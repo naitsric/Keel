@@ -60,7 +60,21 @@ function Row({ run, now }: { run: RunRow; now: number }) {
         <button type="button" onClick={open} className="block max-w-full truncate text-left text-[12.5px] font-medium">
           {run.title}
         </button>
-        <p className="truncate text-[11.5px] text-subtle">{run.projectName}</p>
+        <p className="truncate text-[11.5px] text-subtle">
+          {run.projectName}
+          {run.prUrl && (
+            <button
+              type="button"
+              className="ml-2 text-accent hover:underline"
+              onClick={(e) => {
+                e.stopPropagation();
+                void api.openGithubUrl(run.prUrl as string);
+              }}
+            >
+              {t("run.openPr")}
+            </button>
+          )}
+        </p>
         {run.reason && <p className="mt-0.5 line-clamp-2 text-[11.5px] text-warning">{reasonText(t, run.reason)}</p>}
       </td>
       <td className="px-3 py-2.5 text-[12px] whitespace-nowrap text-muted">

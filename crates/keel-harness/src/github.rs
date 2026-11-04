@@ -1,0 +1,444 @@
+//! GitHub through the user's own `gh`. Keel has no login of its own and stores no token: it asks
+//! `gh` for one when it's about to use it and hands it only to that one process.
+
+use std::fmt;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use serde::{Deserialize, Serialize};
+
+use crate::command::clean_env;
+
+/// A token that can't end up in a log by accident.
+pub struct Token(String);
+
+impl Token {
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+
+    /// Removes the token from text that's about to be stored or shown.
+    pub fn redact(&self, text: &str) -> String {
+        if self.0.is_empty() {
+            text.to_owned()
+        } else {
+            text.replace(&self.0, "<token>")
+        }
+    }
+}
+
+impl fmt::Debug for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Token(<hidden>)")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    pub login: String,
+    pub active: bool,
+    pub ok: bool,
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepoInfo {
+    pub default_branch: String,
+    pub permission: String,
+    pub private: bool,
+    pub default_branch_protected: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Issue {
+    pub number: i64,
+    pub title: String,
+    pub author: String,
+    pub url: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GhError {
+    pub kind: &'static str,
+    pub detail: String,
+}
+
+/// What a failed push or `gh` call means, so the person gets something they can act on.
+pub fn classify_error(text: &str) -> &'static str {
+    let lower = text.to_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
+    if has(&[
+        "refusing to allow",
+        "without `workflow` scope",
+        "workflow scope",
+    ]) {
+        "workflowScope"
+    } else if has(&["saml", "sso"]) {
+        "sso"
+    } else if has(&["must be signed", "commit signature", "signed commits"]) {
+        "signedCommits"
+    } else if has(&[
+        "gh006",
+        "gh013",
+        "protected branch",
+        "rule violation",
+        "repository rule",
+    ]) {
+        "repoRules"
+    } else if has(&[
+        "authentication failed",
+        "could not read username",
+        "gh auth login",
+        "http 401",
+        "bad credentials",
+        "not logged",
+    ]) {
+        "notSignedIn"
+    } else if has(&[
+        "permission to",
+        "permission denied",
+        "http 403",
+        "must have",
+        "write access",
+        "repository not found",
+        "http 404",
+    ]) {
+        "noPermission"
+    } else {
+        "other"
+    }
+}
+
+/// `owner/name`, if this remote is on GitHub.
+pub fn github_repo(remote: &str) -> Option<String> {
+    let remote = remote.trim();
+    let path = remote
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| remote.strip_prefix("https://github.com/"))
+        .or_else(|| remote.strip_prefix("http://github.com/"))?;
+    let path = path.trim_end_matches('/').trim_end_matches(".git");
+    let mut parts = path.split('/');
+    let (owner, name) = (parts.next()?, parts.next()?);
+    (!owner.is_empty() && !name.is_empty() && parts.next().is_none())
+        .then(|| format!("{owner}/{name}"))
+}
+
+#[derive(Debug, Clone)]
+pub struct Gh {
+    pub bin: PathBuf,
+    pub path_env: String,
+}
+
+impl Gh {
+    fn command(&self) -> Command {
+        let mut command = Command::new(&self.bin);
+        command
+            .env_clear()
+            .envs(clean_env(&self.path_env))
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("NO_COLOR", "1");
+        command
+    }
+
+    fn run(&self, token: Option<&Token>, args: &[&str]) -> Result<String, GhError> {
+        let mut command = self.command();
+        command.args(args);
+        if let Some(token) = token {
+            command.env("GH_TOKEN", token.expose());
+        }
+        let output = command.output().map_err(|e| GhError {
+            kind: "other",
+            detail: e.to_string(),
+        })?;
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout)
+                .trim_end()
+                .to_owned());
+        }
+        let raw = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let detail = token.map_or_else(|| raw.clone(), |t| t.redact(&raw));
+        Err(GhError {
+            kind: classify_error(&detail),
+            detail,
+        })
+    }
+
+    /// The accounts `gh` knows. Reads no token.
+    pub fn accounts(&self) -> Result<Vec<Account>, GhError> {
+        // `gh auth status` exits non-zero if any account is in trouble, and still prints all of them.
+        let output = self
+            .command()
+            .args(["auth", "status", "--json", "hosts"])
+            .output()
+            .map_err(|e| GhError {
+                kind: "other",
+                detail: e.to_string(),
+            })?;
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_default();
+        let accounts = value
+            .pointer("/hosts/github.com")
+            .and_then(|a| a.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(accounts
+            .iter()
+            .filter_map(|account| {
+                Some(Account {
+                    login: account.get("login")?.as_str()?.to_owned(),
+                    active: account
+                        .get("active")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    ok: account.get("state").and_then(|v| v.as_str()) == Some("success"),
+                    scopes: account
+                        .get("scopes")
+                        .and_then(|v| v.as_str())
+                        .map(|s| {
+                            s.split(',')
+                                .map(|x| x.trim().to_owned())
+                                .filter(|x| !x.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+            })
+            .collect())
+    }
+
+    /// Asks `gh` for an account's token, without changing which account is active.
+    pub fn token(&self, login: &str) -> Result<Token, GhError> {
+        self.run(None, &["auth", "token", "--user", login])
+            .map(|t| Token(t.trim().to_owned()))
+    }
+
+    pub fn repo_info(&self, token: &Token, repo: &str) -> Result<RepoInfo, GhError> {
+        let text = self.run(
+            Some(token),
+            &[
+                "repo",
+                "view",
+                repo,
+                "--json",
+                "defaultBranchRef,viewerPermission,isPrivate",
+            ],
+        )?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| GhError {
+            kind: "other",
+            detail: e.to_string(),
+        })?;
+        let default_branch = value
+            .pointer("/defaultBranchRef/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("main")
+            .to_owned();
+        let endpoint = format!("repos/{repo}/branches/{default_branch}");
+        let protected = self
+            .run(Some(token), &["api", &endpoint, "--jq", ".protected"])
+            .ok()
+            .map(|t| t.trim() == "true");
+        Ok(RepoInfo {
+            default_branch,
+            permission: value
+                .get("viewerPermission")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_owned(),
+            private: value
+                .get("isPrivate")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            default_branch_protected: protected,
+        })
+    }
+
+    pub fn issues(&self, token: &Token, repo: &str) -> Result<Vec<Issue>, GhError> {
+        let text = self.run(
+            Some(token),
+            &[
+                "issue",
+                "list",
+                "--repo",
+                repo,
+                "--state",
+                "open",
+                "--limit",
+                "50",
+                "--json",
+                "number,title,author,url,body",
+            ],
+        )?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| GhError {
+            kind: "other",
+            detail: e.to_string(),
+        })?;
+        Ok(value
+            .as_array()
+            .map(|issues| issues.iter().filter_map(parse_issue).collect())
+            .unwrap_or_default())
+    }
+
+    /// Opens a draft and returns its URL. Keel doesn't merge, and this module has no way to.
+    pub fn create_draft_pr(
+        &self,
+        token: &Token,
+        repo: &str,
+        head: &str,
+        base: &str,
+        title: &str,
+        body_file: &Path,
+    ) -> Result<String, GhError> {
+        let body_file = body_file.to_string_lossy();
+        self.run(
+            Some(token),
+            &[
+                "pr",
+                "create",
+                "--repo",
+                repo,
+                "--draft",
+                "--head",
+                head,
+                "--base",
+                base,
+                "--title",
+                title,
+                "--body-file",
+                &body_file,
+            ],
+        )
+        .map(|out| {
+            out.lines()
+                .rfind(|l| l.starts_with("http"))
+                .unwrap_or(out.as_str())
+                .trim()
+                .to_owned()
+        })
+    }
+}
+
+fn parse_issue(value: &serde_json::Value) -> Option<Issue> {
+    Some(Issue {
+        number: value.get("number")?.as_i64()?,
+        title: value.get("title")?.as_str()?.to_owned(),
+        author: value
+            .pointer("/author/login")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        url: value
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+        body: value
+            .get("body")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+    })
+}
+
+/// The arguments that make `git` authenticate through `gh`, with nothing written to any config.
+/// The token itself travels only in the process's `GH_TOKEN`.
+pub fn git_credential_args(gh: &Path) -> Vec<String> {
+    let path = gh.to_string_lossy().replace('\'', r"'\''");
+    vec![
+        "-c".into(),
+        "credential.helper=".into(),
+        "-c".into(),
+        format!("credential.helper=!'{path}' auth git-credential"),
+    ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reads_github_remotes_and_only_those() {
+        for remote in [
+            "git@github.com:acme/app.git",
+            "https://github.com/acme/app.git",
+            "https://github.com/acme/app",
+            "ssh://git@github.com/acme/app.git\n",
+        ] {
+            assert_eq!(github_repo(remote).as_deref(), Some("acme/app"), "{remote}");
+        }
+        for remote in [
+            "git@gitlab.com:acme/app.git",
+            "https://github.com/acme",
+            "/tmp/repo",
+            "https://github.com.evil.com/a/b",
+        ] {
+            assert_eq!(github_repo(remote), None, "{remote}");
+        }
+    }
+
+    #[test]
+    fn explains_what_went_wrong() {
+        let cases = [
+            (
+                "refusing to allow an OAuth App to create or update workflow `.github/workflows/ci.yml` without `workflow` scope",
+                "workflowScope",
+            ),
+            ("Resource protected by organization SAML enforcement", "sso"),
+            (
+                "remote: error: GH006: Protected branch update failed",
+                "repoRules",
+            ),
+            (
+                "Commits must have verified signatures. Commit must be signed",
+                "signedCommits",
+            ),
+            (
+                "fatal: Authentication failed for 'https://github.com/a/b.git/'",
+                "notSignedIn",
+            ),
+            ("HTTP 401: Bad credentials", "notSignedIn"),
+            (
+                "remote: Permission to a/b.git denied to someone.",
+                "noPermission",
+            ),
+            ("something else entirely", "other"),
+        ];
+        for (text, kind) in cases {
+            assert_eq!(classify_error(text), kind, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_token_never_shows_in_debug_output_and_can_be_redacted() {
+        let token = Token("gho_secret".into());
+        assert_eq!(format!("{token:?}"), "Token(<hidden>)");
+        assert_eq!(
+            token.redact("failed with gho_secret here"),
+            "failed with <token> here"
+        );
+    }
+
+    #[test]
+    fn credentials_are_never_in_git_arguments() {
+        let args = git_credential_args(Path::new("/opt/homebrew/bin/gh"));
+        assert_eq!(args[1], "credential.helper=");
+        assert!(args[3].contains("auth git-credential"));
+        assert!(
+            !args
+                .iter()
+                .any(|a| a.contains("gho_") || a.contains("token"))
+        );
+    }
+
+    #[test]
+    fn this_module_has_no_merge_or_force_push() {
+        let source = include_str!("github.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap();
+        for word in ["\"merge\"", "--force", "--admin", "\"switch\""] {
+            assert!(!code.contains(word), "{word}");
+        }
+    }
+}

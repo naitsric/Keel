@@ -3,6 +3,7 @@
 
 pub mod auth;
 pub mod command;
+pub mod github;
 pub mod locate;
 pub mod process;
 pub mod settings;

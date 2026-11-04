@@ -1,15 +1,15 @@
-import { AlertTriangle, Check, FileDiff, Loader2, X } from "lucide-react";
+import { AlertTriangle, Check, ExternalLink, FileDiff, GitPullRequest, Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck } from "../lib/api";
-import { activityFrom, type ActivityItem, commandsFrom, type CommandRun, toolSummary } from "../lib/audit";
+import { api, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck, type Run } from "../lib/api";
+import { activityFrom, type ActivityItem, commandsFrom, type CommandRun, explainingAttempt, filesChangedBy, toolSummary, touchesWorkflows } from "../lib/audit";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
-import { errorText, needsSignIn, reasonText } from "../lib/reason";
+import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
-import { Button, Card, cx, Segmented, StateBadge } from "../ui/primitives";
+import { Button, Card, cx, Field, inputClass, Segmented, StateBadge } from "../ui/primitives";
 import { TopBar } from "./TopBar";
 
-type Tab = "activity" | "commands" | "changes" | "prompt" | "details";
+type Tab = "activity" | "commands" | "changes" | "prompt" | "details" | "output";
 
 const DECISIONS: Record<AttemptState, string> = {
   queued: "run.decideActive",
@@ -21,6 +21,8 @@ const DECISIONS: Record<AttemptState, string> = {
   stopped: "run.decideStopped",
   interrupted: "run.decideInterrupted",
   blocked: "run.decideBlocked",
+  waitingApproval: "run.decideApproval",
+  rejected: "run.decideRejected",
   abandoned: "run.decideAbandoned",
 };
 
@@ -37,15 +39,20 @@ function SummaryBlock({ title, note, children }: { title: string; note?: string;
 }
 
 /** The rule of the product: never just "finished". What it did, changed, proved, and what's next. */
-function Summary({ attempt, commands, rawCheck, onShowChanges }: { attempt: Attempt; commands: CommandRun[]; rawCheck: RawCheck; onShowChanges: () => void }) {
+function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: { run: Run | null; attempts: Attempt[]; current: Attempt; commands: CommandRun[]; rawCheck: RawCheck; onShowChanges: () => void }) {
   const { t } = useTranslation();
-  const files = attempt.filesChanged ?? [];
+  const files = filesChangedBy(attempts);
+  const explaining = explainingAttempt(attempts);
   const passed = commands.filter((c) => c.status === "ok").length;
-  const active = isActive(attempt.state);
+  const checks = attempts.filter((a) => a.kind === "check");
+  const latestChecks = checks.filter((a, i) => !checks.slice(i + 1).some((b) => b.stepId === a.stepId));
+  const checksPassed = latestChecks.filter((a) => a.state === "succeeded").length;
+  const anyActive = attempts.some((a) => isActive(a.state));
+  const decision = run?.prUrl ? "run.decideDelivered" : DECISIONS[current.state];
   return (
     <Card className="grid gap-5 p-4 md:grid-cols-2">
-      <SummaryBlock title={t("run.whatItDid")} note={attempt.resultText ? t("run.generated") : undefined}>
-        <p className="selectable whitespace-pre-wrap">{attempt.resultText || (active ? t("run.noResultYet") : attempt.state === "succeeded" ? t("run.noResult") : t("run.noResultEnded"))}</p>
+      <SummaryBlock title={t("run.whatItDid")} note={explaining ? t("run.generated") : undefined}>
+        <p className="selectable whitespace-pre-wrap">{explaining?.resultText || (anyActive ? t("run.noResultYet") : current.state === "succeeded" ? t("run.noResult") : t("run.noResultEnded"))}</p>
       </SummaryBlock>
       <div className="space-y-4">
         <SummaryBlock title={t("run.whatChanged")}>
@@ -66,22 +73,81 @@ function Summary({ attempt, commands, rawCheck, onShowChanges }: { attempt: Atte
           )}
         </SummaryBlock>
         <SummaryBlock title={t("run.whatProves")}>
+          {latestChecks.length > 0 && (
+            <p className={cx(checksPassed === latestChecks.length ? "text-muted" : "font-medium text-danger")}>{t("run.checksPassed", { passed: checksPassed, total: latestChecks.length })}</p>
+          )}
           <p className="text-muted">{commands.length === 0 ? t("run.noCommands") : t("run.commandsPassed", { passed, total: commands.length })}</p>
           <p className={cx("mt-0.5", rawCheck === "changed" || rawCheck === "missing" ? "font-medium text-danger" : "text-muted")}>
             {t(`run.audit${rawCheck[0].toUpperCase()}${rawCheck.slice(1)}`)}
           </p>
         </SummaryBlock>
         <SummaryBlock title={t("run.whatToDecide")}>
-          <p>{t(DECISIONS[attempt.state])}</p>
+          <p>{t(decision)}</p>
         </SummaryBlock>
       </div>
     </Card>
   );
 }
 
-function Actions({ attempt, onError }: { attempt: Attempt; onError: (message: string) => void }) {
+/** Rejecting is the easy path: it has the focus, Enter never approves, and approve arms after a moment. */
+function ApprovalCard({ attempt, files, onError }: { attempt: Attempt; files: string[]; onError: (message: string) => void }) {
   const { t } = useTranslation();
+  const [note, setNote] = useState("");
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const timer = setTimeout(() => setArmed(true), 800);
+    return () => clearTimeout(timer);
+  }, []);
+  const answer = (approve: boolean) => {
+    setBusy(true);
+    api.approvalAnswer(attempt.id, approve, note).catch((e) => {
+      setBusy(false);
+      onError(errorText(t, e));
+    });
+  };
+  return (
+    <Card role="alert" className="border-warning/40 p-4">
+      <p className="text-[14px] font-semibold">{t("run.approvalTitle")}</p>
+      <p className="mt-1 text-[12.5px] text-muted">{t("run.approvalBody")}</p>
+      {touchesWorkflows(files) && (
+        <p className="mt-2 flex gap-1.5 rounded-md border border-warning/40 bg-inset p-2 text-[12.5px] font-medium text-warning">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          {t("run.workflowWarning")}
+        </p>
+      )}
+      <div className="mt-3">
+        <Field label={t("run.approvalNote")}>
+          <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder={t("run.approvalNotePlaceholder")} className={`${inputClass} resize-y`} />
+        </Field>
+      </div>
+      <div className="mt-3 flex gap-2">
+        <Button autoFocus disabled={busy} onClick={() => answer(false)}>
+          {t("run.reject")}
+        </Button>
+        <Button
+          variant="primary"
+          disabled={!armed || busy}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") e.preventDefault();
+          }}
+          onClick={() => answer(true)}
+        >
+          <GitPullRequest size={14} />
+          {t("run.approve")}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+function Actions({ attempt, files, onError }: { attempt: Attempt; files: string[]; onError: (message: string) => void }) {
+  const { t } = useTranslation();
+  const navigate = useApp((s) => s.navigate);
   const act = (run: () => Promise<unknown>) => run().catch((e) => onError(errorText(t, e)));
+  if (attempt.state === "waitingApproval") {
+    return <ApprovalCard attempt={attempt} files={files} onError={onError} />;
+  }
   if (attempt.state === "stalled") {
     return (
       <Card role="alert" className="border-warning/40 p-4">
@@ -111,13 +177,14 @@ function Actions({ attempt, onError }: { attempt: Attempt; onError: (message: st
       </div>
     );
   }
-  if (attempt.state === "succeeded" || attempt.state === "abandoned") return null;
-  const canResume = attempt.state === "interrupted" || attempt.state === "blocked" || attempt.state === "stopped" || attempt.state === "failed";
+  if (attempt.state === "succeeded" || attempt.state === "abandoned" || attempt.state === "rejected") return null;
+  const canResume = attempt.kind === "agent" && ["interrupted", "blocked", "stopped", "failed"].includes(attempt.state);
   return (
     <Card className="p-4">
       {attempt.reason && <p className="selectable text-[12.5px] text-warning">{reasonText(t, attempt.reason)}</p>}
       <div className={cx("flex flex-wrap gap-2", attempt.reason && "mt-2.5")}>
         {needsSignIn(attempt.reason) && <Button onClick={() => void act(() => api.openClaudeLogin())}>{t("run.signIn")}</Button>}
+        {needsProjectSettings(attempt.reason) && <Button onClick={() => navigate({ name: "settings" })}>{t("newRun.openSettings")}</Button>}
         {canResume && <Button variant="primary" onClick={() => void act(() => api.attemptRetry(attempt.id, true))}>{t("run.resume")}</Button>}
         <Button onClick={() => void act(() => api.attemptRetry(attempt.id, false))}>{t("run.retry")}</Button>
         <Button variant="ghost" onClick={() => void act(() => api.attemptAbandon(attempt.id))}>
@@ -166,7 +233,25 @@ function ActivityEntry({ item }: { item: ActivityItem }) {
       );
     }
     case "started":
-      return line(t("activity.started"), "text-subtle");
+      return line(data.command ? t("activity.startedCheck", { command: data.command }) : t("activity.started"), "text-subtle");
+    case "waiting":
+      return line(t("activity.waiting"), "text-warning");
+    case "decision":
+      return (
+        <div>
+          {line(data.answer === "approve" ? t("activity.decisionApprove") : t("activity.decisionReject"), "font-medium")}
+          {data.text && <p className="selectable mt-0.5 text-[12.5px] text-muted">{t("activity.decisionNote", { text: data.text })}</p>}
+        </div>
+      );
+    case "checkResult":
+      return (
+        <div>
+          {line(t("activity.checkResult", { code: data.exitCode ?? "?" }), data.exitCode === 0 ? "text-success" : "text-danger")}
+          {data.leftWorkspaceDirty && line(t("activity.dirty"), "text-warning")}
+        </div>
+      );
+    case "delivered":
+      return line(t("activity.delivered", { account: data.account, url: data.url }), "font-medium");
     case "init":
       return line(t("activity.init", { model: data.model }), "text-subtle");
     case "apiRetry":
@@ -238,6 +323,24 @@ function CommandsTab({ commands }: { commands: CommandRun[] }) {
   );
 }
 
+function OutputTab({ events, attempt }: { events: AuditEvent[]; attempt: Attempt }) {
+  const { t } = useTranslation();
+  const result = events.find((e) => e.kind === "checkResult")?.data;
+  return (
+    <div className="space-y-2">
+      <code className="selectable block font-mono text-[12px] break-all">{attempt.prompt}</code>
+      {!result ? (
+        <p className="text-[12.5px] text-subtle">{t("activity.empty")}</p>
+      ) : (
+        <>
+          <p className={cx("text-[12.5px]", result.exitCode === 0 ? "text-success" : "text-danger")}>{t("activity.checkResult", { code: result.exitCode ?? "?" })}</p>
+          <Output text={[result.stdout, result.stderr].filter(Boolean).join("\n")} truncated={result.truncated} />
+        </>
+      )}
+    </div>
+  );
+}
+
 function ChangesTab({ attempt, revision }: { attempt: Attempt; revision: number }) {
   const { t } = useTranslation();
   const [diff, setDiff] = useState("");
@@ -300,7 +403,7 @@ function DetailsTab({ attempt, events }: { attempt: Attempt; events: AuditEvent[
         <Detail label={t("details.account")}>{attempt.account}</Detail>
         <Detail label={t("details.authSource")}>{source}</Detail>
         <Detail label={t("details.cliVersion")}>{attempt.cliVersion}</Detail>
-        <Detail label={t("details.tools")}>{attempt.tools === "build" ? t("newRun.toolsBuild") : t("newRun.toolsReadOnly")}</Detail>
+        {attempt.kind === "agent" && <Detail label={t("details.tools")}>{attempt.tools === "build" ? t("newRun.toolsBuild") : t("newRun.toolsReadOnly")}</Detail>}
         <Detail label={t("details.started")}>{formatDateTime(attempt.startedAt)}</Detail>
         <Detail label={t("details.finished")}>{attempt.finishedAt && formatDateTime(attempt.finishedAt)}</Detail>
         <Detail label={t("details.duration")}>{attempt.durationMs != null && formatDuration(attempt.durationMs)}</Detail>
@@ -338,107 +441,132 @@ function DetailsTab({ attempt, events }: { attempt: Attempt; events: AuditEvent[
   );
 }
 
+/** If any part of the record doesn't check out, that's what the person needs to know. */
+function worstRawCheck(checks: RawCheck[]): RawCheck {
+  for (const check of ["changed", "missing", "pending"] as const) {
+    if (checks.includes(check)) return check;
+  }
+  return checks.length > 0 ? "intact" : "pending";
+}
+
 export function RunDetail({ runId }: { runId: string }) {
   const { t } = useTranslation();
   const revision = useApp((s) => s.revision);
-  const runs = useApp((s) => s.overview.runs);
-  const title = runs.find((r) => r.id === runId)?.title ?? "";
+  const [run, setRun] = useState<Run | null>(null);
   const [attempts, setAttempts] = useState<Attempt[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
-  const [events, setEvents] = useState<AuditEvent[]>([]);
-  const [rawCheck, setRawCheck] = useState<RawCheck>("pending");
+  const [eventsByAttempt, setEventsByAttempt] = useState<Record<string, AuditEvent[]>>({});
+  const [rawChecks, setRawChecks] = useState<Record<string, RawCheck>>({});
   const [tab, setTab] = useState<Tab>("activity");
   const [error, setError] = useState<string | null>(null);
-  const eventsOf = useRef<string | null>(null);
-  const lastSeq = useRef(0);
+  const lastSeq = useRef<Record<string, number>>({});
 
-  const attempt = attempts.find((a) => a.id === selected) ?? attempts[attempts.length - 1];
-  const attemptId = attempt?.id;
+  const latest = attempts[attempts.length - 1];
+  const attempt = attempts.find((a) => a.id === selected) ?? latest;
 
   const load = useCallback(async () => {
-    setAttempts(await api.runAttempts(runId));
+    const [nextRun, nextAttempts] = await Promise.all([api.runGet(runId), api.runAttempts(runId)]);
+    setRun(nextRun);
+    setAttempts(nextAttempts);
   }, [runId]);
 
   useEffect(() => {
     void load();
   }, [load, revision]);
 
-  // Audit events only ever grow, so only what's new is fetched.
+  // Audit events only ever grow, so only what's new is fetched, for every attempt of the run.
   useEffect(() => {
-    if (!attemptId) return;
-    if (eventsOf.current !== attemptId) {
-      eventsOf.current = attemptId;
-      lastSeq.current = 0;
-      setEvents([]);
+    for (const a of attempts) {
+      const after = lastSeq.current[a.id] ?? 0;
+      void api.attemptEvents(a.id, after).then((fetched) => {
+        const fresh = fetched.filter((e) => e.seq > (lastSeq.current[a.id] ?? 0));
+        if (fresh.length === 0) return;
+        lastSeq.current[a.id] = fresh[fresh.length - 1].seq;
+        setEventsByAttempt((current) => ({ ...current, [a.id]: [...(current[a.id] ?? []), ...fresh] }));
+      });
+      if (a.kind === "agent" || a.kind === "check") {
+        void api.attemptRawCheck(a.id).then((check) => setRawChecks((current) => ({ ...current, [a.id]: check })));
+      }
     }
-    void api.attemptEvents(attemptId, lastSeq.current).then((fetched) => {
-      const fresh = fetched.filter((e) => e.seq > lastSeq.current);
-      if (eventsOf.current !== attemptId || fresh.length === 0) return;
-      lastSeq.current = fresh[fresh.length - 1].seq;
-      setEvents((current) => [...current, ...fresh]);
-    });
-    void api.attemptRawCheck(attemptId).then(setRawCheck);
-  }, [attemptId, revision]);
+  }, [attempts, revision]);
 
-  const commands = useMemo(() => commandsFrom(events), [events]);
+  const events = attempt ? (eventsByAttempt[attempt.id] ?? []) : [];
+  const commands = commandsFrom(events);
+  // The summary speaks for the whole run, not for the step selected below.
+  const allCommands = useMemo(() => attempts.flatMap((a) => commandsFrom(eventsByAttempt[a.id] ?? [])), [attempts, eventsByAttempt]);
+  const rawCheck = worstRawCheck(Object.values(rawChecks));
+  const files = useMemo(() => filesChangedBy(attempts), [attempts]);
 
-  if (!attempt) {
+  if (!attempt || !latest) {
     return <TopBar back />;
   }
 
-  const tabs: { value: Tab; label: string }[] = [
-    { value: "activity", label: t("tabs.activity") },
-    { value: "commands", label: t("tabs.commands") },
-    { value: "changes", label: t("tabs.changes") },
-    { value: "prompt", label: t("tabs.prompt") },
-    { value: "details", label: t("tabs.details") },
-  ];
+  // A step can have run several times. The list shows each attempt, then what's still ahead.
+  const pending = (run?.workflow ?? []).filter((step) => !attempts.some((a) => a.stepId === step.id));
+  const kindTabs: Tab[] = attempt.kind === "agent" ? ["activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" ? ["output", "activity", "details"] : ["activity", "details"];
+  const shownTab: Tab = kindTabs.includes(tab) ? tab : kindTabs[0];
 
   return (
     <>
       <TopBar back />
       <main className="flex-1 space-y-4 overflow-y-auto p-5">
         <div className="flex items-start gap-3">
-          <h1 className="selectable min-w-0 flex-1 text-[17px] leading-snug font-semibold">{title}</h1>
-          <StateBadge state={attempt.state} label={t(`states.${attempt.state}`)} />
+          <div className="min-w-0 flex-1">
+            <h1 className="selectable text-[17px] leading-snug font-semibold">{run?.title}</h1>
+            <p className="mt-0.5 flex flex-wrap gap-x-3 text-[12px] text-subtle">
+              {run?.sourceIssue && <span>{t("run.fromIssue", { number: run.sourceIssue.number })}</span>}
+              {run?.baseRef && <span>{t("run.base", { base: run.baseRef })}</span>}
+            </p>
+          </div>
+          {run?.prUrl && (
+            <Button onClick={() => void api.openGithubUrl(run.prUrl as string)}>
+              <GitPullRequest size={14} />
+              {t("run.pullRequest", { number: run.prNumber ?? "" })}
+              <ExternalLink size={12} />
+            </Button>
+          )}
+          <StateBadge state={latest.state} label={t(`states.${latest.state}`)} />
         </div>
         {error && (
           <p role="alert" className="text-[12.5px] text-danger">
             {error}
           </p>
         )}
-        <Actions attempt={attempt} onError={setError} />
-        <Summary attempt={attempt} commands={commands} rawCheck={rawCheck} onShowChanges={() => setTab("changes")} />
+        <Actions attempt={latest} files={files} onError={setError} />
+        <Summary run={run} attempts={attempts} current={latest} commands={allCommands} rawCheck={rawCheck} onShowChanges={() => setTab("changes")} />
         <div className="grid gap-4 lg:grid-cols-[210px_1fr]">
           <Card className="self-start p-2">
             <h2 className="px-2 pt-1 pb-1.5 text-[12px] font-semibold text-muted">{t("run.stepsTitle")}</h2>
             <ul className="space-y-0.5">
               {attempts.map((a) => (
                 <li key={a.id}>
-                  <button
-                    type="button"
-                    onClick={() => setSelected(a.id)}
-                    className={cx("w-full rounded-md px-2 py-1.5 text-left hover:bg-hover", a.id === attempt.id && "bg-active")}
-                  >
+                  <button type="button" onClick={() => setSelected(a.id)} className={cx("w-full rounded-md px-2 py-1.5 text-left hover:bg-hover", a.id === attempt.id && "bg-active")}>
                     <span className="block truncate text-[12.5px] font-medium">{a.stepId}</span>
                     <span className="mt-0.5 flex items-center justify-between gap-2">
-                      <span className="text-[11px] text-subtle">{t("run.attemptTitle", { number: a.number })}</span>
+                      <span className="text-[11px] text-subtle">{a.number > 1 && t("run.attemptTitle", { number: a.number })}</span>
                       <StateBadge state={a.state} label={t(`states.${a.state}`)} />
                     </span>
-                    <span className="mt-0.5 block truncate font-mono text-[11px] text-subtle">{a.modelActual ?? a.modelRequested}</span>
+                    {a.kind === "agent" && <span className="mt-0.5 block truncate font-mono text-[11px] text-subtle">{a.modelActual ?? a.modelRequested}</span>}
                   </button>
+                </li>
+              ))}
+              {pending.map((step) => (
+                <li key={step.id} className="px-2 py-1.5 opacity-60">
+                  <span className="block truncate text-[12.5px] font-medium">{step.id}</span>
+                  <span className="text-[11px] text-subtle">{t("run.pending")}</span>
                 </li>
               ))}
             </ul>
           </Card>
           <Card className="min-w-0 p-4">
-            <Segmented<Tab> label={t("tabs.details")} value={tab} onChange={setTab} options={tabs} />
+            <Segmented<Tab> label={t("tabs.details")} value={shownTab} onChange={setTab} options={kindTabs.map((value) => ({ value, label: t(`tabs.${value}`) }))} />
             <div className="mt-4">
-              {tab === "activity" && <ActivityTab events={events} />}
-              {tab === "commands" && <CommandsTab commands={commands} />}
-              {tab === "changes" && <ChangesTab attempt={attempt} revision={revision} />}
-              {tab === "prompt" && <pre className="overflow-auto rounded bg-inset p-3 font-mono text-[12px] leading-relaxed whitespace-pre-wrap">{attempt.prompt}</pre>}
-              {tab === "details" && <DetailsTab attempt={attempt} events={events} />}
+              {shownTab === "activity" && <ActivityTab events={events} />}
+              {shownTab === "commands" && <CommandsTab commands={commands} />}
+              {shownTab === "changes" && <ChangesTab attempt={attempt} revision={revision} />}
+              {shownTab === "output" && <OutputTab events={events} attempt={attempt} />}
+              {shownTab === "prompt" && <pre className="overflow-auto rounded bg-inset p-3 font-mono text-[12px] leading-relaxed whitespace-pre-wrap">{attempt.prompt}</pre>}
+              {shownTab === "details" && <DetailsTab attempt={attempt} events={events} />}
             </div>
           </Card>
         </div>

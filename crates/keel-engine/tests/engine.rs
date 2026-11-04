@@ -106,12 +106,11 @@ fn step(tools: ToolProfile) -> StepSpec {
 impl Harness {
     fn start(&self, tools: ToolProfile) -> String {
         self.engine
-            .start_run(StartRun {
-                project_id: self.project_id.clone(),
-                step: step(tools),
-                language: "es".into(),
-                allowed_domains: vec![],
-            })
+            .start_run(StartRun::one_step(
+                self.project_id.clone(),
+                step(tools),
+                "es".into(),
+            ))
             .unwrap()
     }
 
@@ -557,12 +556,11 @@ fn no_session_means_the_run_does_not_start() {
     let h = harness_with("exit 0", r#"{"loggedIn":false}"#, "2.1.318", |_| {});
     let error = h
         .engine
-        .start_run(StartRun {
-            project_id: h.project_id.clone(),
-            step: step(ToolProfile::Build),
-            language: "en".into(),
-            allowed_domains: vec![],
-        })
+        .start_run(StartRun::one_step(
+            h.project_id.clone(),
+            step(ToolProfile::Build),
+            "en".into(),
+        ))
         .unwrap_err();
     assert!(matches!(error, Error::Blocked(Reason::ClaudeLoggedOut)));
     assert!(h.store.runs(10).unwrap().is_empty());
@@ -574,12 +572,11 @@ fn a_cli_outside_the_tested_range_is_refused_with_the_reason() {
         let h = harness_with("exit 0", LOGGED_IN, version, |_| {});
         let error = h
             .engine
-            .start_run(StartRun {
-                project_id: h.project_id.clone(),
-                step: step(ToolProfile::Build),
-                language: "en".into(),
-                allowed_domains: vec![],
-            })
+            .start_run(StartRun::one_step(
+                h.project_id.clone(),
+                step(ToolProfile::Build),
+                "en".into(),
+            ))
             .unwrap_err();
         match (check, error) {
             ("old", Error::Blocked(Reason::CliVersionTooOld { .. }))
@@ -663,6 +660,7 @@ fn reopening_after_the_agent_died_marks_it_interrupted_and_keeps_the_audit() {
             id: "lost".into(),
             run_id: run.clone(),
             step_id: "builder".into(),
+            kind: "agent".into(),
             number: 9,
             state: AttemptState::Running,
             model_requested: "fake".into(),

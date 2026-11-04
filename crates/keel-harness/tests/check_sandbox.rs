@@ -1,0 +1,146 @@
+//! The sandbox for `check` steps, for real. Tests and Makefiles can be edited by an agent, so
+//! what runs here gets no more trust than the agent.
+#![cfg(target_os = "macos")]
+
+use std::net::TcpListener;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+use keel_harness::settings::check_profile;
+
+struct Sandbox {
+    canary_dir: tempfile::TempDir,
+    canary: PathBuf,
+    workspace: tempfile::TempDir,
+    home: PathBuf,
+}
+
+fn sandbox() -> Sandbox {
+    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    // A canary in the real home folder, and a workspace beside it, as in a real install.
+    let canary_dir = tempfile::Builder::new()
+        .prefix(".keel-sandbox-test")
+        .tempdir_in(&home)
+        .unwrap();
+    let canary = canary_dir.path().join("secret.txt");
+    std::fs::write(&canary, "secret").unwrap();
+    let workspace = tempfile::Builder::new()
+        .prefix(".keel-sandbox-workspace")
+        .tempdir_in(&home)
+        .unwrap();
+    std::fs::write(workspace.path().join("ok.txt"), "fine").unwrap();
+    Sandbox {
+        canary_dir,
+        canary,
+        workspace,
+        home,
+    }
+}
+
+impl Sandbox {
+    fn run(&self, script: &str) -> std::process::Output {
+        let profile = check_profile(self.workspace.path(), &self.home, &[]);
+        Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/sh", "-c", script])
+            .current_dir(self.workspace.path())
+            .output()
+            .unwrap()
+    }
+
+    fn allowed(&self, script: &str) -> bool {
+        self.run(script).status.success()
+    }
+}
+
+fn quoted(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy())
+}
+
+#[test]
+fn exit_codes_come_through() {
+    let s = sandbox();
+    assert_eq!(s.run("exit 0").status.code(), Some(0));
+    assert_eq!(s.run("exit 7").status.code(), Some(7));
+    assert_eq!(
+        String::from_utf8_lossy(&s.run("echo hello").stdout).trim(),
+        "hello"
+    );
+}
+
+#[test]
+fn the_workspace_is_readable_and_writable() {
+    let s = sandbox();
+    assert!(s.allowed("cat ok.txt"));
+    assert!(s.allowed("echo x > new.txt && cat new.txt && mkdir -p a/b && rm new.txt"));
+}
+
+#[test]
+fn the_home_folder_is_not() {
+    let s = sandbox();
+    assert!(!s.allowed(&format!("cat {}", quoted(&s.canary))));
+    assert!(!s.allowed(&format!("cat {}", quoted(&s.home.join(".ssh/known_hosts")))));
+    assert!(!s.allowed(&format!(
+        "cat {}",
+        quoted(&s.home.join(".config/gh/hosts.yml"))
+    )));
+    assert!(!s.allowed(&format!(
+        "touch {}",
+        quoted(&s.home.join(".keel-sandbox-write"))
+    )));
+    assert!(!s.allowed(&format!("rm {}", quoted(&s.canary))));
+    assert!(s.canary.exists());
+}
+
+#[test]
+fn temp_folders_work_because_test_suites_need_them() {
+    let s = sandbox();
+    assert!(s.allowed("f=$(mktemp) && echo x > \"$f\" && rm \"$f\""));
+}
+
+#[test]
+fn the_keychain_is_out_of_reach() {
+    let s = sandbox();
+    assert!(!s.allowed("security find-generic-password -s gh:github.com -w >/dev/null 2>&1"));
+    assert!(
+        !s.allowed(
+            "security find-generic-password -s 'Claude Code-credentials' -w >/dev/null 2>&1"
+        )
+    );
+}
+
+#[test]
+fn there_is_no_network() {
+    let s = sandbox();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    assert!(!s.allowed(&format!(
+        "curl -fsS -m 3 -o /dev/null http://127.0.0.1:{port}/"
+    )));
+    assert!(!s.allowed("curl -fsS -m 4 -o /dev/null https://example.com"));
+}
+
+#[test]
+fn listed_paths_can_be_read() {
+    let s = sandbox();
+    let allowed = s.canary_dir.path().to_string_lossy().into_owned();
+    let profile = check_profile(s.workspace.path(), &s.home, &[allowed]);
+    let output = Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", &profile, "/bin/cat", &s.canary.to_string_lossy()])
+        .current_dir(s.workspace.path())
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+}
+
+#[test]
+fn local_unix_sockets_are_out_of_reach_too() {
+    // The Docker socket is one of these, and reaching it would undo the whole sandbox.
+    let s = sandbox();
+    let path = s.canary_dir.path().join("s.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let script = format!(
+        "python3 -c \"import socket; c = socket.socket(socket.AF_UNIX); c.connect('{}')\"",
+        path.to_string_lossy()
+    );
+    assert!(!s.allowed(&script));
+}

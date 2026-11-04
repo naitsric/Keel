@@ -24,7 +24,8 @@ pub enum Error {
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Applied in order; `PRAGMA user_version` records how many ran. Only ever append.
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
     create table setting (key text primary key, value text not null);
 
     create table project (
@@ -107,7 +108,45 @@ const MIGRATIONS: &[&str] = &[r#"
     begin select raise(abort, 'attempt facts are fixed once it starts'); end;
     create trigger attempt_no_delete before delete on attempt
     begin select raise(abort, 'attempts are never deleted'); end;
-"#];
+"#,
+    r#"
+    alter table project add column github_account text;
+    alter table project add column github_repo text;
+    alter table project add column check_command text;
+    alter table project add column allowed_domains text not null default '[]';
+    alter table project add column allowed_read text not null default '[]';
+
+    alter table run add column request text not null default '';
+    alter table run add column workflow text not null default '[]';
+    alter table run add column language text not null default 'en';
+    alter table run add column source_issue text;
+    alter table run add column branch text;
+    alter table run add column pr_url text;
+    alter table run add column pr_number integer;
+    alter table run add column finished_at text;
+
+    alter table attempt add column kind text not null default 'agent';
+    alter table attempt add column exit_code integer;
+    create trigger attempt_kind_fixed before update of kind on attempt
+    begin select raise(abort, 'attempt facts are fixed once it starts'); end;
+
+    create table decision (
+        seq integer primary key autoincrement,
+        project_id text not null,
+        run_id text not null,
+        attempt_id text not null,
+        at text not null,
+        answer text not null,
+        text text not null,
+        retired integer not null default 0
+    );
+    create index decision_by_project on decision (project_id, seq);
+    create trigger decision_facts_fixed before update of project_id, run_id, attempt_id, at, answer, text on decision
+    begin select raise(abort, 'decisions are never rewritten'); end;
+    create trigger decision_no_delete before delete on decision
+    begin select raise(abort, 'decisions are never deleted'); end;
+"#,
+];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -116,6 +155,105 @@ pub struct Project {
     pub name: String,
     pub path: String,
     pub created_at: String,
+    /// The `gh` account this project uses. Keel never switches the active one.
+    pub github_account: Option<String>,
+    /// `owner/name`, when the repo's remote is on GitHub.
+    pub github_repo: Option<String>,
+    pub check_command: Option<String>,
+    pub allowed_domains: Vec<String>,
+    pub allowed_read: Vec<String>,
+}
+
+/// What a person can change about a project.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectSettings {
+    pub github_account: Option<String>,
+    pub check_command: Option<String>,
+    pub allowed_domains: Vec<String>,
+    pub allowed_read: Vec<String>,
+}
+
+const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read";
+
+fn project_from(r: &Row) -> rusqlite::Result<Project> {
+    let list = |text: String| serde_json::from_str(&text).unwrap_or_default();
+    Ok(Project {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        path: r.get(2)?,
+        created_at: r.get(3)?,
+        github_account: r.get(4)?,
+        github_repo: r.get(5)?,
+        check_command: r.get(6)?,
+        allowed_domains: list(r.get(7)?),
+        allowed_read: list(r.get(8)?),
+    })
+}
+
+/// A run with what it needs to continue. The workflow is a copy taken when it started.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Run {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub base_ref: Option<String>,
+    pub request: String,
+    pub workflow: serde_json::Value,
+    pub language: String,
+    pub source_issue: Option<serde_json::Value>,
+    pub branch: Option<String>,
+    pub pr_url: Option<String>,
+    pub pr_number: Option<i64>,
+    pub created_at: String,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewRun {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub request: String,
+    pub workflow: String,
+    pub language: String,
+    pub source_issue: Option<String>,
+}
+
+const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at";
+
+fn run_from(r: &Row) -> rusqlite::Result<Run> {
+    let source_issue: Option<String> = r.get(7)?;
+    let workflow: String = r.get(5)?;
+    Ok(Run {
+        id: r.get(0)?,
+        project_id: r.get(1)?,
+        title: r.get(2)?,
+        base_ref: r.get(3)?,
+        request: r.get(4)?,
+        workflow: serde_json::from_str(&workflow).unwrap_or_default(),
+        language: r.get(6)?,
+        source_issue: source_issue.and_then(|t| serde_json::from_str(&t).ok()),
+        branch: r.get(8)?,
+        pr_url: r.get(9)?,
+        pr_number: r.get(10)?,
+        created_at: r.get(11)?,
+        finished_at: r.get(12)?,
+    })
+}
+
+/// What a person said at an approval step. These reach later runs of the project.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Decision {
+    pub seq: i64,
+    pub project_id: String,
+    pub run_id: String,
+    pub attempt_id: String,
+    pub at: String,
+    pub answer: String,
+    pub text: String,
+    pub retired: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -123,6 +261,7 @@ pub struct NewAttempt {
     pub id: String,
     pub run_id: String,
     pub step_id: String,
+    pub kind: String,
     pub number: i64,
     pub state: AttemptState,
     pub model_requested: String,
@@ -147,6 +286,8 @@ pub struct Attempt {
     pub id: String,
     pub run_id: String,
     pub step_id: String,
+    pub kind: String,
+    pub exit_code: Option<i64>,
     pub number: i64,
     pub state: String,
     pub reason: Option<serde_json::Value>,
@@ -202,6 +343,7 @@ pub struct Event {
 pub struct RunRow {
     pub id: String,
     pub title: String,
+    pub pr_url: Option<String>,
     pub project_id: String,
     pub project_name: String,
     pub step_id: String,
@@ -242,6 +384,8 @@ fn attempt_from(row: &Row) -> rusqlite::Result<Attempt> {
         id: row.get("id")?,
         run_id: row.get("run_id")?,
         step_id: row.get("step_id")?,
+        kind: row.get("kind")?,
+        exit_code: row.get("exit_code")?,
         number: row.get("number")?,
         state: row.get("state")?,
         reason: json_col(row, "reason")?,
@@ -329,40 +473,52 @@ impl Store {
 
     pub fn add_project(&self, project: &Project) -> Result<()> {
         self.lock().execute(
-            "insert into project (id, name, path, created_at) values (?1, ?2, ?3, ?4)",
-            params![project.id, project.name, project.path, project.created_at],
+            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                project.id,
+                project.name,
+                project.path,
+                project.created_at,
+                project.github_account,
+                project.github_repo,
+                project.check_command,
+                serde_json::to_string(&project.allowed_domains).unwrap_or_default(),
+                serde_json::to_string(&project.allowed_read).unwrap_or_default(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<()> {
+        self.lock().execute(
+            "update project set github_account = ?2, check_command = ?3, allowed_domains = ?4, allowed_read = ?5 where id = ?1",
+            params![
+                id,
+                settings.github_account,
+                settings.check_command,
+                serde_json::to_string(&settings.allowed_domains).unwrap_or_default(),
+                serde_json::to_string(&settings.allowed_read).unwrap_or_default(),
+            ],
         )?;
         Ok(())
     }
 
     pub fn projects(&self) -> Result<Vec<Project>> {
         let conn = self.lock();
-        let mut stmt =
-            conn.prepare("select id, name, path, created_at from project order by name")?;
-        let rows = stmt.query_map([], |r| {
-            Ok(Project {
-                id: r.get(0)?,
-                name: r.get(1)?,
-                path: r.get(2)?,
-                created_at: r.get(3)?,
-            })
-        })?;
+        let mut stmt = conn.prepare(&format!(
+            "select {PROJECT_COLUMNS} from project order by name"
+        ))?;
+        let rows = stmt.query_map([], project_from)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn project(&self, id: &str) -> Result<Project> {
         self.lock()
             .query_row(
-                "select id, name, path, created_at from project where id = ?1",
+                &format!("select {PROJECT_COLUMNS} from project where id = ?1"),
                 [id],
-                |r| {
-                    Ok(Project {
-                        id: r.get(0)?,
-                        name: r.get(1)?,
-                        path: r.get(2)?,
-                        created_at: r.get(3)?,
-                    })
-                },
+                project_from,
             )
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("project {id}")))
@@ -372,31 +528,56 @@ impl Store {
         Ok(self
             .lock()
             .query_row(
-                "select id, name, path, created_at from project where path = ?1",
+                &format!("select {PROJECT_COLUMNS} from project where path = ?1"),
                 [path],
-                |r| {
-                    Ok(Project {
-                        id: r.get(0)?,
-                        name: r.get(1)?,
-                        path: r.get(2)?,
-                        created_at: r.get(3)?,
-                    })
-                },
+                project_from,
             )
             .optional()?)
     }
 
-    pub fn add_run(
-        &self,
-        id: &str,
-        project_id: &str,
-        title: &str,
-        base_ref: Option<&str>,
-    ) -> Result<()> {
+    pub fn add_run(&self, run: &NewRun) -> Result<()> {
         self.lock().execute(
-            "insert into run (id, project_id, title, base_ref, created_at) values (?1, ?2, ?3, ?4, ?5)",
-            params![id, project_id, title, base_ref, now()],
+            "insert into run (id, project_id, title, request, workflow, language, source_issue, created_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![run.id, run.project_id, run.title, run.request, run.workflow, run.language, run.source_issue, now()],
         )?;
+        Ok(())
+    }
+
+    pub fn run(&self, id: &str) -> Result<Run> {
+        self.lock()
+            .query_row(
+                &format!("select {RUN_COLUMNS} from run where id = ?1"),
+                [id],
+                run_from,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("run {id}")))
+    }
+
+    /// Runs that still have steps ahead.
+    pub fn open_runs(&self) -> Result<Vec<Run>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "select {RUN_COLUMNS} from run where finished_at is null order by created_at"
+        ))?;
+        let rows = stmt.query_map([], run_from)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn patch_run(&self, id: &str, fields: &[(&'static str, Value)]) -> Result<()> {
+        if fields.is_empty() {
+            return Ok(());
+        }
+        let assignments: Vec<String> = fields
+            .iter()
+            .enumerate()
+            .map(|(i, (col, _))| format!("{col} = ?{}", i + 2))
+            .collect();
+        let sql = format!("update run set {} where id = ?1", assignments.join(", "));
+        let mut values = vec![Value::Text(id.to_owned())];
+        values.extend(fields.iter().map(|(_, v)| v.clone()));
+        self.lock().execute(&sql, params_from_iter(values))?;
         Ok(())
     }
 
@@ -409,12 +590,55 @@ impl Store {
             .ok_or_else(|| Error::NotFound(format!("run {run_id}")))
     }
 
+    pub fn add_decision(
+        &self,
+        project_id: &str,
+        run_id: &str,
+        attempt_id: &str,
+        answer: &str,
+        text: &str,
+    ) -> Result<()> {
+        self.lock().execute(
+            "insert into decision (project_id, run_id, attempt_id, at, answer, text) values (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![project_id, run_id, attempt_id, now(), answer, text],
+        )?;
+        Ok(())
+    }
+
+    /// A project's decisions still in force, newest first.
+    pub fn decisions(&self, project_id: &str) -> Result<Vec<Decision>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select seq, project_id, run_id, attempt_id, at, answer, text, retired from decision
+             where project_id = ?1 and retired = 0 order by seq desc",
+        )?;
+        let rows = stmt.query_map([project_id], |r| {
+            Ok(Decision {
+                seq: r.get(0)?,
+                project_id: r.get(1)?,
+                run_id: r.get(2)?,
+                attempt_id: r.get(3)?,
+                at: r.get(4)?,
+                answer: r.get(5)?,
+                text: r.get(6)?,
+                retired: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn retire_decision(&self, seq: i64) -> Result<()> {
+        self.lock()
+            .execute("update decision set retired = 1 where seq = ?1", [seq])?;
+        Ok(())
+    }
+
     pub fn add_attempt(&self, a: &NewAttempt) -> Result<()> {
         self.lock().execute(
             "insert into attempt (id, run_id, step_id, number, state, model_requested, effort, tools, max_turns,
                 max_budget_usd, language, prompt, system_prompt_sources, settings, session_id, resumed_from,
-                workspace, raw_path, started_at)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                workspace, raw_path, started_at, kind)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             params![
                 a.id,
                 a.run_id,
@@ -434,7 +658,8 @@ impl Store {
                 a.resumed_from,
                 a.workspace,
                 a.raw_path,
-                a.started_at
+                a.started_at,
+                a.kind
             ],
         )?;
         Ok(())
@@ -530,7 +755,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "select r.id, r.title, r.project_id, p.name as project_name, a.step_id, a.id as attempt_id, a.number,
                     a.state, a.reason, coalesce(a.model_actual, a.model_requested) as model, a.turns,
-                    a.started_at, a.finished_at, a.last_activity_at
+                    a.started_at, a.finished_at, a.last_activity_at, r.pr_url
              from run r
              join project p on p.id = r.project_id
              join attempt a on a.run_id = r.id
@@ -541,6 +766,7 @@ impl Store {
             Ok(RunRow {
                 id: r.get(0)?,
                 title: r.get(1)?,
+                pr_url: r.get(14)?,
                 project_id: r.get(2)?,
                 project_name: r.get(3)?,
                 step_id: r.get(4)?,
@@ -563,7 +789,7 @@ impl Store {
             "select
                 coalesce(sum(state in ('preparing', 'running') and number = 1), 0),
                 coalesce(sum(state in ('preparing', 'running') and number > 1), 0),
-                coalesce(sum(state in ('stalled', 'blocked', 'interrupted')), 0),
+                coalesce(sum(state in ('stalled', 'blocked', 'interrupted', 'waitingApproval')), 0),
                 coalesce(sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)), 0),
                 coalesce(sum(coalesce(duration_ms, 0)), 0),
                 coalesce(sum(coalesce(cost_usd, 0)), 0)
@@ -600,14 +826,30 @@ mod tests {
                 name: "demo".into(),
                 path: "/demo".into(),
                 created_at: now(),
+                github_account: None,
+                github_repo: None,
+                check_command: None,
+                allowed_domains: vec![],
+                allowed_read: vec![],
             })
             .unwrap();
-        store.add_run("r", "p", "fix it", Some("main")).unwrap();
+        store
+            .add_run(&NewRun {
+                id: "r".into(),
+                project_id: "p".into(),
+                title: "fix it".into(),
+                request: "fix it".into(),
+                workflow: "[]".into(),
+                language: "en".into(),
+                source_issue: None,
+            })
+            .unwrap();
         store
             .add_attempt(&NewAttempt {
                 id: "a".into(),
                 run_id: "r".into(),
                 step_id: "builder".into(),
+                kind: "agent".into(),
                 number: 1,
                 state: AttemptState::Running,
                 model_requested: "haiku".into(),
@@ -685,6 +927,82 @@ mod tests {
         assert_eq!(rows[0].model, "haiku");
         let totals = store.totals().unwrap();
         assert_eq!((totals.running, totals.tokens), (1, 15));
+    }
+
+    #[test]
+    fn decisions_can_be_retired_but_never_rewritten() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_decision("p", "r", "a", "reject", "use the existing helper")
+            .unwrap();
+        store
+            .add_decision("p", "r", "a", "approve", "ok, but keep it small")
+            .unwrap();
+        let decisions = store.decisions("p").unwrap();
+        assert_eq!(decisions[0].text, "ok, but keep it small");
+        assert_eq!(decisions.len(), 2);
+        {
+            let conn = store.lock();
+            assert!(
+                conn.execute("update decision set text = 'other'", [])
+                    .is_err()
+            );
+            assert!(conn.execute("delete from decision", []).is_err());
+        }
+        store.retire_decision(decisions[0].seq).unwrap();
+        assert_eq!(store.decisions("p").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_run_keeps_its_workflow_and_its_pull_request() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .patch_run(
+                "r",
+                &[
+                    (
+                        "pr_url",
+                        Value::Text("https://github.com/o/r/pull/7".into()),
+                    ),
+                    ("pr_number", Value::Integer(7)),
+                ],
+            )
+            .unwrap();
+        let run = store.run("r").unwrap();
+        assert_eq!(run.pr_number, Some(7));
+        assert_eq!(
+            store.runs(10).unwrap()[0].pr_url.as_deref(),
+            Some("https://github.com/o/r/pull/7")
+        );
+        assert_eq!(store.open_runs().unwrap().len(), 1);
+        store
+            .patch_run("r", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        assert!(store.open_runs().unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_settings_round_trip() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .update_project(
+                "p",
+                &ProjectSettings {
+                    github_account: Some("octo".into()),
+                    check_command: Some("make test".into()),
+                    allowed_domains: vec!["pypi.org".into()],
+                    allowed_read: vec!["~/.cargo".into()],
+                },
+            )
+            .unwrap();
+        let project = store.project("p").unwrap();
+        assert_eq!(project.github_account.as_deref(), Some("octo"));
+        assert_eq!(project.check_command.as_deref(), Some("make test"));
+        assert_eq!(project.allowed_domains, ["pypi.org"]);
+        assert_eq!(project.allowed_read, ["~/.cargo"]);
     }
 
     #[test]

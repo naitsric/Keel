@@ -53,7 +53,9 @@
     "stopped": "Stopped",
     "interrupted": "Interrupted",
     "blocked": "Blocked",
-    "abandoned": "Abandoned"
+    "abandoned": "Abandoned",
+    "waitingApproval": "Waiting for you",
+    "rejected": "Rejected"
   },
   "reasons": {
     "claudeMissing": "Claude Code isn't installed, or Keel can't find it.",
@@ -73,7 +75,14 @@
     "resultError": "The agent ended with an error ({{subtype}}): {{detail}}",
     "exitedWithoutResult": "Claude Code exited with code {{exitCode}} without reporting a result.",
     "prepareFailed": "Couldn't prepare the workspace: {{detail}}",
-    "agentLost": "Keel lost track of the agent, for example because the app or the Mac went down."
+    "agentLost": "Keel lost track of the agent, for example because the app or the Mac went down.",
+    "checkFailed": "The check failed with code {{exitCode}}.",
+    "noGithubRemote": "This project's repo isn't on GitHub, so there's nowhere to open a pull request.",
+    "githubAccountMissing": "Choose which GitHub account this project uses.",
+    "ghMissing": "GitHub CLI (gh) isn't installed, or Keel can't find it.",
+    "deliveryFailed": "Couldn't deliver it to GitHub: {{detail}}",
+    "nothingToDeliver": "There's nothing to deliver: no step changed any files.",
+    "unsafeBranch": "Keel only pushes its own branches, and this run is on {{branch}}."
   },
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",
@@ -108,7 +117,26 @@
       "high": "High",
       "xhigh": "Extra high",
       "max": "Maximum"
-    }
+    },
+    "workflow": "Workflow",
+    "workflowFull": "Full, up to a pull request",
+    "workflowSingle": "One step",
+    "workflowFullHint": "Spec writer, builder, check, your approval, and a draft pull request.",
+    "specModel": "Spec writer's model",
+    "builderModel": "Builder's model",
+    "source": "Where it comes from",
+    "sourceText": "Write it",
+    "sourceIssue": "GitHub issue",
+    "issuesLoading": "Loading issues…",
+    "issuesEmpty": "This repo has no open issues.",
+    "issueChoose": "Choose an issue",
+    "issueNote": "Anyone may have written an issue, so agents get it as a description of a problem, not as instructions.",
+    "issueBy": "by {{author}}",
+    "issueExtra": "Anything to add? (optional)",
+    "checkCommand": "Check: {{command}}",
+    "checkNone": "This project has no check command, so that step is skipped. Set one in Settings.",
+    "needsGithub": "This workflow needs a GitHub account for the project.",
+    "openSettings": "Open Settings"
   },
   "run": {
     "attemptTitle": "Attempt {{number}}",
@@ -146,14 +174,32 @@
     "abandon": "Leave it",
     "signIn": "Sign in to Claude Code",
     "decideStalled": "Choose above what to do with it.",
-    "noResultEnded": "It ended before writing an explanation. The activity below shows what it did."
+    "noResultEnded": "It ended before writing an explanation. The activity below shows what it did.",
+    "pending": "Not started",
+    "pullRequest": "Pull request #{{number}}",
+    "openPr": "Open on GitHub",
+    "fromIssue": "From issue #{{number}}",
+    "base": "Based on {{base}}",
+    "decideApproval": "Approve or reject below.",
+    "decideDelivered": "Review and merge the draft on GitHub. Keel doesn't merge.",
+    "decideRejected": "Nothing. You rejected this, and your reason will reach this project's next runs.",
+    "approvalTitle": "Should this become a pull request?",
+    "approvalBody": "Nothing has left your Mac. Approving pushes a branch and opens a draft.",
+    "approvalNote": "Note for this project (optional)",
+    "approvalNotePlaceholder": "A decision later runs should follow. If you reject, say why.",
+    "approve": "Approve and open a draft",
+    "reject": "Reject",
+    "workflowWarning": "This change edits `.github/workflows`. Those files can run with the repo's secrets as soon as the branch is pushed. Read them first.",
+    "checksPassed": "{{passed}} of {{total}} checks passed.",
+    "checkFailedSummary": "A check failed, so this didn't go further."
   },
   "tabs": {
     "activity": "Activity",
     "commands": "Commands",
     "changes": "Changes",
     "prompt": "Prompt",
-    "details": "Details"
+    "details": "Details",
+    "output": "Output"
   },
   "activity": {
     "empty": "No activity yet.",
@@ -174,7 +220,15 @@
     "abandoned": "You left this run",
     "recovered": "Keel reopened and picked this step up again",
     "snapshotFailed": "Couldn't record the changes: {{error}}",
-    "result": "The agent finished"
+    "result": "The agent finished",
+    "waiting": "Waiting for you",
+    "decisionApprove": "You approved it",
+    "decisionReject": "You rejected it",
+    "decisionNote": "Your note: {{text}}",
+    "checkResult": "The check ended with code {{code}}",
+    "dirty": "It changed files in the private copy, which a check shouldn't.",
+    "delivered": "Draft opened with {{account}}: {{url}}",
+    "startedCheck": "Running: {{command}}"
   },
   "commands": {
     "empty": "No commands ran.",
@@ -221,7 +275,33 @@
     "languages": {
       "en": "English",
       "es": "Español"
-    }
+    },
+    "projects": "Projects",
+    "noProjects": "No projects yet. Add one when you start a run.",
+    "github": "GitHub",
+    "githubAccount": "Account",
+    "githubNone": "None",
+    "githubActive": "active in your terminal",
+    "githubHint": "Keel uses this account for this project only, and never changes the one active in your terminal.",
+    "githubRepo": "Repo: {{repo}}",
+    "githubNoRepo": "This project's repo isn't on GitHub.",
+    "githubPermission": "Permission: {{permission}}",
+    "githubDefault": "Default branch: {{branch}}",
+    "githubUnprotected": "{{branch}} isn't protected, so anyone with write access can push to it directly. Keel never does, but a protected branch adds a safeguard.",
+    "githubScopes": "This account's token also has {{scopes}}. Keel doesn't need them and can't reduce them. A dedicated account limits what could go wrong.",
+    "checkCommand": "Check command",
+    "checkCommandHint": "Runs after the builder, in a sandbox with no network and no access to your home folder. Exit code 0 passes.",
+    "checkCommandPlaceholder": "make test",
+    "domains": "Domains agents can reach",
+    "domainsHint": "One per line. Nothing else is reachable.",
+    "readPaths": "Other folders agents can read",
+    "readPathsHint": "One per line, such as ~/.cargo. Your home folder is hidden otherwise.",
+    "save": "Save",
+    "saved": "Saved",
+    "decisions": "Decisions",
+    "decisionsHint": "What you said at an approval. Agents in this project follow these.",
+    "decisionsEmpty": "No decisions yet.",
+    "retire": "Retire"
   },
   "quit": {
     "title": "There are steps running",
@@ -248,5 +328,14 @@
     "minimize": "Minimize",
     "zoom": "Zoom",
     "close": "Close Window"
+  },
+  "deliveryKinds": {
+    "notSignedIn": "This GitHub account isn't signed in. Run `gh auth login`, then try again.",
+    "noPermission": "This GitHub account can't write to the repo. Give it access or choose another one.",
+    "sso": "Your organization requires SSO for this token. Authorize it with `gh auth refresh`, then try again.",
+    "repoRules": "The repo's rules refused this push.",
+    "signedCommits": "This repo requires signed commits, which Keel can't produce yet.",
+    "workflowScope": "This change edits `.github/workflows`, and the account's token lacks the `workflow` scope. Run `gh auth refresh -s workflow` with that account active, then try again.",
+    "other": "GitHub refused this."
   }
 }

@@ -23,6 +23,38 @@ pub fn step_settings(workspace: &Path, allowed_domains: &[String], extra_read: &
     })
 }
 
+/// The same policy for a `check` step, which Keel runs itself. Tests and Makefiles can be edited
+/// by an agent, so they get no more trust than the agent does. A Seatbelt profile for
+/// `sandbox-exec`: no home folder except what's listed, no network, and writes only here.
+pub fn check_profile(workspace: &Path, home: &Path, extra_read: &[String]) -> String {
+    let quote = |path: &str| path.replace('\\', "\\\\").replace('"', "\\\"");
+    let expand = |path: &str| match path.strip_prefix("~/") {
+        Some(rest) => home.join(rest).to_string_lossy().into_owned(),
+        None => path.to_owned(),
+    };
+    let workspace = quote(&workspace.to_string_lossy());
+    let home_text = quote(&home.to_string_lossy());
+    let mut read_rules = format!("(subpath \"{workspace}\")");
+    for dir in TOOL_DIRS
+        .iter()
+        .map(|d| (*d).to_owned())
+        .chain(extra_read.iter().cloned())
+    {
+        read_rules.push_str(&format!(" (subpath \"{}\")", quote(&expand(&dir))));
+    }
+    format!(
+        "(version 1)\n\
+         (allow default)\n\
+         (deny network*)\n\
+         (deny file-read* (subpath \"{home_text}\"))\n\
+         (allow file-read* {read_rules})\n\
+         (allow file-read-metadata (literal \"{home_text}\"))\n\
+         (deny file-write*)\n\
+         (allow file-write* (subpath \"{workspace}\") (subpath \"/private/tmp\") (subpath \"/private/var/folders\") (literal \"/dev/null\") (literal \"/dev/stdout\") (literal \"/dev/stderr\") (literal \"/dev/tty\") (regex #\"^/dev/fd/\"))\n\
+         (deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd\") (global-name \"com.apple.secd\") (global-name \"com.apple.securityd.xpc\"))\n"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

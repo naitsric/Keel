@@ -1,26 +1,27 @@
-//! Runs steps. Everything happens inside the app process, without a daemon, but each agent is
-//! its own process writing to a file, so it outlives the app and can be picked up again.
+//! Runs workflows. Everything happens inside the app process, without a daemon, but each agent
+//! is its own process writing to a file, so it outlives the app and can be picked up again.
 
+mod deliver;
 mod git;
+mod prompts;
+mod runner;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::Child;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 pub use git::{Git, GitError, Snapshot};
-use keel_core::{AttemptState, Reason, StepSpec, ToolProfile};
+use keel_core::{AttemptState, Reason, StepSpec, WorkflowStep};
 use keel_harness::auth::{self, AuthStatus, VersionCheck};
-use keel_harness::process::{self, SIGINT, SIGTERM, Tail};
-use keel_harness::stream::ResultEvent;
-use keel_harness::{Parsed, StepCommand, Tools, parse_line, settings};
+use keel_harness::github::{self, Account, Gh, GhError, Issue, RepoInfo};
+use keel_harness::process::{self, SIGINT, SIGTERM};
+use keel_harness::{Tools, settings};
 use keel_store::rusqlite_value::Value;
-use keel_store::{Attempt, NewAttempt, Project, Store, now};
+use keel_store::{Decision, NewAttempt, NewRun, Project, ProjectSettings, Store, now};
+pub use prompts::full_workflow;
 use serde_json::json;
 
-/// Tool output kept in the database. The raw file always has all of it.
-const EVENT_TEXT_LIMIT: usize = 64 * 1024;
 const RESUME_PROMPT: &str = "Continue where you left off.";
 
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +43,13 @@ pub enum Error {
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+fn gh_blocked(error: GhError) -> Error {
+    Error::Blocked(Reason::DeliveryFailed {
+        kind: error.kind.to_owned(),
+        detail: error.detail,
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub data_dir: PathBuf,
@@ -56,6 +64,8 @@ pub struct Config {
     pub stop_grace: Duration,
     pub max_agents: usize,
     pub keep_awake: bool,
+    /// Where git reaches GitHub. Tests point this at local repos.
+    pub github_git_base: String,
 }
 
 impl Config {
@@ -69,6 +79,7 @@ impl Config {
             stop_grace: Duration::from_secs(10),
             max_agents: 2,
             keep_awake: true,
+            github_git_base: "https://github.com".to_owned(),
         }
     }
 }
@@ -76,11 +87,31 @@ impl Config {
 #[derive(Debug, Clone)]
 pub struct StartRun {
     pub project_id: String,
-    pub step: StepSpec,
-    /// Language for the agent's closing explanation.
+    /// Shown as the run's name. Taken from the request if absent.
+    pub title: Option<String>,
+    pub request: String,
+    pub workflow: Vec<WorkflowStep>,
+    /// Language for what agents write for the person.
     pub language: String,
-    pub allowed_domains: Vec<String>,
+    /// The issue this came from, kept as evidence of where the request started.
+    pub source_issue: Option<Issue>,
 }
+
+impl StartRun {
+    /// A run with a single agent step.
+    pub fn one_step(project_id: String, step: StepSpec, language: String) -> Self {
+        Self {
+            project_id,
+            title: None,
+            request: step.prompt.clone(),
+            workflow: vec![WorkflowStep::Agent(step)],
+            language,
+            source_issue: None,
+        }
+    }
+}
+
+pub use prompts::request_from_issue;
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,6 +130,7 @@ pub enum RawCheck {
 pub struct Preflight {
     pub claude_found: bool,
     pub git_found: bool,
+    pub gh_found: bool,
     pub version: Option<VersionCheck>,
     pub auth: Option<AuthStatus>,
     /// Auth variables in the environment that Keel removes before starting an agent.
@@ -106,6 +138,21 @@ pub struct Preflight {
     /// Why a run can't start, if it can't.
     pub blocker: Option<Reason>,
 }
+
+/// What a project's GitHub account can do, shown when choosing it.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubStatus {
+    pub repo: Option<String>,
+    pub accounts: Vec<Account>,
+    pub info: Option<RepoInfo>,
+    /// Scopes beyond what Keel needs. It can't reduce them, so it says so.
+    pub excess_scopes: Vec<String>,
+    pub error: Option<Reason>,
+}
+
+/// `repo` covers everything Keel does. `read:org` and `gist` are what `gh` asks for at minimum.
+const NEEDED_SCOPES: [&str; 3] = ["repo", "read:org", "gist"];
 
 #[derive(Default)]
 struct Slots {
@@ -129,6 +176,8 @@ struct Inner {
     slots: Mutex<Slots>,
     slot_freed: Condvar,
     controls: Mutex<HashMap<String, Control>>,
+    /// Starting a step reads what ran and then adds to it. One at a time, or a step could start twice.
+    advancing: Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -159,18 +208,6 @@ fn title_from(prompt: &str) -> String {
     }
 }
 
-fn language_name(code: &str) -> &'static str {
-    if code.starts_with("es") {
-        "Spanish"
-    } else {
-        "English"
-    }
-}
-
-fn text_value(value: Option<String>) -> Value {
-    value.map_or(Value::Null, Value::Text)
-}
-
 impl Engine {
     pub fn new(
         store: Arc<Store>,
@@ -187,6 +224,7 @@ impl Engine {
                 slots: Mutex::default(),
                 slot_freed: Condvar::new(),
                 controls: Mutex::default(),
+                advancing: Mutex::new(()),
             }),
         }
     }
@@ -228,6 +266,7 @@ impl Engine {
         Preflight {
             claude_found: tools.claude.is_some(),
             git_found: tools.git.is_some(),
+            gh_found: tools.gh.is_some(),
             version,
             auth,
             ignored_env: keel_harness::command::ignored_auth_env()
@@ -244,6 +283,10 @@ impl Engine {
             .clone()
             .ok_or(Error::Blocked(Reason::GitMissing))?;
         Ok(Git { bin })
+    }
+
+    fn gh(&self) -> Result<Gh> {
+        self.inner.gh()
     }
 
     pub fn add_project(&self, path: &Path) -> Result<Project> {
@@ -263,93 +306,170 @@ impl Engine {
             name,
             path: root_text,
             created_at: now(),
+            github_account: None,
+            github_repo: git
+                .origin_url(&root)
+                .and_then(|url| github::github_repo(&url)),
+            check_command: None,
+            allowed_domains: Vec::new(),
+            allowed_read: Vec::new(),
         };
         self.inner.store.add_project(&project)?;
         Ok(project)
     }
 
-    /// Starts a run with one step. Returns once it's queued. Refuses if there's no usable session.
+    pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<Project> {
+        self.inner.store.update_project(id, settings)?;
+        Ok(self.inner.store.project(id)?)
+    }
+
+    /// The accounts in `gh`, and what the project's account can do. Never changes the active one.
+    pub fn github_status(&self, project_id: &str) -> Result<GithubStatus> {
+        let project = self.inner.store.project(project_id)?;
+        let mut status = GithubStatus {
+            repo: project.github_repo.clone(),
+            accounts: Vec::new(),
+            info: None,
+            excess_scopes: Vec::new(),
+            error: None,
+        };
+        let gh = match self.gh() {
+            Ok(gh) => gh,
+            Err(_) => {
+                status.error = Some(Reason::GhMissing);
+                return Ok(status);
+            }
+        };
+        status.accounts = gh.accounts().map_err(gh_blocked)?;
+        let Some(login) = project.github_account else {
+            return Ok(status);
+        };
+        if let Some(account) = status.accounts.iter().find(|a| a.login == login) {
+            status.excess_scopes = account
+                .scopes
+                .iter()
+                .filter(|s| !NEEDED_SCOPES.contains(&s.as_str()))
+                .cloned()
+                .collect();
+        }
+        let Some(repo) = project.github_repo else {
+            status.error = Some(Reason::NoGithubRemote);
+            return Ok(status);
+        };
+        let result = gh
+            .token(&login)
+            .and_then(|token| gh.repo_info(&token, &repo));
+        match result {
+            Ok(info) => status.info = Some(info),
+            Err(error) => {
+                status.error = Some(Reason::DeliveryFailed {
+                    kind: error.kind.to_owned(),
+                    detail: error.detail,
+                })
+            }
+        }
+        Ok(status)
+    }
+
+    /// Open issues of the project's repo, to import one by choosing it. Keel never polls.
+    pub fn issues(&self, project_id: &str) -> Result<Vec<Issue>> {
+        let project = self.inner.store.project(project_id)?;
+        let repo = project
+            .github_repo
+            .ok_or(Error::Blocked(Reason::NoGithubRemote))?;
+        let login = project
+            .github_account
+            .ok_or(Error::Blocked(Reason::GithubAccountMissing))?;
+        let gh = self.gh()?;
+        let token = gh.token(&login).map_err(gh_blocked)?;
+        gh.issues(&token, &repo).map_err(gh_blocked)
+    }
+
+    /// Starts a run. Returns once its first step is on its way. Refuses if the session can't work,
+    /// or if a later step could never succeed, rather than failing after the agents already ran.
     pub fn start_run(&self, request: StartRun) -> Result<String> {
         if let Some(reason) = self.preflight().blocker {
             return Err(Error::Blocked(reason));
         }
         let project = self.inner.store.project(&request.project_id)?;
+        if request
+            .workflow
+            .iter()
+            .any(|s| matches!(s, WorkflowStep::Deliver { .. }))
+        {
+            if project.github_repo.is_none() {
+                return Err(Error::Blocked(Reason::NoGithubRemote));
+            }
+            if project.github_account.is_none() {
+                return Err(Error::Blocked(Reason::GithubAccountMissing));
+            }
+            self.gh().map_err(|_| Error::Blocked(Reason::GhMissing))?;
+        }
         let run_id = new_id();
-        self.inner.store.add_run(
-            &run_id,
-            &project.id,
-            &title_from(&request.step.prompt),
-            None,
-        )?;
-        let dir = self.inner.config.data_dir.join("runs").join(&run_id);
-        let workspace = dir.join("workspace");
-        let attempt_id = self.insert_attempt(
-            &run_id,
-            1,
-            &request.step,
-            &request.language,
-            &workspace,
-            new_id(),
-            None,
-            &request.allowed_domains,
-        )?;
-        self.launch(Launch {
-            attempt_id,
-            run_id: run_id.clone(),
+        self.inner.store.add_run(&NewRun {
+            id: run_id.clone(),
             project_id: project.id,
-            step: request.step,
-            source: Some(PathBuf::from(project.path)),
-            resume: None,
-        });
+            title: request.title.unwrap_or_else(|| title_from(&request.request)),
+            request: request.request,
+            workflow: serde_json::to_string(&request.workflow).unwrap_or_else(|_| "[]".into()),
+            language: request.language,
+            source_issue: request.source_issue.as_ref().map(|issue| {
+                json!({ "number": issue.number, "title": issue.title, "author": issue.author, "url": issue.url }).to_string()
+            }),
+        })?;
+        std::fs::create_dir_all(self.inner.run_dir(&run_id))?;
+        restrict_dir(&self.inner.run_dir(&run_id));
+        self.inner.advance(&run_id)?;
         Ok(run_id)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn insert_attempt(
-        &self,
-        run_id: &str,
-        number: i64,
-        step: &StepSpec,
-        language: &str,
-        workspace: &Path,
-        session_id: String,
-        resumed_from: Option<String>,
-        domains: &[String],
-    ) -> Result<String> {
-        let id = new_id();
-        let dir = workspace.parent().unwrap_or(workspace).to_path_buf();
-        std::fs::create_dir_all(&dir)?;
-        restrict_dir(&dir);
-        let raw_path = dir.join(format!("{}-{number}.jsonl", step.id));
-        self.inner.store.add_attempt(&NewAttempt {
-            id: id.clone(),
-            run_id: run_id.to_owned(),
-            step_id: step.id.clone(),
-            number,
-            state: AttemptState::Queued,
-            model_requested: step.model.clone(),
-            effort: step.effort.clone(),
-            tools: step.tools.as_str().to_owned(),
-            max_turns: step.max_turns,
-            max_budget_usd: step.max_budget_usd,
-            language: language.to_owned(),
-            prompt: step.prompt.clone(),
-            system_prompt_sources: "[]".to_owned(),
-            settings: settings::step_settings(workspace, domains, &[]).to_string(),
-            session_id,
-            resumed_from,
-            workspace: workspace.to_string_lossy().into_owned(),
-            raw_path: raw_path.to_string_lossy().into_owned(),
-            started_at: now(),
-        })?;
-        Ok(id)
+    /// Answers an approval step. The text, if any, becomes a decision later runs of this project
+    /// follow. Rejecting ends the run; approving lets it continue.
+    pub fn answer_approval(&self, attempt_id: &str, approve: bool, text: &str) -> Result<()> {
+        let store = &self.inner.store;
+        let attempt = store.attempt(attempt_id)?;
+        if attempt.state != AttemptState::WaitingApproval.as_str() {
+            return Err(Error::InvalidState);
+        }
+        let answer = if approve { "approve" } else { "reject" };
+        let project_id = store.project_of_run(&attempt.run_id)?;
+        if !text.trim().is_empty() {
+            store.add_decision(
+                &project_id,
+                &attempt.run_id,
+                attempt_id,
+                answer,
+                text.trim(),
+            )?;
+        }
+        store.append_event(
+            attempt_id,
+            "decision",
+            &json!({ "answer": answer, "text": text.trim() }),
+        )?;
+        store.patch_attempt(attempt_id, &[("finished_at", Value::Text(now()))])?;
+        let state = if approve {
+            AttemptState::Succeeded
+        } else {
+            AttemptState::Rejected
+        };
+        store.set_state(attempt_id, state, None)?;
+        store.append_event(attempt_id, "finished", &json!({ "state": state.as_str() }))?;
+        if approve {
+            self.inner.advance(&attempt.run_id)?;
+        } else {
+            store.patch_run(&attempt.run_id, &[("finished_at", Value::Text(now()))])?;
+        }
+        (self.inner.on_change)(&attempt.run_id);
+        Ok(())
     }
 
-    fn launch(&self, launch: Launch) {
-        locked(&self.inner.controls).insert(launch.attempt_id.clone(), Control::default());
-        let inner = self.inner.clone();
-        (inner.on_change)(&launch.run_id);
-        std::thread::spawn(move || inner.execute(launch));
+    pub fn decisions(&self, project_id: &str) -> Result<Vec<Decision>> {
+        Ok(self.inner.store.decisions(project_id)?)
+    }
+
+    pub fn retire_decision(&self, seq: i64) -> Result<()> {
+        Ok(self.inner.store.retire_decision(seq)?)
     }
 
     /// Asks a step to stop. A queued step never starts; a running one gets SIGINT, and the
@@ -420,65 +540,43 @@ impl Engine {
         Ok(())
     }
 
-    /// Tries again in the same workspace. With `resume`, it continues the agent's session
-    /// instead of starting a new one from the prompt.
+    /// Tries a step again in the same workspace. With `resume`, an agent continues its session
+    /// instead of starting a new one. A failed delivery retries only the delivery.
     pub fn retry(&self, attempt_id: &str, resume: bool) -> Result<String> {
         let store = &self.inner.store;
         let attempt = store.attempt(attempt_id)?;
         let state = AttemptState::parse(&attempt.state).ok_or(Error::InvalidState)?;
-        if state.is_active() {
+        if state.is_active() || state == AttemptState::WaitingApproval {
             return Err(Error::InvalidState);
         }
-        let latest = store
+        let run = store.run(&attempt.run_id)?;
+        let number = store
             .attempts_of_run(&attempt.run_id)?
-            .last()
-            .map_or(0, |a| a.number);
-        let step = StepSpec {
-            id: attempt.step_id.clone(),
-            model: attempt.model_requested.clone(),
-            effort: attempt.effort.clone(),
-            tools: ToolProfile::parse(&attempt.tools).unwrap_or(ToolProfile::ReadOnly),
-            prompt: if resume {
-                RESUME_PROMPT.to_owned()
-            } else {
-                attempt.prompt.clone()
-            },
-            max_turns: attempt.max_turns.and_then(|t| u32::try_from(t).ok()),
-            max_budget_usd: attempt.max_budget_usd,
-        };
-        let session = if resume {
-            attempt.session_id.clone()
-        } else {
-            new_id()
-        };
-        let domains: Vec<String> = attempt
-            .settings
-            .pointer("/sandbox/network/allowedDomains")
-            .and_then(|d| serde_json::from_value(d.clone()).ok())
-            .unwrap_or_default();
-        let workspace = PathBuf::from(&attempt.workspace);
-        let new_attempt = self.insert_attempt(
+            .iter()
+            .filter(|a| a.step_id == attempt.step_id)
+            .map(|a| a.number)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let steps: Vec<WorkflowStep> =
+            serde_json::from_value(run.workflow.clone()).unwrap_or_default();
+        let step = steps
+            .iter()
+            .find(|s| s.id() == attempt.step_id)
+            .cloned()
+            .ok_or(Error::InvalidState)?;
+        let resume_session =
+            (resume && attempt.kind == "agent").then(|| attempt.session_id.clone());
+        let new_attempt = self.inner.start_step(
             &attempt.run_id,
-            latest + 1,
             &step,
-            &attempt.language,
-            &workspace,
-            session,
-            resume.then(|| attempt.id.clone()),
-            &domains,
+            number,
+            resume_session.clone(),
+            resume_session.is_some().then(|| attempt.id.clone()),
         )?;
-        let project_id = store.project_of_run(&attempt.run_id)?;
-        let source = (!workspace.join(".git").exists())
-            .then(|| store.project(&project_id).map(|p| PathBuf::from(p.path)))
-            .transpose()?;
-        self.launch(Launch {
-            attempt_id: new_attempt.clone(),
-            run_id: attempt.run_id,
-            project_id,
-            step,
-            source,
-            resume: resume.then_some(attempt.session_id),
-        });
+        if run.finished_at.is_some() {
+            store.patch_run(&attempt.run_id, &[("finished_at", Value::Null)])?;
+        }
         Ok(new_attempt)
     }
 
@@ -494,45 +592,21 @@ impl Engine {
         self.inner
             .store
             .append_event(attempt_id, "abandoned", &json!({}))?;
+        self.inner
+            .store
+            .patch_run(&attempt.run_id, &[("finished_at", Value::Text(now()))])?;
         (self.inner.on_change)(&attempt.run_id);
         Ok(())
     }
 
-    /// Run once at startup. Reconnects to steps that outlived the app, and closes out the rest.
+    /// Run once at startup. Reconnects to steps that outlived the app, closes out the rest, and
+    /// continues any run that stopped between two steps. Approvals simply keep waiting.
     pub fn recover(&self) -> Result<()> {
         for attempt in self.inner.store.active_attempts()? {
-            let alive = match (attempt.pid, &attempt.pid_started) {
-                (Some(pid), Some(started)) => process::is_same_process(pid as i32, started),
-                _ => false,
-            };
-            let store = &self.inner.store;
-            store.append_event(&attempt.id, "recovered", &json!({ "processAlive": alive }))?;
-            let project_id = store.project_of_run(&attempt.run_id)?;
-            locked(&self.inner.controls).insert(
-                attempt.id.clone(),
-                Control {
-                    pid: attempt.pid.map(|p| p as i32),
-                    ..Control::default()
-                },
-            );
-            let inner = self.inner.clone();
-            let is_command_step = attempt.tools == ToolProfile::Build.as_str();
-            {
-                let mut slots = locked(&inner.slots);
-                slots.active.insert(attempt.id.clone());
-                if is_command_step {
-                    slots.command_steps.insert(project_id.clone());
-                }
-            }
-            let tail = Tail {
-                offset: attempt.raw_offset as u64,
-            };
-            let context = Monitor::new(&attempt, project_id, is_command_step, None, tail);
-            if alive {
-                std::thread::spawn(move || inner.monitor(context));
-            } else {
-                inner.finish(context, None, true);
-            }
+            self.inner.recover_attempt(&attempt)?;
+        }
+        for run in self.inner.store.open_runs()? {
+            self.inner.advance(&run.id)?;
         }
         Ok(())
     }
@@ -568,730 +642,209 @@ fn restrict_dir(dir: &Path) {
     let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
 }
 
-struct Launch {
-    attempt_id: String,
-    run_id: String,
-    project_id: String,
-    step: StepSpec,
-    /// The user's repo, when the workspace has to be created.
-    source: Option<PathBuf>,
-    resume: Option<String>,
-}
-
-struct Monitor {
-    attempt_id: String,
-    run_id: String,
-    step_id: String,
-    project_id: String,
-    is_command_step: bool,
-    tools_expected: Vec<String>,
-    raw_path: PathBuf,
-    workspace: PathBuf,
-    sha_before: Option<String>,
-    resumed_from: Option<String>,
-    root_pid: Option<i32>,
-    child: Option<Child>,
-    tail: Tail,
-    /// Why this attempt must end blocked, once decided.
-    block: Option<Reason>,
-    result: Option<ResultEvent>,
-}
-
-impl Monitor {
-    fn new(
-        attempt: &Attempt,
-        project_id: String,
-        is_command_step: bool,
-        child: Option<Child>,
-        tail: Tail,
-    ) -> Self {
-        let tools = ToolProfile::parse(&attempt.tools).unwrap_or(ToolProfile::ReadOnly);
-        Self {
-            attempt_id: attempt.id.clone(),
-            run_id: attempt.run_id.clone(),
-            step_id: attempt.step_id.clone(),
-            project_id,
-            is_command_step,
-            tools_expected: tools.tools().iter().map(|t| (*t).to_owned()).collect(),
-            raw_path: PathBuf::from(&attempt.raw_path),
-            workspace: PathBuf::from(&attempt.workspace),
-            sha_before: attempt.sha_before.clone(),
-            resumed_from: attempt.resumed_from.clone(),
-            root_pid: attempt.pid.map(|p| p as i32),
-            child,
-            tail,
-            block: None,
-            result: None,
-        }
-    }
-}
-
+/// Helpers shared with `runner` and `deliver`.
 impl Inner {
     fn changed(&self, run_id: &str) {
         (self.on_change)(run_id);
     }
 
-    fn stop_requested(&self, attempt_id: &str) -> bool {
-        locked(&self.controls)
-            .get(attempt_id)
-            .is_some_and(|c| c.stop_requested)
+    fn run_dir(&self, run_id: &str) -> PathBuf {
+        self.config.data_dir.join("runs").join(run_id)
     }
 
-    /// Waits for room. Runs are limited overall, and a project runs one command step at a
-    /// time, because tests often share resources such as a database.
-    fn acquire_slot(&self, launch: &Launch) -> bool {
-        let needs_project = launch.step.tools == ToolProfile::Build;
-        let mut last_reason: Option<Reason> = None;
-        let mut slots = locked(&self.slots);
-        loop {
-            if self.stop_requested(&launch.attempt_id) {
-                return false;
-            }
-            let reason = if needs_project && slots.command_steps.contains(&launch.project_id) {
-                Some(Reason::WaitingForProject)
-            } else if slots.active.len() >= self.config.max_agents {
-                Some(Reason::WaitingForCapacity)
-            } else {
-                None
-            };
-            let Some(reason) = reason else {
-                slots.active.insert(launch.attempt_id.clone());
-                if needs_project {
-                    slots.command_steps.insert(launch.project_id.clone());
-                }
-                return true;
-            };
-            if last_reason.as_ref() != Some(&reason) {
-                let _ =
-                    self.store
-                        .set_state(&launch.attempt_id, AttemptState::Queued, Some(&reason));
-                self.changed(&launch.run_id);
-                last_reason = Some(reason);
-            }
-            slots = self
-                .slot_freed
-                .wait_timeout(slots, Duration::from_millis(200))
-                .map(|(g, _)| g)
-                .unwrap_or_else(|e| e.into_inner().0);
-        }
+    fn workspace(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("workspace")
     }
 
-    fn release_slot(&self, attempt_id: &str, project_id: &str, is_command_step: bool) {
-        let mut slots = locked(&self.slots);
-        slots.active.remove(attempt_id);
-        if is_command_step {
-            slots.command_steps.remove(project_id);
-        }
-        drop(slots);
-        self.slot_freed.notify_all();
+    fn mirror(&self, project_id: &str) -> PathBuf {
+        self.config
+            .data_dir
+            .join("projects")
+            .join(project_id)
+            .join("mirror.git")
     }
 
-    fn end_early(&self, launch: &Launch, state: AttemptState, reason: Option<Reason>) {
-        let _ = self
-            .store
-            .set_state(&launch.attempt_id, state, reason.as_ref());
-        let _ = self
-            .store
-            .patch_attempt(&launch.attempt_id, &[("finished_at", Value::Text(now()))]);
-        let _ = self.store.append_event(
-            &launch.attempt_id,
-            "state",
-            &json!({ "state": state.as_str(), "reason": reason }),
-        );
-        self.changed(&launch.run_id);
-    }
-
-    fn execute(self: Arc<Self>, launch: Launch) {
-        if !self.acquire_slot(&launch) {
-            self.end_early(&launch, AttemptState::Stopped, None);
-            return;
-        }
-        let is_command_step = launch.step.tools == ToolProfile::Build;
-        let started = self.prepare_and_spawn(&launch);
-        match started {
-            Ok(Some(monitor)) => self.monitor(monitor),
-            Ok(None) => {
-                self.release_slot(&launch.attempt_id, &launch.project_id, is_command_step);
-                self.end_early(&launch, AttemptState::Stopped, None);
-            }
-            Err(error) => {
-                self.release_slot(&launch.attempt_id, &launch.project_id, is_command_step);
-                let reason = match error {
-                    Error::Blocked(reason) => reason,
-                    other => Reason::PrepareFailed {
-                        detail: other.to_string(),
-                    },
-                };
-                self.end_early(&launch, AttemptState::Failed, Some(reason));
-            }
-        }
-    }
-
-    fn prepare_and_spawn(&self, launch: &Launch) -> Result<Option<Monitor>> {
-        let store = &self.store;
-        let attempt = store.attempt(&launch.attempt_id)?;
-        store.set_state(&attempt.id, AttemptState::Preparing, None)?;
-        self.changed(&attempt.run_id);
-
-        let tools = locked(&self.tools).clone();
-        let claude = tools
-            .claude
-            .clone()
-            .ok_or(Error::Blocked(Reason::ClaudeMissing))?;
-        let git = Git {
-            bin: tools
-                .git
-                .clone()
-                .ok_or(Error::Blocked(Reason::GitMissing))?,
-        };
-        let workspace = PathBuf::from(&attempt.workspace);
-        let dir = workspace.parent().unwrap_or(&workspace).to_path_buf();
-
-        let mut base_ref = None;
-        if let Some(source) = &launch.source {
-            let mirror = self
-                .config
-                .data_dir
-                .join("projects")
-                .join(&launch.project_id)
-                .join("mirror.git");
-            base_ref = Some(git.update_mirror(source, &mirror)?);
-            let identity = git.identity(source);
-            let short: String = attempt.run_id.chars().take(8).collect();
-            git.create_workspace(&mirror, &workspace, &format!("keel/{short}"), &identity)?;
-        }
-        let sha_before = git.head(&workspace)?;
-
-        let stem = format!("{}-{}", attempt.step_id, attempt.number);
-        let settings_file = dir.join(format!("{stem}.settings.json"));
-        std::fs::write(&settings_file, attempt.settings.to_string())?;
-        let (system_prompt, sources) =
-            system_prompt(&workspace, &attempt.language, launch.step.tools);
-        let system_prompt_file = dir.join(format!("{stem}.system.md"));
-        std::fs::write(&system_prompt_file, &system_prompt)?;
-        let prompt_file = dir.join(format!("{stem}.prompt.txt"));
-        std::fs::write(&prompt_file, &launch.step.prompt)?;
-
-        let command = StepCommand {
-            claude: claude.clone(),
+    fn gh(&self) -> Result<Gh> {
+        let tools = locked(&self.tools);
+        let bin = tools.gh.clone().ok_or(Error::Blocked(Reason::GhMissing))?;
+        Ok(Gh {
+            bin,
             path_env: tools.path_env.clone(),
-            workspace: workspace.clone(),
-            settings_file,
-            system_prompt_file,
-            session_id: attempt.session_id.clone(),
-            resume: launch.resume.clone(),
-        };
-        let args = command.args(&launch.step);
-        let version = auth::read_version(&claude, &tools.path_env);
-        let account = AuthStatus::read(&claude, &tools.path_env).and_then(|a| a.account_label());
-        store.patch_attempt(
-            &attempt.id,
-            &[
-                ("sha_before", Value::Text(sha_before.clone())),
-                ("system_prompt_sources", Value::Text(sources.to_string())),
-                ("cli_version", text_value(version.clone())),
-                ("account", text_value(account.clone())),
-            ],
-        )?;
-        store.append_event(
-            &attempt.id,
-            "started",
-            &json!({
-                "args": args,
-                "envNames": keel_harness::clean_env(&tools.path_env).into_iter().map(|(k, _)| k).collect::<Vec<_>>(),
-                "cliVersion": version,
-                "account": account,
-                "shaBefore": sha_before,
-                "baseRef": base_ref,
-                "systemPrompt": system_prompt,
-                "systemPromptSources": sources,
-                "resumedFrom": attempt.resumed_from,
-            }),
-        )?;
-        if self.stop_requested(&attempt.id) {
-            return Ok(None);
-        }
-
-        let raw_path = PathBuf::from(&attempt.raw_path);
-        let stderr_path = dir.join(format!("{stem}.stderr.txt"));
-        let child = process::spawn_step(
-            command.command(&launch.step),
-            &prompt_file,
-            &raw_path,
-            &stderr_path,
-        )?;
-        let pid = child.id() as i32;
-        let pid_started = process::process_start(pid);
-        store.patch_attempt(
-            &attempt.id,
-            &[
-                ("pid", Value::Integer(i64::from(pid))),
-                ("pid_started", text_value(pid_started)),
-            ],
-        )?;
-        locked(&self.controls)
-            .entry(attempt.id.clone())
-            .or_default()
-            .pid = Some(pid);
-        store.set_state(&attempt.id, AttemptState::Running, None)?;
-        self.changed(&attempt.run_id);
-        if self.config.keep_awake {
-            // Ends by itself when the step does.
-            let _ = std::process::Command::new("/usr/bin/caffeinate")
-                .args(["-i", "-w", &pid.to_string()])
-                .spawn()
-                .map(reap_in_background);
-        }
-
-        let attempt = store.attempt(&attempt.id)?;
-        let is_command_step = launch.step.tools == ToolProfile::Build;
-        Ok(Some(Monitor::new(
-            &attempt,
-            launch.project_id.clone(),
-            is_command_step,
-            Some(child),
-            Tail { offset: 0 },
-        )))
+        })
     }
 
-    fn monitor(self: Arc<Self>, mut m: Monitor) {
-        // Instant doesn't advance while the Mac sleeps, so sleep never looks like a stall.
-        let mut last_progress = Instant::now();
-        let mut last_stall_check = Instant::now();
-        let mut stop_sent_at: Option<Instant> = None;
-        let mut term_sent = false;
-        loop {
-            match m.tail.read_new(&m.raw_path) {
-                Ok(lines) if !lines.is_empty() => {
-                    last_progress = Instant::now();
-                    self.handle_lines(&mut m, &lines);
-                    self.clear_stall(&m);
-                    self.changed(&m.run_id);
-                }
-                _ => {}
-            }
+    /// Records a step and sets it going.
+    fn start_step(
+        self: &Arc<Self>,
+        run_id: &str,
+        step: &WorkflowStep,
+        number: i64,
+        resume: Option<String>,
+        resumed_from: Option<String>,
+    ) -> Result<String> {
+        let run = self.store.run(run_id)?;
+        let project = self.store.project(&run.project_id)?;
+        let workspace = self.workspace(run_id);
+        let dir = self.run_dir(run_id);
+        std::fs::create_dir_all(&dir)?;
 
-            let exit = match m.child.as_mut() {
-                Some(child) => match child.try_wait() {
-                    Ok(Some(status)) => Some(status.code()),
-                    Ok(None) => None,
-                    Err(_) => Some(None),
-                },
-                None => {
-                    let alive = m.root_pid.is_some_and(|pid| unsafe { libc_kill_zero(pid) });
-                    if alive { None } else { Some(None) }
-                }
-            };
-            if let Some(code) = exit {
-                self.finish(m, code, false);
-                return;
-            }
-
-            if self.stop_requested(&m.attempt_id) || m.block.is_some() {
-                let sent = *stop_sent_at.get_or_insert_with(|| {
-                    if let Some(pid) = m.root_pid {
-                        process::signal_group(pid, SIGINT);
-                    }
-                    Instant::now()
-                });
-                if !term_sent && sent.elapsed() > self.config.stop_grace {
-                    term_sent = true;
-                    if let Some(pid) = m.root_pid {
-                        process::signal_group(pid, SIGTERM);
-                    }
-                }
-                if sent.elapsed() > self.config.stop_grace * 2
-                    && let Some(pid) = m.root_pid
-                {
-                    process::signal_group(pid, 9);
-                }
-            } else if last_stall_check.elapsed() >= self.config.tick * 4 {
-                last_stall_check = Instant::now();
-                self.check_stall(&m, last_progress.elapsed());
-            }
-            std::thread::sleep(self.config.tick);
-        }
-    }
-
-    fn clear_stall(&self, m: &Monitor) {
-        if let Ok(attempt) = self.store.attempt(&m.attempt_id)
-            && attempt.state == AttemptState::Stalled.as_str()
-        {
-            let _ = self
-                .store
-                .set_state(&m.attempt_id, AttemptState::Running, None);
-            let _ = self
-                .store
-                .append_event(&m.attempt_id, "stallCleared", &json!({}));
-        }
-    }
-
-    /// Reports a stall. Never acts on it: the person decides what happens next.
-    fn check_stall(&self, m: &Monitor, quiet: Duration) {
-        if quiet < self.config.stall_after {
-            return;
-        }
-        if locked(&self.controls)
-            .get(&m.attempt_id)
-            .and_then(|c| c.snooze_until)
-            .is_some_and(|until| Instant::now() < until)
-        {
-            return;
-        }
-        let Some(root) = m.root_pid else { return };
-        let activity = process::activity(root);
-        if activity.cpu_percent >= 5.0 && quiet < self.config.stall_hard_limit {
-            return; // Quiet, but working. A long test suite looks like this.
-        }
-        let reason = Reason::Stalled {
-            command: activity.command.clone(),
-            pid: activity.pid,
-            minutes: quiet.as_secs() / 60,
-            cpu_percent: activity.cpu_percent,
-        };
-        let Ok(attempt) = self.store.attempt(&m.attempt_id) else {
-            return;
-        };
-        let already = attempt.state == AttemptState::Stalled.as_str();
-        let _ = self
-            .store
-            .set_state(&m.attempt_id, AttemptState::Stalled, Some(&reason));
-        if !already {
-            let _ = self
-                .store
-                .append_event(&m.attempt_id, "stalled", &json!({ "reason": reason }));
-        }
-        self.changed(&m.run_id);
-    }
-
-    fn handle_lines(&self, m: &mut Monitor, lines: &[String]) {
-        let store = &self.store;
-        for line in lines {
-            for parsed in parse_line(line) {
-                match parsed {
-                    Parsed::Init {
-                        session_id,
-                        model,
-                        tools,
-                        api_key_source,
-                        permission_mode,
-                        cli_version,
-                    } => {
-                        let _ = store.patch_attempt(
-                            &m.attempt_id,
-                            &[
-                                ("model_actual", text_value(model.clone())),
-                                ("api_key_source", text_value(api_key_source.clone())),
-                            ],
-                        );
-                        let _ = store.append_event(
-                            &m.attempt_id,
-                            "init",
-                            &json!({ "sessionId": session_id, "model": model, "tools": tools, "apiKeySource": api_key_source, "permissionMode": permission_mode, "cliVersion": cli_version }),
-                        );
-                        // Keel only accepts the user's own login, and exactly the tools it asked
-                        // for. Anything else means the launch didn't behave as tested.
-                        if api_key_source
-                            .as_deref()
-                            .is_some_and(|source| source != "none")
-                        {
-                            m.block = Some(Reason::UnexpectedAuth {
-                                source: api_key_source.unwrap_or_default(),
-                            });
-                        } else {
-                            let mut found = tools.clone();
-                            let mut expected = m.tools_expected.clone();
-                            found.sort();
-                            expected.sort();
-                            if found != expected {
-                                m.block = Some(Reason::UnexpectedTools { expected, found });
-                            }
-                        }
-                    }
-                    Parsed::AssistantText { text } => {
-                        let _ = store.append_event(&m.attempt_id, "text", &json!({ "text": text }));
-                    }
-                    Parsed::ToolCall {
-                        id,
-                        name,
-                        input,
-                        parent,
-                    } => {
-                        let _ = store.append_event(
-                            &m.attempt_id,
-                            "toolCall",
-                            &json!({ "id": id, "name": name, "input": input, "parent": parent }),
-                        );
-                    }
-                    Parsed::ToolResult {
-                        id,
-                        is_error,
-                        text,
-                        exit_code,
-                    } => {
-                        let truncated = text.len() > EVENT_TEXT_LIMIT;
-                        let kept: String = if truncated {
-                            text.chars().take(EVENT_TEXT_LIMIT).collect()
-                        } else {
-                            text
-                        };
-                        let _ = store.append_event(&m.attempt_id, "toolResult", &json!({ "id": id, "isError": is_error, "text": kept, "truncated": truncated, "exitCode": exit_code }));
-                    }
-                    Parsed::ApiRetry { attempt, error } => {
-                        let _ = store.append_event(
-                            &m.attempt_id,
-                            "apiRetry",
-                            &json!({ "attempt": attempt, "error": error }),
-                        );
-                    }
-                    Parsed::PermissionDenied { tool, detail } => {
-                        let _ = store.append_event(
-                            &m.attempt_id,
-                            "permissionDenied",
-                            &json!({ "tool": tool, "detail": detail }),
-                        );
-                    }
-                    Parsed::RateLimit {
-                        status,
-                        resets_at,
-                        kind,
-                    } => {
-                        if status.as_deref() == Some("rejected") {
-                            m.block = Some(Reason::RateLimited { resets_at });
-                        }
-                        let _ = store.append_event(
-                            &m.attempt_id,
-                            "rateLimit",
-                            &json!({ "status": status, "resetsAt": resets_at, "kind": kind }),
-                        );
-                    }
-                    Parsed::Result(result) => {
-                        let _ = store.append_event(
-                            &m.attempt_id,
-                            "result",
-                            &json!({
-                                "subtype": result.subtype, "isError": result.is_error, "text": result.text, "errors": result.errors,
-                                "turns": result.turns, "durationMs": result.duration_ms, "costUsd": result.cost_usd,
-                                "inputTokens": result.input_tokens, "outputTokens": result.output_tokens, "models": result.models,
-                                "denials": result.denials, "structuredOutput": result.structured_output,
-                            }),
-                        );
-                        m.result = Some(result);
-                    }
-                    Parsed::Other { .. } => {}
-                }
-            }
-        }
-        let _ = store.patch_attempt(
-            &m.attempt_id,
-            &[
-                ("raw_offset", Value::Integer(m.tail.offset as i64)),
-                ("last_activity_at", Value::Text(now())),
-            ],
-        );
-    }
-
-    /// Closes an attempt: keeps everything it left, then decides what state that means.
-    fn finish(&self, mut m: Monitor, exit_code: Option<i32>, process_lost: bool) {
-        if let Ok(lines) = m.tail.read_new(&m.raw_path)
-            && !lines.is_empty()
-        {
-            self.handle_lines(&mut m, &lines);
-        }
-        let store = &self.store;
-        let stop_requested = self.stop_requested(&m.attempt_id);
-
-        let mut fields: Vec<(&'static str, Value)> = vec![("finished_at", Value::Text(now()))];
-        let raw_sha = process::sha256_file(&m.raw_path).ok();
-        fields.push(("raw_sha256", text_value(raw_sha.clone())));
-
-        let mut files: Vec<String> = Vec::new();
-        let mut sha_after = None;
-        if let (Some(before), Some(bin)) = (&m.sha_before, locked(&self.tools).git.clone()) {
-            match (Git { bin }).snapshot(&m.workspace, before, &m.step_id) {
-                Ok(snapshot) => {
-                    let diff_path = m.raw_path.with_extension("diff");
-                    if process::create_private(&diff_path).is_ok()
-                        && std::fs::write(&diff_path, &snapshot.diff).is_ok()
-                    {
-                        fields.push((
-                            "diff_path",
-                            Value::Text(diff_path.to_string_lossy().into_owned()),
-                        ));
-                    }
-                    files = snapshot.files;
-                    sha_after = Some(snapshot.sha.clone());
-                    fields.push(("sha_after", Value::Text(snapshot.sha)));
-                    fields.push(("files_changed", Value::Text(json!(files).to_string())));
-                }
-                Err(error) => {
-                    let _ = store.append_event(
-                        &m.attempt_id,
-                        "snapshotFailed",
-                        &json!({ "error": error.to_string() }),
-                    );
-                }
-            }
-        }
-
-        if let Some(result) = &m.result {
-            // A resumed session reports totals for the whole session, so count only what's new.
-            let earlier = m
-                .resumed_from
-                .as_deref()
-                .and_then(|id| store.attempt(id).ok());
-            let delta_cost = |value: Option<f64>, before: Option<f64>| {
-                value.map(|v| (v - before.unwrap_or(0.0)).max(0.0))
-            };
-            let delta = |value: Option<i64>, before: Option<i64>| {
-                value.map(|v| (v - before.unwrap_or(0)).max(0))
-            };
-            let optional_real = |v: Option<f64>| v.map_or(Value::Null, Value::Real);
-            let optional_int = |v: Option<i64>| v.map_or(Value::Null, Value::Integer);
-            fields.push((
-                "cost_usd",
-                optional_real(delta_cost(
-                    result.cost_usd,
-                    earlier.as_ref().and_then(|a| a.cost_usd),
-                )),
-            ));
-            fields.push((
-                "input_tokens",
-                optional_int(delta(
-                    result.input_tokens,
-                    earlier.as_ref().and_then(|a| a.input_tokens),
-                )),
-            ));
-            fields.push((
-                "output_tokens",
-                optional_int(delta(
-                    result.output_tokens,
-                    earlier.as_ref().and_then(|a| a.output_tokens),
-                )),
-            ));
-            fields.push(("turns", optional_int(result.turns)));
-            fields.push(("duration_ms", optional_int(result.duration_ms)));
-            fields.push(("result_text", text_value(result.text.clone())));
-            if !result.models.is_empty() {
-                fields.push(("model_actual", Value::Text(result.models.join(", "))));
-            }
-        }
-        let _ = store.patch_attempt(&m.attempt_id, &fields);
-
-        let (state, reason) = classify(&m, exit_code, stop_requested, process_lost);
-        let _ = store.set_state(&m.attempt_id, state, reason.as_ref());
-        let _ = store.append_event(
-            &m.attempt_id,
-            "finished",
-            &json!({ "state": state.as_str(), "reason": reason, "exitCode": exit_code, "rawSha256": raw_sha, "shaAfter": sha_after, "files": files }),
-        );
-        self.release_slot(&m.attempt_id, &m.project_id, m.is_command_step);
-        locked(&self.controls).remove(&m.attempt_id);
-        self.changed(&m.run_id);
-    }
-}
-
-/// What an attempt's ending means. `is_error` decides, not the subtype or the exit code:
-/// M0 saw `subtype: success` on a rejected key, and exit 0 after SIGINT.
-fn classify(
-    m: &Monitor,
-    exit_code: Option<i32>,
-    stop_requested: bool,
-    process_lost: bool,
-) -> (AttemptState, Option<Reason>) {
-    if let Some(block) = &m.block {
-        return (AttemptState::Blocked, Some(block.clone()));
-    }
-    if stop_requested {
-        return (AttemptState::Stopped, None);
-    }
-    match &m.result {
-        Some(result) if !result.is_error => (AttemptState::Succeeded, None),
-        Some(result) => {
-            let detail = result
-                .text
-                .clone()
-                .or_else(|| result.errors.first().cloned())
-                .unwrap_or_default();
-            let lower = detail.to_lowercase();
-            if [
-                "invalid api key",
-                "authentication",
-                "/login",
-                "not logged in",
-                "oauth token",
-            ]
-            .iter()
-            .any(|needle| lower.contains(needle))
-            {
+        let stem = format!("{}-{number}", step.id());
+        let id = new_id();
+        let (model, effort, tools, turns, budget, prompt, settings_json, raw_name) = match step {
+            WorkflowStep::Agent(spec) => {
+                let text = if resume.is_some() {
+                    RESUME_PROMPT.to_owned()
+                } else {
+                    let attempts = self.store.attempts_of_run(run_id)?;
+                    prompts::render(&spec.prompt, &run.request, |id| {
+                        attempts
+                            .iter()
+                            .rev()
+                            .find(|a| {
+                                a.step_id == id && a.state == AttemptState::Succeeded.as_str()
+                            })
+                            .and_then(|a| a.result_text.clone())
+                    })
+                };
                 (
-                    AttemptState::Blocked,
-                    Some(Reason::SessionRejected { detail }),
+                    spec.model.clone(),
+                    spec.effort.clone(),
+                    spec.tools.as_str().to_owned(),
+                    spec.max_turns,
+                    spec.max_budget_usd,
+                    text,
+                    settings::step_settings(
+                        &workspace,
+                        &project.allowed_domains,
+                        &project.allowed_read,
+                    )
+                    .to_string(),
+                    format!("{stem}.jsonl"),
                 )
-            } else if lower.contains("rate limit") || lower.contains("usage limit") {
-                (
-                    AttemptState::Blocked,
-                    Some(Reason::RateLimited { resets_at: None }),
-                )
+            }
+            WorkflowStep::Check { run: command, .. } => (
+                String::new(),
+                None,
+                "check".to_owned(),
+                None,
+                None,
+                command.clone(),
+                json!({ "network": "none", "read": project.allowed_read }).to_string(),
+                format!("{stem}.log"),
+            ),
+            WorkflowStep::Approval { .. } | WorkflowStep::Deliver { .. } => (
+                String::new(),
+                None,
+                "none".to_owned(),
+                None,
+                None,
+                String::new(),
+                "{}".to_owned(),
+                format!("{stem}.log"),
+            ),
+        };
+        let session_id = resume.clone().unwrap_or_else(new_id);
+        self.store.add_attempt(&NewAttempt {
+            id: id.clone(),
+            run_id: run_id.to_owned(),
+            step_id: step.id().to_owned(),
+            kind: step.kind().to_owned(),
+            number,
+            state: if matches!(step, WorkflowStep::Approval { .. }) {
+                AttemptState::WaitingApproval
             } else {
-                (
-                    AttemptState::Failed,
-                    Some(Reason::ResultError {
-                        subtype: result.subtype.clone(),
-                        detail,
-                    }),
-                )
+                AttemptState::Queued
+            },
+            model_requested: model,
+            effort,
+            tools,
+            max_turns: turns,
+            max_budget_usd: budget,
+            language: run.language.clone(),
+            prompt,
+            system_prompt_sources: "[]".to_owned(),
+            settings: settings_json,
+            session_id,
+            resumed_from,
+            workspace: workspace.to_string_lossy().into_owned(),
+            raw_path: dir.join(raw_name).to_string_lossy().into_owned(),
+            started_at: now(),
+        })?;
+        self.changed(run_id);
+        if matches!(step, WorkflowStep::Approval { .. }) {
+            self.store.append_event(&id, "waiting", &json!({}))?;
+            return Ok(id);
+        }
+        locked(&self.controls).insert(id.clone(), Control::default());
+        let inner = self.clone();
+        let step = step.clone();
+        let attempt_id = id.clone();
+        let project_id = project.id.clone();
+        std::thread::spawn(move || inner.execute(attempt_id, project_id, step, resume));
+        Ok(id)
+    }
+
+    /// Starts the next step, if the last one succeeded. Anything else needs a person.
+    fn advance(self: &Arc<Self>, run_id: &str) -> Result<()> {
+        let _guard = locked(&self.advancing);
+        let run = self.store.run(run_id)?;
+        if run.finished_at.is_some() {
+            return Ok(());
+        }
+        let steps: Vec<WorkflowStep> = serde_json::from_value(run.workflow).unwrap_or_default();
+        let attempts = self.store.attempts_of_run(run_id)?;
+        for step in &steps {
+            match attempts.iter().rev().find(|a| a.step_id == step.id()) {
+                None => {
+                    self.start_step(run_id, step, 1, None, None)?;
+                    return Ok(());
+                }
+                Some(latest) if latest.state == AttemptState::Succeeded.as_str() => {}
+                Some(_) => return Ok(()),
             }
         }
-        None if process_lost || (m.child.is_none() && exit_code.is_none()) => {
-            (AttemptState::Interrupted, Some(Reason::AgentLost))
-        }
-        None => (
-            AttemptState::Failed,
-            Some(Reason::ExitedWithoutResult { exit_code }),
-        ),
+        self.store
+            .patch_run(run_id, &[("finished_at", Value::Text(now()))])?;
+        self.changed(run_id);
+        Ok(())
     }
 }
 
-/// What every step is told, plus the project's own instructions, which `--restricted` skips.
-fn system_prompt(
-    workspace: &Path,
-    language: &str,
-    tools: ToolProfile,
-) -> (String, serde_json::Value) {
-    let mut text = String::from(
-        "# Working inside Keel\n\n\
-         You are running one step of a software workflow, in a private clone of the project.\n\
-         There is no GitHub access and no credentials here. Do not try to push or open a pull request.\n\
-         A person reviews what you produce.\n",
-    );
-    if tools == ToolProfile::Build {
-        text.push_str(
-            "Commit your work on the current branch before you finish.\n\
-             Never run two test commands at the same time: they can share a database and block each other.\n",
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keel_core::ToolProfile;
+
+    #[test]
+    fn long_requests_get_a_short_title() {
+        assert_eq!(title_from("\n\n  Fix it\nmore"), "Fix it");
+        assert_eq!(title_from(&"x".repeat(200)).chars().count(), 90);
+    }
+
+    #[test]
+    fn step_kinds_serialize_with_a_type() {
+        let step = WorkflowStep::Check {
+            id: "ci".into(),
+            run: "make test".into(),
+        };
+        let value = serde_json::to_value(&step).unwrap();
+        assert_eq!(
+            value,
+            json!({ "type": "check", "id": "ci", "run": "make test" })
         );
+        let back: WorkflowStep = serde_json::from_value(value).unwrap();
+        assert_eq!(back, step);
+        let agent = WorkflowStep::Agent(StepSpec {
+            id: "a".into(),
+            model: "opus".into(),
+            effort: None,
+            tools: ToolProfile::Build,
+            prompt: "p".into(),
+            max_turns: None,
+            max_budget_usd: None,
+        });
+        let back: WorkflowStep =
+            serde_json::from_value(serde_json::to_value(&agent).unwrap()).unwrap();
+        assert_eq!(back, agent);
     }
-    text.push_str(&format!(
-        "\nEnd with a short message for the person, in {}: what you did, what changed, how you checked it, and anything they need to decide.\n",
-        language_name(language),
-    ));
-    let mut sources = Vec::new();
-    if let Ok(claude_md) = std::fs::read_to_string(workspace.join("CLAUDE.md")) {
-        text.push_str("\n# Project instructions (CLAUDE.md)\n\n");
-        text.push_str(&claude_md);
-        sources.push(json!({ "source": "CLAUDE.md", "bytes": claude_md.len() }));
-    }
-    (text, json!(sources))
-}
-
-/// Without this, `Child` would stay a zombie until the app exits.
-fn reap_in_background(mut child: Child) {
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-}
-
-/// `kill(pid, 0)`: whether a process we didn't start is still there.
-unsafe fn libc_kill_zero(pid: i32) -> bool {
-    process::signal_process(pid, 0)
 }

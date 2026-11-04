@@ -59,9 +59,9 @@ fn main() {
     );
     let project = engine.add_project(&repo).unwrap();
     let run = engine
-        .start_run(StartRun {
-            project_id: project.id,
-            step: StepSpec {
+        .start_run(StartRun::one_step(
+            project.id,
+            StepSpec {
                 id: "builder".into(),
                 model,
                 effort: None,
@@ -70,9 +70,8 @@ fn main() {
                 max_turns: Some(10),
                 max_budget_usd: None,
             },
-            language: "es".into(),
-            allowed_domains: vec![],
-        })
+            "es".into(),
+        ))
         .unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(180);

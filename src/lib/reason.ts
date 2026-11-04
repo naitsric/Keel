@@ -16,6 +16,12 @@ export function reasonText(t: TFunction, reason: Reason): string {
         : t("reasons.stalledModel", { minutes: data.minutes });
     case "unexpectedTools":
       return t("reasons.unexpectedTools", { expected: (data.expected ?? []).join(", "), found: (data.found ?? []).join(", ") });
+    case "deliveryFailed": {
+      const known = ["notSignedIn", "noPermission", "sso", "repoRules", "signedCommits", "workflowScope"].includes(data.kind);
+      return known ? t(`deliveryKinds.${data.kind}`) : t("reasons.deliveryFailed", { detail: data.detail ?? "" });
+    }
+    case "checkFailed":
+      return t("reasons.checkFailed", { exitCode: data.exitCode ?? "?" });
     case "exitedWithoutResult":
       return t("reasons.exitedWithoutResult", { exitCode: data.exitCode ?? "?" });
     default:
@@ -32,5 +38,8 @@ export function errorText(t: TFunction, error: unknown): string {
 }
 
 /** A reason the user fixes by signing in. */
+/** A reason the user fixes in the project's settings. */
+export const needsProjectSettings = (reason: Reason | null | undefined) => reason?.code === "githubAccountMissing";
+
 export const needsSignIn = (reason: Reason | null | undefined) =>
   reason?.code === "claudeLoggedOut" || reason?.code === "sessionRejected";
