@@ -52,6 +52,12 @@ refs in the clone, which affects nothing else.
   macOS only. `allowAllUnixSockets` opens every socket, including Docker's, so Linux has no
   safe option yet.
 
+### Decision
+
+Keel starts each project's services outside the sandbox and connects them by Unix socket, with
+a bridge for databases in Docker. This arrives with M2. Linux waits until it has a safe option,
+so v0.1 is macOS only.
+
 ## Findings for the harness
 
 - `subtype` is not enough. A bad API key returned `subtype: success` with `is_error: true`.
