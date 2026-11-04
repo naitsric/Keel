@@ -91,9 +91,9 @@ fn decisions_block(decisions: &[Decision]) -> (String, Vec<i64>) {
     )
 }
 
-/// Fills in `{{request}}` and `{{steps.<id>.output}}`. One pass only: text that comes from an agent
-/// or an issue is never expanded again, so it can't reach into other values.
-pub fn render(template: &str, request: &str, output_of: impl Fn(&str) -> Option<String>) -> String {
+/// Fills in `{{request}}`, `{{diff}}`, `{{rework}}` and `{{steps.<id>.output}}`. One pass only: text
+/// that comes from an agent or an issue is never expanded again, so it can't reach other values.
+pub fn render(template: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
     let mut result = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(start) = rest.find("{{") {
@@ -103,16 +103,9 @@ pub fn render(template: &str, request: &str, output_of: impl Fn(&str) -> Option<
             result.push_str(&rest[start..]);
             return result;
         };
-        let name = after[..end].trim();
-        if name == "request" {
-            result.push_str(request);
-        } else if let Some(id) = name
-            .strip_prefix("steps.")
-            .and_then(|n| n.strip_suffix(".output"))
-        {
-            result.push_str(&output_of(id).unwrap_or_default());
-        } else {
-            result.push_str(&rest[start..start + 2 + end + 2]);
+        match lookup(after[..end].trim()) {
+            Some(value) => result.push_str(&value),
+            None => result.push_str(&rest[start..start + 2 + end + 2]),
         }
         rest = &after[end + 2..];
     }
@@ -170,6 +163,8 @@ pub fn full_workflow(
             prompt: prompt.into(),
             max_turns: None,
             max_budget_usd: None,
+            paths: Vec::new(),
+            role: Default::default(),
         })
     };
     let mut steps = vec![
@@ -211,26 +206,31 @@ mod tests {
     #[test]
     fn rendering_fills_values_once_and_leaves_the_rest() {
         let out = render(
-            "A {{request}} B {{steps.spec.output}} C {{unknown}} D {{steps.none.output}} E",
-            "req",
-            |id| (id == "spec").then(|| "out".to_owned()),
+            "A {{request}} B {{steps.spec.output}} C {{unknown}} E",
+            |name| match name {
+                "request" => Some("req".to_owned()),
+                "steps.spec.output" => Some("out".to_owned()),
+                _ => None,
+            },
         );
-        assert_eq!(out, "A req B out C {{unknown}} D  E");
+        assert_eq!(out, "A req B out C {{unknown}} E");
     }
 
     #[test]
     fn text_from_an_issue_or_an_agent_is_not_expanded_again() {
-        let out = render(
-            "{{request}}|{{steps.spec.output}}",
-            "{{steps.spec.output}}",
-            |_| Some("{{request}}".to_owned()),
-        );
+        let out = render("{{request}}|{{steps.spec.output}}", |name| match name {
+            "request" => Some("{{steps.spec.output}}".to_owned()),
+            _ => Some("{{request}}".to_owned()),
+        });
         assert_eq!(out, "{{steps.spec.output}}|{{request}}");
     }
 
     #[test]
     fn an_unclosed_placeholder_is_left_alone() {
-        assert_eq!(render("a {{request", "x", |_| None), "a {{request");
+        assert_eq!(
+            render("a {{request", |_| Some("x".to_owned())),
+            "a {{request"
+        );
     }
 
     #[test]

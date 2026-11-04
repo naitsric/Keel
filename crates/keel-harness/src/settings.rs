@@ -19,11 +19,19 @@ pub fn step_settings(
     let mut allow_read = vec![workspace.to_string_lossy().into_owned()];
     allow_read.extend(TOOL_DIRS.iter().map(|d| (*d).to_owned()));
     allow_read.extend(extra_read.iter().cloned());
+    // The sandbox covers Bash. This covers Claude Code's own file tools. Not all of `.git`: a rule
+    // here also reaches the sandbox, and the agent has to be able to commit.
+    let root = workspace.to_string_lossy();
+    let git_files: Vec<String> = ["config", "config.worktree", "commondir", "hooks/**"]
+        .iter()
+        .map(|file| format!("Edit(/{root}/.git/{file})"))
+        .collect();
     let mut network = json!({ "allowedDomains": allowed_domains });
     if !sockets.is_empty() {
         network["allowUnixSockets"] = json!(sockets);
     }
     json!({
+        "permissions": { "deny": git_files },
         "sandbox": {
             "enabled": true,
             "failIfUnavailable": true,
@@ -71,6 +79,13 @@ fn profile(
         None => path.to_owned(),
     };
     let workspace = quote(&workspace.to_string_lossy());
+    // Git would run whatever these name, so nothing here gets to change them. Moving `.git` away
+    // and making another would get around that, so `.git` itself stays put as well.
+    let git_rules = format!(
+        "(literal \"{workspace}\") (literal \"{workspace}/.git\") (literal \"{workspace}/.git/config\") \
+         (literal \"{workspace}/.git/config.worktree\") (literal \"{workspace}/.git/commondir\") \
+         (subpath \"{workspace}/.git/hooks\")"
+    );
     let home_text = quote(&home.to_string_lossy());
     let mut read_rules = format!("(subpath \"{workspace}\")");
     for dir in TOOL_DIRS
@@ -108,6 +123,7 @@ fn profile(
          (allow file-read-metadata (literal \"{home_text}\"))\n\
          (deny file-write*)\n\
          (allow file-write* {write_rules} (subpath \"/private/tmp\") (subpath \"/private/var/folders\") (literal \"/dev/null\") (literal \"/dev/stdout\") (literal \"/dev/stderr\") (literal \"/dev/tty\") (regex #\"^/dev/fd/\"))\n\
+         (deny file-write* {git_rules})\n\
          (deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd\") (global-name \"com.apple.secd\") (global-name \"com.apple.securityd.xpc\"))\n"
     )
 }
@@ -115,6 +131,20 @@ fn profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_git_would_run_is_off_limits_and_the_rest_of_git_is_not() {
+        let settings = step_settings(Path::new("/w"), &[], &[], &[]);
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.contains(&json!("Edit(//w/.git/config)")));
+        assert!(deny.contains(&json!("Edit(//w/.git/hooks/**)")));
+        // Denying all of `.git` stops the agent from committing, as a real run showed.
+        assert!(
+            !deny
+                .iter()
+                .any(|rule| rule == "Edit(//w/.git/**)" || rule == "Edit(//w/.git)")
+        );
+    }
 
     #[test]
     fn denies_home_and_never_allows_unsandboxed_commands() {

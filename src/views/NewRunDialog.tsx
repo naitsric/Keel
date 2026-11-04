@@ -2,50 +2,28 @@ import { open as openFolder } from "@tauri-apps/plugin-dialog";
 import { FolderPlus, ShieldCheck } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type Issue, type ToolProfile } from "../lib/api";
+import { api, type Issue, type ToolProfile, type Workflow } from "../lib/api";
 import { errorText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, cx, Field, inputClass, Modal, Segmented } from "../ui/primitives";
+import { ModelField } from "./ModelField";
 
-const MODELS = [
-  { value: "fable", label: "Fable" },
-  { value: "opus", label: "Opus" },
-  { value: "sonnet", label: "Sonnet" },
-  { value: "haiku", label: "Haiku" },
-];
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
-const CUSTOM = "__custom__";
 const DEFAULT = "__default__";
 
-type Mode = "full" | "single";
 type Source = "text" | "issue";
 
-/** A model picker, with a free field for any other model name. */
-function ModelField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
-  const { t } = useTranslation();
-  const known = MODELS.some((m) => m.value === value);
-  const [custom, setCustom] = useState(!known);
-  return (
-    <Field label={label}>
-      <select
-        value={custom ? CUSTOM : value}
-        onChange={(e) => {
-          const isCustom = e.target.value === CUSTOM;
-          setCustom(isCustom);
-          onChange(isCustom ? "" : e.target.value);
-        }}
-        className={inputClass}
-      >
-        {MODELS.map((m) => (
-          <option key={m.value} value={m.value}>
-            {m.label}
-          </option>
-        ))}
-        <option value={CUSTOM}>{t("newRun.customModel")}</option>
-      </select>
-      {custom && <input value={value} onChange={(e) => onChange(e.target.value.trim())} placeholder={t("newRun.customModelPlaceholder")} className={`${inputClass} mt-1.5 font-mono`} />}
-    </Field>
-  );
+const SINGLE = "__single__";
+
+/** The steps of a workflow in one line, with the model of each agent. */
+function StepChain({ workflow }: { workflow: Workflow }) {
+  const label = (id: string, model?: string) => (model ? `${id} (${model})` : id);
+  const parts = workflow.steps.map((step) => {
+    if (step.type === "agent") return label(step.id, step.model);
+    if (step.type === "parallel") return step.steps.map((s) => label(s.id, s.model)).join(" + ");
+    return step.id;
+  });
+  return <p className="mt-1.5 font-mono text-[11px] leading-relaxed break-words text-subtle">{parts.join(" → ")}</p>;
 }
 
 export function NewRunDialog() {
@@ -57,13 +35,12 @@ export function NewRunDialog() {
   const navigate = useApp((s) => s.navigate);
 
   const [projectId, setProjectId] = useState("");
-  const [mode, setMode] = useState<Mode>("full");
+  const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [workflowId, setWorkflowId] = useState("builtin:full");
   const [source, setSource] = useState<Source>("text");
   const [prompt, setPrompt] = useState("");
   const [issues, setIssues] = useState<Issue[] | null>(null);
   const [issue, setIssue] = useState<Issue | null>(null);
-  const [specModel, setSpecModel] = useState("opus");
-  const [builderModel, setBuilderModel] = useState("sonnet");
   const [stepId, setStepId] = useState("");
   const [model, setModel] = useState("sonnet");
   const [effort, setEffort] = useState(DEFAULT);
@@ -77,6 +54,18 @@ export function NewRunDialog() {
   useEffect(() => {
     if (!projectId && projects.length > 0) setProjectId(projects[0].id);
   }, [projects, projectId]);
+
+  useEffect(() => {
+    if (!open || !projectId) return;
+    api
+      .workflowsList(projectId, i18n.language)
+      .then((list) => {
+        setWorkflows(list);
+        // One from another project, or one that's been deleted, can't stay selected.
+        setWorkflowId((current) => (current === SINGLE || list.some((w) => w.id === current) ? current : (list[0]?.id ?? SINGLE)));
+      })
+      .catch((e) => setError(errorText(t, e)));
+  }, [open, projectId, i18n.language, t]);
 
   // Issues load only when asked for, and importing one takes a click. Keel never polls them.
   useEffect(() => {
@@ -112,9 +101,12 @@ export function NewRunDialog() {
 
   const turns = maxTurns.trim() === "" ? null : Number(maxTurns);
   const hasRequest = source === "issue" ? issue !== null : prompt.trim() !== "";
-  const needsGithub = mode === "full" && project != null && (!project.githubAccount || !project.githubRepo);
-  const validModels = mode === "full" ? specModel && builderModel : model && (turns === null || (Number.isInteger(turns) && turns > 0));
-  const valid = projectId && hasRequest && validModels && !needsGithub;
+  const single = workflowId === SINGLE;
+  const workflow = workflows.find((w) => w.id === workflowId);
+  const delivers = workflow?.steps.some((step) => step.type === "deliver") ?? false;
+  const needsGithub = !single && delivers && project != null && (!project.githubAccount || !project.githubRepo);
+  const validChoice = single ? model && (turns === null || (Number.isInteger(turns) && turns > 0)) : workflow != null;
+  const valid = projectId && hasRequest && validChoice && !needsGithub;
 
   const start = async () => {
     setBusy(true);
@@ -125,10 +117,9 @@ export function NewRunDialog() {
         prompt,
         issue,
         language: i18n.language,
-        workflow:
-          mode === "full"
-            ? { mode: "full", specModel, builderModel }
-            : { mode: "single", stepId: stepId.trim() || t("newRun.stepNameDefault"), model, effort: effort === DEFAULT ? null : effort, tools, maxTurns: turns },
+        workflow: !single
+          ? { mode: "saved", workflowId }
+          : { mode: "single", stepId: stepId.trim() || t("newRun.stepNameDefault"), model, effort: effort === DEFAULT ? null : effort, tools, maxTurns: turns },
       });
       setPrompt("");
       setIssue(null);
@@ -163,17 +154,28 @@ export function NewRunDialog() {
         </Field>
 
         <div>
-          <span className="mb-1 block text-[12px] font-medium text-muted">{t("newRun.workflow")}</span>
-          <Segmented<Mode>
-            label={t("newRun.workflow")}
-            value={mode}
-            onChange={setMode}
-            options={[
-              { value: "full", label: t("newRun.workflowFull") },
-              { value: "single", label: t("newRun.workflowSingle") },
-            ]}
-          />
-          {mode === "full" && <p className="mt-1.5 text-[11.5px] text-subtle">{t("newRun.workflowFullHint")}</p>}
+          <Field label={t("newRun.workflow")}>
+            <div className="flex gap-2">
+              <select value={workflowId} onChange={(e) => setWorkflowId(e.target.value)} className={inputClass}>
+                {workflows.map((w) => (
+                  <option key={w.id} value={w.id}>
+                    {w.name}
+                  </option>
+                ))}
+                <option value={SINGLE}>{t("newRun.workflowSingleOption")}</option>
+              </select>
+              <Button
+                className="h-auto shrink-0"
+                onClick={() => {
+                  setOpen(false);
+                  navigate({ name: "workflows" });
+                }}
+              >
+                {t("newRun.editWorkflows")}
+              </Button>
+            </div>
+          </Field>
+          {workflow && <StepChain workflow={workflow} />}
         </div>
 
         <div>
@@ -219,13 +221,9 @@ export function NewRunDialog() {
           <textarea rows={source === "issue" ? 2 : 4} value={prompt} onChange={(e) => setPrompt(e.target.value)} placeholder={source === "issue" ? undefined : t("newRun.promptPlaceholder")} className={`${inputClass} resize-y leading-relaxed`} />
         </Field>
 
-        {mode === "full" ? (
+        {!single ? (
           <>
-            <div className="grid grid-cols-2 gap-3">
-              <ModelField label={t("newRun.specModel")} value={specModel} onChange={setSpecModel} />
-              <ModelField label={t("newRun.builderModel")} value={builderModel} onChange={setBuilderModel} />
-            </div>
-            <p className="font-mono text-[11.5px] text-subtle">{project?.checkCommand ? t("newRun.checkCommand", { command: project.checkCommand }) : <span className="font-sans">{t("newRun.checkNone")}</span>}</p>
+            {!project?.checkCommand && <p className="text-[11.5px] text-subtle">{t("newRun.checkNone")}</p>}
             {needsGithub && (
               <div role="alert" className="flex items-center gap-2 rounded-md border border-border-strong bg-inset px-3 py-2 text-[12.5px] text-warning">
                 <span className="flex-1">{project?.githubRepo ? t("newRun.needsGithub") : t("reasons.noGithubRemote")}</span>

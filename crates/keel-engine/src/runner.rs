@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
-use crate::{Error, Inner, Result, locked, prompts};
+use crate::{Error, Inner, Result, locked, prompts, workflows};
 
 /// Tool output kept in the database. The raw file always has all of it.
 const EVENT_TEXT_LIMIT: usize = 64 * 1024;
@@ -44,6 +44,8 @@ pub(crate) struct Monitor {
     root_pid: Option<i32>,
     child: Option<Child>,
     tail: Tail,
+    /// A reviewer or approver that ends without its structured answer didn't do its job.
+    requires_output: bool,
     /// Why this attempt must end blocked, once decided.
     block: Option<Reason>,
     result: Option<ResultEvent>,
@@ -72,6 +74,7 @@ impl Monitor {
             root_pid: attempt.pid.map(|p| p as i32),
             child,
             tail,
+            requires_output: attempt.role != "worker",
             block: None,
             result: None,
             services: None,
@@ -222,7 +225,7 @@ impl Inner {
                 self.deliver(&attempt);
                 return;
             }
-            WorkflowStep::Approval { .. } => Ok(None),
+            WorkflowStep::Approval { .. } | WorkflowStep::Parallel { .. } => Ok(None),
         };
         match started {
             Ok(Some(monitor)) => self.monitor(monitor),
@@ -249,13 +252,15 @@ impl Inner {
     /// Makes sure the run has its private clone, and returns the commit the step starts from.
     fn prepare_workspace(&self, attempt: &Attempt, project_id: &str) -> Result<(Git, String)> {
         let tools = locked(&self.tools).clone();
-        let git = Git {
-            bin: tools
+        let git = Git::new(
+            tools
                 .git
                 .clone()
                 .ok_or(Error::Blocked(Reason::GitMissing))?,
-        };
+        );
         let workspace = PathBuf::from(&attempt.workspace);
+        // A workflow can open with a group, and those steps must not all create it at once.
+        let _creating = locked(&self.creating_workspace);
         if !workspace.join(".git").exists() {
             let project = self.store.project(project_id)?;
             let mirror = self.mirror(project_id);
@@ -359,6 +364,7 @@ impl Inner {
             system_prompt_file,
             session_id: attempt.session_id.clone(),
             resume,
+            json_schema: workflows::schema_for(&spec.role).map(str::to_owned),
         };
         let args = command.args(spec);
         let version = auth::read_version(&claude, &tools.path_env);
@@ -749,6 +755,10 @@ impl Inner {
                 } else {
                     let mut found = tools.clone();
                     let mut expected = m.tools_expected.clone();
+                    // Claude Code adds this one itself when asked for a structured answer.
+                    if m.requires_output {
+                        expected.push("StructuredOutput".to_owned());
+                    }
                     found.sort();
                     expected.sort();
                     if found != expected {
@@ -858,7 +868,8 @@ impl Inner {
 
         let mut files: Vec<String> = Vec::new();
         let mut sha_after = None;
-        let git = locked(&self.tools).git.clone().map(|bin| Git { bin });
+        let mut snapshot_failed = false;
+        let git = locked(&self.tools).git.clone().map(Git::new);
         if m.kind == "agent"
             && let (Some(before), Some(git)) = (&m.sha_before, &git)
         {
@@ -877,8 +888,16 @@ impl Inner {
                     sha_after = Some(snapshot.sha.clone());
                     fields.push(("sha_after", Value::Text(snapshot.sha)));
                     fields.push(("files_changed", Value::Text(json!(files).to_string())));
+                    let base = store
+                        .attempts_of_run(&m.run_id)
+                        .ok()
+                        .and_then(|all| all.iter().find_map(|a| a.sha_before.clone()));
+                    if let Some(net) = base.and_then(|b| git.files_since(&m.workspace, &b).ok()) {
+                        fields.push(("run_files", Value::Text(json!(net).to_string())));
+                    }
                 }
                 Err(error) => {
+                    snapshot_failed = true;
                     let _ = store.append_event(
                         &m.attempt_id,
                         "snapshotFailed",
@@ -948,13 +967,21 @@ impl Inner {
             fields.push(("turns", optional_int(result.turns)));
             fields.push(("duration_ms", optional_int(result.duration_ms)));
             fields.push(("result_text", text_value(result.text.clone())));
+            if let Some(output) = &result.structured_output {
+                fields.push(("output", Value::Text(output.to_string())));
+            }
             if !result.models.is_empty() {
                 fields.push(("model_actual", Value::Text(result.models.join(", "))));
             }
         }
         let _ = store.patch_attempt(&m.attempt_id, &fields);
 
-        let (state, reason) = classify(&m, exit_code, stop_requested, process_lost);
+        let (mut state, mut reason) = classify(&m, exit_code, stop_requested, process_lost);
+        // If Keel can't tell what the step changed, it can't say the step went well.
+        if snapshot_failed && state == AttemptState::Succeeded {
+            state = AttemptState::Failed;
+            reason = Some(Reason::SnapshotFailed);
+        }
         let _ = store.set_state(&m.attempt_id, state, reason.as_ref());
         let _ = store.append_event(
             &m.attempt_id,
@@ -1007,6 +1034,11 @@ fn classify(
         };
     }
     match &m.result {
+        Some(result)
+            if !result.is_error && m.requires_output && result.structured_output.is_none() =>
+        {
+            (AttemptState::Failed, Some(Reason::NoStructuredOutput))
+        }
         Some(result) if !result.is_error => (AttemptState::Succeeded, None),
         Some(result) => {
             let detail = result

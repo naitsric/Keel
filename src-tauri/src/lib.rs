@@ -8,8 +8,8 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use keel_core::{EnvVar, Reason, Service, StepSpec, ToolProfile, WorkflowStep};
 use keel_engine::{
-    Config, Engine, Error as EngineError, GithubStatus, Preflight, RawCheck, StartRun,
-    full_workflow, request_from_issue,
+    Config, Engine, Error as EngineError, GithubStatus, Preflight, RawCheck, StartRun, Workflow,
+    request_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::Issue;
@@ -203,10 +203,8 @@ fn decision_retire(state: State<'_, AppState>, seq: i64) -> CommandResult<()> {
     rename_all_fields = "camelCase"
 )]
 enum WorkflowChoice {
-    Full {
-        spec_model: String,
-        builder_model: String,
-    },
+    /// A built-in workflow or one of the project's.
+    Saved { workflow_id: String },
     Single {
         step_id: String,
         model: String,
@@ -238,17 +236,20 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
         .issue
         .as_ref()
         .map(|issue| format!("#{} {}", issue.number, issue.title));
-    let project = state.store.project(&request.project_id)?;
     let workflow = match request.workflow {
-        WorkflowChoice::Full {
-            spec_model,
-            builder_model,
-        } => full_workflow(
-            &request.language,
-            &spec_model,
-            &builder_model,
-            project.check_command.as_deref(),
-        ),
+        WorkflowChoice::Saved { workflow_id } => {
+            state
+                .engine
+                .workflows(&request.project_id, &request.language)?
+                .into_iter()
+                .find(|w| w.id == workflow_id)
+                .ok_or(CommandError {
+                    code: "invalidState",
+                    reason: None,
+                    detail: None,
+                })?
+                .steps
+        }
         WorkflowChoice::Single {
             step_id,
             model,
@@ -264,6 +265,8 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
                 prompt: text.clone(),
                 max_turns,
                 max_budget_usd: None,
+                paths: vec![],
+                role: Default::default(),
             })]
         }
     };
@@ -275,6 +278,49 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
         language: request.language,
         source_issue: request.issue,
     })?)
+}
+
+#[tauri::command(async)]
+fn workflows_list(
+    state: State<'_, AppState>,
+    project_id: String,
+    language: String,
+) -> CommandResult<Vec<Workflow>> {
+    Ok(state.engine.workflows(&project_id, &language)?)
+}
+
+#[tauri::command(async)]
+fn workflow_save(
+    state: State<'_, AppState>,
+    project_id: String,
+    workflow: Workflow,
+) -> CommandResult<Workflow> {
+    Ok(state.engine.save_workflow(&project_id, &workflow)?)
+}
+
+#[tauri::command(async)]
+fn workflow_delete(
+    state: State<'_, AppState>,
+    project_id: String,
+    workflow_id: String,
+) -> CommandResult<()> {
+    Ok(state.engine.delete_workflow(&project_id, &workflow_id)?)
+}
+
+#[tauri::command(async)]
+fn run_diff(state: State<'_, AppState>, run_id: String) -> CommandResult<String> {
+    Ok(state.engine.run_diff(&run_id)?)
+}
+
+#[tauri::command(async)]
+fn rework_limit_answer(
+    state: State<'_, AppState>,
+    attempt_id: String,
+    another_round: bool,
+) -> CommandResult<()> {
+    Ok(state
+        .engine
+        .resolve_rework_limit(&attempt_id, another_round)?)
 }
 
 #[tauri::command(async)]
@@ -520,6 +566,11 @@ pub fn run() {
             project_add,
             run_start,
             run_get,
+            run_diff,
+            workflows_list,
+            workflow_save,
+            workflow_delete,
+            rework_limit_answer,
             run_attempts,
             project_update,
             github_status,

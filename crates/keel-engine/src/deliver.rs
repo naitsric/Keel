@@ -106,12 +106,12 @@ impl Inner {
             .clone()
             .ok_or(Error::Blocked(Reason::GithubAccountMissing))?;
         let gh = self.gh()?;
-        let git = Git {
-            bin: locked(&self.tools)
+        let git = Git::new(
+            locked(&self.tools)
                 .git
                 .clone()
                 .ok_or(Error::Blocked(Reason::GitMissing))?,
-        };
+        );
 
         let workspace = PathBuf::from(&attempt.workspace);
         let mirror = self.mirror(&project.id);
@@ -215,20 +215,31 @@ impl Inner {
             serde_json::from_value(run.workflow.clone()).unwrap_or_default();
 
         let mut body = String::new();
-        // The last agent that could change files is the one that knows what changed.
-        let builder = attempts.iter().rev().find(|a| {
+        // The agents that could change files know what changed. After rework there's one per round,
+        // and the last one alone would tell only the end of the story.
+        let succeeded = |a: &&keel_store::Attempt| {
             a.kind == "agent"
-                && a.tools == keel_core::ToolProfile::Build.as_str()
+                && a.role == "worker"
                 && a.state == AttemptState::Succeeded.as_str()
-        });
-        let summary = builder.or_else(|| {
-            attempts
-                .iter()
-                .rev()
-                .find(|a| a.kind == "agent" && a.state == AttemptState::Succeeded.as_str())
-        });
-        if let Some(text) = summary.and_then(|a| a.result_text.as_deref()) {
-            body.push_str(text.trim());
+                && a.result_text.is_some()
+        };
+        let mut builders: Vec<&keel_store::Attempt> = attempts
+            .iter()
+            .filter(succeeded)
+            .filter(|a| a.tools == keel_core::ToolProfile::Build.as_str())
+            .collect();
+        if builders.is_empty() {
+            builders.extend(attempts.iter().rev().find(succeeded));
+        }
+        for attempt in &builders {
+            if attempt.round > 0 {
+                body.push_str(&format!(
+                    "**{} {}**\n\n",
+                    label("Round", "Ronda"),
+                    attempt.round + 1
+                ));
+            }
+            body.push_str(attempt.result_text.as_deref().unwrap_or_default().trim());
             body.push_str("\n\n");
         }
         if let Some(issue) = &run.source_issue
@@ -237,18 +248,7 @@ impl Inner {
             body.push_str(&format!("Refs #{number}\n\n"));
         }
 
-        let mut files: Vec<&String> = Vec::new();
-        let names: Vec<String> = attempts
-            .iter()
-            .filter_map(|a| a.files_changed.as_ref())
-            .filter_map(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
-            .flatten()
-            .collect();
-        for name in &names {
-            if !files.contains(&name) {
-                files.push(name);
-            }
-        }
+        let files = crate::workflows::files_changed(&attempts);
         body.push_str(&format!("### {}\n\n", label("What changed", "Qué cambió")));
         for file in &files {
             body.push_str(&format!("- `{file}`\n"));
@@ -281,12 +281,46 @@ impl Inner {
             ));
         }
         body.push_str(&format!("\n### {}\n\n", label("Steps", "Pasos")));
-        for attempt in attempts.iter().filter(|a| a.kind == "agent") {
+        for attempt in attempts
+            .iter()
+            .filter(|a| a.kind == "agent" && a.state != AttemptState::Skipped.as_str())
+        {
             let model = attempt
                 .model_actual
                 .as_deref()
                 .unwrap_or(&attempt.model_requested);
-            body.push_str(&format!("- `{}`: {model}\n", attempt.step_id));
+            let round = if attempt.round > 0 {
+                format!(" ({} {})", label("round", "ronda"), attempt.round + 1)
+            } else {
+                String::new()
+            };
+            body.push_str(&format!("- `{}`{round}: {model}\n", attempt.step_id));
+        }
+        let mut wrote_reviews = false;
+        for attempt in attempts
+            .iter()
+            .filter(|a| a.role == "reviewer" && a.round == run.round)
+        {
+            if !wrote_reviews {
+                body.push_str(&format!("\n### {}\n\n", label("Reviews", "Revisiones")));
+                wrote_reviews = true;
+            }
+            let line = if attempt.state == AttemptState::Skipped.as_str() {
+                label(
+                    "skipped: nothing it covers changed",
+                    "omitida: no cambió nada de lo que cubre",
+                )
+                .to_owned()
+            } else {
+                attempt
+                    .output
+                    .as_ref()
+                    .and_then(|o| o.get("summary"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned()
+            };
+            body.push_str(&format!("- `{}`: {line}\n", attempt.step_id));
         }
         for attempt in attempts.iter().filter(|a| a.kind == "approval") {
             if let Some(decision) = self

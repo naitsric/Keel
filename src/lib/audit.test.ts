@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuditEvent } from "./api";
-import { activityFrom, commandsFrom, explainingAttempt, filesChangedBy, toolSummary, touchesWorkflows } from "./audit";
+import { activityFrom, commandsFrom, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, latestOfEachStep, toolSummary, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -53,11 +53,57 @@ describe("run summary", () => {
   });
 
   it("lets the builder explain the run rather than the spec writer", () => {
-    const spec = { kind: "agent", tools: "readOnly", resultText: "spec" };
-    const builder = { kind: "agent", tools: "build", resultText: "built" };
-    const check = { kind: "check", tools: "check", resultText: null };
-    expect(explainingAttempt([spec, builder, check])).toBe(builder);
-    expect(explainingAttempt([spec, check])).toBe(spec);
-    expect(explainingAttempt([check])).toBeUndefined();
+    const worker = { kind: "agent", role: "worker", state: "succeeded" };
+    const spec = { ...worker, tools: "readOnly", resultText: "spec" };
+    const builder = { ...worker, tools: "build", resultText: "built" };
+    const check = { kind: "check", tools: "check", role: "worker", state: "succeeded", resultText: null };
+    const reviewer = { ...spec, role: "reviewer", resultText: "looks fine" };
+    expect(explainingAttempts([spec, builder, reviewer])).toEqual([builder]);
+    expect(explainingAttempts([spec, builder, check])).toEqual([builder]);
+    expect(explainingAttempts([spec, check])).toEqual([spec]);
+    expect(explainingAttempts([check])).toEqual([]);
+  });
+
+  it("tells every round of the story, without the tries that failed", () => {
+    const worker = { kind: "agent", role: "worker", tools: "build" };
+    const failed = { ...worker, state: "failed", resultText: "gave up" };
+    const first = { ...worker, state: "succeeded", resultText: "fixed it" };
+    const second = { ...worker, state: "succeeded", resultText: "fixed what came back" };
+    expect(explainingAttempts([failed, first, second])).toEqual([first, second]);
+    expect(explainingAttempts([failed])).toEqual([failed]);
+  });
+
+  it("lists what the run changed in the end, not everything it touched on the way", () => {
+    const added = { filesChanged: ["a.py", "b.py"], runFiles: ["a.py", "b.py"] };
+    const removed = { filesChanged: ["b.py"], runFiles: ["a.py"] };
+    const reviewed = { filesChanged: null, runFiles: null };
+    expect(filesChangedBy([added, removed, reviewed])).toEqual(["a.py"]);
+    expect(filesChangedBy([{ filesChanged: ["old.py"] }])).toEqual(["old.py"]);
+  });
+});
+
+describe("a run with several steps", () => {
+  const a = (stepId: string, state: string) => ({ stepId, state });
+
+  it("counts only the latest try of each step", () => {
+    const failed = a("code", "failed");
+    const retried = a("code", "succeeded");
+    expect(latestOfEachStep([failed, a("ux", "succeeded"), retried]).map((x) => x.state)).toEqual(["succeeded", "succeeded"]);
+  });
+
+  it("focuses on what needs a person, ahead of what's working", () => {
+    expect(focusAttempt([a("security", "running"), a("code", "failed"), a("ux", "running")])?.stepId).toBe("code");
+    expect(focusAttempt([a("security", "succeeded"), a("ux", "running")])?.stepId).toBe("ux");
+    expect(focusAttempt([a("builder", "succeeded"), a("human", "waitingApproval")])?.stepId).toBe("human");
+    expect(focusAttempt([a("pr", "succeeded")])?.stepId).toBe("pr");
+  });
+
+  it("doesn't dwell on a failure that was already retried", () => {
+    expect(focusAttempt([a("code", "failed"), a("ux", "running"), a("code", "running")])?.state).toBe("running");
+    expect(focusAttempt([a("code", "failed"), a("code", "succeeded")])?.state).toBe("succeeded");
+  });
+
+  it("opens up parallel groups", () => {
+    expect(flatSteps([{ type: "agent", id: "a" }, { type: "parallel", id: "g", steps: [{ id: "b" }, { id: "c" }] }]).map((s) => s.id)).toEqual(["a", "b", "c"]);
   });
 });

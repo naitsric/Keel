@@ -2,11 +2,11 @@ import { AlertTriangle, Check, ExternalLink, FileDiff, GitPullRequest, Loader2, 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck, type Run } from "../lib/api";
-import { activityFrom, type ActivityItem, commandsFrom, type CommandRun, explainingAttempt, filesChangedBy, toolSummary, touchesWorkflows } from "../lib/audit";
+import { activityFrom, type ActivityItem, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, toolSummary, touchesWorkflows } from "../lib/audit";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
-import { Button, Card, cx, Field, inputClass, Segmented, StateBadge } from "../ui/primitives";
+import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
 import { TopBar } from "./TopBar";
 
 type Tab = "activity" | "commands" | "changes" | "prompt" | "details" | "output";
@@ -23,6 +23,7 @@ const DECISIONS: Record<AttemptState, string> = {
   blocked: "run.decideBlocked",
   waitingApproval: "run.decideApproval",
   rejected: "run.decideRejected",
+  skipped: "run.decideActive",
   abandoned: "run.decideAbandoned",
 };
 
@@ -42,17 +43,25 @@ function SummaryBlock({ title, note, children }: { title: string; note?: string;
 function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: { run: Run | null; attempts: Attempt[]; current: Attempt; commands: CommandRun[]; rawCheck: RawCheck; onShowChanges: () => void }) {
   const { t } = useTranslation();
   const files = filesChangedBy(attempts);
-  const explaining = explainingAttempt(attempts);
+  const explaining = explainingAttempts(attempts);
   const passed = commands.filter((c) => c.status === "ok").length;
   const checks = attempts.filter((a) => a.kind === "check");
   const latestChecks = checks.filter((a, i) => !checks.slice(i + 1).some((b) => b.stepId === a.stepId));
   const checksPassed = latestChecks.filter((a) => a.state === "succeeded").length;
   const anyActive = attempts.some((a) => isActive(a.state));
-  const decision = run?.prUrl ? "run.decideDelivered" : DECISIONS[current.state];
+  // A step that's done says nothing about the run while others are still to come.
+  const between = !run?.finishedAt && (current.state === "succeeded" || current.state === "skipped");
+  const decision = run?.prUrl ? "run.decideDelivered" : current.reason?.code === "reworkLimit" ? "run.decideReworkLimit" : between ? "run.decideActive" : DECISIONS[current.state];
   return (
     <Card className="grid gap-5 p-4 md:grid-cols-2">
-      <SummaryBlock title={t("run.whatItDid")} note={explaining ? t("run.generated") : undefined}>
-        <p className="selectable whitespace-pre-wrap">{explaining?.resultText || (anyActive ? t("run.noResultYet") : current.state === "succeeded" ? t("run.noResult") : t("run.noResultEnded"))}</p>
+      <SummaryBlock title={t("run.whatItDid")} note={explaining.length > 0 ? t("run.generated") : undefined}>
+        {explaining.length === 0 && <p className="selectable whitespace-pre-wrap">{(anyActive ? t("run.noResultYet") : current.state === "succeeded" ? t("run.noResult") : t("run.noResultEnded"))}</p>}
+        {explaining.map((attempt) => (
+          <div key={attempt.id} className="mb-3 last:mb-0">
+            {attempt.round > 0 && <p className="mb-1 text-[12px] font-medium text-warning">{t("run.round", { number: attempt.round + 1 })}</p>}
+            <p className="selectable whitespace-pre-wrap">{attempt.resultText}</p>
+          </div>
+        ))}
       </SummaryBlock>
       <div className="space-y-4">
         <SummaryBlock title={t("run.whatChanged")}>
@@ -148,6 +157,22 @@ function Actions({ attempt, files, onError }: { attempt: Attempt; files: string[
   if (attempt.state === "waitingApproval") {
     return <ApprovalCard attempt={attempt} files={files} onError={onError} />;
   }
+  if (attempt.reason?.code === "reworkLimit") {
+    return (
+      <Card role="alert" className="border-warning/40 p-4">
+        <p className="selectable text-[12.5px] text-warning">{reasonText(t, attempt.reason)}</p>
+        <div className="mt-2.5 flex flex-wrap gap-2">
+          <Button onClick={() => void act(() => api.reworkLimitAnswer(attempt.id, true))}>{t("run.anotherRound")}</Button>
+          <Button variant="primary" onClick={() => void act(() => api.reworkLimitAnswer(attempt.id, false))}>
+            {t("run.toMyApproval")}
+          </Button>
+          <Button variant="ghost" onClick={() => void act(() => api.attemptAbandon(attempt.id))}>
+            {t("run.abandon")}
+          </Button>
+        </div>
+      </Card>
+    );
+  }
   if (attempt.state === "stalled") {
     return (
       <Card role="alert" className="border-warning/40 p-4">
@@ -177,7 +202,7 @@ function Actions({ attempt, files, onError }: { attempt: Attempt; files: string[
       </div>
     );
   }
-  if (attempt.state === "succeeded" || attempt.state === "abandoned" || attempt.state === "rejected") return null;
+  if (attempt.state === "succeeded" || attempt.state === "abandoned" || attempt.state === "rejected" || attempt.state === "skipped") return null;
   const canResume = attempt.kind === "agent" && ["interrupted", "blocked", "stopped", "failed"].includes(attempt.state);
   return (
     <Card className="p-4">
@@ -236,6 +261,14 @@ function ActivityEntry({ item }: { item: ActivityItem }) {
       return line(data.command ? t("activity.startedCheck", { command: data.command }) : t("activity.started"), "text-subtle");
     case "waiting":
       return line(t("activity.waiting"), "text-warning");
+    case "skipped":
+      return line(t("activity.skipped"), "text-subtle");
+    case "rework":
+      return line(t("activity.rework", { round: data.round }), "text-warning");
+    case "reworkLimit":
+      return line(t("activity.reworkLimit"), "text-warning");
+    case "reworkLimitAnswer":
+      return line(data.anotherRound ? t("activity.reworkLimitAnswerRound") : t("activity.reworkLimitAnswerApproval"));
     case "services":
       return line(t("activity.services", { names: (data.services ?? []).map((service: { name: string }) => service.name).join(", ") }), "text-subtle");
     case "servicesLost":
@@ -345,6 +378,80 @@ function OutputTab({ events, attempt }: { events: AuditEvent[]; attempt: Attempt
   );
 }
 
+function DiffView({ diff }: { diff: string }) {
+  return (
+    <pre className="overflow-auto rounded bg-inset p-2 font-mono text-[11.5px] leading-relaxed">
+      {diff.split("\n").map((line, index) => (
+        <div
+          // Lines of a fixed text: their position is their identity.
+          key={index}
+          className={cx(
+            line.startsWith("+") && !line.startsWith("+++") && "bg-diff-add",
+            line.startsWith("-") && !line.startsWith("---") && "bg-diff-del",
+            line.startsWith("@@") && "text-accent",
+            (line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("+++") || line.startsWith("---")) && "text-subtle",
+          )}
+        >
+          {line || " "}
+        </div>
+      ))}
+    </pre>
+  );
+}
+
+/** What every reviewer said in the current round, and what the approver made of it. */
+function ReviewsCard({ attempts, round }: { attempts: Attempt[]; round: number }) {
+  const { t } = useTranslation();
+  const current = attempts.filter((a) => a.round === round);
+  const reviewers = current.filter((a) => a.role === "reviewer");
+  const approver = [...current].reverse().find((a) => a.role === "approver" && a.output);
+  if (reviewers.length === 0 && !approver) return null;
+  return (
+    <Card className="p-4">
+      <h2 className="flex items-baseline gap-2 text-[13px] font-semibold">
+        {t("run.reviewsTitle")}
+        {round > 0 && <span className="text-[12px] font-normal text-warning">{t("run.round", { number: round + 1 })}</span>}
+      </h2>
+      <ul className="mt-2.5 space-y-2">
+        {reviewers.map((review) => (
+          <li key={review.id} className="text-[12.5px]">
+            <div className="flex flex-wrap items-baseline gap-2">
+              <span className="font-mono text-[12px] font-medium">{review.stepId}</span>
+              {review.output ? (
+                <span className={review.output.verdict === "approved" ? "text-success" : "text-warning"}>{review.output.verdict === "approved" ? t("run.verdictApproved") : t("run.verdictChanges")}</span>
+              ) : (
+                <StateBadge state={review.state} label={t(`states.${review.state}`)} />
+              )}
+            </div>
+            {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
+            {(review.output?.findings ?? []).length > 0 && (
+              <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 text-muted">
+                {review.output?.findings.map((finding, index) => (
+                  <li key={index}>{finding}</li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ul>
+      {approver?.output && (
+        <div className="mt-3 border-t border-border pt-2.5 text-[12.5px]">
+          <div className="flex flex-wrap items-baseline gap-2">
+            <span className="font-medium">{t("run.approverTitle")}</span>
+            <span className={approver.output.decision === "approve" ? "text-success" : "text-warning"}>
+              {approver.output.overriddenByPerson ? t("run.decisionOverridden") : approver.output.decision === "approve" ? t("run.decisionApprove") : t("run.decisionRework")}
+            </span>
+            <span className="text-subtle">
+              {t("run.risk")}: {t(`run.risk${approver.output.risk[0].toUpperCase()}${approver.output.risk.slice(1)}`)}
+            </span>
+          </div>
+          {approver.output.reasons && <p className="selectable mt-0.5 text-muted">{approver.output.reasons}</p>}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function ChangesTab({ attempt, revision }: { attempt: Attempt; revision: number }) {
   const { t } = useTranslation();
   const [diff, setDiff] = useState("");
@@ -362,22 +469,7 @@ function ChangesTab({ attempt, revision }: { attempt: Attempt; revision: number 
       {!diff ? (
         <p className="text-[12.5px] text-subtle">{t("changes.empty")}</p>
       ) : (
-        <pre className="overflow-auto rounded bg-inset p-2 font-mono text-[11.5px] leading-relaxed">
-          {diff.split("\n").map((line, index) => (
-            <div
-              // Lines of a fixed text: their position is their identity.
-              key={index}
-              className={cx(
-                line.startsWith("+") && !line.startsWith("+++") && "bg-diff-add",
-                line.startsWith("-") && !line.startsWith("---") && "bg-diff-del",
-                line.startsWith("@@") && "text-accent",
-                (line.startsWith("diff ") || line.startsWith("index ") || line.startsWith("+++") || line.startsWith("---")) && "text-subtle",
-              )}
-            >
-              {line || " "}
-            </div>
-          ))}
-        </pre>
+        <DiffView diff={diff} />
       )}
     </div>
   );
@@ -465,8 +557,9 @@ export function RunDetail({ runId }: { runId: string }) {
   const [error, setError] = useState<string | null>(null);
   const lastSeq = useRef<Record<string, number>>({});
 
-  const latest = attempts[attempts.length - 1];
+  const latest = focusAttempt(attempts);
   const attempt = attempts.find((a) => a.id === selected) ?? latest;
+  const [runDiff, setRunDiff] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     const [nextRun, nextAttempts] = await Promise.all([api.runGet(runId), api.runAttempts(runId)]);
@@ -506,8 +599,8 @@ export function RunDetail({ runId }: { runId: string }) {
   }
 
   // A step can have run several times. The list shows each attempt, then what's still ahead.
-  const pending = (run?.workflow ?? []).filter((step) => !attempts.some((a) => a.stepId === step.id));
-  const kindTabs: Tab[] = attempt.kind === "agent" ? ["activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
+  const pending = flatSteps(run?.workflow ?? []).filter((step) => !attempts.some((a) => a.stepId === step.id));
+  const kindTabs: Tab[] = attempt.state === "skipped" ? ["activity", "prompt"] : attempt.kind === "agent" ? ["activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
   const shownTab: Tab = kindTabs.includes(tab) ? tab : kindTabs[0];
 
   return (
@@ -537,7 +630,11 @@ export function RunDetail({ runId }: { runId: string }) {
           </p>
         )}
         <Actions attempt={latest} files={files} onError={setError} />
-        <Summary run={run} attempts={attempts} current={latest} commands={allCommands} rawCheck={rawCheck} onShowChanges={() => setTab("changes")} />
+        <Summary run={run} attempts={attempts} current={latest} commands={allCommands} rawCheck={rawCheck} onShowChanges={() => void api.runDiff(runId).then(setRunDiff)} />
+        <ReviewsCard attempts={attempts} round={run?.round ?? 0} />
+        <Modal open={runDiff !== null} onOpenChange={(open) => !open && setRunDiff(null)} title={t("run.changesTitle")} className="w-[900px]">
+          {runDiff ? <DiffView diff={runDiff} /> : <p className="text-[12.5px] text-subtle">{t("changes.empty")}</p>}
+        </Modal>
         <div className="grid gap-4 lg:grid-cols-[210px_1fr]">
           <Card className="self-start p-2">
             <h2 className="px-2 pt-1 pb-1.5 text-[12px] font-semibold text-muted">{t("run.stepsTitle")}</h2>
@@ -547,7 +644,7 @@ export function RunDetail({ runId }: { runId: string }) {
                   <button type="button" onClick={() => setSelected(a.id)} className={cx("w-full rounded-md px-2 py-1.5 text-left hover:bg-hover", a.id === attempt.id && "bg-active")}>
                     <span className="block truncate text-[12.5px] font-medium">{a.stepId}</span>
                     <span className="mt-0.5 flex items-center justify-between gap-2">
-                      <span className="text-[11px] text-subtle">{a.number > 1 && t("run.attemptTitle", { number: a.number })}</span>
+                      <span className="text-[11px] text-subtle">{a.round > 0 ? t("run.round", { number: a.round + 1 }) : a.number > 1 && t("run.attemptTitle", { number: a.number })}</span>
                       <StateBadge state={a.state} label={t(`states.${a.state}`)} />
                     </span>
                     {a.kind === "agent" && <span className="mt-0.5 block truncate font-mono text-[11px] text-subtle">{a.modelActual ?? a.modelRequested}</span>}

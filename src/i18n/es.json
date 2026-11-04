@@ -6,7 +6,8 @@
     "settings": "Ajustes",
     "back": "Volver",
     "refresh": "Comprobar de nuevo",
-    "error": "Algo salió mal: {{detail}}"
+    "error": "Algo salió mal: {{detail}}",
+    "workflows": "Workflows"
   },
   "session": {
     "checking": "Comprobando tu sesión de Claude Code…",
@@ -55,7 +56,8 @@
     "blocked": "Bloqueado",
     "abandoned": "Abandonado",
     "waitingApproval": "Te espera",
-    "rejected": "Rechazado"
+    "rejected": "Rechazado",
+    "skipped": "Omitido"
   },
   "reasons": {
     "claudeMissing": "Claude Code no está instalado, o Keel no lo encuentra.",
@@ -85,7 +87,12 @@
     "unsafeBranch": "Keel solo sube sus propias ramas, y esta ejecución está en {{branch}}.",
     "serviceFailed": "No se pudo iniciar el servicio «{{name}}»: {{detail}}",
     "invalidSetting": "Este ajuste no se puede usar: {{value}}",
-    "setupFailed": "La preparación del proyecto falló con código {{exitCode}}."
+    "setupFailed": "La preparación del proyecto falló con código {{exitCode}}.",
+    "noStructuredOutput": "Terminó sin la respuesta que se le pidió.",
+    "reworkLimit": "El aprobador lo devolvió {{rounds}} veces y sigue sin quedar conforme. Ahora decides tú.",
+    "noMatchingPaths": "No cambió nada de lo que cubre ({{paths}}).",
+    "invalidWorkflow": "Este workflow no puede correr.",
+    "snapshotFailed": "El paso terminó, pero Keel no pudo leer lo que cambió, así que no cuenta como hecho."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
@@ -122,11 +129,6 @@
       "max": "Máximo"
     },
     "workflow": "Workflow",
-    "workflowFull": "Completo, hasta un pull request",
-    "workflowSingle": "Un paso",
-    "workflowFullHint": "Spec writer, builder, verificación, tu aprobación y un pull request en borrador.",
-    "specModel": "Modelo del spec writer",
-    "builderModel": "Modelo del builder",
     "source": "De dónde sale",
     "sourceText": "Escribirlo",
     "sourceIssue": "Issue de GitHub",
@@ -139,7 +141,9 @@
     "checkCommand": "Verificación: {{command}}",
     "checkNone": "Este proyecto no tiene comando de verificación, así que ese paso se omite. Configúralo en Ajustes.",
     "needsGithub": "Este workflow necesita una cuenta de GitHub para el proyecto.",
-    "openSettings": "Abrir Ajustes"
+    "openSettings": "Abrir Ajustes",
+    "workflowSingleOption": "Solo un paso",
+    "editWorkflows": "Editar workflows"
   },
   "run": {
     "attemptTitle": "Intento {{number}}",
@@ -160,7 +164,7 @@
     "auditMissing": "Falta el archivo crudo del registro de auditoría.",
     "auditPending": "El registro de auditoría se cierra cuando termina el paso.",
     "whatToDecide": "Qué te toca decidir",
-    "decideSucceeded": "Revisa los cambios. Entregarlos como un pull request llega en la próxima versión; por ahora quedan en la copia privada.",
+    "decideSucceeded": "Revisa los cambios. Este workflow no abre un pull request. Usa uno que lo haga para entregarlos.",
     "decideActive": "Nada todavía. Puedes detenerlo si quieres.",
     "decideFailed": "Inténtalo de nuevo o déjalo. El motivo está arriba.",
     "decideStopped": "Lo detuviste. Puedes intentarlo de nuevo o dejarlo.",
@@ -183,7 +187,7 @@
     "openPr": "Abrir en GitHub",
     "fromIssue": "Del issue #{{number}}",
     "base": "Basado en {{base}}",
-    "decideApproval": "Aprueba o rechaza abajo.",
+    "decideApproval": "Aprueba o rechaza arriba.",
     "decideDelivered": "Revisa y mergea el borrador en GitHub. Keel no mergea.",
     "decideRejected": "Nada. Lo rechazaste, y tu motivo llegará a las próximas ejecuciones de este proyecto.",
     "approvalTitle": "¿Esto debe convertirse en un pull request?",
@@ -194,7 +198,23 @@
     "reject": "Rechazar",
     "workflowWarning": "Este cambio edita `.github/workflows`. Esos archivos pueden correr con los secretos del repo en cuanto se suba la rama. Léelos primero.",
     "checksPassed": "{{passed}} de {{total}} verificaciones pasaron.",
-    "checkFailedSummary": "Una verificación falló, así que no siguió adelante."
+    "checkFailedSummary": "Una verificación falló, así que no siguió adelante.",
+    "round": "Ronda {{number}}",
+    "reviewsTitle": "Revisiones",
+    "verdictApproved": "Sin problemas",
+    "verdictChanges": "Pide cambios",
+    "approverTitle": "Aprobador",
+    "decisionApprove": "Listo para ti",
+    "decisionRework": "Lo devolvió",
+    "decisionOverridden": "Tomaste su lugar",
+    "risk": "Riesgo",
+    "riskLow": "bajo",
+    "riskMedium": "medio",
+    "riskHigh": "alto",
+    "anotherRound": "Una ronda más",
+    "toMyApproval": "Pasarlo a mi aprobación",
+    "changesTitle": "Todo lo que cambió esta ejecución",
+    "decideReworkLimit": "Elige arriba: una ronda más, tu aprobación o dejarlo."
   },
   "tabs": {
     "activity": "Actividad",
@@ -234,7 +254,12 @@
     "startedCheck": "Corriendo: {{command}}",
     "services": "Servicios listos: {{names}}",
     "servicesLost": "No se pudieron restaurar los servicios al reabrir: {{error}}",
-    "setupResult": "La preparación terminó con código {{code}}"
+    "setupResult": "La preparación terminó con código {{code}}",
+    "skipped": "Omitido: no cambió nada de lo que cubre",
+    "rework": "Devuelto para la ronda {{round}}",
+    "reworkLimit": "Llegó al límite de rondas",
+    "reworkLimitAnswerRound": "Pediste otra ronda",
+    "reworkLimitAnswerApproval": "Lo pasaste a tu aprobación"
   },
   "commands": {
     "empty": "No corrió ningún comando.",
@@ -371,5 +396,64 @@
     "serviceStart": "Escribe el comando que inicia «{{value}}».",
     "envName": "El nombre de una variable usa mayúsculas, números y guiones bajos: «{{value}}».",
     "envReserved": "Keel controla «{{value}}», o podría llevar una credencial, así que un proyecto no puede definirla."
+  },
+  "invalidWorkflow": {
+    "empty": "Un workflow necesita al menos un paso.",
+    "badId": "«{{step}}» no sirve como nombre de paso. Usa letras, números y guiones.",
+    "duplicateId": "Hay dos pasos llamados «{{step}}».",
+    "noModel": "Elige un modelo para «{{step}}».",
+    "noPrompt": "Escribe qué debe hacer «{{step}}».",
+    "badPath": "«{{step}}» tiene un patrón de archivos que no se puede leer.",
+    "reviewerMustReadOnly": "«{{step}}» juzga el trabajo, así que solo puede leer.",
+    "parallelMustReadOnly": "«{{step}}» está en un grupo que corre a la vez, y comparten una copia del código, así que solo puede leer.",
+    "reworkTarget": "«{{step}}» devuelve el trabajo a un paso que debe estar antes.",
+    "tooManyRounds": "«{{step}}» puede devolver el trabajo 5 veces como máximo.",
+    "emptyGroup": "El grupo «{{step}}» no tiene pasos.",
+    "noCommand": "Escribe el comando de «{{step}}».",
+    "deliverNeedsApproval": "«{{step}}» abre un pull request, así que una persona tiene que aprobar en un paso anterior."
+  },
+  "workflows": {
+    "title": "Workflows",
+    "subtitle": "Los pasos por los que pasa una ejecución, con el modelo de cada uno.",
+    "project": "Proyecto",
+    "noProjects": "Primero agrega un proyecto, al lanzar una ejecución.",
+    "builtin": "Incluido",
+    "builtinNote": "Este viene con Keel. Al guardar, se crea una copia para este proyecto.",
+    "name": "Nombre",
+    "add": "Agregar un paso:",
+    "addAgent": "Agente",
+    "addParallel": "Grupo a la vez",
+    "addCheck": "Verificación",
+    "addApproval": "Tu aprobación",
+    "addDeliver": "Pull request",
+    "addReviewer": "Agregar un revisor",
+    "stepAgent": "Agente",
+    "stepSetup": "Preparación",
+    "stepCheck": "Verificación",
+    "stepParallel": "Grupo que corre a la vez",
+    "stepApproval": "Tu aprobación",
+    "stepDeliver": "Pull request en borrador",
+    "approvalHint": "La ejecución te espera aquí, el tiempo que haga falta.",
+    "deliverHint": "Keel sube una rama y abre un borrador. Nunca mergea.",
+    "stepId": "Nombre del paso",
+    "role": "Rol",
+    "roleWorker": "Hace el trabajo",
+    "roleReviewer": "Revisa",
+    "roleApprover": "Aprueba",
+    "reworkTo": "Devuelve el trabajo a",
+    "maxRounds": "Rondas como máximo",
+    "paths": "Solo si cambian estos archivos (opcional)",
+    "pathsHint": "Patrones separados por comas, como **/*.tsx. Vacío significa que siempre corre.",
+    "prompt": "Qué hace",
+    "promptHint": "Puedes usar {{tokens}}, donde spec es el nombre de un paso.",
+    "command": "Comando",
+    "moveUp": "Subir",
+    "moveDown": "Bajar",
+    "remove": "Quitar",
+    "save": "Guardar",
+    "saveCopy": "Guardar una copia",
+    "saved": "Guardado",
+    "delete": "Eliminar",
+    "newName": "Mi workflow"
   }
 }

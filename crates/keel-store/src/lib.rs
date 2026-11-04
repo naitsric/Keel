@@ -153,6 +153,15 @@ const MIGRATIONS: &[&str] = &[
     r#"
     alter table project add column setup_command text;
 "#,
+    r#"
+    alter table run add column round integer not null default 0;
+    alter table attempt add column round integer not null default 0;
+    alter table attempt add column role text not null default 'worker';
+    alter table attempt add column output text;
+    alter table attempt add column run_files text;
+    create trigger attempt_round_fixed before update of round, role on attempt
+    begin select raise(abort, 'attempt facts are fixed once it starts'); end;
+"#,
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -221,6 +230,8 @@ pub struct Run {
     pub branch: Option<String>,
     pub pr_url: Option<String>,
     pub pr_number: Option<i64>,
+    /// How many times an approver has sent the work back.
+    pub round: i64,
     pub created_at: String,
     pub finished_at: Option<String>,
 }
@@ -236,7 +247,7 @@ pub struct NewRun {
     pub source_issue: Option<String>,
 }
 
-const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at";
+const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round";
 
 fn run_from(r: &Row) -> rusqlite::Result<Run> {
     let source_issue: Option<String> = r.get(7)?;
@@ -255,6 +266,7 @@ fn run_from(r: &Row) -> rusqlite::Result<Run> {
         pr_number: r.get(10)?,
         created_at: r.get(11)?,
         finished_at: r.get(12)?,
+        round: r.get(13)?,
     })
 }
 
@@ -278,6 +290,8 @@ pub struct NewAttempt {
     pub run_id: String,
     pub step_id: String,
     pub kind: String,
+    pub role: String,
+    pub round: i64,
     pub number: i64,
     pub state: AttemptState,
     pub model_requested: String,
@@ -303,6 +317,13 @@ pub struct Attempt {
     pub run_id: String,
     pub step_id: String,
     pub kind: String,
+    pub role: String,
+    pub round: i64,
+    /// The structured answer of a reviewer or approver.
+    pub output: Option<serde_json::Value>,
+    /// What the whole run had changed when this step ended. A file added and later removed
+    /// isn't here, because it won't be in the pull request.
+    pub run_files: Option<serde_json::Value>,
     pub exit_code: Option<i64>,
     pub number: i64,
     pub state: String,
@@ -401,6 +422,10 @@ fn attempt_from(row: &Row) -> rusqlite::Result<Attempt> {
         run_id: row.get("run_id")?,
         step_id: row.get("step_id")?,
         kind: row.get("kind")?,
+        role: row.get("role")?,
+        round: row.get("round")?,
+        output: json_col(row, "output")?,
+        run_files: json_col(row, "run_files")?,
         exit_code: row.get("exit_code")?,
         number: row.get("number")?,
         state: row.get("state")?,
@@ -659,8 +684,8 @@ impl Store {
         self.lock().execute(
             "insert into attempt (id, run_id, step_id, number, state, model_requested, effort, tools, max_turns,
                 max_budget_usd, language, prompt, system_prompt_sources, settings, session_id, resumed_from,
-                workspace, raw_path, started_at, kind)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                workspace, raw_path, started_at, kind, role, round)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)",
             params![
                 a.id,
                 a.run_id,
@@ -681,7 +706,9 @@ impl Store {
                 a.workspace,
                 a.raw_path,
                 a.started_at,
-                a.kind
+                a.kind,
+                a.role,
+                a.round
             ],
         )?;
         Ok(())
@@ -725,7 +752,7 @@ impl Store {
 
     pub fn attempts_of_run(&self, run_id: &str) -> Result<Vec<Attempt>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare("select * from attempt where run_id = ?1 order by number")?;
+        let mut stmt = conn.prepare("select * from attempt where run_id = ?1 order by rowid")?;
         let rows = stmt.query_map([run_id], attempt_from)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
@@ -781,7 +808,14 @@ impl Store {
              from run r
              join project p on p.id = r.project_id
              join attempt a on a.run_id = r.id
-              and a.number = (select max(number) from attempt where run_id = r.id)
+              and a.rowid = (
+                select b.rowid from attempt b where b.run_id = r.id
+                  and not exists (select 1 from attempt later
+                                  where later.run_id = b.run_id and later.step_id = b.step_id and later.rowid > b.rowid)
+                order by case when b.state in ('stalled', 'blocked', 'waitingApproval', 'interrupted', 'failed', 'stopped', 'rejected', 'abandoned') then 0
+                              when b.state in ('queued', 'preparing', 'running') then 1 else 2 end,
+                         b.rowid desc
+                limit 1)
              order by r.created_at desc limit ?1",
         )?;
         let rows = stmt.query_map([limit], |r| {
@@ -811,7 +845,9 @@ impl Store {
             "select
                 coalesce(sum(state in ('preparing', 'running') and number = 1), 0),
                 coalesce(sum(state in ('preparing', 'running') and number > 1), 0),
-                coalesce(sum(state in ('stalled', 'blocked', 'interrupted', 'waitingApproval')), 0),
+                coalesce(sum(state in ('stalled', 'blocked', 'interrupted', 'waitingApproval')
+                    and not exists (select 1 from attempt later
+                                    where later.run_id = attempt.run_id and later.step_id = attempt.step_id and later.rowid > attempt.rowid)), 0),
                 coalesce(sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)), 0),
                 coalesce(sum(coalesce(duration_ms, 0)), 0),
                 coalesce(sum(coalesce(cost_usd, 0)), 0)
@@ -875,6 +911,8 @@ mod tests {
                 run_id: "r".into(),
                 step_id: "builder".into(),
                 kind: "agent".into(),
+                role: "worker".into(),
+                round: 0,
                 number: 1,
                 state: AttemptState::Running,
                 model_requested: "haiku".into(),
@@ -952,6 +990,94 @@ mod tests {
         assert_eq!(rows[0].model, "haiku");
         let totals = store.totals().unwrap();
         assert_eq!((totals.running, totals.tokens), (1, 15));
+    }
+
+    #[test]
+    fn a_database_from_before_reviews_opens_with_its_runs_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        // The version people have on their machines: everything up to the services and setup.
+        {
+            let store = Store::open(&path).unwrap();
+            seeded(&store);
+        }
+        let run_row = {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "pragma user_version = 4;
+                 drop trigger attempt_round_fixed;
+                 alter table run drop column round;
+                 alter table attempt drop column round;
+                 alter table attempt drop column role;
+                 alter table attempt drop column output;
+                 alter table attempt drop column run_files;",
+            )
+            .unwrap();
+            conn.query_row("select id from run limit 1", [], |r| r.get::<_, String>(0))
+                .unwrap()
+        };
+
+        let store = Store::open(&path).unwrap();
+        let attempts = store.attempts_of_run(&run_row).unwrap();
+        assert_eq!(attempts.len(), 1);
+        assert_eq!(attempts[0].role, "worker");
+        assert_eq!(attempts[0].round, 0);
+        assert_eq!(attempts[0].output, None);
+        assert_eq!(store.run(&run_row).unwrap().round, 0);
+        assert_eq!(store.runs(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_workflow_shows_once_on_the_home_table_at_the_step_that_matters() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let attempt = |id: &str, step: &str, state: AttemptState| NewAttempt {
+            id: id.into(),
+            run_id: "r".into(),
+            step_id: step.into(),
+            kind: "agent".into(),
+            role: "worker".into(),
+            round: 0,
+            number: 1,
+            state,
+            model_requested: "haiku".into(),
+            effort: None,
+            tools: "readOnly".into(),
+            max_turns: None,
+            max_budget_usd: None,
+            language: "en".into(),
+            prompt: String::new(),
+            system_prompt_sources: "[]".into(),
+            settings: "{}".into(),
+            session_id: id.into(),
+            resumed_from: None,
+            workspace: "/w".into(),
+            raw_path: "/w.jsonl".into(),
+            started_at: now(),
+        };
+        store.set_state("a", AttemptState::Succeeded, None).unwrap();
+        store
+            .add_attempt(&attempt("b", "ux", AttemptState::Succeeded))
+            .unwrap();
+        store
+            .add_attempt(&attempt("c", "security", AttemptState::Running))
+            .unwrap();
+        let rows = store.runs(10).unwrap();
+        assert_eq!(rows.len(), 1, "one row per run");
+        assert_eq!(rows[0].step_id, "security");
+        // Something that needs a person outranks what's still running.
+        store
+            .add_attempt(&attempt("d", "code", AttemptState::Blocked))
+            .unwrap();
+        assert_eq!(store.runs(10).unwrap()[0].step_id, "code");
+        assert_eq!(store.runs(10).unwrap()[0].state, "blocked");
+        assert_eq!(store.totals().unwrap().blocked, 1);
+        // Unless it's been retried, and then it's history.
+        store
+            .add_attempt(&attempt("e", "code", AttemptState::Running))
+            .unwrap();
+        assert_eq!(store.runs(10).unwrap()[0].state, "running");
+        assert_eq!(store.totals().unwrap().blocked, 0);
     }
 
     #[test]

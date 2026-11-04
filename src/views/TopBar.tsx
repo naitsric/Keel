@@ -1,4 +1,4 @@
-import { ArrowLeft, Settings } from "lucide-react";
+import { ArrowLeft, ListChecks, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useApp } from "../lib/store";
@@ -22,6 +22,10 @@ export function TopBar({ back, children }: { back?: boolean; children?: ReactNod
       )}
       <div data-tauri-drag-region className="flex-1" />
       {children}
+      <Button variant="ghost" onClick={() => navigate({ name: "workflows" })}>
+        <ListChecks size={14} />
+        {t("app.workflows")}
+      </Button>
       <Button variant="ghost" aria-label={t("app.settings")} title={t("app.settings")} onClick={() => navigate({ name: "settings" })}>
         <Settings size={14} />
       </Button>
