@@ -144,13 +144,22 @@ impl Inner {
         let body = self.pull_request_body(&run, &project)?;
         let body_file = self.run_dir(&run.id).join("pull-request.md");
         std::fs::write(&body_file, &body)?;
+        // An issue's title already names the problem. Otherwise the commit says what changed better
+        // than the first line of a request does.
+        let title = if run.source_issue.is_some() {
+            run.title.clone()
+        } else {
+            git.first_subject(&mirror, &workspace)
+                .filter(|subject| !subject.is_empty() && !subject.starts_with("keel:"))
+                .unwrap_or_else(|| run.title.clone())
+        };
         let url = self.open_pull_request(
             &gh,
             &token,
             &repo,
             &branch,
             &info.default_branch,
-            &run.title,
+            &title,
             &body_file,
         )?;
 

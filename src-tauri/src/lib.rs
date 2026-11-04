@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use keel_core::{Reason, StepSpec, ToolProfile, WorkflowStep};
+use keel_core::{EnvVar, Reason, Service, StepSpec, ToolProfile, WorkflowStep};
 use keel_engine::{
     Config, Engine, Error as EngineError, GithubStatus, Preflight, RawCheck, StartRun,
     full_workflow, request_from_issue,
@@ -143,9 +143,12 @@ fn project_add(state: State<'_, AppState>, path: String) -> CommandResult<Projec
 #[serde(rename_all = "camelCase")]
 struct ProjectSettingsInput {
     github_account: Option<String>,
+    setup_command: Option<String>,
     check_command: Option<String>,
     allowed_domains: Vec<String>,
     allowed_read: Vec<String>,
+    services: Vec<Service>,
+    env: Vec<EnvVar>,
 }
 
 #[tauri::command(async)]
@@ -160,9 +163,12 @@ fn project_update(
         &project_id,
         &ProjectSettings {
             github_account: clean(settings.github_account),
+            setup_command: clean(settings.setup_command),
             check_command: clean(settings.check_command),
             allowed_domains: settings.allowed_domains,
             allowed_read: settings.allowed_read,
+            services: settings.services,
+            env: settings.env,
         },
     )?)
 }

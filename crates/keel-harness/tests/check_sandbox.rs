@@ -6,7 +6,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use keel_harness::settings::check_profile;
+use keel_harness::settings::{check_profile, setup_profile};
 
 struct Sandbox {
     canary_dir: tempfile::TempDir,
@@ -39,7 +39,7 @@ fn sandbox() -> Sandbox {
 
 impl Sandbox {
     fn run(&self, script: &str) -> std::process::Output {
-        let profile = check_profile(self.workspace.path(), &self.home, &[]);
+        let profile = check_profile(self.workspace.path(), &self.home, &[], &[]);
         Command::new("/usr/bin/sandbox-exec")
             .args(["-p", &profile, "/bin/sh", "-c", script])
             .current_dir(self.workspace.path())
@@ -123,7 +123,7 @@ fn there_is_no_network() {
 fn listed_paths_can_be_read() {
     let s = sandbox();
     let allowed = s.canary_dir.path().to_string_lossy().into_owned();
-    let profile = check_profile(s.workspace.path(), &s.home, &[allowed]);
+    let profile = check_profile(s.workspace.path(), &s.home, &[allowed], &[]);
     let output = Command::new("/usr/bin/sandbox-exec")
         .args(["-p", &profile, "/bin/cat", &s.canary.to_string_lossy()])
         .current_dir(s.workspace.path())
@@ -143,4 +143,157 @@ fn local_unix_sockets_are_out_of_reach_too() {
         path.to_string_lossy()
     );
     assert!(!s.allowed(&script));
+}
+
+#[test]
+fn a_listed_socket_works_and_no_other_does() {
+    let s = sandbox();
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let allowed_dir = root_path.join("db");
+    let other_dir = root_path.join("other");
+    std::fs::create_dir_all(&allowed_dir).unwrap();
+    std::fs::create_dir_all(&other_dir).unwrap();
+    let allowed = allowed_dir.join("db.sock");
+    let other = other_dir.join("other.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&allowed).unwrap();
+    let other_listener = std::os::unix::net::UnixListener::bind(&other).unwrap();
+    std::thread::spawn(move || for _ in listener.incoming() {});
+    std::thread::spawn(move || for _ in other_listener.incoming() {});
+    let profile = check_profile(
+        s.workspace.path(),
+        &s.home,
+        &[],
+        &[allowed_dir.to_string_lossy().into_owned()],
+    );
+    let connect = |path: &Path| {
+        Command::new("/usr/bin/sandbox-exec")
+            .args([
+                "-p",
+                &profile,
+                "python3",
+                "-c",
+                &format!(
+                    "import socket; c = socket.socket(socket.AF_UNIX); c.connect('{}')",
+                    path.display()
+                ),
+            ])
+            .current_dir(s.workspace.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(connect(&allowed), "the listed socket");
+    assert!(!connect(&other), "any other socket");
+}
+
+fn run_setup(s: &Sandbox, cache: &Path, script: &str) -> bool {
+    let profile = setup_profile(s.workspace.path(), &s.home, &[], &[], cache);
+    Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", &profile, "/bin/sh", "-c", script])
+        .current_dir(s.workspace.path())
+        .output()
+        .unwrap()
+        .status
+        .success()
+}
+
+#[test]
+fn setup_can_reach_the_internet_and_its_cache() {
+    let s = sandbox();
+    let cache = tempfile::Builder::new()
+        .prefix(".keel-sandbox-cache")
+        .tempdir_in(&s.home)
+        .unwrap();
+    assert!(
+        run_setup(
+            &s,
+            cache.path(),
+            "curl -fsS -m 10 -o /dev/null https://pypi.org/pypi/pip/json"
+        ),
+        "the internet, including DNS"
+    );
+    assert!(
+        run_setup(
+            &s,
+            cache.path(),
+            &format!(
+                "echo x > {}/f && cat {}/f",
+                quoted(cache.path()),
+                quoted(cache.path())
+            )
+        ),
+        "its cache"
+    );
+    assert!(
+        run_setup(&s, cache.path(), "echo x > installed.txt"),
+        "the workspace"
+    );
+}
+
+#[test]
+fn setup_still_cannot_reach_anything_on_this_machine() {
+    let s = sandbox();
+    let cache = tempfile::Builder::new()
+        .prefix(".keel-sandbox-cache")
+        .tempdir_in(&s.home)
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    assert!(
+        !run_setup(
+            &s,
+            cache.path(),
+            &format!("curl -fsS -m 3 -o /dev/null http://127.0.0.1:{port}/")
+        ),
+        "local ports"
+    );
+    assert!(
+        !run_setup(&s, cache.path(), &format!("cat {}", quoted(&s.canary))),
+        "the home folder"
+    );
+    assert!(
+        !run_setup(
+            &s,
+            cache.path(),
+            &format!("touch {}", quoted(&s.home.join(".keel-sandbox-write")))
+        ),
+        "writes to home"
+    );
+    assert!(
+        !run_setup(
+            &s,
+            cache.path(),
+            "security find-generic-password -s gh:github.com -w >/dev/null 2>&1"
+        ),
+        "the keychain"
+    );
+    let path = s.canary_dir.path().join("s.sock");
+    let _unix = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    assert!(
+        !run_setup(
+            &s,
+            cache.path(),
+            &format!(
+                "python3 -c \"import socket; c = socket.socket(socket.AF_UNIX); c.connect('{}')\"",
+                path.to_string_lossy()
+            )
+        ),
+        "local sockets"
+    );
+}
+
+#[test]
+fn the_cache_is_only_writable_during_setup() {
+    let s = sandbox();
+    let cache = tempfile::Builder::new()
+        .prefix(".keel-sandbox-cache")
+        .tempdir_in(&s.home)
+        .unwrap();
+    assert!(
+        !s.allowed(&format!("touch {}/poison", quoted(cache.path()))),
+        "a check can't write to the shared cache"
+    );
+    assert!(!cache.path().join("poison").exists());
 }

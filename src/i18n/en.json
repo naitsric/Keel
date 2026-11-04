@@ -82,7 +82,10 @@
     "ghMissing": "GitHub CLI (gh) isn't installed, or Keel can't find it.",
     "deliveryFailed": "Couldn't deliver it to GitHub: {{detail}}",
     "nothingToDeliver": "There's nothing to deliver: no step changed any files.",
-    "unsafeBranch": "Keel only pushes its own branches, and this run is on {{branch}}."
+    "unsafeBranch": "Keel only pushes its own branches, and this run is on {{branch}}.",
+    "serviceFailed": "Couldn't start the service “{{name}}”: {{detail}}",
+    "invalidSetting": "This setting can't be used: {{value}}",
+    "setupFailed": "Preparing the project failed with code {{exitCode}}."
   },
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",
@@ -228,7 +231,10 @@
     "checkResult": "The check ended with code {{code}}",
     "dirty": "It changed files in the private copy, which a check shouldn't.",
     "delivered": "Draft opened with {{account}}: {{url}}",
-    "startedCheck": "Running: {{command}}"
+    "startedCheck": "Running: {{command}}",
+    "services": "Services ready: {{names}}",
+    "servicesLost": "Couldn't restore the services after reopening: {{error}}",
+    "setupResult": "Preparation ended with code {{code}}"
   },
   "commands": {
     "empty": "No commands ran.",
@@ -301,7 +307,26 @@
     "decisions": "Decisions",
     "decisionsHint": "What you said at an approval. Agents in this project follow these.",
     "decisionsEmpty": "No decisions yet.",
-    "retire": "Retire"
+    "retire": "Retire",
+    "services": "Services",
+    "servicesHint": "What this project's commands need, such as a test database. Keel runs them outside the sandbox while a step uses them, and commands reach them only through a Unix socket.",
+    "servicesEmpty": "No services.",
+    "addBridge": "Add a local port",
+    "addCommand": "Add a command",
+    "serviceName": "Name",
+    "serviceTypeBridge": "Forwards to a port on this Mac, such as a database in Docker.",
+    "serviceTypeCommand": "Keel starts this command, which must listen on $KEEL_SOCKET.",
+    "servicePort": "Port",
+    "serviceStart": "Command",
+    "serviceSocket": "Socket file (optional)",
+    "serviceSocketHint": "Postgres clients need .s.PGSQL.5432.",
+    "serviceRemove": "Remove",
+    "env": "Variables for commands",
+    "envHint": "One per line, as NAME=value. In a value, socketDir and socket with the service name, between double braces, become that service's paths. They're saved in plain text and recorded in the audit log, so don't put secrets here.",
+    "envInvalid": "This line needs the form NAME=value: “{{line}}”.",
+    "setupCommand": "Setup command",
+    "setupCommandHint": "Installs what the project needs, once per run, before any agent. It can reach the internet, but not your home folder or anything else on this Mac. Your repo's own scripts may run here.",
+    "setupCommandPlaceholder": "uv sync --frozen"
   },
   "quit": {
     "title": "There are steps running",
@@ -337,5 +362,14 @@
     "signedCommits": "This repo requires signed commits, which Keel can't produce yet.",
     "workflowScope": "This change edits `.github/workflows`, and the account's token lacks the `workflow` scope. Run `gh auth refresh -s workflow` with that account active, then try again.",
     "other": "GitHub refused this."
+  },
+  "invalidSettings": {
+    "serviceName": "A service name uses lowercase letters, numbers and hyphens, up to 20 characters: “{{value}}”.",
+    "serviceDuplicate": "There are two services called “{{value}}”.",
+    "serviceSocket": "A socket file name can't contain a slash: “{{value}}”.",
+    "servicePort": "Choose a port for the service.",
+    "serviceStart": "Write the command that starts “{{value}}”.",
+    "envName": "A variable name uses capital letters, numbers and underscores: “{{value}}”.",
+    "envReserved": "Keel controls “{{value}}”, or it could carry a credential, so a project can't set it."
   }
 }

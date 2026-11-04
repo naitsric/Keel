@@ -170,7 +170,7 @@ mockIPC((command) => {
     case "refresh_session":
       return preflight;
     case "overview":
-      return { runs, projects: [{ id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", checkCommand: "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.cargo"] }], totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
+      return { runs, projects: [{ id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.cargo"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }] }], totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
     case "run_get":
       return run;
     case "run_attempts":

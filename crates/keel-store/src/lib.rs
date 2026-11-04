@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use keel_core::{AttemptState, Reason};
+use keel_core::{AttemptState, EnvVar, Reason, Service};
 pub use rusqlite::types as rusqlite_value;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
@@ -146,6 +146,13 @@ const MIGRATIONS: &[&str] = &[
     create trigger decision_no_delete before delete on decision
     begin select raise(abort, 'decisions are never deleted'); end;
 "#,
+    r#"
+    alter table project add column services text not null default '[]';
+    alter table project add column env text not null default '[]';
+"#,
+    r#"
+    alter table project add column setup_command text;
+"#,
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -159,21 +166,27 @@ pub struct Project {
     pub github_account: Option<String>,
     /// `owner/name`, when the repo's remote is on GitHub.
     pub github_repo: Option<String>,
+    pub setup_command: Option<String>,
     pub check_command: Option<String>,
     pub allowed_domains: Vec<String>,
     pub allowed_read: Vec<String>,
+    pub services: Vec<Service>,
+    pub env: Vec<EnvVar>,
 }
 
 /// What a person can change about a project.
 #[derive(Debug, Clone, Default)]
 pub struct ProjectSettings {
     pub github_account: Option<String>,
+    pub setup_command: Option<String>,
     pub check_command: Option<String>,
     pub allowed_domains: Vec<String>,
     pub allowed_read: Vec<String>,
+    pub services: Vec<Service>,
+    pub env: Vec<EnvVar>,
 }
 
-const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read";
+const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command";
 
 fn project_from(r: &Row) -> rusqlite::Result<Project> {
     let list = |text: String| serde_json::from_str(&text).unwrap_or_default();
@@ -187,6 +200,9 @@ fn project_from(r: &Row) -> rusqlite::Result<Project> {
         check_command: r.get(6)?,
         allowed_domains: list(r.get(7)?),
         allowed_read: list(r.get(8)?),
+        services: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
+        env: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
+        setup_command: r.get(11)?,
     })
 }
 
@@ -473,8 +489,8 @@ impl Store {
 
     pub fn add_project(&self, project: &Project) -> Result<()> {
         self.lock().execute(
-            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 project.id,
                 project.name,
@@ -485,6 +501,9 @@ impl Store {
                 project.check_command,
                 serde_json::to_string(&project.allowed_domains).unwrap_or_default(),
                 serde_json::to_string(&project.allowed_read).unwrap_or_default(),
+                serde_json::to_string(&project.services).unwrap_or_default(),
+                serde_json::to_string(&project.env).unwrap_or_default(),
+                project.setup_command,
             ],
         )?;
         Ok(())
@@ -492,13 +511,16 @@ impl Store {
 
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<()> {
         self.lock().execute(
-            "update project set github_account = ?2, check_command = ?3, allowed_domains = ?4, allowed_read = ?5 where id = ?1",
+            "update project set github_account = ?2, check_command = ?3, allowed_domains = ?4, allowed_read = ?5, services = ?6, env = ?7, setup_command = ?8 where id = ?1",
             params![
                 id,
                 settings.github_account,
                 settings.check_command,
                 serde_json::to_string(&settings.allowed_domains).unwrap_or_default(),
                 serde_json::to_string(&settings.allowed_read).unwrap_or_default(),
+                serde_json::to_string(&settings.services).unwrap_or_default(),
+                serde_json::to_string(&settings.env).unwrap_or_default(),
+                settings.setup_command,
             ],
         )?;
         Ok(())
@@ -828,9 +850,12 @@ mod tests {
                 created_at: now(),
                 github_account: None,
                 github_repo: None,
+                setup_command: None,
                 check_command: None,
                 allowed_domains: vec![],
                 allowed_read: vec![],
+                services: vec![],
+                env: vec![],
             })
             .unwrap();
         store
@@ -992,17 +1017,30 @@ mod tests {
                 "p",
                 &ProjectSettings {
                     github_account: Some("octo".into()),
+                    setup_command: Some("uv sync".into()),
                     check_command: Some("make test".into()),
                     allowed_domains: vec!["pypi.org".into()],
                     allowed_read: vec!["~/.cargo".into()],
+                    services: vec![Service::Bridge {
+                        name: "db".into(),
+                        port: 5432,
+                        socket: None,
+                    }],
+                    env: vec![EnvVar {
+                        name: "DB".into(),
+                        value: "{{socket:db}}".into(),
+                    }],
                 },
             )
             .unwrap();
         let project = store.project("p").unwrap();
         assert_eq!(project.github_account.as_deref(), Some("octo"));
+        assert_eq!(project.setup_command.as_deref(), Some("uv sync"));
         assert_eq!(project.check_command.as_deref(), Some("make test"));
         assert_eq!(project.allowed_domains, ["pypi.org"]);
         assert_eq!(project.allowed_read, ["~/.cargo"]);
+        assert_eq!(project.services[0].name(), "db");
+        assert_eq!(project.env[0].name, "DB");
     }
 
     #[test]

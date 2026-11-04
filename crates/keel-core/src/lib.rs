@@ -52,6 +52,54 @@ pub struct StepSpec {
     pub max_budget_usd: Option<f64>,
 }
 
+/// Something a project's commands need, such as a test database. Keel runs these outside the
+/// sandbox and gives steps one Unix socket per service.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum Service {
+    /// Already listening on a local port, for example in Docker. Keel opens a socket that
+    /// forwards to that port and nowhere else.
+    Bridge {
+        name: String,
+        port: u16,
+        socket: Option<String>,
+    },
+    /// A command Keel starts for the step. It must listen on `$KEEL_SOCKET`.
+    Command {
+        name: String,
+        start: String,
+        socket: Option<String>,
+    },
+}
+
+impl Service {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Bridge { name, .. } | Self::Command { name, .. } => name,
+        }
+    }
+
+    /// The socket's file name, for clients that require one, like Postgres's `.s.PGSQL.5432`.
+    pub fn socket_file(&self) -> Option<&str> {
+        match self {
+            Self::Bridge { socket, .. } | Self::Command { socket, .. } => socket.as_deref(),
+        }
+    }
+}
+
+/// A variable for a project's commands. These are saved in plain text and recorded in the audit
+/// log, so they're for socket paths and test settings, not secrets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvVar {
+    pub name: String,
+    pub value: String,
+}
+
 /// One step of a workflow. There are few kinds on purpose.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -62,6 +110,9 @@ pub struct StepSpec {
 pub enum WorkflowStep {
     /// An agent working in the run's private copy.
     Agent(StepSpec),
+    /// Installs what the project needs, once, before any agent runs: the code is still what was
+    /// published. The one step with network, and still sandboxed.
+    Setup { id: String, run: String },
     /// A command Keel runs itself, in a sandbox, with no model involved. Exit 0 passes.
     Check { id: String, run: String },
     /// Waits for a person, for as long as it takes.
@@ -74,13 +125,17 @@ impl WorkflowStep {
     pub fn id(&self) -> &str {
         match self {
             Self::Agent(step) => &step.id,
-            Self::Check { id, .. } | Self::Approval { id } | Self::Deliver { id } => id,
+            Self::Setup { id, .. }
+            | Self::Check { id, .. }
+            | Self::Approval { id }
+            | Self::Deliver { id } => id,
         }
     }
 
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Agent(_) => "agent",
+            Self::Setup { .. } => "setup",
             Self::Check { .. } => "check",
             Self::Approval { .. } => "approval",
             Self::Deliver { .. } => "deliver",
@@ -209,6 +264,9 @@ pub enum Reason {
     CheckFailed {
         exit_code: Option<i32>,
     },
+    SetupFailed {
+        exit_code: Option<i32>,
+    },
     NoGithubRemote,
     GithubAccountMissing,
     GhMissing,
@@ -222,5 +280,14 @@ pub enum Reason {
     /// Keel refuses to push to anything but its own branches.
     UnsafeBranch {
         branch: String,
+    },
+    ServiceFailed {
+        name: String,
+        detail: String,
+    },
+    /// A value in a project's settings isn't usable. `field` says which.
+    InvalidSetting {
+        field: String,
+        value: String,
     },
 }

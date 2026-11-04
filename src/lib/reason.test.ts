@@ -42,3 +42,11 @@ describe("needsSignIn", () => {
     expect(needsSignIn(null)).toBe(false);
   });
 });
+
+describe("settings errors", () => {
+  it("names what's wrong with a setting", () => {
+    expect(reasonText(t("es"), { code: "invalidSetting", field: "envReserved", value: "GH_TOKEN" })).toContain("GH_TOKEN");
+    expect(reasonText(t("en"), { code: "invalidSetting", field: "serviceDuplicate", value: "db" })).toContain("two services");
+    expect(reasonText(t("en"), { code: "serviceFailed", name: "db", detail: "nothing is listening on port 5432" })).toContain("nothing is listening");
+  });
+});

@@ -14,7 +14,8 @@ use keel_store::rusqlite_value::Value;
 use keel_store::{Attempt, now};
 use serde_json::json;
 
-use crate::git::Git;
+use crate::git::{Git, RUN_CACHE};
+use crate::services::{self, ServiceSet};
 use crate::{Error, Inner, Result, locked, prompts};
 
 /// Tool output kept in the database. The raw file always has all of it.
@@ -23,6 +24,9 @@ const EVENT_TEXT_LIMIT: usize = 64 * 1024;
 fn text_value(value: Option<String>) -> Value {
     value.map_or(Value::Null, Value::Text)
 }
+
+/// The running services, and the variables that point at them.
+type StartedServices = (Option<ServiceSet>, Vec<(String, String)>);
 
 pub(crate) struct Monitor {
     attempt_id: String,
@@ -43,6 +47,8 @@ pub(crate) struct Monitor {
     /// Why this attempt must end blocked, once decided.
     block: Option<Reason>,
     result: Option<ResultEvent>,
+    /// Stops the step's services when dropped.
+    services: Option<ServiceSet>,
 }
 
 impl Monitor {
@@ -68,12 +74,26 @@ impl Monitor {
             tail,
             block: None,
             result: None,
+            services: None,
         }
     }
 }
 
+/// Points the usual tools at a cache a sandboxed command can write to, since theirs live in the
+/// home folder. Copies rather than links, so a change in the workspace can't reach a cache.
+fn cache_env(cache: &std::path::Path) -> Vec<(String, String)> {
+    let cache = cache.to_string_lossy().into_owned();
+    vec![
+        ("XDG_CACHE_HOME".to_owned(), cache.clone()),
+        ("UV_CACHE_DIR".to_owned(), format!("{cache}/uv")),
+        ("UV_LINK_MODE".to_owned(), "copy".to_owned()),
+        ("PIP_CACHE_DIR".to_owned(), format!("{cache}/pip")),
+        ("npm_config_cache".to_owned(), format!("{cache}/npm")),
+    ]
+}
+
 fn runs_commands(kind: &str, tools: Option<ToolProfile>) -> bool {
-    kind == "check" || tools == Some(ToolProfile::Build)
+    kind == "check" || kind == "setup" || tools == Some(ToolProfile::Build)
 }
 
 impl Inner {
@@ -193,7 +213,10 @@ impl Inner {
         }
         let started = match &step {
             WorkflowStep::Agent(spec) => self.spawn_agent(&attempt, &project_id, spec, resume),
-            WorkflowStep::Check { run, .. } => self.spawn_check(&attempt, &project_id, run),
+            WorkflowStep::Setup { run, .. } => self.spawn_command(&attempt, &project_id, run, true),
+            WorkflowStep::Check { run, .. } => {
+                self.spawn_command(&attempt, &project_id, run, false)
+            }
             WorkflowStep::Deliver { .. } => {
                 self.release_slot(&attempt_id, &project_id, holds_project, counts_as_agent);
                 self.deliver(&attempt);
@@ -263,6 +286,38 @@ impl Inner {
         self.store
             .patch_attempt(&attempt.id, &[("sha_before", Value::Text(sha.clone()))])?;
         Ok((git, sha))
+    }
+
+    /// Starts the project's services for a step that runs commands, and works out the variables
+    /// that point at them. All of it goes in the audit log.
+    fn start_services(
+        &self,
+        attempt: &Attempt,
+        project: &keel_store::Project,
+        path_env: &str,
+    ) -> Result<StartedServices> {
+        if project.services.is_empty() && project.env.is_empty() {
+            return Ok((None, Vec::new()));
+        }
+        let root = services::root_for(&project.id);
+        let env = services::resolve_env(&project.env, &project.services, &root);
+        let set = ServiceSet::start(
+            &project.services,
+            &root,
+            &self.run_dir(&attempt.run_id),
+            path_env,
+        )
+        .map_err(Error::Blocked)?;
+        self.store.append_event(
+            &attempt.id,
+            "services",
+            &json!({
+                "services": project.services,
+                "sockets": project.services.iter().map(|s| services::socket_path(&root, s)).collect::<Vec<_>>(),
+                "env": env.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect::<Vec<_>>(),
+            }),
+        )?;
+        Ok((Some(set), env))
     }
 
     fn spawn_agent(
@@ -336,18 +391,32 @@ impl Inner {
 
         let raw_path = PathBuf::from(&attempt.raw_path);
         let stderr_path = dir.join(format!("{stem}.stderr.txt"));
-        let child =
-            process::spawn_step(command.command(spec), &prompt_file, &raw_path, &stderr_path)?;
-        self.track_process(attempt, child, project_id).map(Some)
+        // Only steps that can run commands get services. A read-only step has no way to use them.
+        let (service_set, service_env) = if spec.tools == ToolProfile::Build {
+            let project = store.project(project_id)?;
+            self.start_services(attempt, &project, &tools.path_env)?
+        } else {
+            (None, Vec::new())
+        };
+        let mut process_command = command.command(spec);
+        if spec.tools == ToolProfile::Build {
+            process_command.envs(cache_env(&workspace.join(RUN_CACHE)));
+        }
+        process_command.envs(service_env);
+        let child = process::spawn_step(process_command, &prompt_file, &raw_path, &stderr_path)?;
+        let mut monitor = self.track_process(attempt, child, project_id)?;
+        monitor.services = service_set;
+        Ok(Some(monitor))
     }
 
     /// A check is Keel running a command, with no model. It's sandboxed like an agent's commands,
     /// because tests and Makefiles are files an agent may have just edited.
-    fn spawn_check(
+    fn spawn_command(
         &self,
         attempt: &Attempt,
         project_id: &str,
         command_text: &str,
+        is_setup: bool,
     ) -> Result<Option<Monitor>> {
         let store = &self.store;
         store.set_state(&attempt.id, AttemptState::Preparing, None)?;
@@ -358,7 +427,28 @@ impl Inner {
         let workspace = PathBuf::from(&attempt.workspace);
         let dir = self.run_dir(&attempt.run_id);
         let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-        let profile = settings::check_profile(&workspace, &home, &project.allowed_read);
+        let sockets = services::socket_dirs(&services::root_for(project_id), &project.services);
+        // Setup fills a cache shared by the project's runs. Everything after it gets one of its
+        // own, inside the private copy, so nothing an agent wrote can reach the next run.
+        let shared_cache = self.mirror(project_id).with_file_name("cache");
+        let (profile, cache) = if is_setup {
+            std::fs::create_dir_all(&shared_cache)?;
+            (
+                settings::setup_profile(
+                    &workspace,
+                    &home,
+                    &project.allowed_read,
+                    &sockets,
+                    &shared_cache,
+                ),
+                shared_cache,
+            )
+        } else {
+            (
+                settings::check_profile(&workspace, &home, &project.allowed_read, &sockets),
+                workspace.join(RUN_CACHE),
+            )
+        };
 
         store.append_event(
             &attempt.id,
@@ -383,8 +473,12 @@ impl Inner {
                     .into_iter()
                     .filter(|(name, _)| !name.starts_with("CLAUDE_") && !name.starts_with("BASH_")),
             );
+        let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
+        command.envs(cache_env(&cache)).envs(service_env);
         let child = process::spawn_step(command, &prompt_file, &raw_path, &stderr_path)?;
-        self.track_process(attempt, child, project_id).map(Some)
+        let mut monitor = self.track_process(attempt, child, project_id)?;
+        monitor.services = service_set;
+        Ok(Some(monitor))
     }
 
     fn track_process(&self, attempt: &Attempt, child: Child, project_id: &str) -> Result<Monitor> {
@@ -466,6 +560,22 @@ impl Inner {
             }
         }
         if alive {
+            let mut context = context;
+            if context.holds_project {
+                // The bridges died with the app. The step may still need them.
+                let project = self.store.project(&context.project_id)?;
+                let path_env = locked(&self.tools).path_env.clone();
+                match self.start_services(attempt, &project, &path_env) {
+                    Ok((set, _)) => context.services = set,
+                    Err(error) => {
+                        let _ = self.store.append_event(
+                            &attempt.id,
+                            "servicesLost",
+                            &json!({ "error": error.to_string() }),
+                        );
+                    }
+                }
+            }
             let inner = self.clone();
             std::thread::spawn(move || inner.monitor(context));
         } else {
@@ -728,6 +838,9 @@ impl Inner {
         exit_code: Option<i32>,
         process_lost: bool,
     ) {
+        // First of all, so that "finished" means nothing is left running, and so the next step
+        // can open the same sockets.
+        drop(m.services.take());
         if let Ok(lines) = m.tail.read_new(&m.raw_path)
             && !lines.is_empty()
         {
@@ -775,7 +888,7 @@ impl Inner {
             }
         }
 
-        if m.kind == "check" {
+        if m.kind == "check" || m.kind == "setup" {
             let output = std::fs::read(&m.raw_path).unwrap_or_default();
             let stderr = std::fs::read(m.raw_path.with_file_name(format!(
                     "{}.stderr.txt",
@@ -793,7 +906,7 @@ impl Inner {
             let _ = store.append_event(
                 &m.attempt_id,
                 "checkResult",
-                &json!({ "exitCode": exit_code, "stdout": tail(&output), "stderr": tail(&stderr), "truncated": output.len() > EVENT_TEXT_LIMIT, "leftWorkspaceDirty": dirty }),
+                &json!({ "kind": m.kind, "exitCode": exit_code, "stdout": tail(&output), "stderr": tail(&stderr), "truncated": output.len() > EVENT_TEXT_LIMIT, "leftWorkspaceDirty": dirty }),
             );
         }
 
@@ -876,22 +989,21 @@ fn classify(
     if stop_requested {
         return (AttemptState::Stopped, None);
     }
-    if m.kind == "check" {
+    if m.kind == "check" || m.kind == "setup" {
+        let failed = |exit_code| {
+            if m.kind == "setup" {
+                Reason::SetupFailed { exit_code }
+            } else {
+                Reason::CheckFailed { exit_code }
+            }
+        };
         return match exit_code {
             Some(0) => (AttemptState::Succeeded, None),
-            Some(code) => (
-                AttemptState::Failed,
-                Some(Reason::CheckFailed {
-                    exit_code: Some(code),
-                }),
-            ),
+            Some(code) => (AttemptState::Failed, Some(failed(Some(code)))),
             None if process_lost || m.child.is_none() => {
                 (AttemptState::Interrupted, Some(Reason::AgentLost))
             }
-            None => (
-                AttemptState::Failed,
-                Some(Reason::CheckFailed { exit_code: None }),
-            ),
+            None => (AttemptState::Failed, Some(failed(None))),
         };
     }
     match &m.result {

@@ -45,22 +45,37 @@ export interface Preflight {
   blocker: Reason | null;
 }
 
+export type Service =
+  | { type: "bridge"; name: string; port: number; socket: string | null }
+  | { type: "command"; name: string; start: string; socket: string | null };
+
+export interface EnvVar {
+  name: string;
+  value: string;
+}
+
 export interface Project {
   id: string;
   name: string;
   path: string;
   githubAccount: string | null;
   githubRepo: string | null;
+  setupCommand: string | null;
   checkCommand: string | null;
   allowedDomains: string[];
   allowedRead: string[];
+  services: Service[];
+  env: EnvVar[];
 }
 
 export interface ProjectSettings {
   githubAccount: string | null;
+  setupCommand: string | null;
   checkCommand: string | null;
   allowedDomains: string[];
   allowedRead: string[];
+  services: Service[];
+  env: EnvVar[];
 }
 
 export interface GithubAccount {
@@ -95,6 +110,7 @@ export interface Decision {
 
 export type WorkflowStep =
   | { type: "agent"; id: string; model: string; tools: ToolProfile }
+  | { type: "setup"; id: string; run: string }
   | { type: "check"; id: string; run: string }
   | { type: "approval"; id: string }
   | { type: "deliver"; id: string };
@@ -156,7 +172,7 @@ export interface Attempt {
   id: string;
   runId: string;
   stepId: string;
-  kind: "agent" | "check" | "approval" | "deliver";
+  kind: "agent" | "setup" | "check" | "approval" | "deliver";
   exitCode: number | null;
   number: number;
   state: AttemptState;
@@ -164,7 +180,7 @@ export interface Attempt {
   modelRequested: string;
   modelActual: string | null;
   effort: string | null;
-  tools: ToolProfile | "check" | "none";
+  tools: ToolProfile | "setup" | "check" | "none";
   language: string;
   cliVersion: string | null;
   apiKeySource: string | null;

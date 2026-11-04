@@ -55,8 +55,9 @@ refs in the clone, which affects nothing else.
 ### Decision
 
 Keel starts each project's services outside the sandbox and connects them by Unix socket, with
-a bridge for databases in Docker. This arrives with M2. Linux waits until it has a safe option,
-so v0.1 is macOS only.
+a bridge for databases in Docker. Linux waits until it has a safe option, so v0.1 is macOS only.
+A real agent and a real check have since reached Postgres in Docker this way, with direct TCP
+still blocked (`crates/keel-engine/examples/services_e2e.rs`).
 
 ## Findings for the harness
 
@@ -72,12 +73,13 @@ so v0.1 is macOS only.
 ## Not resolved
 
 - **Linux:** nothing was run there.
-- **Toolchains in the home folder:** `uv`, `cargo` and `nvm` were not tried under deny-home.
-  Each project will likely need a list of allowed paths.
+- **Toolchains in the home folder:** `uv` works, through a setup step with internet access that
+  runs before any agent, and a cache each run keeps in its private copy. `cargo` and `nvm` haven't
+  been tried, and will likely need their folders listed in the project's settings.
 - **Parallel Bash:** one attempt ran in sequence, even when asked for parallel calls. That
   does not prove it can't happen, so the engine keeps its one-Bash-step rule.
 - **Separate Claude accounts:** a fresh `CLAUDE_CONFIG_DIR` reports logged out, but no second
   login was tried.
 - **Launch from Finder:** needs a built app, so it moves to M1.
 - **Fixtures not captured:** API retries and a real rate limit.
-- A real test suite has not run under this policy.
+- A large real test suite has not run under this policy. A small one with `uv`, `pytest` and Postgres has.

@@ -148,9 +148,12 @@ fn world() -> World {
             &project.id,
             &ProjectSettings {
                 github_account: Some("alice".into()),
+                setup_command: None,
                 check_command: None,
                 allowed_domains: vec![],
                 allowed_read: vec![],
+                services: vec![],
+                env: vec![],
             },
         )
         .unwrap();
