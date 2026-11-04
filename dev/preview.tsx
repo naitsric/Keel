@@ -11,7 +11,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
-import type { Attempt, AttemptState, AuditEvent, Preflight, Reason, RunRow } from "../src/lib/api";
+import type { Attempt, AttemptState, AuditEvent, Preflight, Reason, Run, RunRow, WorkflowStep } from "../src/lib/api";
 import { useApp } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -35,6 +35,8 @@ const attempt: Attempt = {
   id: "a1",
   runId: "r1",
   stepId: "builder",
+  kind: "agent",
+  exitCode: null,
   number: 1,
   state,
   reason: REASONS[state] ?? null,
@@ -64,6 +66,37 @@ const attempt: Attempt = {
   startedAt: at(state === "stalled" ? 14 : 3),
   finishedAt: finished ? at(1) : null,
   lastActivityAt: at(state === "stalled" ? 11 : 1),
+};
+
+const workflow: WorkflowStep[] = [
+  { type: "agent", id: "spec", model: "opus", tools: "readOnly" },
+  { type: "agent", id: "builder", model: "sonnet", tools: "build" },
+  { type: "check", id: "check", run: "make test" },
+  { type: "approval", id: "approval" },
+  { type: "deliver", id: "pull-request" },
+];
+const delivered = params.get("flow") === "delivered";
+const waiting = params.get("flow") === "approval" || delivered;
+const specAttempt: Attempt = { ...attempt, id: "a0", stepId: "spec", tools: "readOnly", state: "succeeded", reason: null, modelActual: "claude-opus-5-5", filesChanged: null, resultText: "1. add returns the sum.\n2. The tests pass.", finishedAt: at(2) };
+const builtAttempt: Attempt = { ...attempt, state: "succeeded", reason: null, shaAfter: "28c696fd11223344556677889900aabbccddeeff", finishedAt: at(1), rawSha256: "9f2c", resultText: "I fixed `add` in calc.py: it subtracted instead of adding.\n\nTests: `make test` passes.", filesChanged: params.get("workflows") === "1" ? ["calc.py", ".github/workflows/ci.yml"] : ["calc.py"] };
+const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12" };
+const approvalAttempt: Attempt = { ...attempt, id: "a3", stepId: "approval", kind: "approval", tools: "none", state: delivered ? "succeeded" : "waitingApproval", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, rawSha256: null, finishedAt: delivered ? at(0) : null };
+const prAttempt: Attempt = { ...attempt, id: "a4", stepId: "pull-request", kind: "deliver", tools: "none", state: "succeeded", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: "https://github.com/acme/app/pull/12", rawSha256: null, finishedAt: at(0) };
+const attemptsList: Attempt[] = waiting ? [specAttempt, builtAttempt, checkAttempt, approvalAttempt, ...(delivered ? [prAttempt] : [])] : [attempt];
+const run: Run = {
+  id: "r1",
+  projectId: "p1",
+  title: "#7 The add function in calc.py is wrong",
+  baseRef: "main",
+  request: "Fix add",
+  workflow: waiting ? workflow : [{ type: "agent", id: "builder", model: "sonnet", tools: "build" }],
+  language: "en",
+  sourceIssue: waiting ? { number: 7, title: "add is wrong", author: "someone", url: "https://github.com/acme/app/issues/7" } : null,
+  branch: "keel/5e882d0f",
+  prUrl: delivered ? "https://github.com/acme/app/pull/12" : null,
+  prNumber: delivered ? 12 : null,
+  createdAt: at(4),
+  finishedAt: delivered ? at(0) : null,
 };
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a1", at: at(3), kind, data });
@@ -99,11 +132,13 @@ const preflight: Preflight = {
   auth: params.get("session") === "out" ? { loggedIn: false, method: null, provider: null, subscription: null, email: null, orgName: null, expiresAt: null } : { loggedIn: true, method: "claude.ai", provider: "firstParty", subscription: "max", email: "you@example.com", orgName: null, expiresAt: null },
   ignoredEnv: params.get("env") === "key" ? ["ANTHROPIC_API_KEY"] : [],
   blocker: params.get("session") === "out" ? { code: "claudeLoggedOut" } : null,
+  ghFound: true,
 };
 
 const row = (id: string, title: string, s: AttemptState, reason: Reason | null, model: string, turns: number | null, minutes: number): RunRow => ({
   id,
   title,
+  prUrl: s === "succeeded" ? "https://github.com/acme/app/pull/12" : null,
   projectId: "p1",
   projectName: "demo",
   stepId: "builder",
@@ -135,9 +170,29 @@ mockIPC((command) => {
     case "refresh_session":
       return preflight;
     case "overview":
-      return { runs, projects: [{ id: "p1", name: "demo", path: "/Users/you/demo" }], totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
+      return { runs, projects: [{ id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", checkCommand: "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.cargo"] }], totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
+    case "run_get":
+      return run;
     case "run_attempts":
-      return [attempt];
+      return attemptsList;
+    case "github_status":
+      return {
+        repo: "acme/app",
+        accounts: [
+          { login: "you-personal", active: true, ok: true, scopes: ["repo"] },
+          { login: "you-work", active: false, ok: true, scopes: ["repo", "admin:org", "workflow"] },
+        ],
+        info: { defaultBranch: "main", permission: "ADMIN", private: true, defaultBranchProtected: false },
+        excessScopes: ["admin:org", "workflow"],
+        error: null,
+      };
+    case "decisions_list":
+      return [{ seq: 1, at: at(2000), answer: "reject", text: "Use the existing retry helper, not a new one." }];
+    case "issues_list":
+      return [
+        { number: 7, title: "The add function in calc.py is wrong", author: "someone", url: "u", body: "b" },
+        { number: 9, title: "Holiday repeated in 2030", author: "other", url: "u", body: "b" },
+      ];
     case "attempt_events":
       return events;
     case "attempt_diff":

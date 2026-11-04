@@ -39,8 +39,8 @@ impl ToolProfile {
     }
 }
 
-/// One step as the user defined it, including its own model.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One agent step as the user defined it, including its own model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StepSpec {
     pub id: String,
@@ -50,6 +50,42 @@ pub struct StepSpec {
     pub prompt: String,
     pub max_turns: Option<u32>,
     pub max_budget_usd: Option<f64>,
+}
+
+/// One step of a workflow. There are few kinds on purpose.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum WorkflowStep {
+    /// An agent working in the run's private copy.
+    Agent(StepSpec),
+    /// A command Keel runs itself, in a sandbox, with no model involved. Exit 0 passes.
+    Check { id: String, run: String },
+    /// Waits for a person, for as long as it takes.
+    Approval { id: String },
+    /// Keel, not an agent, pushes the branch and opens a draft pull request.
+    Deliver { id: String },
+}
+
+impl WorkflowStep {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Agent(step) => &step.id,
+            Self::Check { id, .. } | Self::Approval { id } | Self::Deliver { id } => id,
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Agent(_) => "agent",
+            Self::Check { .. } => "check",
+            Self::Approval { .. } => "approval",
+            Self::Deliver { .. } => "deliver",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -68,6 +104,10 @@ pub enum AttemptState {
     Interrupted,
     /// Can't continue until a person acts.
     Blocked,
+    /// An approval step waiting for an answer. Nothing is running.
+    WaitingApproval,
+    /// A person rejected it at an approval step. The run ends here.
+    Rejected,
     Abandoned,
 }
 
@@ -85,6 +125,8 @@ impl AttemptState {
             Self::Stopped => "stopped",
             Self::Interrupted => "interrupted",
             Self::Blocked => "blocked",
+            Self::WaitingApproval => "waitingApproval",
+            Self::Rejected => "rejected",
             Self::Abandoned => "abandoned",
         }
     }
@@ -100,6 +142,8 @@ impl AttemptState {
             "stopped" => Self::Stopped,
             "interrupted" => Self::Interrupted,
             "blocked" => Self::Blocked,
+            "waitingApproval" => Self::WaitingApproval,
+            "rejected" => Self::Rejected,
             "abandoned" => Self::Abandoned,
             _ => return None,
         })
@@ -161,4 +205,22 @@ pub enum Reason {
         detail: String,
     },
     AgentLost,
+    /// A check command ended with this code.
+    CheckFailed {
+        exit_code: Option<i32>,
+    },
+    NoGithubRemote,
+    GithubAccountMissing,
+    GhMissing,
+    /// `kind` says what to fix: `notSignedIn`, `noPermission`, `sso`, `repoRules`,
+    /// `signedCommits`, `workflowScope` or `other`.
+    DeliveryFailed {
+        kind: String,
+        detail: String,
+    },
+    NothingToDeliver,
+    /// Keel refuses to push to anything but its own branches.
+    UnsafeBranch {
+        branch: String,
+    },
 }

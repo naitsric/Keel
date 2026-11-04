@@ -53,7 +53,9 @@
     "stopped": "Detenido",
     "interrupted": "Interrumpido",
     "blocked": "Bloqueado",
-    "abandoned": "Abandonado"
+    "abandoned": "Abandonado",
+    "waitingApproval": "Te espera",
+    "rejected": "Rechazado"
   },
   "reasons": {
     "claudeMissing": "Claude Code no está instalado, o Keel no lo encuentra.",
@@ -73,7 +75,14 @@
     "resultError": "El agente terminó con un error ({{subtype}}): {{detail}}",
     "exitedWithoutResult": "Claude Code salió con el código {{exitCode}} sin reportar un resultado.",
     "prepareFailed": "No se pudo preparar la copia de trabajo: {{detail}}",
-    "agentLost": "Keel perdió de vista al agente, por ejemplo porque se cerró la app o se apagó el Mac."
+    "agentLost": "Keel perdió de vista al agente, por ejemplo porque se cerró la app o se apagó el Mac.",
+    "checkFailed": "La verificación falló con código {{exitCode}}.",
+    "noGithubRemote": "El repo de este proyecto no está en GitHub, así que no hay dónde abrir un pull request.",
+    "githubAccountMissing": "Elige qué cuenta de GitHub usa este proyecto.",
+    "ghMissing": "GitHub CLI (gh) no está instalado, o Keel no lo encuentra.",
+    "deliveryFailed": "No se pudo entregar a GitHub: {{detail}}",
+    "nothingToDeliver": "No hay nada que entregar: ningún paso cambió archivos.",
+    "unsafeBranch": "Keel solo sube sus propias ramas, y esta ejecución está en {{branch}}."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
@@ -108,7 +117,26 @@
       "high": "Alto",
       "xhigh": "Muy alto",
       "max": "Máximo"
-    }
+    },
+    "workflow": "Workflow",
+    "workflowFull": "Completo, hasta un pull request",
+    "workflowSingle": "Un paso",
+    "workflowFullHint": "Spec writer, builder, verificación, tu aprobación y un pull request en borrador.",
+    "specModel": "Modelo del spec writer",
+    "builderModel": "Modelo del builder",
+    "source": "De dónde sale",
+    "sourceText": "Escribirlo",
+    "sourceIssue": "Issue de GitHub",
+    "issuesLoading": "Cargando issues…",
+    "issuesEmpty": "Este repo no tiene issues abiertos.",
+    "issueChoose": "Elige un issue",
+    "issueNote": "Un issue lo puede escribir cualquiera, así que los agentes lo reciben como descripción de un problema, no como instrucciones.",
+    "issueBy": "de {{author}}",
+    "issueExtra": "¿Algo que agregar? (opcional)",
+    "checkCommand": "Verificación: {{command}}",
+    "checkNone": "Este proyecto no tiene comando de verificación, así que ese paso se omite. Configúralo en Ajustes.",
+    "needsGithub": "Este workflow necesita una cuenta de GitHub para el proyecto.",
+    "openSettings": "Abrir Ajustes"
   },
   "run": {
     "attemptTitle": "Intento {{number}}",
@@ -146,14 +174,32 @@
     "abandon": "Dejarlo",
     "signIn": "Iniciar sesión en Claude Code",
     "decideStalled": "Elige arriba qué hacer con él.",
-    "noResultEnded": "Terminó antes de escribir una explicación. La actividad de abajo muestra lo que hizo."
+    "noResultEnded": "Terminó antes de escribir una explicación. La actividad de abajo muestra lo que hizo.",
+    "pending": "Sin empezar",
+    "pullRequest": "Pull request #{{number}}",
+    "openPr": "Abrir en GitHub",
+    "fromIssue": "Del issue #{{number}}",
+    "base": "Basado en {{base}}",
+    "decideApproval": "Aprueba o rechaza abajo.",
+    "decideDelivered": "Revisa y mergea el borrador en GitHub. Keel no mergea.",
+    "decideRejected": "Nada. Lo rechazaste, y tu motivo llegará a las próximas ejecuciones de este proyecto.",
+    "approvalTitle": "¿Esto debe convertirse en un pull request?",
+    "approvalBody": "Nada ha salido de tu Mac. Al aprobar, se sube una rama y se abre un borrador.",
+    "approvalNote": "Nota para este proyecto (opcional)",
+    "approvalNotePlaceholder": "Una decisión que las próximas ejecuciones deben seguir. Si rechazas, di por qué.",
+    "approve": "Aprobar y abrir borrador",
+    "reject": "Rechazar",
+    "workflowWarning": "Este cambio edita `.github/workflows`. Esos archivos pueden correr con los secretos del repo en cuanto se suba la rama. Léelos primero.",
+    "checksPassed": "{{passed}} de {{total}} verificaciones pasaron.",
+    "checkFailedSummary": "Una verificación falló, así que no siguió adelante."
   },
   "tabs": {
     "activity": "Actividad",
     "commands": "Comandos",
     "changes": "Cambios",
     "prompt": "Prompt",
-    "details": "Detalles"
+    "details": "Detalles",
+    "output": "Salida"
   },
   "activity": {
     "empty": "Todavía no hay actividad.",
@@ -174,7 +220,15 @@
     "abandoned": "Dejaste esta ejecución",
     "recovered": "Keel se reabrió y retomó este paso",
     "snapshotFailed": "No se pudieron registrar los cambios: {{error}}",
-    "result": "El agente terminó"
+    "result": "El agente terminó",
+    "waiting": "Te espera",
+    "decisionApprove": "Lo aprobaste",
+    "decisionReject": "Lo rechazaste",
+    "decisionNote": "Tu nota: {{text}}",
+    "checkResult": "La verificación terminó con código {{code}}",
+    "dirty": "Cambió archivos en la copia privada, cosa que una verificación no debería hacer.",
+    "delivered": "Borrador abierto con {{account}}: {{url}}",
+    "startedCheck": "Corriendo: {{command}}"
   },
   "commands": {
     "empty": "No corrió ningún comando.",
@@ -221,7 +275,33 @@
     "languages": {
       "en": "English",
       "es": "Español"
-    }
+    },
+    "projects": "Proyectos",
+    "noProjects": "Todavía no hay proyectos. Agrega uno al lanzar una ejecución.",
+    "github": "GitHub",
+    "githubAccount": "Cuenta",
+    "githubNone": "Ninguna",
+    "githubActive": "activa en tu terminal",
+    "githubHint": "Keel usa esta cuenta solo para este proyecto y nunca cambia la que está activa en tu terminal.",
+    "githubRepo": "Repo: {{repo}}",
+    "githubNoRepo": "El repo de este proyecto no está en GitHub.",
+    "githubPermission": "Permiso: {{permission}}",
+    "githubDefault": "Rama principal: {{branch}}",
+    "githubUnprotected": "{{branch}} no está protegida, así que cualquiera con permiso de escritura puede subir directo. Keel nunca lo hace, pero protegerla agrega una salvaguarda.",
+    "githubScopes": "El token de esta cuenta también tiene {{scopes}}. Keel no los necesita y no puede reducirlos. Una cuenta dedicada limita lo que podría salir mal.",
+    "checkCommand": "Comando de verificación",
+    "checkCommandHint": "Corre después del builder, en un sandbox sin red y sin acceso a tu carpeta personal. El código de salida 0 significa que pasó.",
+    "checkCommandPlaceholder": "make test",
+    "domains": "Dominios a los que llegan los agentes",
+    "domainsHint": "Uno por línea. No se llega a nada más.",
+    "readPaths": "Otras carpetas que los agentes pueden leer",
+    "readPathsHint": "Una por línea, como ~/.cargo. Tu carpeta personal queda oculta en lo demás.",
+    "save": "Guardar",
+    "saved": "Guardado",
+    "decisions": "Decisiones",
+    "decisionsHint": "Lo que dijiste en una aprobación. Los agentes de este proyecto las siguen.",
+    "decisionsEmpty": "Todavía no hay decisiones.",
+    "retire": "Retirar"
   },
   "quit": {
     "title": "Hay pasos en curso",
@@ -248,5 +328,14 @@
     "minimize": "Minimizar",
     "zoom": "Zoom",
     "close": "Cerrar ventana"
+  },
+  "deliveryKinds": {
+    "notSignedIn": "Esta cuenta de GitHub no tiene sesión. Corre `gh auth login` e inténtalo de nuevo.",
+    "noPermission": "Esta cuenta de GitHub no puede escribir en el repo. Dale acceso o elige otra.",
+    "sso": "Tu organización exige SSO para este token. Autorízalo con `gh auth refresh` e inténtalo de nuevo.",
+    "repoRules": "Las reglas del repo rechazaron este push.",
+    "signedCommits": "Este repo exige commits firmados, y Keel todavía no puede producirlos.",
+    "workflowScope": "Este cambio edita `.github/workflows`, y el token de la cuenta no tiene el permiso `workflow`. Corre `gh auth refresh -s workflow` con esa cuenta activa e inténtalo de nuevo.",
+    "other": "GitHub lo rechazó."
   }
 }

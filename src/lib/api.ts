@@ -10,6 +10,8 @@ export type AttemptState =
   | "stopped"
   | "interrupted"
   | "blocked"
+  | "waitingApproval"
+  | "rejected"
   | "abandoned";
 
 export type ToolProfile = "readOnly" | "build";
@@ -36,6 +38,7 @@ export type VersionCheck =
 export interface Preflight {
   claudeFound: boolean;
   gitFound: boolean;
+  ghFound: boolean;
   version: VersionCheck | null;
   auth: AuthStatus | null;
   ignoredEnv: string[];
@@ -46,11 +49,80 @@ export interface Project {
   id: string;
   name: string;
   path: string;
+  githubAccount: string | null;
+  githubRepo: string | null;
+  checkCommand: string | null;
+  allowedDomains: string[];
+  allowedRead: string[];
 }
+
+export interface ProjectSettings {
+  githubAccount: string | null;
+  checkCommand: string | null;
+  allowedDomains: string[];
+  allowedRead: string[];
+}
+
+export interface GithubAccount {
+  login: string;
+  active: boolean;
+  ok: boolean;
+  scopes: string[];
+}
+
+export interface GithubStatus {
+  repo: string | null;
+  accounts: GithubAccount[];
+  info: { defaultBranch: string; permission: string; private: boolean; defaultBranchProtected: boolean | null } | null;
+  excessScopes: string[];
+  error: Reason | null;
+}
+
+export interface Issue {
+  number: number;
+  title: string;
+  author: string;
+  url: string;
+  body: string;
+}
+
+export interface Decision {
+  seq: number;
+  at: string;
+  answer: "approve" | "reject";
+  text: string;
+}
+
+export type WorkflowStep =
+  | { type: "agent"; id: string; model: string; tools: ToolProfile }
+  | { type: "check"; id: string; run: string }
+  | { type: "approval"; id: string }
+  | { type: "deliver"; id: string };
+
+export interface Run {
+  id: string;
+  projectId: string;
+  title: string;
+  baseRef: string | null;
+  request: string;
+  workflow: WorkflowStep[];
+  language: string;
+  sourceIssue: { number: number; title: string; author: string; url: string } | null;
+  branch: string | null;
+  prUrl: string | null;
+  prNumber: number | null;
+  createdAt: string;
+  finishedAt: string | null;
+}
+
+export type WorkflowChoice =
+  | { mode: "full"; specModel: string; builderModel: string }
+  | { mode: "single"; stepId: string; model: string; effort: string | null; tools: ToolProfile; maxTurns: number | null };
 
 export interface RunRow {
   id: string;
   title: string;
+  prUrl: string | null;
   projectId: string;
   projectName: string;
   stepId: string;
@@ -84,13 +156,15 @@ export interface Attempt {
   id: string;
   runId: string;
   stepId: string;
+  kind: "agent" | "check" | "approval" | "deliver";
+  exitCode: number | null;
   number: number;
   state: AttemptState;
   reason: Reason | null;
   modelRequested: string;
   modelActual: string | null;
   effort: string | null;
-  tools: ToolProfile;
+  tools: ToolProfile | "check" | "none";
   language: string;
   cliVersion: string | null;
   apiKeySource: string | null;
@@ -134,12 +208,9 @@ export interface CommandError {
 
 export interface RunRequest {
   projectId: string;
-  stepId: string;
   prompt: string;
-  model: string;
-  effort: string | null;
-  tools: ToolProfile;
-  maxTurns: number | null;
+  issue: Issue | null;
+  workflow: WorkflowChoice;
   language: string;
 }
 
@@ -149,7 +220,15 @@ export const api = {
   overview: () => invoke<Overview>("overview"),
   projectAdd: (path: string) => invoke<Project>("project_add", { path }),
   runStart: (request: RunRequest) => invoke<string>("run_start", { request }),
+  runGet: (runId: string) => invoke<Run>("run_get", { runId }),
   runAttempts: (runId: string) => invoke<Attempt[]>("run_attempts", { runId }),
+  projectUpdate: (projectId: string, settings: ProjectSettings) => invoke<Project>("project_update", { projectId, settings }),
+  githubStatus: (projectId: string) => invoke<GithubStatus>("github_status", { projectId }),
+  issuesList: (projectId: string) => invoke<Issue[]>("issues_list", { projectId }),
+  decisionsList: (projectId: string) => invoke<Decision[]>("decisions_list", { projectId }),
+  decisionRetire: (seq: number) => invoke<void>("decision_retire", { seq }),
+  approvalAnswer: (attemptId: string, approve: boolean, text: string) => invoke<void>("approval_answer", { attemptId, approve, text }),
+  openGithubUrl: (url: string) => invoke<void>("open_github_url", { url }),
   attemptEvents: (attemptId: string, afterSeq: number) => invoke<AuditEvent[]>("attempt_events", { attemptId, afterSeq }),
   attemptDiff: (attemptId: string) => invoke<string>("attempt_diff", { attemptId }),
   attemptRawCheck: (attemptId: string) => invoke<RawCheck>("attempt_raw_check", { attemptId }),

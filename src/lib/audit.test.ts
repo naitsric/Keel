@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuditEvent } from "./api";
-import { activityFrom, commandsFrom, toolSummary } from "./audit";
+import { activityFrom, commandsFrom, explainingAttempt, filesChangedBy, toolSummary, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -38,5 +38,26 @@ describe("toolSummary", () => {
     expect(toolSummary("Read", { file_path: "a.py" })).toBe("a.py");
     expect(toolSummary("Grep", { pattern: "x" })).toBe("x");
     expect(toolSummary("Read", null)).toBe("");
+  });
+});
+
+describe("run summary", () => {
+  it("lists each changed file once", () => {
+    expect(filesChangedBy([{ filesChanged: ["a", "b"] }, { filesChanged: null }, { filesChanged: ["b", "c"] }])).toEqual(["a", "b", "c"]);
+  });
+
+  it("flags workflow files, which can run with the repo's secrets", () => {
+    expect(touchesWorkflows(["src/a.ts"])).toBe(false);
+    expect(touchesWorkflows(["src/a.ts", ".github/workflows/ci.yml"])).toBe(true);
+    expect(touchesWorkflows([".github/CODEOWNERS"])).toBe(false);
+  });
+
+  it("lets the builder explain the run rather than the spec writer", () => {
+    const spec = { kind: "agent", tools: "readOnly", resultText: "spec" };
+    const builder = { kind: "agent", tools: "build", resultText: "built" };
+    const check = { kind: "check", tools: "check", resultText: null };
+    expect(explainingAttempt([spec, builder, check])).toBe(builder);
+    expect(explainingAttempt([spec, check])).toBe(spec);
+    expect(explainingAttempt([check])).toBeUndefined();
   });
 });

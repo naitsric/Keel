@@ -6,10 +6,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use keel_core::{Reason, StepSpec, ToolProfile};
-use keel_engine::{Config, Engine, Error as EngineError, Preflight, RawCheck, StartRun};
+use keel_core::{Reason, StepSpec, ToolProfile, WorkflowStep};
+use keel_engine::{
+    Config, Engine, Error as EngineError, GithubStatus, Preflight, RawCheck, StartRun,
+    full_workflow, request_from_issue,
+};
 use keel_harness::Tools;
-use keel_store::{Attempt, Event, Project, RunRow, Store, Totals};
+use keel_harness::github::Issue;
+use keel_store::{Attempt, Decision, Event, Project, ProjectSettings, Run, RunRow, Store, Totals};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
@@ -137,34 +141,170 @@ fn project_add(state: State<'_, AppState>, path: String) -> CommandResult<Projec
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct ProjectSettingsInput {
+    github_account: Option<String>,
+    check_command: Option<String>,
+    allowed_domains: Vec<String>,
+    allowed_read: Vec<String>,
+}
+
+#[tauri::command(async)]
+fn project_update(
+    state: State<'_, AppState>,
+    project_id: String,
+    settings: ProjectSettingsInput,
+) -> CommandResult<Project> {
+    let clean =
+        |value: Option<String>| value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+    Ok(state.engine.update_project(
+        &project_id,
+        &ProjectSettings {
+            github_account: clean(settings.github_account),
+            check_command: clean(settings.check_command),
+            allowed_domains: settings.allowed_domains,
+            allowed_read: settings.allowed_read,
+        },
+    )?)
+}
+
+#[tauri::command(async)]
+fn github_status(state: State<'_, AppState>, project_id: String) -> CommandResult<GithubStatus> {
+    state.ready.wait();
+    Ok(state.engine.github_status(&project_id)?)
+}
+
+#[tauri::command(async)]
+fn issues_list(state: State<'_, AppState>, project_id: String) -> CommandResult<Vec<Issue>> {
+    state.ready.wait();
+    Ok(state.engine.issues(&project_id)?)
+}
+
+#[tauri::command(async)]
+fn decisions_list(state: State<'_, AppState>, project_id: String) -> CommandResult<Vec<Decision>> {
+    Ok(state.engine.decisions(&project_id)?)
+}
+
+#[tauri::command(async)]
+fn decision_retire(state: State<'_, AppState>, seq: i64) -> CommandResult<()> {
+    Ok(state.engine.retire_decision(seq)?)
+}
+
+/// How a run is defined: the full workflow, or one agent step.
+#[derive(Deserialize)]
+#[serde(
+    tag = "mode",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+enum WorkflowChoice {
+    Full {
+        spec_model: String,
+        builder_model: String,
+    },
+    Single {
+        step_id: String,
+        model: String,
+        effort: Option<String>,
+        tools: ToolProfile,
+        max_turns: Option<u32>,
+    },
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RunRequest {
     project_id: String,
-    step_id: String,
     prompt: String,
-    model: String,
-    effort: Option<String>,
-    tools: ToolProfile,
-    max_turns: Option<u32>,
+    /// The issue this comes from. `prompt` then holds anything the person added to it.
+    issue: Option<Issue>,
+    workflow: WorkflowChoice,
     language: String,
 }
 
 #[tauri::command(async)]
 fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<String> {
     state.ready.wait();
+    let text = match &request.issue {
+        Some(issue) => request_from_issue(issue, &request.prompt),
+        None => request.prompt.clone(),
+    };
+    let title = request
+        .issue
+        .as_ref()
+        .map(|issue| format!("#{} {}", issue.number, issue.title));
+    let project = state.store.project(&request.project_id)?;
+    let workflow = match request.workflow {
+        WorkflowChoice::Full {
+            spec_model,
+            builder_model,
+        } => full_workflow(
+            &request.language,
+            &spec_model,
+            &builder_model,
+            project.check_command.as_deref(),
+        ),
+        WorkflowChoice::Single {
+            step_id,
+            model,
+            effort,
+            tools,
+            max_turns,
+        } => {
+            vec![WorkflowStep::Agent(StepSpec {
+                id: step_id,
+                model,
+                effort,
+                tools,
+                prompt: text.clone(),
+                max_turns,
+                max_budget_usd: None,
+            })]
+        }
+    };
     Ok(state.engine.start_run(StartRun {
         project_id: request.project_id,
-        step: StepSpec {
-            id: request.step_id,
-            model: request.model,
-            effort: request.effort,
-            tools: request.tools,
-            prompt: request.prompt,
-            max_turns: request.max_turns,
-            max_budget_usd: None,
-        },
+        title,
+        request: text,
+        workflow,
         language: request.language,
-        allowed_domains: vec![],
+        source_issue: request.issue,
     })?)
+}
+
+#[tauri::command(async)]
+fn run_get(state: State<'_, AppState>, run_id: String) -> CommandResult<Run> {
+    Ok(state.store.run(&run_id)?)
+}
+
+#[tauri::command(async)]
+fn approval_answer(
+    state: State<'_, AppState>,
+    attempt_id: String,
+    approve: bool,
+    text: String,
+) -> CommandResult<()> {
+    Ok(state.engine.answer_approval(&attempt_id, approve, &text)?)
+}
+
+/// Opens a pull request in the browser. Only GitHub URLs, so a value from a run can't open anything else.
+#[tauri::command(async)]
+fn open_github_url(url: String) -> CommandResult<()> {
+    if !url.starts_with("https://github.com/") {
+        return Err(CommandError {
+            code: "invalidState",
+            reason: None,
+            detail: None,
+        });
+    }
+    std::process::Command::new("/usr/bin/open")
+        .arg(&url)
+        .status()
+        .map(|_| ())
+        .map_err(|e| CommandError {
+            code: "internal",
+            reason: None,
+            detail: Some(e.to_string()),
+        })
 }
 
 #[tauri::command(async)]
@@ -373,7 +513,15 @@ pub fn run() {
             overview,
             project_add,
             run_start,
+            run_get,
             run_attempts,
+            project_update,
+            github_status,
+            issues_list,
+            decisions_list,
+            decision_retire,
+            approval_answer,
+            open_github_url,
             attempt_events,
             attempt_diff,
             attempt_raw_check,
