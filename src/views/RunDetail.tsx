@@ -250,7 +250,7 @@ function ActivityEntry({ item }: { item: ActivityItem }) {
     case "checkResult":
       return (
         <div>
-          {line(t("activity.checkResult", { code: data.exitCode ?? "?" }), data.exitCode === 0 ? "text-success" : "text-danger")}
+          {line(t(data.kind === "setup" ? "activity.setupResult" : "activity.checkResult", { code: data.exitCode ?? "?" }), data.exitCode === 0 ? "text-success" : "text-danger")}
           {data.leftWorkspaceDirty && line(t("activity.dirty"), "text-warning")}
         </div>
       );
@@ -337,7 +337,7 @@ function OutputTab({ events, attempt }: { events: AuditEvent[]; attempt: Attempt
         <p className="text-[12.5px] text-subtle">{t("activity.empty")}</p>
       ) : (
         <>
-          <p className={cx("text-[12.5px]", result.exitCode === 0 ? "text-success" : "text-danger")}>{t("activity.checkResult", { code: result.exitCode ?? "?" })}</p>
+          <p className={cx("text-[12.5px]", result.exitCode === 0 ? "text-success" : "text-danger")}>{t(result.kind === "setup" ? "activity.setupResult" : "activity.checkResult", { code: result.exitCode ?? "?" })}</p>
           <Output text={[result.stdout, result.stderr].filter(Boolean).join("\n")} truncated={result.truncated} />
         </>
       )}
@@ -488,7 +488,7 @@ export function RunDetail({ runId }: { runId: string }) {
         lastSeq.current[a.id] = fresh[fresh.length - 1].seq;
         setEventsByAttempt((current) => ({ ...current, [a.id]: [...(current[a.id] ?? []), ...fresh] }));
       });
-      if (a.kind === "agent" || a.kind === "check") {
+      if (a.kind === "agent" || a.kind === "check" || a.kind === "setup") {
         void api.attemptRawCheck(a.id).then((check) => setRawChecks((current) => ({ ...current, [a.id]: check })));
       }
     }
@@ -507,7 +507,7 @@ export function RunDetail({ runId }: { runId: string }) {
 
   // A step can have run several times. The list shows each attempt, then what's still ahead.
   const pending = (run?.workflow ?? []).filter((step) => !attempts.some((a) => a.stepId === step.id));
-  const kindTabs: Tab[] = attempt.kind === "agent" ? ["activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" ? ["output", "activity", "details"] : ["activity", "details"];
+  const kindTabs: Tab[] = attempt.kind === "agent" ? ["activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
   const shownTab: Tab = kindTabs.includes(tab) ? tab : kindTabs[0];
 
   return (

@@ -62,6 +62,7 @@ function ProjectSettingsCard({ project }: { project: Project }) {
   const { t } = useTranslation();
   const refreshOverview = useApp((s) => s.refreshOverview);
   const [account, setAccount] = useState(project.githubAccount ?? NONE);
+  const [setup, setSetup] = useState(project.setupCommand ?? "");
   const [check, setCheck] = useState(project.checkCommand ?? "");
   const [domains, setDomains] = useState(project.allowedDomains.join("\n"));
   const [paths, setPaths] = useState(project.allowedRead.join("\n"));
@@ -89,6 +90,7 @@ function ProjectSettingsCard({ project }: { project: Project }) {
     try {
       await api.projectUpdate(project.id, {
         githubAccount: account === NONE ? null : account,
+        setupCommand: setup,
         checkCommand: check,
         allowedDomains: lines(domains),
         allowedRead: lines(paths),
@@ -152,6 +154,9 @@ function ProjectSettingsCard({ project }: { project: Project }) {
       {status?.error && <p className="mt-1 text-[12px] text-danger">{reasonText(t, status.error)}</p>}
 
       <div className="mt-4 space-y-3">
+        <Field label={t("settings.setupCommand")} hint={t("settings.setupCommandHint")}>
+          <input value={setup} onChange={(e) => setSetup(e.target.value)} placeholder={t("settings.setupCommandPlaceholder")} className={`${inputClass} font-mono`} />
+        </Field>
         <Field label={t("settings.checkCommand")} hint={t("settings.checkCommandHint")}>
           <input value={check} onChange={(e) => setCheck(e.target.value)} placeholder={t("settings.checkCommandPlaceholder")} className={`${inputClass} font-mono`} />
         </Field>

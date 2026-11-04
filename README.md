@@ -19,6 +19,8 @@ reviewers, a workflow editor and the rest of the per-project Brain are on the wa
   doesn't merge.
 - Services a project needs, like a test database, run outside the sandbox while a step uses
   them, and commands reach them only through a Unix socket.
+- A setup command installs dependencies once per run, before any agent. It's the one step with
+  internet access, and it still can't reach your home folder or anything else on your Mac.
 
 ## Requirements
 

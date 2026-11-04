@@ -314,6 +314,7 @@ impl Engine {
             path: root_text,
             created_at: now(),
             github_account: None,
+            setup_command: None,
             github_repo: git
                 .origin_url(&root)
                 .and_then(|url| github::github_repo(&url)),
@@ -415,13 +416,32 @@ impl Engine {
             }
             self.gh().map_err(|_| Error::Blocked(Reason::GhMissing))?;
         }
+        // Preparation always comes first, and from what's published, before any agent touches it.
+        let mut workflow = request.workflow;
+        if let Some(run) = project
+            .setup_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+            && !workflow
+                .iter()
+                .any(|s| matches!(s, WorkflowStep::Setup { .. }))
+        {
+            workflow.insert(
+                0,
+                WorkflowStep::Setup {
+                    id: "setup".into(),
+                    run: run.to_owned(),
+                },
+            );
+        }
         let run_id = new_id();
         self.inner.store.add_run(&NewRun {
             id: run_id.clone(),
             project_id: project.id,
             title: request.title.unwrap_or_else(|| title_from(&request.request)),
             request: request.request,
-            workflow: serde_json::to_string(&request.workflow).unwrap_or_else(|_| "[]".into()),
+            workflow: serde_json::to_string(&workflow).unwrap_or_else(|_| "[]".into()),
             language: request.language,
             source_issue: request.source_issue.as_ref().map(|issue| {
                 json!({ "number": issue.number, "title": issue.title, "author": issue.author, "url": issue.url }).to_string()
@@ -738,6 +758,16 @@ impl Inner {
                     format!("{stem}.jsonl"),
                 )
             }
+            WorkflowStep::Setup { run: command, .. } => (
+                String::new(),
+                None,
+                "setup".to_owned(),
+                None,
+                None,
+                command.clone(),
+                json!({ "network": "internet, nothing local", "read": project.allowed_read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string(),
+                format!("{stem}.log"),
+            ),
             WorkflowStep::Check { run: command, .. } => (
                 String::new(),
                 None,

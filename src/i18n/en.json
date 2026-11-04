@@ -84,7 +84,8 @@
     "nothingToDeliver": "There's nothing to deliver: no step changed any files.",
     "unsafeBranch": "Keel only pushes its own branches, and this run is on {{branch}}.",
     "serviceFailed": "Couldn't start the service “{{name}}”: {{detail}}",
-    "invalidSetting": "This setting can't be used: {{value}}"
+    "invalidSetting": "This setting can't be used: {{value}}",
+    "setupFailed": "Preparing the project failed with code {{exitCode}}."
   },
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",
@@ -232,7 +233,8 @@
     "delivered": "Draft opened with {{account}}: {{url}}",
     "startedCheck": "Running: {{command}}",
     "services": "Services ready: {{names}}",
-    "servicesLost": "Couldn't restore the services after reopening: {{error}}"
+    "servicesLost": "Couldn't restore the services after reopening: {{error}}",
+    "setupResult": "Preparation ended with code {{code}}"
   },
   "commands": {
     "empty": "No commands ran.",
@@ -321,7 +323,10 @@
     "serviceRemove": "Remove",
     "env": "Variables for commands",
     "envHint": "One per line, as NAME=value. In a value, socketDir and socket with the service name, between double braces, become that service's paths. They're saved in plain text and recorded in the audit log, so don't put secrets here.",
-    "envInvalid": "This line needs the form NAME=value: “{{line}}”."
+    "envInvalid": "This line needs the form NAME=value: “{{line}}”.",
+    "setupCommand": "Setup command",
+    "setupCommandHint": "Installs what the project needs, once per run, before any agent. It can reach the internet, but not your home folder or anything else on this Mac. Your repo's own scripts may run here.",
+    "setupCommandPlaceholder": "uv sync --frozen"
   },
   "quit": {
     "title": "There are steps running",

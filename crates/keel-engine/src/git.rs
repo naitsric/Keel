@@ -29,6 +29,9 @@ impl GitError {
 /// The branch prefix Keel owns. A push to anything else is refused here, whatever the caller says.
 pub const BRANCH_PREFIX: &str = "keel/";
 const BASE_REF: &str = "keel-base";
+/// Where a run's tools keep their caches. Inside the private copy, since the real ones live in the
+/// home folder, which sandboxed commands can't reach.
+pub const RUN_CACHE: &str = ".keel-cache";
 
 #[derive(Debug, Clone)]
 pub struct Git {
@@ -211,6 +214,14 @@ impl Git {
         // command an agent runs warns about it.
         self.run(workspace, &["config", "core.excludesFile", "/dev/null"])?;
         self.run(workspace, &["config", "core.attributesFile", "/dev/null"])?;
+        // The run's own cache must never end up in a commit.
+        let exclude = workspace.join(".git/info/exclude");
+        if let Some(parent) = exclude.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut excluded = std::fs::read_to_string(&exclude).unwrap_or_default();
+        excluded.push_str(&format!("\n/{RUN_CACHE}/\n"));
+        std::fs::write(&exclude, excluded)?;
         self.head(workspace)
     }
 

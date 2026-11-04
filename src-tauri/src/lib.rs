@@ -143,6 +143,7 @@ fn project_add(state: State<'_, AppState>, path: String) -> CommandResult<Projec
 #[serde(rename_all = "camelCase")]
 struct ProjectSettingsInput {
     github_account: Option<String>,
+    setup_command: Option<String>,
     check_command: Option<String>,
     allowed_domains: Vec<String>,
     allowed_read: Vec<String>,
@@ -162,6 +163,7 @@ fn project_update(
         &project_id,
         &ProjectSettings {
             github_account: clean(settings.github_account),
+            setup_command: clean(settings.setup_command),
             check_command: clean(settings.check_command),
             allowed_domains: settings.allowed_domains,
             allowed_read: settings.allowed_read,

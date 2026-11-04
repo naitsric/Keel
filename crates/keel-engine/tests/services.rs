@@ -121,6 +121,7 @@ impl World {
                 &self.project_id,
                 &ProjectSettings {
                     github_account: None,
+                    setup_command: None,
                     check_command: None,
                     allowed_domains: vec![],
                     allowed_read: vec![],
@@ -421,4 +422,84 @@ fn settings_that_could_reach_a_credential_are_refused() {
         Error::Blocked(Reason::InvalidSetting { .. })
     ));
     assert!(w.store.project(&w.project_id).unwrap().env.is_empty());
+}
+
+#[test]
+fn setup_runs_first_and_later_steps_use_their_own_cache() {
+    let w = world();
+    w.engine
+        .update_project(
+            &w.project_id,
+            &ProjectSettings { setup_command: Some("echo $XDG_CACHE_HOME > setup-cache.txt; mkdir -p \"$XDG_CACHE_HOME\"; touch \"$XDG_CACHE_HOME/from-setup\"".into()), ..ProjectSettings::default() },
+        )
+        .unwrap();
+    let run = w.run(vec![
+        check("after", "echo $XDG_CACHE_HOME > check-cache.txt; mkdir -p \"$XDG_CACHE_HOME\"; touch \"$XDG_CACHE_HOME/from-check\""),
+        agent("builder", ToolProfile::Build),
+    ]);
+    let builder = w.wait_done(&run, "builder");
+    assert_eq!(builder.state, "succeeded");
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    assert_eq!(
+        attempts.iter().map(|a| a.kind.as_str()).collect::<Vec<_>>(),
+        ["setup", "check", "agent"]
+    );
+    assert_eq!(
+        attempts[0].state,
+        "succeeded",
+        "{}",
+        w.check_output(&attempts[0])
+    );
+
+    let workspace = Path::new(&builder.workspace);
+    let setup_cache = std::fs::read_to_string(workspace.join("setup-cache.txt")).unwrap();
+    let check_cache = std::fs::read_to_string(workspace.join("check-cache.txt")).unwrap();
+    assert!(setup_cache.trim().ends_with("/cache"), "{setup_cache}");
+    assert!(
+        check_cache
+            .trim()
+            .starts_with(&*workspace.to_string_lossy()),
+        "{check_cache}"
+    );
+    assert!(Path::new(setup_cache.trim()).join("from-setup").exists());
+    assert!(!Path::new(setup_cache.trim()).join("from-check").exists());
+
+    // What tools leave in the run's cache never gets committed.
+    assert!(workspace.join(".keel-cache/from-check").exists());
+    let tracked = Command::new("git")
+        .current_dir(workspace)
+        .args(["ls-files"])
+        .output()
+        .unwrap();
+    assert!(!String::from_utf8_lossy(&tracked.stdout).contains(".keel-cache"));
+}
+
+#[test]
+fn a_failed_setup_stops_the_run_before_any_agent_and_can_be_retried() {
+    let w = world();
+    let flag = w.dir.path().join("setup-may-pass");
+    // The flag is outside the workspace but in temp, which sandboxed commands can read.
+    let marker = format!("/tmp/keel-setup-test-{}", std::process::id());
+    let _ = std::fs::remove_file(&marker);
+    let _ = flag;
+    w.engine
+        .update_project(
+            &w.project_id,
+            &ProjectSettings {
+                setup_command: Some(format!("test -f {marker} || exit 4")),
+                ..ProjectSettings::default()
+            },
+        )
+        .unwrap();
+    let run = w.run(vec![agent("builder", ToolProfile::Build)]);
+    let setup = w.wait_done(&run, "setup");
+    assert_eq!(setup.state, "failed");
+    let reason: Reason = serde_json::from_value(setup.reason.clone().unwrap()).unwrap();
+    assert_eq!(reason, Reason::SetupFailed { exit_code: Some(4) });
+    assert!(!w.log.join("claude.log").exists(), "no agent ran");
+
+    std::fs::write(&marker, "").unwrap();
+    w.engine.retry(&setup.id, false).unwrap();
+    assert_eq!(w.wait_done(&run, "builder").state, "succeeded");
+    let _ = std::fs::remove_file(&marker);
 }

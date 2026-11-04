@@ -110,6 +110,9 @@ pub struct EnvVar {
 pub enum WorkflowStep {
     /// An agent working in the run's private copy.
     Agent(StepSpec),
+    /// Installs what the project needs, once, before any agent runs: the code is still what was
+    /// published. The one step with network, and still sandboxed.
+    Setup { id: String, run: String },
     /// A command Keel runs itself, in a sandbox, with no model involved. Exit 0 passes.
     Check { id: String, run: String },
     /// Waits for a person, for as long as it takes.
@@ -122,13 +125,17 @@ impl WorkflowStep {
     pub fn id(&self) -> &str {
         match self {
             Self::Agent(step) => &step.id,
-            Self::Check { id, .. } | Self::Approval { id } | Self::Deliver { id } => id,
+            Self::Setup { id, .. }
+            | Self::Check { id, .. }
+            | Self::Approval { id }
+            | Self::Deliver { id } => id,
         }
     }
 
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Agent(_) => "agent",
+            Self::Setup { .. } => "setup",
             Self::Check { .. } => "check",
             Self::Approval { .. } => "approval",
             Self::Deliver { .. } => "deliver",
@@ -255,6 +262,9 @@ pub enum Reason {
     AgentLost,
     /// A check command ended with this code.
     CheckFailed {
+        exit_code: Option<i32>,
+    },
+    SetupFailed {
         exit_code: Option<i32>,
     },
     NoGithubRemote,

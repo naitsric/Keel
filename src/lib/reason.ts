@@ -22,6 +22,8 @@ export function reasonText(t: TFunction, reason: Reason): string {
     }
     case "invalidSetting":
       return t(`invalidSettings.${data.field}`, { value: data.value, defaultValue: t("reasons.invalidSetting", { value: data.value }) });
+    case "setupFailed":
+      return t("reasons.setupFailed", { exitCode: data.exitCode ?? "?" });
     case "checkFailed":
       return t("reasons.checkFailed", { exitCode: data.exitCode ?? "?" });
     case "exitedWithoutResult":

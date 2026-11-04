@@ -14,7 +14,7 @@ use keel_store::rusqlite_value::Value;
 use keel_store::{Attempt, now};
 use serde_json::json;
 
-use crate::git::Git;
+use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
 use crate::{Error, Inner, Result, locked, prompts};
 
@@ -79,8 +79,21 @@ impl Monitor {
     }
 }
 
+/// Points the usual tools at a cache a sandboxed command can write to, since theirs live in the
+/// home folder. Copies rather than links, so a change in the workspace can't reach a cache.
+fn cache_env(cache: &std::path::Path) -> Vec<(String, String)> {
+    let cache = cache.to_string_lossy().into_owned();
+    vec![
+        ("XDG_CACHE_HOME".to_owned(), cache.clone()),
+        ("UV_CACHE_DIR".to_owned(), format!("{cache}/uv")),
+        ("UV_LINK_MODE".to_owned(), "copy".to_owned()),
+        ("PIP_CACHE_DIR".to_owned(), format!("{cache}/pip")),
+        ("npm_config_cache".to_owned(), format!("{cache}/npm")),
+    ]
+}
+
 fn runs_commands(kind: &str, tools: Option<ToolProfile>) -> bool {
-    kind == "check" || tools == Some(ToolProfile::Build)
+    kind == "check" || kind == "setup" || tools == Some(ToolProfile::Build)
 }
 
 impl Inner {
@@ -200,7 +213,10 @@ impl Inner {
         }
         let started = match &step {
             WorkflowStep::Agent(spec) => self.spawn_agent(&attempt, &project_id, spec, resume),
-            WorkflowStep::Check { run, .. } => self.spawn_check(&attempt, &project_id, run),
+            WorkflowStep::Setup { run, .. } => self.spawn_command(&attempt, &project_id, run, true),
+            WorkflowStep::Check { run, .. } => {
+                self.spawn_command(&attempt, &project_id, run, false)
+            }
             WorkflowStep::Deliver { .. } => {
                 self.release_slot(&attempt_id, &project_id, holds_project, counts_as_agent);
                 self.deliver(&attempt);
@@ -383,6 +399,9 @@ impl Inner {
             (None, Vec::new())
         };
         let mut process_command = command.command(spec);
+        if spec.tools == ToolProfile::Build {
+            process_command.envs(cache_env(&workspace.join(RUN_CACHE)));
+        }
         process_command.envs(service_env);
         let child = process::spawn_step(process_command, &prompt_file, &raw_path, &stderr_path)?;
         let mut monitor = self.track_process(attempt, child, project_id)?;
@@ -392,11 +411,12 @@ impl Inner {
 
     /// A check is Keel running a command, with no model. It's sandboxed like an agent's commands,
     /// because tests and Makefiles are files an agent may have just edited.
-    fn spawn_check(
+    fn spawn_command(
         &self,
         attempt: &Attempt,
         project_id: &str,
         command_text: &str,
+        is_setup: bool,
     ) -> Result<Option<Monitor>> {
         let store = &self.store;
         store.set_state(&attempt.id, AttemptState::Preparing, None)?;
@@ -407,12 +427,28 @@ impl Inner {
         let workspace = PathBuf::from(&attempt.workspace);
         let dir = self.run_dir(&attempt.run_id);
         let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-        let profile = settings::check_profile(
-            &workspace,
-            &home,
-            &project.allowed_read,
-            &services::socket_dirs(&services::root_for(project_id), &project.services),
-        );
+        let sockets = services::socket_dirs(&services::root_for(project_id), &project.services);
+        // Setup fills a cache shared by the project's runs. Everything after it gets one of its
+        // own, inside the private copy, so nothing an agent wrote can reach the next run.
+        let shared_cache = self.mirror(project_id).with_file_name("cache");
+        let (profile, cache) = if is_setup {
+            std::fs::create_dir_all(&shared_cache)?;
+            (
+                settings::setup_profile(
+                    &workspace,
+                    &home,
+                    &project.allowed_read,
+                    &sockets,
+                    &shared_cache,
+                ),
+                shared_cache,
+            )
+        } else {
+            (
+                settings::check_profile(&workspace, &home, &project.allowed_read, &sockets),
+                workspace.join(RUN_CACHE),
+            )
+        };
 
         store.append_event(
             &attempt.id,
@@ -438,7 +474,7 @@ impl Inner {
                     .filter(|(name, _)| !name.starts_with("CLAUDE_") && !name.starts_with("BASH_")),
             );
         let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
-        command.envs(service_env);
+        command.envs(cache_env(&cache)).envs(service_env);
         let child = process::spawn_step(command, &prompt_file, &raw_path, &stderr_path)?;
         let mut monitor = self.track_process(attempt, child, project_id)?;
         monitor.services = service_set;
@@ -852,7 +888,7 @@ impl Inner {
             }
         }
 
-        if m.kind == "check" {
+        if m.kind == "check" || m.kind == "setup" {
             let output = std::fs::read(&m.raw_path).unwrap_or_default();
             let stderr = std::fs::read(m.raw_path.with_file_name(format!(
                     "{}.stderr.txt",
@@ -870,7 +906,7 @@ impl Inner {
             let _ = store.append_event(
                 &m.attempt_id,
                 "checkResult",
-                &json!({ "exitCode": exit_code, "stdout": tail(&output), "stderr": tail(&stderr), "truncated": output.len() > EVENT_TEXT_LIMIT, "leftWorkspaceDirty": dirty }),
+                &json!({ "kind": m.kind, "exitCode": exit_code, "stdout": tail(&output), "stderr": tail(&stderr), "truncated": output.len() > EVENT_TEXT_LIMIT, "leftWorkspaceDirty": dirty }),
             );
         }
 
@@ -953,22 +989,21 @@ fn classify(
     if stop_requested {
         return (AttemptState::Stopped, None);
     }
-    if m.kind == "check" {
+    if m.kind == "check" || m.kind == "setup" {
+        let failed = |exit_code| {
+            if m.kind == "setup" {
+                Reason::SetupFailed { exit_code }
+            } else {
+                Reason::CheckFailed { exit_code }
+            }
+        };
         return match exit_code {
             Some(0) => (AttemptState::Succeeded, None),
-            Some(code) => (
-                AttemptState::Failed,
-                Some(Reason::CheckFailed {
-                    exit_code: Some(code),
-                }),
-            ),
+            Some(code) => (AttemptState::Failed, Some(failed(Some(code)))),
             None if process_lost || m.child.is_none() => {
                 (AttemptState::Interrupted, Some(Reason::AgentLost))
             }
-            None => (
-                AttemptState::Failed,
-                Some(Reason::CheckFailed { exit_code: None }),
-            ),
+            None => (AttemptState::Failed, Some(failed(None))),
         };
     }
     match &m.result {

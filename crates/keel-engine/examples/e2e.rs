@@ -31,6 +31,7 @@ fn main() {
             &project.id,
             &ProjectSettings {
                 github_account: Some(account),
+                setup_command: None,
                 check_command: Some("python3 test_calc.py".into()),
                 allowed_domains: vec![],
                 allowed_read: vec![],

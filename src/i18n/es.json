@@ -84,7 +84,8 @@
     "nothingToDeliver": "No hay nada que entregar: ningún paso cambió archivos.",
     "unsafeBranch": "Keel solo sube sus propias ramas, y esta ejecución está en {{branch}}.",
     "serviceFailed": "No se pudo iniciar el servicio «{{name}}»: {{detail}}",
-    "invalidSetting": "Este ajuste no se puede usar: {{value}}"
+    "invalidSetting": "Este ajuste no se puede usar: {{value}}",
+    "setupFailed": "La preparación del proyecto falló con código {{exitCode}}."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
@@ -232,7 +233,8 @@
     "delivered": "Borrador abierto con {{account}}: {{url}}",
     "startedCheck": "Corriendo: {{command}}",
     "services": "Servicios listos: {{names}}",
-    "servicesLost": "No se pudieron restaurar los servicios al reabrir: {{error}}"
+    "servicesLost": "No se pudieron restaurar los servicios al reabrir: {{error}}",
+    "setupResult": "La preparación terminó con código {{code}}"
   },
   "commands": {
     "empty": "No corrió ningún comando.",
@@ -321,7 +323,10 @@
     "serviceRemove": "Quitar",
     "env": "Variables para los comandos",
     "envHint": "Una por línea, como NOMBRE=valor. En un valor, socketDir y socket con el nombre del servicio, entre llaves dobles, se convierten en las rutas de ese servicio. Se guardan en texto plano y quedan en la auditoría, así que no pongas secretos aquí.",
-    "envInvalid": "Esta línea debe tener la forma NOMBRE=valor: «{{line}}»."
+    "envInvalid": "Esta línea debe tener la forma NOMBRE=valor: «{{line}}».",
+    "setupCommand": "Comando de preparación",
+    "setupCommandHint": "Instala lo que necesita el proyecto, una vez por ejecución, antes de cualquier agente. Puede llegar a internet, pero no a tu carpeta personal ni a nada más de este Mac. Aquí pueden correr scripts de tu repo.",
+    "setupCommandPlaceholder": "uv sync --frozen"
   },
   "quit": {
     "title": "Hay pasos en curso",
