@@ -2,19 +2,61 @@ import { AlertTriangle } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Language } from "../i18n";
-import { api, type Decision, type GithubStatus, type Project } from "../lib/api";
+import { api, type Decision, type EnvVar, type GithubStatus, type Project, type Service } from "../lib/api";
 import { formatDateTime } from "../lib/format";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, Field, inputClass, Segmented } from "../ui/primitives";
 import { TopBar } from "./TopBar";
 
-const NONE = "__none__";
 const lines = (text: string) =>
   text
     .split("\n")
     .map((line) => line.trim())
     .filter(Boolean);
+
+const NONE = "__none__";
+const ENV_EXAMPLE = "DB_HOST={{socketDir:db}}";
+
+/** Turns `NAME=value` lines into variables, or says which line isn't one. */
+export function parseEnv(text: string): { env: EnvVar[]; invalid: string | null } {
+  const env: EnvVar[] = [];
+  for (const line of lines(text)) {
+    const at = line.indexOf("=");
+    if (at <= 0) return { env, invalid: line };
+    env.push({ name: line.slice(0, at).trim(), value: line.slice(at + 1).trim() });
+  }
+  return { env, invalid: null };
+}
+
+function ServiceRow({ service, onChange, onRemove }: { service: Service; onChange: (service: Service) => void; onRemove: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <li className="rounded-md border border-border p-3">
+      <p className="mb-2 text-[11.5px] text-subtle">{service.type === "bridge" ? t("settings.serviceTypeBridge") : t("settings.serviceTypeCommand")}</p>
+      <div className="grid gap-2 md:grid-cols-[1fr_1fr_1.4fr]">
+        <Field label={t("settings.serviceName")}>
+          <input value={service.name} onChange={(e) => onChange({ ...service, name: e.target.value })} className={`${inputClass} font-mono`} />
+        </Field>
+        {service.type === "bridge" ? (
+          <Field label={t("settings.servicePort")}>
+            <input inputMode="numeric" value={service.port || ""} onChange={(e) => onChange({ ...service, port: Number(e.target.value.replace(/\D/g, "")) || 0 })} className={`${inputClass} font-mono`} />
+          </Field>
+        ) : (
+          <Field label={t("settings.serviceStart")}>
+            <input value={service.start} onChange={(e) => onChange({ ...service, start: e.target.value })} className={`${inputClass} font-mono`} />
+          </Field>
+        )}
+        <Field label={t("settings.serviceSocket")} hint={t("settings.serviceSocketHint")}>
+          <input value={service.socket ?? ""} onChange={(e) => onChange({ ...service, socket: e.target.value.trim() || null })} className={`${inputClass} font-mono`} />
+        </Field>
+      </div>
+      <Button variant="ghost" className="mt-1 -ml-2" onClick={onRemove}>
+        {t("settings.serviceRemove")}
+      </Button>
+    </li>
+  );
+}
 
 function ProjectSettingsCard({ project }: { project: Project }) {
   const { t } = useTranslation();
@@ -23,6 +65,8 @@ function ProjectSettingsCard({ project }: { project: Project }) {
   const [check, setCheck] = useState(project.checkCommand ?? "");
   const [domains, setDomains] = useState(project.allowedDomains.join("\n"));
   const [paths, setPaths] = useState(project.allowedRead.join("\n"));
+  const [services, setServices] = useState<Service[]>(project.services);
+  const [env, setEnv] = useState(project.env.map((v) => `${v.name}=${v.value}`).join("\n"));
   const [status, setStatus] = useState<GithubStatus | null>(null);
   const [decisions, setDecisions] = useState<Decision[]>([]);
   const [saved, setSaved] = useState(false);
@@ -37,12 +81,19 @@ function ProjectSettingsCard({ project }: { project: Project }) {
 
   const save = async () => {
     setError(null);
+    const parsed = parseEnv(env);
+    if (parsed.invalid) {
+      setError(t("settings.envInvalid", { line: parsed.invalid }));
+      return;
+    }
     try {
       await api.projectUpdate(project.id, {
         githubAccount: account === NONE ? null : account,
         checkCommand: check,
         allowedDomains: lines(domains),
         allowedRead: lines(paths),
+        services,
+        env: parsed.env,
       });
       await refreshOverview();
       setSaved(true);
@@ -112,6 +163,32 @@ function ProjectSettingsCard({ project }: { project: Project }) {
             <textarea rows={3} value={paths} onChange={(e) => setPaths(e.target.value)} className={`${inputClass} resize-y font-mono`} />
           </Field>
         </div>
+      </div>
+      <h4 className="mt-5 text-[12.5px] font-semibold">{t("settings.services")}</h4>
+      <p className="mt-0.5 text-[12px] text-muted">{t("settings.servicesHint")}</p>
+      {services.length === 0 ? (
+        <p className="mt-2 text-[12px] text-subtle">{t("settings.servicesEmpty")}</p>
+      ) : (
+        <ul className="mt-2 space-y-2">
+          {services.map((service, index) => (
+            <ServiceRow
+              // Rows have no identity until saved, and names change as they're typed.
+              key={index}
+              service={service}
+              onChange={(next) => setServices(services.map((s, i) => (i === index ? next : s)))}
+              onRemove={() => setServices(services.filter((_, i) => i !== index))}
+            />
+          ))}
+        </ul>
+      )}
+      <div className="mt-2 flex gap-2">
+        <Button onClick={() => setServices([...services, { type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }])}>{t("settings.addBridge")}</Button>
+        <Button onClick={() => setServices([...services, { type: "command", name: "db", start: "", socket: null }])}>{t("settings.addCommand")}</Button>
+      </div>
+      <div className="mt-3">
+        <Field label={t("settings.env")} hint={t("settings.envHint")}>
+          <textarea rows={3} value={env} onChange={(e) => setEnv(e.target.value)} placeholder={ENV_EXAMPLE} className={`${inputClass} resize-y font-mono`} />
+        </Field>
       </div>
       {error && (
         <p role="alert" className="mt-2 text-[12px] text-danger">

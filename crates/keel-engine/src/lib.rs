@@ -5,6 +5,7 @@ mod deliver;
 mod git;
 mod prompts;
 mod runner;
+mod services;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -195,17 +196,23 @@ fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
+/// A run's name: the request's first line, cut at a word so it still reads.
 fn title_from(prompt: &str) -> String {
+    const LIMIT: usize = 72;
     let line = prompt
         .lines()
         .find(|l| !l.trim().is_empty())
         .unwrap_or("")
         .trim();
-    if line.chars().count() > 90 {
-        format!("{}…", line.chars().take(89).collect::<String>())
-    } else {
-        line.to_owned()
+    if line.chars().count() <= LIMIT {
+        return line.to_owned();
     }
+    let cut: String = line.chars().take(LIMIT).collect();
+    let kept = cut
+        .rfind(' ')
+        .filter(|i| *i > LIMIT / 2)
+        .map_or(cut.as_str(), |i| &cut[..i]);
+    format!("{}…", kept.trim_end())
 }
 
 impl Engine {
@@ -313,12 +320,15 @@ impl Engine {
             check_command: None,
             allowed_domains: Vec::new(),
             allowed_read: Vec::new(),
+            services: Vec::new(),
+            env: Vec::new(),
         };
         self.inner.store.add_project(&project)?;
         Ok(project)
     }
 
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<Project> {
+        services::validate(&settings.services, &settings.env).map_err(Error::Blocked)?;
         self.inner.store.update_project(id, settings)?;
         Ok(self.inner.store.project(id)?)
     }
@@ -717,6 +727,12 @@ impl Inner {
                         &workspace,
                         &project.allowed_domains,
                         &project.allowed_read,
+                        // Only steps that run commands get anywhere near a service.
+                        &if spec.tools == keel_core::ToolProfile::Build {
+                            services::socket_dirs(&services::root_for(&project.id), &project.services)
+                        } else {
+                            Vec::new()
+                        },
                     )
                     .to_string(),
                     format!("{stem}.jsonl"),
@@ -729,7 +745,7 @@ impl Inner {
                 None,
                 None,
                 command.clone(),
-                json!({ "network": "none", "read": project.allowed_read }).to_string(),
+                json!({ "network": "none", "read": project.allowed_read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string(),
                 format!("{stem}.log"),
             ),
             WorkflowStep::Approval { .. } | WorkflowStep::Deliver { .. } => (
@@ -818,7 +834,12 @@ mod tests {
     #[test]
     fn long_requests_get_a_short_title() {
         assert_eq!(title_from("\n\n  Fix it\nmore"), "Fix it");
-        assert_eq!(title_from(&"x".repeat(200)).chars().count(), 90);
+        assert_eq!(title_from(&"x".repeat(200)).chars().count(), 73);
+        let long = "The add function in calc.py returns the wrong result. Fix it so the tests in test_calc.py pass.";
+        assert_eq!(
+            title_from(long),
+            "The add function in calc.py returns the wrong result. Fix it so the…"
+        );
     }
 
     #[test]

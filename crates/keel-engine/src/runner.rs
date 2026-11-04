@@ -15,6 +15,7 @@ use keel_store::{Attempt, now};
 use serde_json::json;
 
 use crate::git::Git;
+use crate::services::{self, ServiceSet};
 use crate::{Error, Inner, Result, locked, prompts};
 
 /// Tool output kept in the database. The raw file always has all of it.
@@ -23,6 +24,9 @@ const EVENT_TEXT_LIMIT: usize = 64 * 1024;
 fn text_value(value: Option<String>) -> Value {
     value.map_or(Value::Null, Value::Text)
 }
+
+/// The running services, and the variables that point at them.
+type StartedServices = (Option<ServiceSet>, Vec<(String, String)>);
 
 pub(crate) struct Monitor {
     attempt_id: String,
@@ -43,6 +47,8 @@ pub(crate) struct Monitor {
     /// Why this attempt must end blocked, once decided.
     block: Option<Reason>,
     result: Option<ResultEvent>,
+    /// Stops the step's services when dropped.
+    services: Option<ServiceSet>,
 }
 
 impl Monitor {
@@ -68,6 +74,7 @@ impl Monitor {
             tail,
             block: None,
             result: None,
+            services: None,
         }
     }
 }
@@ -265,6 +272,38 @@ impl Inner {
         Ok((git, sha))
     }
 
+    /// Starts the project's services for a step that runs commands, and works out the variables
+    /// that point at them. All of it goes in the audit log.
+    fn start_services(
+        &self,
+        attempt: &Attempt,
+        project: &keel_store::Project,
+        path_env: &str,
+    ) -> Result<StartedServices> {
+        if project.services.is_empty() && project.env.is_empty() {
+            return Ok((None, Vec::new()));
+        }
+        let root = services::root_for(&project.id);
+        let env = services::resolve_env(&project.env, &project.services, &root);
+        let set = ServiceSet::start(
+            &project.services,
+            &root,
+            &self.run_dir(&attempt.run_id),
+            path_env,
+        )
+        .map_err(Error::Blocked)?;
+        self.store.append_event(
+            &attempt.id,
+            "services",
+            &json!({
+                "services": project.services,
+                "sockets": project.services.iter().map(|s| services::socket_path(&root, s)).collect::<Vec<_>>(),
+                "env": env.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect::<Vec<_>>(),
+            }),
+        )?;
+        Ok((Some(set), env))
+    }
+
     fn spawn_agent(
         &self,
         attempt: &Attempt,
@@ -336,9 +375,19 @@ impl Inner {
 
         let raw_path = PathBuf::from(&attempt.raw_path);
         let stderr_path = dir.join(format!("{stem}.stderr.txt"));
-        let child =
-            process::spawn_step(command.command(spec), &prompt_file, &raw_path, &stderr_path)?;
-        self.track_process(attempt, child, project_id).map(Some)
+        // Only steps that can run commands get services. A read-only step has no way to use them.
+        let (service_set, service_env) = if spec.tools == ToolProfile::Build {
+            let project = store.project(project_id)?;
+            self.start_services(attempt, &project, &tools.path_env)?
+        } else {
+            (None, Vec::new())
+        };
+        let mut process_command = command.command(spec);
+        process_command.envs(service_env);
+        let child = process::spawn_step(process_command, &prompt_file, &raw_path, &stderr_path)?;
+        let mut monitor = self.track_process(attempt, child, project_id)?;
+        monitor.services = service_set;
+        Ok(Some(monitor))
     }
 
     /// A check is Keel running a command, with no model. It's sandboxed like an agent's commands,
@@ -358,7 +407,12 @@ impl Inner {
         let workspace = PathBuf::from(&attempt.workspace);
         let dir = self.run_dir(&attempt.run_id);
         let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-        let profile = settings::check_profile(&workspace, &home, &project.allowed_read);
+        let profile = settings::check_profile(
+            &workspace,
+            &home,
+            &project.allowed_read,
+            &services::socket_dirs(&services::root_for(project_id), &project.services),
+        );
 
         store.append_event(
             &attempt.id,
@@ -383,8 +437,12 @@ impl Inner {
                     .into_iter()
                     .filter(|(name, _)| !name.starts_with("CLAUDE_") && !name.starts_with("BASH_")),
             );
+        let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
+        command.envs(service_env);
         let child = process::spawn_step(command, &prompt_file, &raw_path, &stderr_path)?;
-        self.track_process(attempt, child, project_id).map(Some)
+        let mut monitor = self.track_process(attempt, child, project_id)?;
+        monitor.services = service_set;
+        Ok(Some(monitor))
     }
 
     fn track_process(&self, attempt: &Attempt, child: Child, project_id: &str) -> Result<Monitor> {
@@ -466,6 +524,22 @@ impl Inner {
             }
         }
         if alive {
+            let mut context = context;
+            if context.holds_project {
+                // The bridges died with the app. The step may still need them.
+                let project = self.store.project(&context.project_id)?;
+                let path_env = locked(&self.tools).path_env.clone();
+                match self.start_services(attempt, &project, &path_env) {
+                    Ok((set, _)) => context.services = set,
+                    Err(error) => {
+                        let _ = self.store.append_event(
+                            &attempt.id,
+                            "servicesLost",
+                            &json!({ "error": error.to_string() }),
+                        );
+                    }
+                }
+            }
             let inner = self.clone();
             std::thread::spawn(move || inner.monitor(context));
         } else {
@@ -728,6 +802,9 @@ impl Inner {
         exit_code: Option<i32>,
         process_lost: bool,
     ) {
+        // First of all, so that "finished" means nothing is left running, and so the next step
+        // can open the same sockets.
+        drop(m.services.take());
         if let Ok(lines) = m.tail.read_new(&m.raw_path)
             && !lines.is_empty()
         {

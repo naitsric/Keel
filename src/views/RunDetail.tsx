@@ -236,6 +236,10 @@ function ActivityEntry({ item }: { item: ActivityItem }) {
       return line(data.command ? t("activity.startedCheck", { command: data.command }) : t("activity.started"), "text-subtle");
     case "waiting":
       return line(t("activity.waiting"), "text-warning");
+    case "services":
+      return line(t("activity.services", { names: (data.services ?? []).map((service: { name: string }) => service.name).join(", ") }), "text-subtle");
+    case "servicesLost":
+      return line(t("activity.servicesLost", { error: data.error }), "text-danger");
     case "decision":
       return (
         <div>

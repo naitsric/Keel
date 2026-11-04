@@ -41,7 +41,7 @@ pub fn system_prompt(
         );
     }
     text.push_str(&format!(
-        "\nEnd with a short message for the person, in {}: what you did, what changed, how you checked it, and anything they need to decide.\n",
+        "\nEnd with a short message for the person, in {}: what you did, what changed, how you checked it, and anything they need to decide. It may become a pull request description, so write it for a reviewer, and don't mention this environment, pushing, or pull requests.\n",
         language_name(language),
     ));
 

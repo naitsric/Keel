@@ -82,7 +82,9 @@
     "ghMissing": "GitHub CLI (gh) no está instalado, o Keel no lo encuentra.",
     "deliveryFailed": "No se pudo entregar a GitHub: {{detail}}",
     "nothingToDeliver": "No hay nada que entregar: ningún paso cambió archivos.",
-    "unsafeBranch": "Keel solo sube sus propias ramas, y esta ejecución está en {{branch}}."
+    "unsafeBranch": "Keel solo sube sus propias ramas, y esta ejecución está en {{branch}}.",
+    "serviceFailed": "No se pudo iniciar el servicio «{{name}}»: {{detail}}",
+    "invalidSetting": "Este ajuste no se puede usar: {{value}}"
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
@@ -228,7 +230,9 @@
     "checkResult": "La verificación terminó con código {{code}}",
     "dirty": "Cambió archivos en la copia privada, cosa que una verificación no debería hacer.",
     "delivered": "Borrador abierto con {{account}}: {{url}}",
-    "startedCheck": "Corriendo: {{command}}"
+    "startedCheck": "Corriendo: {{command}}",
+    "services": "Servicios listos: {{names}}",
+    "servicesLost": "No se pudieron restaurar los servicios al reabrir: {{error}}"
   },
   "commands": {
     "empty": "No corrió ningún comando.",
@@ -301,7 +305,23 @@
     "decisions": "Decisiones",
     "decisionsHint": "Lo que dijiste en una aprobación. Los agentes de este proyecto las siguen.",
     "decisionsEmpty": "Todavía no hay decisiones.",
-    "retire": "Retirar"
+    "retire": "Retirar",
+    "services": "Servicios",
+    "servicesHint": "Lo que necesitan los comandos de este proyecto, como una base de pruebas. Keel los corre fuera del sandbox mientras un paso los usa, y los comandos llegan a ellos solo por un socket Unix.",
+    "servicesEmpty": "Sin servicios.",
+    "addBridge": "Agregar un puerto local",
+    "addCommand": "Agregar un comando",
+    "serviceName": "Nombre",
+    "serviceTypeBridge": "Reenvía a un puerto de este Mac, como una base en Docker.",
+    "serviceTypeCommand": "Keel inicia este comando, que debe escuchar en $KEEL_SOCKET.",
+    "servicePort": "Puerto",
+    "serviceStart": "Comando",
+    "serviceSocket": "Archivo de socket (opcional)",
+    "serviceSocketHint": "Los clientes de Postgres necesitan .s.PGSQL.5432.",
+    "serviceRemove": "Quitar",
+    "env": "Variables para los comandos",
+    "envHint": "Una por línea, como NOMBRE=valor. En un valor, socketDir y socket con el nombre del servicio, entre llaves dobles, se convierten en las rutas de ese servicio. Se guardan en texto plano y quedan en la auditoría, así que no pongas secretos aquí.",
+    "envInvalid": "Esta línea debe tener la forma NOMBRE=valor: «{{line}}»."
   },
   "quit": {
     "title": "Hay pasos en curso",
@@ -337,5 +357,14 @@
     "signedCommits": "Este repo exige commits firmados, y Keel todavía no puede producirlos.",
     "workflowScope": "Este cambio edita `.github/workflows`, y el token de la cuenta no tiene el permiso `workflow`. Corre `gh auth refresh -s workflow` con esa cuenta activa e inténtalo de nuevo.",
     "other": "GitHub lo rechazó."
+  },
+  "invalidSettings": {
+    "serviceName": "El nombre de un servicio usa minúsculas, números y guiones, hasta 20 caracteres: «{{value}}».",
+    "serviceDuplicate": "Hay dos servicios llamados «{{value}}».",
+    "serviceSocket": "El nombre del archivo de socket no puede tener barras: «{{value}}».",
+    "servicePort": "Elige un puerto para el servicio.",
+    "serviceStart": "Escribe el comando que inicia «{{value}}».",
+    "envName": "El nombre de una variable usa mayúsculas, números y guiones bajos: «{{value}}».",
+    "envReserved": "Keel controla «{{value}}», o podría llevar una credencial, así que un proyecto no puede definirla."
   }
 }

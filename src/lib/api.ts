@@ -45,6 +45,15 @@ export interface Preflight {
   blocker: Reason | null;
 }
 
+export type Service =
+  | { type: "bridge"; name: string; port: number; socket: string | null }
+  | { type: "command"; name: string; start: string; socket: string | null };
+
+export interface EnvVar {
+  name: string;
+  value: string;
+}
+
 export interface Project {
   id: string;
   name: string;
@@ -54,6 +63,8 @@ export interface Project {
   checkCommand: string | null;
   allowedDomains: string[];
   allowedRead: string[];
+  services: Service[];
+  env: EnvVar[];
 }
 
 export interface ProjectSettings {
@@ -61,6 +72,8 @@ export interface ProjectSettings {
   checkCommand: string | null;
   allowedDomains: string[];
   allowedRead: string[];
+  services: Service[];
+  env: EnvVar[];
 }
 
 export interface GithubAccount {

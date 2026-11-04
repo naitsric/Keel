@@ -233,6 +233,20 @@ impl Git {
         Ok(count.trim().parse().unwrap_or(0))
     }
 
+    /// The subject of the run's first commit, which usually says what the change is.
+    pub fn first_subject(&self, mirror: &Path, workspace: &Path) -> Option<String> {
+        let base = self
+            .run(mirror, &["rev-parse", &format!("refs/heads/{BASE_REF}")])
+            .ok()?;
+        let log = self
+            .run(
+                workspace,
+                &["log", "--reverse", "--format=%s", &format!("{base}..HEAD")],
+            )
+            .ok()?;
+        log.lines().next().map(str::to_owned)
+    }
+
     /// Copies the run's branch into the mirror. The workspace is only read.
     pub fn fetch_run_branch(
         &self,

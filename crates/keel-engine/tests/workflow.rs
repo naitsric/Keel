@@ -151,6 +151,8 @@ fn world() -> World {
                 check_command: None,
                 allowed_domains: vec![],
                 allowed_read: vec![],
+                services: vec![],
+                env: vec![],
             },
         )
         .unwrap();

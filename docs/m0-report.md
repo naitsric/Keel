@@ -55,8 +55,9 @@ refs in the clone, which affects nothing else.
 ### Decision
 
 Keel starts each project's services outside the sandbox and connects them by Unix socket, with
-a bridge for databases in Docker. This arrives with M2. Linux waits until it has a safe option,
-so v0.1 is macOS only.
+a bridge for databases in Docker. Linux waits until it has a safe option, so v0.1 is macOS only.
+A real agent and a real check have since reached Postgres in Docker this way, with direct TCP
+still blocked (`crates/keel-engine/examples/services_e2e.rs`).
 
 ## Findings for the harness
 

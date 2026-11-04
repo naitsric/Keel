@@ -34,6 +34,8 @@ fn main() {
                 check_command: Some("python3 test_calc.py".into()),
                 allowed_domains: vec![],
                 allowed_read: vec![],
+                services: vec![],
+                env: vec![],
             },
         )
         .unwrap();

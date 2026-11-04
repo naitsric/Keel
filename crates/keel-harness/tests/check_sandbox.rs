@@ -39,7 +39,7 @@ fn sandbox() -> Sandbox {
 
 impl Sandbox {
     fn run(&self, script: &str) -> std::process::Output {
-        let profile = check_profile(self.workspace.path(), &self.home, &[]);
+        let profile = check_profile(self.workspace.path(), &self.home, &[], &[]);
         Command::new("/usr/bin/sandbox-exec")
             .args(["-p", &profile, "/bin/sh", "-c", script])
             .current_dir(self.workspace.path())
@@ -123,7 +123,7 @@ fn there_is_no_network() {
 fn listed_paths_can_be_read() {
     let s = sandbox();
     let allowed = s.canary_dir.path().to_string_lossy().into_owned();
-    let profile = check_profile(s.workspace.path(), &s.home, &[allowed]);
+    let profile = check_profile(s.workspace.path(), &s.home, &[allowed], &[]);
     let output = Command::new("/usr/bin/sandbox-exec")
         .args(["-p", &profile, "/bin/cat", &s.canary.to_string_lossy()])
         .current_dir(s.workspace.path())
@@ -143,4 +143,47 @@ fn local_unix_sockets_are_out_of_reach_too() {
         path.to_string_lossy()
     );
     assert!(!s.allowed(&script));
+}
+
+#[test]
+fn a_listed_socket_works_and_no_other_does() {
+    let s = sandbox();
+    let root = tempfile::tempdir_in("/tmp").unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let allowed_dir = root_path.join("db");
+    let other_dir = root_path.join("other");
+    std::fs::create_dir_all(&allowed_dir).unwrap();
+    std::fs::create_dir_all(&other_dir).unwrap();
+    let allowed = allowed_dir.join("db.sock");
+    let other = other_dir.join("other.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&allowed).unwrap();
+    let other_listener = std::os::unix::net::UnixListener::bind(&other).unwrap();
+    std::thread::spawn(move || for _ in listener.incoming() {});
+    std::thread::spawn(move || for _ in other_listener.incoming() {});
+    let profile = check_profile(
+        s.workspace.path(),
+        &s.home,
+        &[],
+        &[allowed_dir.to_string_lossy().into_owned()],
+    );
+    let connect = |path: &Path| {
+        Command::new("/usr/bin/sandbox-exec")
+            .args([
+                "-p",
+                &profile,
+                "python3",
+                "-c",
+                &format!(
+                    "import socket; c = socket.socket(socket.AF_UNIX); c.connect('{}')",
+                    path.display()
+                ),
+            ])
+            .current_dir(s.workspace.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(connect(&allowed), "the listed socket");
+    assert!(!connect(&other), "any other socket");
 }
