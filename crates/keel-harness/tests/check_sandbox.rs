@@ -92,6 +92,45 @@ fn the_home_folder_is_not() {
 }
 
 #[test]
+fn a_check_cannot_change_what_git_will_run() {
+    let s = sandbox();
+    let git = |script: &str| {
+        Command::new("/bin/sh")
+            .current_dir(s.workspace.path())
+            .args(["-c", script])
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(git(
+        "git init -q -b main && git config user.name T && git config user.email t@e.c"
+    ));
+    let config = std::fs::read_to_string(s.workspace.path().join(".git/config")).unwrap();
+
+    for attack in [
+        "echo '[core]' >> .git/config",
+        "rm .git/config",
+        "mv .git/config .git/old",
+        "echo x > .git/config.worktree",
+        "echo /tmp > .git/commondir",
+        "echo x > .git/hooks/pre-commit",
+        "mv .git .git-old",
+        "git config diff.external /tmp/x",
+    ] {
+        assert!(!s.allowed(attack), "{attack}");
+    }
+    assert_eq!(
+        std::fs::read_to_string(s.workspace.path().join(".git/config")).unwrap(),
+        config
+    );
+    assert!(s.workspace.path().join(".git/HEAD").exists());
+
+    // Ordinary work still happens, and that's why the rest of `.git` stays open.
+    assert!(s.allowed("git add -A && git commit -qm work && git branch other && git status"));
+}
+
+#[test]
 fn temp_folders_work_because_test_suites_need_them() {
     let s = sandbox();
     assert!(s.allowed("f=$(mktemp) && echo x > \"$f\" && rm \"$f\""));

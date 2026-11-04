@@ -6,7 +6,8 @@
     "settings": "Settings",
     "back": "Back",
     "refresh": "Check again",
-    "error": "Something went wrong: {{detail}}"
+    "error": "Something went wrong: {{detail}}",
+    "workflows": "Workflows"
   },
   "session": {
     "checking": "Checking your Claude Code session…",
@@ -55,7 +56,8 @@
     "blocked": "Blocked",
     "abandoned": "Abandoned",
     "waitingApproval": "Waiting for you",
-    "rejected": "Rejected"
+    "rejected": "Rejected",
+    "skipped": "Skipped"
   },
   "reasons": {
     "claudeMissing": "Claude Code isn't installed, or Keel can't find it.",
@@ -85,7 +87,12 @@
     "unsafeBranch": "Keel only pushes its own branches, and this run is on {{branch}}.",
     "serviceFailed": "Couldn't start the service “{{name}}”: {{detail}}",
     "invalidSetting": "This setting can't be used: {{value}}",
-    "setupFailed": "Preparing the project failed with code {{exitCode}}."
+    "setupFailed": "Preparing the project failed with code {{exitCode}}.",
+    "noStructuredOutput": "It finished without the answer it was asked for.",
+    "reworkLimit": "The approver sent this back {{rounds}} times and still isn't satisfied. It's your call now.",
+    "noMatchingPaths": "Nothing it covers changed ({{paths}}).",
+    "invalidWorkflow": "This workflow can't run.",
+    "snapshotFailed": "The step ended, but Keel couldn't read what it changed, so it doesn't count as done."
   },
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",
@@ -122,11 +129,6 @@
       "max": "Maximum"
     },
     "workflow": "Workflow",
-    "workflowFull": "Full, up to a pull request",
-    "workflowSingle": "One step",
-    "workflowFullHint": "Spec writer, builder, check, your approval, and a draft pull request.",
-    "specModel": "Spec writer's model",
-    "builderModel": "Builder's model",
     "source": "Where it comes from",
     "sourceText": "Write it",
     "sourceIssue": "GitHub issue",
@@ -139,7 +141,9 @@
     "checkCommand": "Check: {{command}}",
     "checkNone": "This project has no check command, so that step is skipped. Set one in Settings.",
     "needsGithub": "This workflow needs a GitHub account for the project.",
-    "openSettings": "Open Settings"
+    "openSettings": "Open Settings",
+    "workflowSingleOption": "One step only",
+    "editWorkflows": "Edit workflows"
   },
   "run": {
     "attemptTitle": "Attempt {{number}}",
@@ -160,7 +164,7 @@
     "auditMissing": "The audit record's raw file is missing.",
     "auditPending": "The audit record closes when the step ends.",
     "whatToDecide": "What you need to decide",
-    "decideSucceeded": "Review the changes. Delivering them as a pull request arrives in the next version; for now they stay in the private copy.",
+    "decideSucceeded": "Review the changes. This workflow doesn't open a pull request. Use one that does to deliver them.",
     "decideActive": "Nothing yet. You can stop it if you want.",
     "decideFailed": "Try again, or leave it. The reason is above.",
     "decideStopped": "You stopped it. You can try again or leave it.",
@@ -183,7 +187,7 @@
     "openPr": "Open on GitHub",
     "fromIssue": "From issue #{{number}}",
     "base": "Based on {{base}}",
-    "decideApproval": "Approve or reject below.",
+    "decideApproval": "Approve or reject above.",
     "decideDelivered": "Review and merge the draft on GitHub. Keel doesn't merge.",
     "decideRejected": "Nothing. You rejected this, and your reason will reach this project's next runs.",
     "approvalTitle": "Should this become a pull request?",
@@ -194,7 +198,23 @@
     "reject": "Reject",
     "workflowWarning": "This change edits `.github/workflows`. Those files can run with the repo's secrets as soon as the branch is pushed. Read them first.",
     "checksPassed": "{{passed}} of {{total}} checks passed.",
-    "checkFailedSummary": "A check failed, so this didn't go further."
+    "checkFailedSummary": "A check failed, so this didn't go further.",
+    "round": "Round {{number}}",
+    "reviewsTitle": "Reviews",
+    "verdictApproved": "No problems",
+    "verdictChanges": "Asks for changes",
+    "approverTitle": "Approver",
+    "decisionApprove": "Ready for you",
+    "decisionRework": "Sent it back",
+    "decisionOverridden": "You took over from it",
+    "risk": "Risk",
+    "riskLow": "low",
+    "riskMedium": "medium",
+    "riskHigh": "high",
+    "anotherRound": "One more round",
+    "toMyApproval": "Send it to my approval",
+    "changesTitle": "Everything this run changed",
+    "decideReworkLimit": "Choose above: one more round, your approval, or leave it."
   },
   "tabs": {
     "activity": "Activity",
@@ -234,7 +254,12 @@
     "startedCheck": "Running: {{command}}",
     "services": "Services ready: {{names}}",
     "servicesLost": "Couldn't restore the services after reopening: {{error}}",
-    "setupResult": "Preparation ended with code {{code}}"
+    "setupResult": "Preparation ended with code {{code}}",
+    "skipped": "Skipped: nothing it covers changed",
+    "rework": "Sent back for round {{round}}",
+    "reworkLimit": "Reached the limit of rounds",
+    "reworkLimitAnswerRound": "You asked for another round",
+    "reworkLimitAnswerApproval": "You sent it on to your approval"
   },
   "commands": {
     "empty": "No commands ran.",
@@ -371,5 +396,64 @@
     "serviceStart": "Write the command that starts “{{value}}”.",
     "envName": "A variable name uses capital letters, numbers and underscores: “{{value}}”.",
     "envReserved": "Keel controls “{{value}}”, or it could carry a credential, so a project can't set it."
+  },
+  "invalidWorkflow": {
+    "empty": "A workflow needs at least one step.",
+    "badId": "“{{step}}” can't be a step's name. Use letters, numbers and hyphens.",
+    "duplicateId": "Two steps are called “{{step}}”.",
+    "noModel": "Choose a model for “{{step}}”.",
+    "noPrompt": "Write what “{{step}}” should do.",
+    "badPath": "“{{step}}” has a file pattern that can't be read.",
+    "reviewerMustReadOnly": "“{{step}}” judges the work, so it can only read.",
+    "parallelMustReadOnly": "“{{step}}” is in a group that runs at once, and they share one copy of the code, so it can only read.",
+    "reworkTarget": "“{{step}}” sends work back to a step that has to come before it.",
+    "tooManyRounds": "“{{step}}” can send work back 5 times at most.",
+    "emptyGroup": "The group “{{step}}” has no steps.",
+    "noCommand": "Write the command for “{{step}}”.",
+    "deliverNeedsApproval": "“{{step}}” opens a pull request, so a person has to approve in a step before it."
+  },
+  "workflows": {
+    "title": "Workflows",
+    "subtitle": "The steps a run goes through, with the model for each one.",
+    "project": "Project",
+    "noProjects": "Add a project first, when you start a run.",
+    "builtin": "Included",
+    "builtinNote": "This one comes with Keel. Saving makes a copy for this project.",
+    "name": "Name",
+    "add": "Add a step:",
+    "addAgent": "Agent",
+    "addParallel": "Group at once",
+    "addCheck": "Check",
+    "addApproval": "Your approval",
+    "addDeliver": "Pull request",
+    "addReviewer": "Add a reviewer",
+    "stepAgent": "Agent",
+    "stepSetup": "Setup",
+    "stepCheck": "Check",
+    "stepParallel": "Group that runs at once",
+    "stepApproval": "Your approval",
+    "stepDeliver": "Draft pull request",
+    "approvalHint": "The run waits here for you, for as long as it takes.",
+    "deliverHint": "Keel pushes a branch and opens a draft. It never merges.",
+    "stepId": "Step name",
+    "role": "Role",
+    "roleWorker": "Does the work",
+    "roleReviewer": "Reviews",
+    "roleApprover": "Approves",
+    "reworkTo": "Sends work back to",
+    "maxRounds": "Rounds at most",
+    "paths": "Only if these files change (optional)",
+    "pathsHint": "Patterns separated by commas, such as **/*.tsx. Empty means it always runs.",
+    "prompt": "What it does",
+    "promptHint": "You can use {{tokens}}, where spec is a step's name.",
+    "command": "Command",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "remove": "Remove",
+    "save": "Save",
+    "saveCopy": "Save a copy",
+    "saved": "Saved",
+    "delete": "Delete",
+    "newName": "My workflow"
   }
 }

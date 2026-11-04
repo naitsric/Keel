@@ -83,6 +83,8 @@ fn main() {
             prompt: prompt.clone(),
             max_turns: Some(6),
             max_budget_usd: None,
+            paths: vec![],
+            role: Default::default(),
         }),
         WorkflowStep::Check {
             id: "check".into(),

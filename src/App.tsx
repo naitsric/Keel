@@ -6,6 +6,7 @@ import { Home } from "./views/Home";
 import { NewRunDialog } from "./views/NewRunDialog";
 import { RunDetail } from "./views/RunDetail";
 import { SettingsView } from "./views/SettingsView";
+import { WorkflowsView } from "./views/WorkflowsView";
 
 function QuitDialog() {
   const { t } = useTranslation();
@@ -33,6 +34,7 @@ export default function App() {
       {view.name === "home" && <Home />}
       {view.name === "run" && <RunDetail key={view.runId} runId={view.runId} />}
       {view.name === "settings" && <SettingsView />}
+      {view.name === "workflows" && <WorkflowsView />}
       <NewRunDialog />
       <QuitDialog />
     </div>

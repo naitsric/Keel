@@ -39,6 +39,37 @@ impl ToolProfile {
     }
 }
 
+/// What an agent step is for. Reviewers and approvers return a structured answer Keel can act on.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum StepRole {
+    #[default]
+    Worker,
+    /// Reads the change and returns a verdict with findings. It can't edit anything.
+    Reviewer,
+    /// Checks the reviewers' findings and decides. Sending work back reruns everything from
+    /// `rework_to`, at most `max_rounds` times. Then a person decides.
+    Approver { rework_to: String, max_rounds: u32 },
+}
+
+impl StepRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Reviewer => "reviewer",
+            Self::Approver { .. } => "approver",
+        }
+    }
+
+    fn is_worker(&self) -> bool {
+        matches!(self, Self::Worker)
+    }
+}
+
 /// One agent step as the user defined it, including its own model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +81,11 @@ pub struct StepSpec {
     pub prompt: String,
     pub max_turns: Option<u32>,
     pub max_budget_usd: Option<f64>,
+    /// Runs only if the run changed files matching one of these globs. Empty means always.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "StepRole::is_worker")]
+    pub role: StepRole,
 }
 
 /// Something a project's commands need, such as a test database. Keel runs these outside the
@@ -115,6 +151,8 @@ pub enum WorkflowStep {
     Setup { id: String, run: String },
     /// A command Keel runs itself, in a sandbox, with no model involved. Exit 0 passes.
     Check { id: String, run: String },
+    /// Agents that run at the same time. Only read-only ones, since they share a workspace.
+    Parallel { id: String, steps: Vec<StepSpec> },
     /// Waits for a person, for as long as it takes.
     Approval { id: String },
     /// Keel, not an agent, pushes the branch and opens a draft pull request.
@@ -127,6 +165,7 @@ impl WorkflowStep {
             Self::Agent(step) => &step.id,
             Self::Setup { id, .. }
             | Self::Check { id, .. }
+            | Self::Parallel { id, .. }
             | Self::Approval { id }
             | Self::Deliver { id } => id,
         }
@@ -137,6 +176,7 @@ impl WorkflowStep {
             Self::Agent(_) => "agent",
             Self::Setup { .. } => "setup",
             Self::Check { .. } => "check",
+            Self::Parallel { .. } => "parallel",
             Self::Approval { .. } => "approval",
             Self::Deliver { .. } => "deliver",
         }
@@ -163,6 +203,8 @@ pub enum AttemptState {
     WaitingApproval,
     /// A person rejected it at an approval step. The run ends here.
     Rejected,
+    /// Not needed for this change: nothing it covers was touched.
+    Skipped,
     Abandoned,
 }
 
@@ -182,6 +224,7 @@ impl AttemptState {
             Self::Blocked => "blocked",
             Self::WaitingApproval => "waitingApproval",
             Self::Rejected => "rejected",
+            Self::Skipped => "skipped",
             Self::Abandoned => "abandoned",
         }
     }
@@ -199,6 +242,7 @@ impl AttemptState {
             "blocked" => Self::Blocked,
             "waitingApproval" => Self::WaitingApproval,
             "rejected" => Self::Rejected,
+            "skipped" => Self::Skipped,
             "abandoned" => Self::Abandoned,
             _ => return None,
         })
@@ -266,6 +310,22 @@ pub enum Reason {
     },
     SetupFailed {
         exit_code: Option<i32>,
+    },
+    /// The step ended, but Keel couldn't read what it changed.
+    SnapshotFailed,
+    /// A reviewer or approver finished without the answer it was asked for.
+    NoStructuredOutput,
+    /// The approver kept sending work back, up to the limit. A person decides now.
+    ReworkLimit {
+        rounds: u32,
+    },
+    NoMatchingPaths {
+        paths: Vec<String>,
+    },
+    /// `problem` is a code the UI translates, and `step` is the step it's about.
+    InvalidWorkflow {
+        problem: String,
+        step: String,
     },
     NoGithubRemote,
     GithubAccountMissing,

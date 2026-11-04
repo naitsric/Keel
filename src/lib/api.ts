@@ -12,6 +12,7 @@ export type AttemptState =
   | "blocked"
   | "waitingApproval"
   | "rejected"
+  | "skipped"
   | "abandoned";
 
 export type ToolProfile = "readOnly" | "build";
@@ -108,12 +109,50 @@ export interface Decision {
   text: string;
 }
 
+export type StepRole = { kind: "worker" } | { kind: "reviewer" } | { kind: "approver"; reworkTo: string; maxRounds: number };
+
+export interface StepSpec {
+  id: string;
+  model: string;
+  effort: string | null;
+  tools: ToolProfile;
+  prompt: string;
+  maxTurns: number | null;
+  maxBudgetUsd: number | null;
+  paths?: string[];
+  role?: StepRole;
+}
+
 export type WorkflowStep =
-  | { type: "agent"; id: string; model: string; tools: ToolProfile }
+  | ({ type: "agent" } & StepSpec)
   | { type: "setup"; id: string; run: string }
   | { type: "check"; id: string; run: string }
+  | { type: "parallel"; id: string; steps: StepSpec[] }
   | { type: "approval"; id: string }
   | { type: "deliver"; id: string };
+
+export interface Workflow {
+  id: string;
+  name: string;
+  steps: WorkflowStep[];
+  builtin: boolean;
+}
+
+/** A reviewer's answer. */
+export interface Verdict {
+  verdict: "approved" | "changes";
+  findings: string[];
+  summary: string;
+}
+
+/** The approver's answer. */
+export interface Decision_ {
+  decision: "approve" | "rework";
+  risk: "low" | "medium" | "high";
+  reasons: string;
+  instructions: string;
+  overriddenByPerson?: boolean;
+}
 
 export interface Run {
   id: string;
@@ -127,12 +166,13 @@ export interface Run {
   branch: string | null;
   prUrl: string | null;
   prNumber: number | null;
+  round: number;
   createdAt: string;
   finishedAt: string | null;
 }
 
 export type WorkflowChoice =
-  | { mode: "full"; specModel: string; builderModel: string }
+  | { mode: "saved"; workflowId: string }
   | { mode: "single"; stepId: string; model: string; effort: string | null; tools: ToolProfile; maxTurns: number | null };
 
 export interface RunRow {
@@ -173,6 +213,10 @@ export interface Attempt {
   runId: string;
   stepId: string;
   kind: "agent" | "setup" | "check" | "approval" | "deliver";
+  role: "worker" | "reviewer" | "approver";
+  round: number;
+  output: (Verdict & Decision_) | null;
+  runFiles: string[] | null;
   exitCode: number | null;
   number: number;
   state: AttemptState;
@@ -237,6 +281,11 @@ export const api = {
   projectAdd: (path: string) => invoke<Project>("project_add", { path }),
   runStart: (request: RunRequest) => invoke<string>("run_start", { request }),
   runGet: (runId: string) => invoke<Run>("run_get", { runId }),
+  runDiff: (runId: string) => invoke<string>("run_diff", { runId }),
+  workflowsList: (projectId: string, language: string) => invoke<Workflow[]>("workflows_list", { projectId, language }),
+  workflowSave: (projectId: string, workflow: Workflow) => invoke<Workflow>("workflow_save", { projectId, workflow }),
+  workflowDelete: (projectId: string, workflowId: string) => invoke<void>("workflow_delete", { projectId, workflowId }),
+  reworkLimitAnswer: (attemptId: string, anotherRound: boolean) => invoke<void>("rework_limit_answer", { attemptId, anotherRound }),
   runAttempts: (runId: string) => invoke<Attempt[]>("run_attempts", { runId }),
   projectUpdate: (projectId: string, settings: ProjectSettings) => invoke<Project>("project_update", { projectId, settings }),
   githubStatus: (projectId: string) => invoke<GithubStatus>("github_status", { projectId }),

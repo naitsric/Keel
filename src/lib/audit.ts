@@ -63,15 +63,49 @@ export function toolSummary(name: string, input: Record<string, any> | null | un
 }
 
 /** Everything the run's steps changed, without repeats. */
-export function filesChangedBy(attempts: { filesChanged: string[] | null }[]): string[] {
-  return [...new Set(attempts.flatMap((a) => a.filesChanged ?? []))];
+export function filesChangedBy(attempts: { filesChanged: string[] | null; runFiles?: string[] | null }[]): string[] {
+  // A file added and later removed isn't part of what the run changed.
+  const net = [...attempts].reverse().find((a) => a.runFiles)?.runFiles;
+  return net ?? [...new Set(attempts.flatMap((a) => a.filesChanged ?? []))];
 }
 
 /** Files that can run with the repo's secrets as soon as the branch is pushed. */
 export const touchesWorkflows = (files: string[]) => files.some((f) => f.startsWith(".github/workflows/"));
 
-/** The attempt whose final message explains the run: the last one that could change files, else the last agent. */
-export function explainingAttempt<T extends { kind: string; tools: string; resultText: string | null }>(attempts: T[]): T | undefined {
-  const agents = attempts.filter((a) => a.kind === "agent" && a.resultText);
-  return [...agents].reverse().find((a) => a.tools === "build") ?? agents[agents.length - 1];
+/**
+ * The attempts whose final messages explain the run: every one that could change files, since after
+ * rework there's one per round, and else the last worker.
+ */
+export function explainingAttempts<T extends { kind: string; tools: string; role: string; state: string; resultText: string | null }>(attempts: T[]): T[] {
+  const agents = attempts.filter((a) => a.kind === "agent" && a.role === "worker" && a.resultText);
+  const builders = agents.filter((a) => a.tools === "build");
+  const finished = builders.filter((a) => a.state === "succeeded");
+  if (finished.length > 0) return finished;
+  if (builders.length > 0) return builders.slice(-1);
+  return agents.slice(-1);
+}
+
+/** The latest try of each step, in the order they first ran. */
+export function latestOfEachStep<T extends { stepId: string }>(attempts: T[]): T[] {
+  const latest = new Map<string, T>();
+  for (const attempt of attempts) latest.set(attempt.stepId, attempt);
+  return [...latest.values()];
+}
+
+const NEEDS_A_PERSON = ["waitingApproval", "stalled", "blocked", "interrupted", "failed", "stopped", "rejected"];
+const WORKING = ["running", "preparing", "queued"];
+
+/** The step the run is about right now: whatever needs a person, then whatever is working. */
+export function focusAttempt<T extends { stepId: string; state: string }>(attempts: T[]): T | undefined {
+  const current = latestOfEachStep(attempts);
+  for (const group of [NEEDS_A_PERSON, WORKING]) {
+    const found = [...current].reverse().find((a) => group.includes(a.state));
+    if (found) return found;
+  }
+  return attempts[attempts.length - 1];
+}
+
+/** Steps of a workflow with parallel groups opened up, in order. */
+export function flatSteps(steps: { type: string; id: string; steps?: { id: string }[] }[]): { id: string }[] {
+  return steps.flatMap((step) => (step.type === "parallel" ? (step.steps ?? []) : [step]));
 }

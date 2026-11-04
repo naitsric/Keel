@@ -58,6 +58,8 @@ pub struct StepCommand {
     pub session_id: String,
     /// Continue this session instead of starting `session_id`.
     pub resume: Option<String>,
+    /// Makes the step return JSON matching this schema, in `structured_output`.
+    pub json_schema: Option<String>,
 }
 
 impl StepCommand {
@@ -94,6 +96,9 @@ impl StepCommand {
         match &self.resume {
             Some(session) => pair("--resume", session.clone()),
             None => pair("--session-id", self.session_id.clone()),
+        }
+        if let Some(schema) = &self.json_schema {
+            pair("--json-schema", schema.clone());
         }
         if let Some(effort) = &step.effort {
             pair("--effort", effort.clone());
@@ -136,6 +141,8 @@ mod tests {
             prompt: "x".into(),
             max_turns: Some(5),
             max_budget_usd: None,
+            paths: vec![],
+            role: Default::default(),
         }
     }
 
@@ -148,6 +155,7 @@ mod tests {
             system_prompt_file: "/p.md".into(),
             session_id: "sid".into(),
             resume: None,
+            json_schema: None,
         }
     }
 
@@ -183,6 +191,17 @@ mod tests {
     fn build_steps_cannot_spawn_agents_or_monitors() {
         let tools = value_after(&command().args(&step(ToolProfile::Build)), "--tools").unwrap();
         assert!(!tools.contains("Agent") && !tools.contains("Task") && !tools.contains("Monitor"));
+    }
+
+    #[test]
+    fn a_reviewer_is_asked_for_a_structured_answer() {
+        let mut c = command();
+        assert!(value_after(&c.args(&step(ToolProfile::ReadOnly)), "--json-schema").is_none());
+        c.json_schema = Some("{}".into());
+        assert_eq!(
+            value_after(&c.args(&step(ToolProfile::ReadOnly)), "--json-schema").as_deref(),
+            Some("{}")
+        );
     }
 
     #[test]

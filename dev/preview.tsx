@@ -36,6 +36,10 @@ const attempt: Attempt = {
   runId: "r1",
   stepId: "builder",
   kind: "agent",
+  role: "worker",
+  round: 0,
+  output: null,
+  runFiles: null,
   exitCode: null,
   number: 1,
   state,
@@ -68,33 +72,49 @@ const attempt: Attempt = {
   lastActivityAt: at(state === "stalled" ? 11 : 1),
 };
 
+const agentStep = (id: string, model: string, tools: "readOnly" | "build") => ({ type: "agent" as const, id, model, tools, effort: null, prompt: "Implement {{steps.spec.output}}", maxTurns: null, maxBudgetUsd: null });
+const reviewerStep = (id: string, paths: string[]) => ({ id, model: "sonnet", tools: "readOnly" as const, effort: null, prompt: "Review {{diff}}", maxTurns: null, maxBudgetUsd: null, paths, role: { kind: "reviewer" as const } });
 const workflow: WorkflowStep[] = [
-  { type: "agent", id: "spec", model: "opus", tools: "readOnly" },
-  { type: "agent", id: "builder", model: "sonnet", tools: "build" },
+  agentStep("spec", "opus", "readOnly"),
+  agentStep("builder", "sonnet", "build"),
   { type: "check", id: "check", run: "make test" },
+  { type: "parallel", id: "reviews", steps: [reviewerStep("security", []), reviewerStep("ux", ["**/*.tsx"]), reviewerStep("ui", ["**/*.tsx"]), reviewerStep("code", [])] },
+  { ...agentStep("approver", "opus", "readOnly"), role: { kind: "approver", reworkTo: "builder", maxRounds: 2 } },
   { type: "approval", id: "approval" },
   { type: "deliver", id: "pull-request" },
 ];
 const delivered = params.get("flow") === "delivered";
-const waiting = params.get("flow") === "approval" || delivered;
+const waiting = params.get("flow") === "approval" || params.get("flow") === "limit" || delivered;
 const specAttempt: Attempt = { ...attempt, id: "a0", stepId: "spec", tools: "readOnly", state: "succeeded", reason: null, modelActual: "claude-opus-5-5", filesChanged: null, resultText: "1. add returns the sum.\n2. The tests pass.", finishedAt: at(2) };
 const builtAttempt: Attempt = { ...attempt, state: "succeeded", reason: null, shaAfter: "28c696fd11223344556677889900aabbccddeeff", finishedAt: at(1), rawSha256: "9f2c", resultText: "I fixed `add` in calc.py: it subtracted instead of adding.\n\nTests: `make test` passes.", filesChanged: params.get("workflows") === "1" ? ["calc.py", ".github/workflows/ci.yml"] : ["calc.py"] };
 const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12" };
 const approvalAttempt: Attempt = { ...attempt, id: "a3", stepId: "approval", kind: "approval", tools: "none", state: delivered ? "succeeded" : "waitingApproval", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, rawSha256: null, finishedAt: delivered ? at(0) : null };
 const prAttempt: Attempt = { ...attempt, id: "a4", stepId: "pull-request", kind: "deliver", tools: "none", state: "succeeded", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: "https://github.com/acme/app/pull/12", rawSha256: null, finishedAt: at(0) };
-const attemptsList: Attempt[] = waiting ? [specAttempt, builtAttempt, checkAttempt, approvalAttempt, ...(delivered ? [prAttempt] : [])] : [attempt];
+const round = params.get("round") === "2" ? 1 : 0;
+const reviewer = (id: string, verdict: "approved" | "changes", summary: string, findings: string[]): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "succeeded", reason: null, tools: "readOnly", filesChanged: null, resultText: null, finishedAt: at(1), output: { verdict, findings, summary } as Attempt["output"] });
+const skippedReviewer = (id: string): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "skipped", reason: { code: "noMatchingPaths", paths: ["**/*.tsx"] }, tools: "readOnly", filesChanged: null, resultText: null, modelActual: null, finishedAt: at(1), output: null });
+const approverAttempt = (decision: "approve" | "rework"): Attempt => ({ ...attempt, id: "r-approver", stepId: "approver", role: "approver", round, state: params.get("flow") === "limit" ? "blocked" : "succeeded", reason: params.get("flow") === "limit" ? { code: "reworkLimit", rounds: 2 } : null, tools: "readOnly", modelActual: "claude-opus-5-5", filesChanged: null, resultText: null, finishedAt: at(1), output: { decision, risk: "medium", reasons: "The security finding is real: the new endpoint skips the role check.", instructions: "Add the role check." } as Attempt["output"] });
+const reviews: Attempt[] = [
+  reviewer("security", params.get("findings") === "1" ? "changes" : "approved", params.get("findings") === "1" ? "The new endpoint skips the role check." : "No problems in authorization, logs or input handling.", params.get("findings") === "1" ? ["app/api.py:42 doesn't call require_role"] : []),
+  skippedReviewer("ux"),
+  skippedReviewer("ui"),
+  reviewer("code", "approved", "It meets each criterion, and the tests prove it.", []),
+  approverAttempt(params.get("findings") === "1" ? "rework" : "approve"),
+];
+const attemptsList: Attempt[] = params.get("flow") === "limit" ? [specAttempt, builtAttempt, checkAttempt, ...reviews] : waiting ? [specAttempt, builtAttempt, checkAttempt, ...reviews, approvalAttempt, ...(delivered ? [prAttempt] : [])] : [attempt];
 const run: Run = {
   id: "r1",
   projectId: "p1",
   title: "#7 The add function in calc.py is wrong",
   baseRef: "main",
   request: "Fix add",
-  workflow: waiting ? workflow : [{ type: "agent", id: "builder", model: "sonnet", tools: "build" }],
+  workflow: waiting ? workflow : [agentStep("builder", "sonnet", "build")],
   language: "en",
   sourceIssue: waiting ? { number: 7, title: "add is wrong", author: "someone", url: "https://github.com/acme/app/issues/7" } : null,
   branch: "keel/5e882d0f",
   prUrl: delivered ? "https://github.com/acme/app/pull/12" : null,
   prNumber: delivered ? 12 : null,
+  round: params.get("round") === "2" ? 1 : 0,
   createdAt: at(4),
   finishedAt: delivered ? at(0) : null,
 };
@@ -173,6 +193,13 @@ mockIPC((command) => {
       return { runs, projects: [{ id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.cargo"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }] }], totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
     case "run_get":
       return run;
+    case "run_diff":
+      return DIFF;
+    case "workflows_list":
+      return [
+        { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: workflow },
+        { id: "mine", name: i18next.language === "es" ? "Solo revisiones" : "Reviews only", builtin: false, steps: workflow.slice(3) },
+      ];
     case "run_attempts":
       return attemptsList;
     case "github_status":
@@ -208,6 +235,7 @@ void useApp.getState().refreshOverview();
 useApp.setState({ preflight });
 if (view === "run") useApp.setState({ view: { name: "run", runId: "r1" } });
 if (view === "settings") useApp.setState({ view: { name: "settings" } });
+if (view === "workflows") useApp.setState({ view: { name: "workflows" } });
 if (params.get("dialog") === "newRun") useApp.setState({ newRunOpen: true });
 if (params.get("dialog") === "quit") useApp.setState({ quitOpen: true });
 

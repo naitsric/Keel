@@ -69,6 +69,8 @@ fn main() {
                 prompt: "The add function in calc.py is wrong. Fix it, then run the tests.".into(),
                 max_turns: Some(10),
                 max_budget_usd: None,
+                paths: vec![],
+                role: Default::default(),
             },
             "es".into(),
         ))

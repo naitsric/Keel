@@ -193,6 +193,8 @@ fn agent(id: &str, tools: ToolProfile) -> WorkflowStep {
         prompt: "x".into(),
         max_turns: None,
         max_budget_usd: None,
+        paths: vec![],
+        role: Default::default(),
     })
 }
 

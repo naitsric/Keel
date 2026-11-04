@@ -1,10 +1,16 @@
 //! Git as Keel runs it. The agent works in a private clone. Credentials only ever touch the
-//! mirror, a bare repo no agent can reach, and everything in git that could execute code is off.
+//! mirror, a bare repo no agent can reach. Anything that reads that clone runs in the sandbox,
+//! because a `.git/config` can name programs for git to run, and a step could have written one.
 
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use keel_harness::github::{Token, classify_error, git_credential_args};
+use keel_harness::process::{SIGKILL, signal_group};
+use keel_harness::settings::check_profile;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -33,9 +39,14 @@ const BASE_REF: &str = "keel-base";
 /// home folder, which sandboxed commands can't reach.
 pub const RUN_CACHE: &str = ".keel-cache";
 
+/// How long git gets in a workspace. What a step left there could make it hang, and a run must
+/// never sit there saying nothing.
+const WORKSPACE_LIMIT: Duration = Duration::from_secs(600);
+
 #[derive(Debug, Clone)]
 pub struct Git {
-    pub bin: PathBuf,
+    bin: PathBuf,
+    limit: Duration,
 }
 
 /// How to reach GitHub for one operation. Nothing here is written anywhere.
@@ -53,8 +64,20 @@ pub struct Snapshot {
 }
 
 impl Git {
+    pub fn new(bin: PathBuf) -> Self {
+        Self {
+            bin,
+            limit: WORKSPACE_LIMIT,
+        }
+    }
+
     fn command(&self, cwd: &Path) -> Command {
         let mut command = Command::new(&self.bin);
+        Self::harden(&mut command, cwd);
+        command
+    }
+
+    fn harden(command: &mut Command, cwd: &Path) {
         command
             .current_dir(cwd)
             .env_clear()
@@ -72,8 +95,51 @@ impl Git {
                 "protocol.ext.allow=never",
                 "-c",
                 "commit.gpgsign=false",
+                "-c",
+                "gc.auto=0",
+                "-c",
+                "color.ui=false",
             ]);
-        command
+    }
+
+    /// Where this git's own files are, if they happen to be in the home folder.
+    fn install_dirs(&self, home: &Path) -> Vec<String> {
+        let real = self.bin.canonicalize().unwrap_or_else(|_| self.bin.clone());
+        let Some(dir) = real.parent() else {
+            return Vec::new();
+        };
+        let libexec = dir.parent().map(|prefix| prefix.join("libexec/git-core"));
+        [Some(dir.to_path_buf()), libexec]
+            .into_iter()
+            .flatten()
+            // A git sitting right in the home folder must not open up the whole folder.
+            .filter(|path| !home.starts_with(path))
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Git on a run's workspace, in the same sandbox as a `check` step. Whatever the workspace
+    /// makes git run gets no more than that step did.
+    fn run_in_workspace(&self, workspace: &Path, args: &[&str]) -> Result<String, GitError> {
+        let home = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| GitError::Failed("HOME is not set".to_owned()))?;
+        let profile = check_profile(workspace, &home, &self.install_dirs(&home), &[]);
+        let mut command = Command::new("/usr/bin/sandbox-exec");
+        command.args(["-p", &profile]).arg(&self.bin);
+        Self::harden(&mut command, workspace);
+        command.args(args);
+        let (ok, stdout, stderr) = bounded_output(command, self.limit)?;
+        if ok {
+            Ok(String::from_utf8_lossy(&stdout).trim_end().to_owned())
+        } else {
+            Err(GitError::Failed(format!(
+                "git {}: {}",
+                args.first().unwrap_or(&""),
+                String::from_utf8_lossy(&stderr).trim()
+            )))
+        }
     }
 
     fn run(&self, cwd: &Path, args: &[&str]) -> Result<String, GitError> {
@@ -225,19 +291,19 @@ impl Git {
         self.head(workspace)
     }
 
-    pub fn head(&self, repo: &Path) -> Result<String, GitError> {
-        self.run(repo, &["rev-parse", "HEAD"])
+    pub fn head(&self, workspace: &Path) -> Result<String, GitError> {
+        self.run_in_workspace(workspace, &["rev-parse", "HEAD"])
     }
 
-    pub fn current_branch(&self, repo: &Path) -> Result<String, GitError> {
-        self.run(repo, &["symbolic-ref", "--short", "HEAD"])
+    pub fn current_branch(&self, workspace: &Path) -> Result<String, GitError> {
+        self.run_in_workspace(workspace, &["symbolic-ref", "--short", "HEAD"])
     }
 
     /// How many commits the run's branch has beyond what it started from.
     pub fn commits_ahead(&self, mirror: &Path, workspace: &Path) -> Result<usize, GitError> {
         let head = self.head(workspace)?;
         let base = self.run(mirror, &["rev-parse", &format!("refs/heads/{BASE_REF}")])?;
-        let count = self.run(
+        let count = self.run_in_workspace(
             workspace,
             &["rev-list", "--count", &format!("{base}..{head}")],
         )?;
@@ -250,7 +316,7 @@ impl Git {
             .run(mirror, &["rev-parse", &format!("refs/heads/{BASE_REF}")])
             .ok()?;
         let log = self
-            .run(
+            .run_in_workspace(
                 workspace,
                 &["log", "--reverse", "--format=%s", &format!("{base}..HEAD")],
             )
@@ -258,7 +324,9 @@ impl Git {
         log.lines().next().map(str::to_owned)
     }
 
-    /// Copies the run's branch into the mirror. The workspace is only read.
+    /// Copies the run's branch into the mirror. This is the one command outside the sandbox that
+    /// touches the workspace: it has to write to the mirror, and the other end, `upload-pack`, is
+    /// the part of git made to be safe on a repo nobody trusts.
     pub fn fetch_run_branch(
         &self,
         mirror: &Path,
@@ -301,28 +369,106 @@ impl Git {
         before: &str,
         step_id: &str,
     ) -> Result<Snapshot, GitError> {
-        if !self.run(workspace, &["status", "--porcelain"])?.is_empty() {
-            self.run(workspace, &["add", "-A"])?;
+        if !self
+            .run_in_workspace(workspace, &["status", "--porcelain"])?
+            .is_empty()
+        {
+            self.run_in_workspace(workspace, &["add", "-A"])?;
             let message = format!("keel: changes left uncommitted by {step_id}");
-            self.run(workspace, &["commit", "-q", "--no-verify", "-m", &message])?;
+            self.run_in_workspace(workspace, &["commit", "-q", "--no-verify", "-m", &message])?;
         }
         let sha = self.head(workspace)?;
         let range = format!("{before}..{sha}");
         let files = self
-            .run(workspace, &["diff", "--name-only", &range])?
+            .run_in_workspace(workspace, &["diff", "--no-ext-diff", "--name-only", &range])?
             .lines()
             .map(str::to_owned)
             .collect();
-        let diff = self.run(workspace, &["diff", &range])?;
+        let diff = self.diff_range(workspace, &range)?;
         Ok(Snapshot { sha, files, diff })
+    }
+
+    /// The change itself. Between two commits no filter applies, and these flags keep what the
+    /// workspace's config could name from rewriting what a person is about to approve.
+    fn diff_range(&self, workspace: &Path, range: &str) -> Result<String, GitError> {
+        self.run_in_workspace(
+            workspace,
+            &["diff", "--no-ext-diff", "--no-textconv", range],
+        )
+    }
+
+    /// The files the run has changed since `base`, as the pull request will list them.
+    pub fn files_since(&self, workspace: &Path, base: &str) -> Result<Vec<String>, GitError> {
+        let range = format!("{base}..HEAD");
+        Ok(self
+            .run_in_workspace(workspace, &["diff", "--no-ext-diff", "--name-only", &range])?
+            .lines()
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// Everything the run has committed since `base`, as the pull request will show it.
+    pub fn diff_since(&self, workspace: &Path, base: &str) -> Result<String, GitError> {
+        self.diff_range(workspace, &format!("{base}..HEAD"))
     }
 
     /// Whether a command left the workspace different, which a check shouldn't.
     pub fn is_dirty(&self, workspace: &Path) -> bool {
-        self.run(workspace, &["status", "--porcelain"])
+        self.run_in_workspace(workspace, &["status", "--porcelain"])
             .map(|s| !s.is_empty())
             .unwrap_or(false)
     }
+}
+
+/// Runs a command and gives up on it at the limit, along with anything it started.
+fn bounded_output(
+    mut command: Command,
+    limit: Duration,
+) -> Result<(bool, Vec<u8>, Vec<u8>), GitError> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0);
+    let mut child = command.spawn()?;
+    let (sender, receiver) = mpsc::channel();
+    let drain = |is_stdout: bool, pipe: Option<Box<dyn std::io::Read + Send>>| {
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.read_to_end(&mut bytes);
+            }
+            let _ = sender.send((is_stdout, bytes));
+        });
+    };
+    drain(true, child.stdout.take().map(|p| Box::new(p) as _));
+    drain(false, child.stderr.take().map(|p| Box::new(p) as _));
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            signal_group(child.id() as i32, SIGKILL);
+            let _ = child.wait();
+            return Err(GitError::Failed(format!(
+                "git took longer than {} seconds",
+                limit.as_secs()
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let (mut stdout, mut stderr) = (Vec::new(), Vec::new());
+    // Something it left behind could hold the pipes open, and that's no reason to keep waiting.
+    for _ in 0..2 {
+        match receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok((true, bytes)) => stdout = bytes,
+            Ok((false, bytes)) => stderr = bytes,
+            Err(_) => break,
+        }
+    }
+    Ok((status.success(), stdout, stderr))
 }
 
 fn require_own_branch(branch: &str) -> Result<(), GitError> {
@@ -341,6 +487,150 @@ fn require_own_branch(branch: &str) -> Result<(), GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run's workspace after a step that had write access to `.git/config`, set up as in a real
+    /// install: under the home folder, with a canary a program outside the sandbox could touch.
+    struct Poisoned {
+        _dir: tempfile::TempDir,
+        git: Git,
+        mirror: PathBuf,
+        workspace: PathBuf,
+        canary: PathBuf,
+        base: String,
+    }
+
+    fn sh(cwd: &Path, script: &str) {
+        let output = Command::new("/bin/sh")
+            .current_dir(cwd)
+            .args(["-c", script])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{script}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn poisoned(config: &str) -> Poisoned {
+        let home = PathBuf::from(std::env::var("HOME").unwrap());
+        let dir = tempfile::Builder::new()
+            .prefix(".keel-git-test")
+            .tempdir_in(&home)
+            .unwrap();
+        let root = dir.path().to_path_buf();
+        let git = Git::new(PathBuf::from("/usr/bin/git"));
+        let source = root.join("source");
+        std::fs::create_dir(&source).unwrap();
+        sh(
+            &source,
+            "git init -q -b main && git config user.name T && git config user.email t@e.c && echo one > a.txt && git add -A && git commit -qm init",
+        );
+        let mirror = root.join("mirror.git");
+        git.update_mirror_from_local(&source, &mirror).unwrap();
+        let workspace = root.join("workspace");
+        let identity = ("T".to_owned(), "t@e.c".to_owned());
+        let base = git
+            .create_workspace(&mirror, &workspace, "keel/test", &identity)
+            .unwrap();
+        let canary = root.join("canary");
+        let config = config
+            .replace("CANARY", &canary.to_string_lossy())
+            .replace("MARKER", &workspace.join(".git/marker").to_string_lossy());
+        let mut existing = std::fs::read_to_string(workspace.join(".git/config")).unwrap();
+        existing.push_str(&config);
+        std::fs::write(workspace.join(".git/config"), existing).unwrap();
+        std::fs::write(
+            workspace.join(".gitattributes"),
+            "* filter=evil diff=evil\n",
+        )
+        .unwrap();
+        std::fs::write(workspace.join("a.txt"), "two\n").unwrap();
+        Poisoned {
+            _dir: dir,
+            git,
+            mirror,
+            workspace,
+            canary,
+            base,
+        }
+    }
+
+    const FILTER: &str = "[filter \"evil\"]\n\tclean = \"touch CANARY; touch MARKER; cat\"\n";
+
+    #[test]
+    fn a_filter_a_step_planted_stays_in_the_sandbox() {
+        let p = poisoned(FILTER);
+        let snapshot = p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        assert!(
+            p.workspace.join(".git/marker").exists(),
+            "the filter did run, so this proves something"
+        );
+        assert!(!p.canary.exists(), "it could not reach the home folder");
+        assert_eq!(snapshot.files, [".gitattributes", "a.txt"]);
+        assert!(!snapshot.sha.is_empty());
+    }
+
+    #[test]
+    fn a_planted_diff_program_can_neither_run_nor_lie() {
+        let script = "#!/bin/sh\ntouch CANARY\necho FAKE-DIFF\n";
+        let p = poisoned("");
+        let path = p.workspace.join(".git/evil.sh");
+        std::fs::write(&path, script.replace("CANARY", &p.canary.to_string_lossy())).unwrap();
+        sh(&p.workspace, "chmod +x .git/evil.sh");
+        let config = format!(
+            "[diff]\n\texternal = {0}\n[diff \"evil\"]\n\ttextconv = {0}\n\tcommand = {0}\n",
+            path.display()
+        );
+        let mut existing = std::fs::read_to_string(p.workspace.join(".git/config")).unwrap();
+        existing.push_str(&config);
+        std::fs::write(p.workspace.join(".git/config"), existing).unwrap();
+
+        let snapshot = p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        assert!(!p.canary.exists());
+        assert!(!snapshot.diff.contains("FAKE-DIFF"), "{}", snapshot.diff);
+        assert!(snapshot.diff.contains("+two"), "{}", snapshot.diff);
+        let run_diff = p.git.diff_since(&p.workspace, &p.base).unwrap();
+        assert!(
+            !run_diff.contains("FAKE-DIFF") && run_diff.contains("+two"),
+            "{run_diff}"
+        );
+    }
+
+    #[test]
+    fn delivering_a_poisoned_workspace_runs_nothing_either() {
+        let p = poisoned(FILTER);
+        p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        std::fs::write(p.workspace.join("a.txt"), "three\n").unwrap();
+        assert!(p.git.is_dirty(&p.workspace));
+        assert_eq!(p.git.current_branch(&p.workspace).unwrap(), "keel/test");
+        assert_eq!(p.git.commits_ahead(&p.mirror, &p.workspace).unwrap(), 1);
+        assert!(p.git.first_subject(&p.mirror, &p.workspace).is_some());
+        p.git
+            .fetch_run_branch(&p.mirror, &p.workspace, "keel/test")
+            .unwrap();
+        assert!(!p.canary.exists());
+        let fetched = p
+            .git
+            .run(&p.mirror, &["rev-parse", "refs/heads/keel/test"])
+            .unwrap();
+        assert_eq!(fetched, p.git.head(&p.workspace).unwrap());
+    }
+
+    #[test]
+    fn git_that_hangs_is_given_up_on_along_with_what_it_started() {
+        let mut p = poisoned(
+            "[filter \"evil\"]\n\tclean = \"touch MARKER; sleep 300\"\n\trequired = true\n",
+        );
+        p.git.limit = Duration::from_millis(600);
+        let started = Instant::now();
+        let error = p
+            .git
+            .snapshot(&p.workspace, &p.base, "builder")
+            .unwrap_err();
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert!(error.to_string().contains("longer than"), "{error}");
+    }
 
     #[test]
     fn only_keel_branches_can_be_pushed() {

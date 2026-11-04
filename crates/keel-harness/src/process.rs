@@ -108,6 +108,7 @@ pub fn signal_process(pid: i32, signal: i32) -> bool {
 
 pub const SIGINT: i32 = libc::SIGINT;
 pub const SIGTERM: i32 = libc::SIGTERM;
+pub const SIGKILL: i32 = libc::SIGKILL;
 
 /// What the step's process tree is doing, to explain a lack of progress.
 #[derive(Debug, Clone, PartialEq)]

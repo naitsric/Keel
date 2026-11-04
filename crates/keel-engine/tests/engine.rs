@@ -100,6 +100,8 @@ fn step(tools: ToolProfile) -> StepSpec {
         prompt: "Fix the bug\nwith care".into(),
         max_turns: None,
         max_budget_usd: None,
+        paths: vec![],
+        role: Default::default(),
     }
 }
 
@@ -661,6 +663,8 @@ fn reopening_after_the_agent_died_marks_it_interrupted_and_keeps_the_audit() {
             run_id: run.clone(),
             step_id: "builder".into(),
             kind: "agent".into(),
+            role: "worker".into(),
+            round: 0,
             number: 9,
             state: AttemptState::Running,
             model_requested: "fake".into(),
