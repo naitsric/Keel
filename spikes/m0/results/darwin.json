@@ -1,0 +1,665 @@
+{
+  "cli_version": "2.1.318 (Claude Code)",
+  "platform": "Darwin arm64",
+  "auth_status": {
+    "loggedIn": true,
+    "authMethod": "claude.ai",
+    "apiProvider": "firstParty",
+    "subscriptionType": "max",
+    "has_loginExpiresAt": true
+  },
+  "config_dir_fresh_logged_in": false,
+  "launch_modes": {
+    "default": {
+      "exit": 0,
+      "seconds": 5.8,
+      "subtype": "success",
+      "is_error": false,
+      "turns": 2,
+      "cost_usd": 0.0032874600000000003,
+      "apiKeySource": "none",
+      "model_init": "claude-haiku-5-5",
+      "models_used": [
+        "claude-haiku-5-5"
+      ],
+      "permissionMode": "dontAsk",
+      "tools": [
+        "Task",
+        "Bash",
+        "CronCreate",
+        "CronDelete",
+        "CronList",
+        "Edit",
+        "EnterWorktree",
+        "ExitWorktree",
+        "ListAgents",
+        "ListMcpResourcesTool",
+        "Monitor",
+        "NotebookEdit",
+        "Read",
+        "ReadMcpResourceDirTool",
+        "ReadMcpResourceTool",
+        "RemoteTrigger",
+        "ReportFindings",
+        "ScheduleWakeup",
+        "SendMessage",
+        "Skill",
+        "TaskStop",
+        "ToolSearch",
+        "WebFetch",
+        "WebSearch",
+        "Workflow",
+        "Write",
+        "mcp__claude_ai_Claude_Docs__batch",
+        "mcp__claude_ai_Claude_Docs__create",
+        "mcp__claude_ai_Claude_Docs__delete",
+        "mcp__claude_ai_Claude_Docs__export",
+        "mcp__claude_ai_Claude_Docs__guide",
+        "mcp__claude_ai_Claude_Docs__query",
+        "mcp__claude_ai_Claude_Docs__read",
+        "mcp__claude_ai_Claude_Docs__update",
+        "mcp__claude_ai_Slack__slack_add_list_record",
+        "mcp__claude_ai_Slack__slack_add_reaction",
+        "mcp__claude_ai_Slack__slack_complete_file_upload",
+        "mcp__claude_ai_Slack__slack_create_canvas",
+        "mcp__claude_ai_Slack__slack_create_conversation",
+        "mcp__claude_ai_Slack__slack_create_list",
+        "mcp__claude_ai_Slack__slack_get_file_upload_url",
+        "mcp__claude_ai_Slack__slack_get_reactions",
+        "mcp__claude_ai_Slack__slack_list_channel_members",
+        "mcp__claude_ai_Slack__slack_list_user_channels",
+        "mcp__claude_ai_Slack__slack_read_canvas",
+        "mcp__claude_ai_Slack__slack_read_channel",
+        "mcp__claude_ai_Slack__slack_read_file",
+        "mcp__claude_ai_Slack__slack_read_list",
+        "mcp__claude_ai_Slack__slack_read_thread",
+        "mcp__claude_ai_Slack__slack_read_user_profile",
+        "mcp__claude_ai_Slack__slack_schedule_message",
+        "mcp__claude_ai_Slack__slack_search_channels",
+        "mcp__claude_ai_Slack__slack_search_emojis",
+        "mcp__claude_ai_Slack__slack_search_public",
+        "mcp__claude_ai_Slack__slack_search_public_and_private",
+        "mcp__claude_ai_Slack__slack_search_users",
+        "mcp__claude_ai_Slack__slack_send_message",
+        "mcp__claude_ai_Slack__slack_send_message_draft",
+        "mcp__claude_ai_Slack__slack_update_canvas",
+        "mcp__claude_ai_Slack__slack_update_list",
+        "mcp__claude_ai_Slack__slack_update_list_record"
+      ],
+      "denials": [],
+      "event_types": [
+        "assistant",
+        "rate_limit_event",
+        "result/success",
+        "system/hook_response",
+        "system/hook_started",
+        "system/init",
+        "system/thinking_tokens",
+        "user"
+      ],
+      "planted_hook_ran": true,
+      "planted_mcp_ran": true,
+      "planted_mcp_listed": true,
+      "planted_skill_listed": true,
+      "read_claude_md": true
+    },
+    "restricted": {
+      "exit": 0,
+      "seconds": 1.9,
+      "subtype": "success",
+      "is_error": false,
+      "turns": 2,
+      "cost_usd": 0.00039393,
+      "apiKeySource": "none",
+      "model_init": "claude-haiku-5-5",
+      "models_used": [
+        "claude-haiku-5-5"
+      ],
+      "permissionMode": "dontAsk",
+      "tools": [
+        "Bash",
+        "Read"
+      ],
+      "denials": [],
+      "event_types": [
+        "assistant",
+        "rate_limit_event",
+        "result/success",
+        "system/init",
+        "system/thinking_tokens",
+        "user"
+      ],
+      "planted_hook_ran": false,
+      "planted_mcp_ran": false,
+      "planted_mcp_listed": false,
+      "planted_skill_listed": false,
+      "read_claude_md": false
+    },
+    "setting_sources_user": {
+      "exit": 0,
+      "seconds": 1.6,
+      "subtype": "success",
+      "is_error": false,
+      "turns": 2,
+      "cost_usd": 0.0008010199999999999,
+      "apiKeySource": "none",
+      "model_init": "claude-haiku-5-5",
+      "models_used": [
+        "claude-haiku-5-5"
+      ],
+      "permissionMode": "dontAsk",
+      "tools": [
+        "Bash",
+        "Read"
+      ],
+      "denials": [],
+      "event_types": [
+        "assistant",
+        "rate_limit_event",
+        "result/success",
+        "system/hook_response",
+        "system/hook_started",
+        "system/init",
+        "user"
+      ],
+      "planted_hook_ran": false,
+      "planted_mcp_ran": false,
+      "planted_mcp_listed": false,
+      "planted_skill_listed": false,
+      "read_claude_md": false
+    }
+  },
+  "hardened_mode_used": "restricted",
+  "sandbox": {
+    "deny_listed_paths": {
+      "probes": {
+        "gh_token": "BLOCKED",
+        "keychain_gh": "REACHED",
+        "keychain_claude": "REACHED",
+        "read_ssh": "BLOCKED",
+        "read_gh_hosts": "BLOCKED",
+        "read_claude_json": "BLOCKED",
+        "read_denied_canary": "BLOCKED",
+        "read_open_canary": "REACHED",
+        "env_tokens": "BLOCKED",
+        "ssh_agent_env": "BLOCKED",
+        "ssh_agent_launchd": "BLOCKED",
+        "docker_socket": "BLOCKED",
+        "net_example": "BLOCKED",
+        "net_github": "BLOCKED",
+        "net_allowed": "REACHED",
+        "net_raw_socket": "BLOCKED",
+        "loopback_tcp": "BLOCKED",
+        "write_worktree": "REACHED",
+        "write_home": "BLOCKED",
+        "git_move_main": "REACHED",
+        "git_config_write": "BLOCKED",
+        "git_hooks_write": "BLOCKED",
+        "git_push_origin": "BLOCKED",
+        "git_commit": "REACHED",
+        "git_pointer_rewrite": "BLOCKED"
+      },
+      "run": {
+        "exit": 0,
+        "seconds": 3.2,
+        "subtype": "success",
+        "is_error": false,
+        "turns": 2,
+        "cost_usd": 0.00125802,
+        "apiKeySource": "none",
+        "model_init": "claude-haiku-5-5",
+        "models_used": [
+          "claude-haiku-5-5"
+        ],
+        "permissionMode": "dontAsk",
+        "tools": [
+          "Bash",
+          "Read"
+        ],
+        "denials": [],
+        "event_types": [
+          "assistant",
+          "rate_limit_event",
+          "result/success",
+          "system/init",
+          "system/thinking_tokens",
+          "user"
+        ]
+      },
+      "refs_changed": true,
+      "main_moved": true,
+      "shared_config_changed": false,
+      "pointer_changed": false,
+      "tool_error": null
+    },
+    "deny_home_allow_worktree": {
+      "probes": {
+        "gh_token": "BLOCKED",
+        "keychain_gh": "BLOCKED",
+        "keychain_claude": "BLOCKED",
+        "read_ssh": "BLOCKED",
+        "read_gh_hosts": "BLOCKED",
+        "read_claude_json": "BLOCKED",
+        "read_denied_canary": "REACHED",
+        "read_open_canary": "REACHED",
+        "env_tokens": "BLOCKED",
+        "ssh_agent_env": "BLOCKED",
+        "ssh_agent_launchd": "BLOCKED",
+        "docker_socket": "BLOCKED",
+        "net_example": "BLOCKED",
+        "net_github": "BLOCKED",
+        "net_allowed": "REACHED",
+        "net_raw_socket": "BLOCKED",
+        "loopback_tcp": "BLOCKED",
+        "write_worktree": "REACHED",
+        "write_home": "BLOCKED",
+        "git_move_main": "REACHED",
+        "git_config_write": "BLOCKED",
+        "git_hooks_write": "BLOCKED",
+        "git_push_origin": "BLOCKED",
+        "git_commit": "REACHED",
+        "git_pointer_rewrite": "BLOCKED"
+      },
+      "run": {
+        "exit": 0,
+        "seconds": 3.1,
+        "subtype": "success",
+        "is_error": false,
+        "turns": 2,
+        "cost_usd": 0.00128169,
+        "apiKeySource": "none",
+        "model_init": "claude-haiku-5-5",
+        "models_used": [
+          "claude-haiku-5-5"
+        ],
+        "permissionMode": "dontAsk",
+        "tools": [
+          "Bash",
+          "Read"
+        ],
+        "denials": [],
+        "event_types": [
+          "assistant",
+          "rate_limit_event",
+          "result/success",
+          "system/init",
+          "system/thinking_tokens",
+          "user"
+        ]
+      },
+      "refs_changed": true,
+      "main_moved": true,
+      "shared_config_changed": false,
+      "pointer_changed": false,
+      "tool_error": null
+    }
+  },
+  "read_tool_denied": {
+    "exit": 0,
+    "seconds": 3.5,
+    "subtype": "success",
+    "is_error": false,
+    "turns": 1,
+    "cost_usd": 0.00115111,
+    "apiKeySource": "none",
+    "model_init": "claude-haiku-5-5",
+    "models_used": [
+      "claude-haiku-5-5"
+    ],
+    "permissionMode": "dontAsk",
+    "tools": [
+      "Bash",
+      "Read"
+    ],
+    "denials": [],
+    "event_types": [
+      "assistant",
+      "rate_limit_event",
+      "result/success",
+      "system/init",
+      "system/thinking_tokens"
+    ],
+    "canary_leaked": false
+  },
+  "read_tool_without_rule": {
+    "exit": 0,
+    "seconds": 1.9,
+    "subtype": "success",
+    "is_error": false,
+    "turns": 2,
+    "cost_usd": 0.0008854300000000001,
+    "apiKeySource": "none",
+    "model_init": "claude-haiku-5-5",
+    "models_used": [
+      "claude-haiku-5-5"
+    ],
+    "permissionMode": "dontAsk",
+    "tools": [
+      "Bash",
+      "Read"
+    ],
+    "denials": [
+      "Read"
+    ],
+    "event_types": [
+      "assistant",
+      "rate_limit_event",
+      "result/success",
+      "system/init",
+      "system/permission_denied",
+      "user"
+    ],
+    "canary_leaked": false
+  },
+  "bash_exit_code": {
+    "exit": 0,
+    "seconds": 1.7,
+    "subtype": "success",
+    "is_error": false,
+    "turns": 2,
+    "cost_usd": 0.00095735,
+    "apiKeySource": "none",
+    "model_init": "claude-haiku-5-5",
+    "models_used": [
+      "claude-haiku-5-5"
+    ],
+    "permissionMode": "dontAsk",
+    "tools": [
+      "Bash",
+      "Read"
+    ],
+    "denials": [],
+    "event_types": [
+      "assistant",
+      "rate_limit_event",
+      "result/success",
+      "system/init",
+      "user"
+    ],
+    "tool_results": [
+      {
+        "is_error": true,
+        "text": "Exit code 3",
+        "extra": "Error: Exit code 3"
+      }
+    ]
+  },
+  "max_turns": {
+    "exit": 1,
+    "seconds": 1.4,
+    "subtype": "error_max_turns",
+    "is_error": true,
+    "turns": 2,
+    "cost_usd": 0.00090561,
+    "apiKeySource": "none",
+    "model_init": "claude-haiku-5-5",
+    "models_used": [
+      "claude-haiku-5-5"
+    ],
+    "permissionMode": "dontAsk",
+    "tools": [
+      "Bash",
+      "Read"
+    ],
+    "denials": [],
+    "event_types": [
+      "assistant",
+      "rate_limit_event",
+      "result/error_max_turns",
+      "system/init",
+      "user"
+    ]
+  },
+  "max_budget": {
+    "exit": 1,
+    "seconds": 1.1,
+    "subtype": "error_max_budget_usd",
+    "is_error": true,
+    "turns": 1,
+    "cost_usd": 0.00082361,
+    "apiKeySource": "none",
+    "model_init": "claude-haiku-5-5",
+    "models_used": [
+      "claude-haiku-5-5"
+    ],
+    "permissionMode": "dontAsk",
+    "tools": [
+      "Bash",
+      "Read"
+    ],
+    "denials": [],
+    "event_types": [
+      "assistant",
+      "result/error_max_budget_usd",
+      "system/init"
+    ]
+  },
+  "structured_output": {
+    "exit": 0,
+    "seconds": 1.3,
+    "subtype": "success",
+    "is_error": false,
+    "turns": 2,
+    "cost_usd": 0.0008715800000000001,
+    "apiKeySource": "none",
+    "model_init": "claude-haiku-5-5",
+    "models_used": [
+      "claude-haiku-5-5"
+    ],
+    "permissionMode": "dontAsk",
+    "tools": [
+      "Bash",
+      "Read",
+      "StructuredOutput"
+    ],
+    "denials": [],
+    "event_types": [
+      "assistant",
+      "rate_limit_event",
+      "result/success",
+      "system/init",
+      "system/thinking_tokens",
+      "user"
+    ],
+    "structured": {
+      "verdict": "approved"
+    }
+  },
+  "killed_SIGINT": {
+    "exit": 0,
+    "seconds": 15.0,
+    "subtype": "error_during_execution",
+    "is_error": true,
+    "turns": 3,
+    "cost_usd": 0.0008371100000000001,
+    "apiKeySource": "none",
+    "model_init": "claude-haiku-5-5",
+    "models_used": [
+      "claude-haiku-5-5"
+    ],
+    "permissionMode": "dontAsk",
+    "tools": [
+      "Bash",
+      "Read"
+    ],
+    "denials": [],
+    "event_types": [
+      "assistant",
+      "rate_limit_event",
+      "result/error_during_execution",
+      "system/init",
+      "user"
+    ],
+    "has_result_event": true,
+    "lines": 6
+  },
+  "killed_SIGTERM": {
+    "exit": 143,
+    "seconds": 15.1,
+    "subtype": null,
+    "is_error": null,
+    "turns": null,
+    "cost_usd": null,
+    "apiKeySource": "none",
+    "model_init": "claude-haiku-5-5",
+    "models_used": [],
+    "permissionMode": "dontAsk",
+    "tools": [
+      "Bash",
+      "Read"
+    ],
+    "denials": [],
+    "event_types": [
+      "assistant",
+      "rate_limit_event",
+      "system/init",
+      "user"
+    ],
+    "has_result_event": false,
+    "lines": 4
+  },
+  "parallel_bash": {
+    "exit": 0,
+    "seconds": 14.6,
+    "subtype": "success",
+    "is_error": false,
+    "turns": 3,
+    "cost_usd": 0.0013991200000000002,
+    "apiKeySource": "none",
+    "model_init": "claude-haiku-5-5",
+    "models_used": [
+      "claude-haiku-5-5"
+    ],
+    "permissionMode": "dontAsk",
+    "tools": [
+      "Bash",
+      "Read"
+    ],
+    "denials": [],
+    "event_types": [
+      "assistant",
+      "rate_limit_event",
+      "result/success",
+      "system/init",
+      "system/thinking_tokens",
+      "user"
+    ],
+    "tool_use_per_message": [
+      0,
+      1,
+      1,
+      0
+    ],
+    "order": [
+      "start",
+      "end",
+      "start",
+      "end"
+    ],
+    "overlapped": false
+  },
+  "background_bash": {
+    "exit": 0,
+    "seconds": 4.4,
+    "subtype": "success",
+    "is_error": false,
+    "turns": 3,
+    "cost_usd": 0.0014083400000000001,
+    "apiKeySource": "none",
+    "model_init": "claude-haiku-5-5",
+    "models_used": [
+      "claude-haiku-5-5"
+    ],
+    "permissionMode": "dontAsk",
+    "tools": [
+      "Bash",
+      "Read"
+    ],
+    "denials": [],
+    "event_types": [
+      "assistant",
+      "rate_limit_event",
+      "result/success",
+      "system/init",
+      "system/thinking_tokens",
+      "user"
+    ],
+    "answer": "No, not in the form you asked for. The Bash tool rejected the `run_in_background` parameter, so I couldn't use it.\n\nI ran `sleep 30 &` in the shell instead. The job started (PID 29583). The shell also",
+    "tool_results": [
+      "<tool_use_error>InputValidationError: Bash failed due to the following issue:\nAn unexpected parameter `run_in_background` was provided</tool_use_error>",
+      "(eval):1: nice(5) failed: operation not permitted\nstarted background job pid=29583"
+    ]
+  },
+  "database": {
+    "server_outside_sandbox_up": true,
+    "default": {
+      "outside_tcp": "BLOCKED",
+      "outside_socket": "BLOCKED"
+    },
+    "allow_unix_socket": {
+      "outside_tcp": "BLOCKED",
+      "outside_socket": "REACHED"
+    },
+    "allow_local_binding": {
+      "outside_tcp": "REACHED",
+      "outside_socket": "BLOCKED"
+    },
+    "allow_localhost_domain": {
+      "outside_tcp": "BLOCKED",
+      "outside_socket": "BLOCKED"
+    },
+    "server_inside_sandbox": {
+      "inside_initdb": "BLOCKED"
+    }
+  },
+  "network_diagnosis": {
+    "deny_listed": "code=200\ncurl_exit=0\nHTTP_PROXY=set\nHTTPS_PROXY=set\nhttp_proxy=set\nhttps_proxy=set\nALL_PROXY=set\nall_proxy=set",
+    "deny_home": "code=200\ncurl_exit=0\nHTTP_PROXY=set\nHTTPS_PROXY=set\nhttp_proxy=set\nhttps_proxy=set\nALL_PROXY=set\nall_proxy=set"
+  },
+  "clone_policy": {
+    "layout": "home folder, as a real install",
+    "probes": {
+      "gh_token": "BLOCKED",
+      "keychain_gh": "BLOCKED",
+      "keychain_claude": "BLOCKED",
+      "read_ssh": "BLOCKED",
+      "read_gh_hosts": "BLOCKED",
+      "read_claude_json": "BLOCKED",
+      "read_denied_canary": "BLOCKED",
+      "read_open_canary": "BLOCKED",
+      "env_tokens": "BLOCKED",
+      "ssh_agent_env": "BLOCKED",
+      "ssh_agent_launchd": "BLOCKED",
+      "docker_socket": "BLOCKED",
+      "net_example": "BLOCKED",
+      "net_github": "BLOCKED",
+      "net_allowed": "REACHED",
+      "net_raw_socket": "BLOCKED",
+      "loopback_tcp": "BLOCKED",
+      "write_worktree": "REACHED",
+      "write_home": "BLOCKED",
+      "git_move_main": "REACHED",
+      "git_config_write": "BLOCKED",
+      "git_hooks_write": "BLOCKED",
+      "git_push_origin": "BLOCKED",
+      "git_commit": "REACHED",
+      "git_pointer_rewrite": "BLOCKED"
+    },
+    "mirror_refs_unchanged_by_agent": true,
+    "origin_refs_unchanged": true,
+    "clone_config_changed": false,
+    "app_can_fetch_run_branch": true,
+    "mirror_main_unchanged_after_fetch": true
+  },
+  "system_prompt_file_under_restricted": {
+    "subtype": "success",
+    "answer": "OTTER"
+  },
+  "fake_api_key": {
+    "exit": 1,
+    "apiKeySource": "ANTHROPIC_API_KEY",
+    "subtype": "success",
+    "is_error": true,
+    "error": "Invalid API key · Fix external API key"
+  }
+}
