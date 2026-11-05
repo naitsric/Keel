@@ -1,13 +1,13 @@
-import { open as openFolder } from "@tauri-apps/plugin-dialog";
-import { Check, Circle, Minus, FolderPlus } from "lucide-react";
+import { Check, Circle, Minus } from "lucide-react";
 import { type ReactNode, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Language } from "../i18n";
 import { api, type GithubAccount } from "../lib/api";
 import { onboardingState, type Readiness } from "../lib/onboarding";
-import { errorText, reasonText } from "../lib/reason";
+import { reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Segmented } from "../ui/primitives";
+import { AddProjectButton, useAddProject } from "./AddProject";
 
 function Item({ state, optional, title, detail, children }: { state: Readiness; optional?: boolean; title: string; detail: string; children?: ReactNode }) {
   const { t } = useTranslation();
@@ -21,7 +21,7 @@ function Item({ state, optional, title, detail, children }: { state: Readiness; 
       <div className="min-w-0 flex-1">
         <p className="text-[13px] font-medium">
           {title}
-          {optional && <span className="ml-2 text-[11.5px] font-normal text-subtle">{t("onboarding.optional")}</span>}
+          {optional && <span className="ml-2 text-[11.5px] font-normal text-subtle">{t("onboarding.neededForBuiltIn")}</span>}
         </p>
         <p className="selectable mt-0.5 text-[12px] text-muted">{detail}</p>
         {children && <div className="mt-2 flex flex-wrap gap-2">{children}</div>}
@@ -35,10 +35,9 @@ export function Onboarding() {
   const { t, i18n } = useTranslation();
   const preflight = useApp((s) => s.preflight);
   const refreshSession = useApp((s) => s.refreshSession);
-  const refreshOverview = useApp((s) => s.refreshOverview);
   const setLanguage = useApp((s) => s.setLanguage);
   const [accounts, setAccounts] = useState<GithubAccount[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const { add, error, busy } = useAddProject();
 
   const ghFound = preflight?.ghFound ?? false;
   const check = () => {
@@ -79,18 +78,6 @@ export function Onboarding() {
     problem: "",
   }[state.github];
 
-  const addProject = async () => {
-    setError(null);
-    const path = await openFolder({ directory: true, multiple: false });
-    if (typeof path !== "string") return;
-    try {
-      await api.projectAdd(path, i18n.language);
-      await refreshOverview();
-    } catch (e) {
-      setError(errorText(t, e));
-    }
-  };
-
   return (
     <Card className="mx-auto max-w-2xl p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -130,10 +117,7 @@ export function Onboarding() {
           </p>
         )}
         <div className="mt-3 flex flex-wrap gap-2">
-          <Button variant="primary" disabled={!state.canAddProject} onClick={() => void addProject()}>
-            <FolderPlus size={14} />
-            {t("newRun.addProject")}
-          </Button>
+          <AddProjectButton add={add} busy={busy} variant="primary" disabled={!state.canAddProject} />
           <Button variant="ghost" onClick={check}>
             {t("onboarding.checkAgain")}
           </Button>

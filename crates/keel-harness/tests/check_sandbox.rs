@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use keel_harness::clean_env;
-use keel_harness::settings::{check_profile, setup_profile};
+use keel_harness::settings::{check_profile, setup_profile, with_own_output};
 
 struct Sandbox {
     canary_dir: tempfile::TempDir,
@@ -178,6 +178,119 @@ fn git_works_when_the_home_folder_has_a_git_config() {
         "{}",
         String::from_utf8_lossy(&with.stderr)
     );
+}
+
+/// Where a real install keeps a run: folders down inside the home folder, with its log beside the
+/// workspace. Node and uv stopped dead there, and a workspace right in the home folder hid it.
+struct DeepRun {
+    root: tempfile::TempDir,
+    runs: PathBuf,
+    workspace: PathBuf,
+    home: PathBuf,
+}
+
+fn deep_run() -> DeepRun {
+    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    let root = tempfile::Builder::new()
+        .prefix(".keel-sandbox-deep")
+        .tempdir_in(&home)
+        .unwrap();
+    let runs = root.path().join("Application Support/runs/r1");
+    let workspace = runs.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    DeepRun {
+        root,
+        runs,
+        workspace,
+        home,
+    }
+}
+
+#[test]
+fn a_command_can_find_its_way_to_a_workspace_deep_in_the_home_folder() {
+    let d = deep_run();
+    let other = d.runs.with_file_name("other");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(d.runs.join("secret.txt"), "secret").unwrap();
+    let profile = check_profile(&d.workspace, &d.home, &[], &[]);
+    let allowed = |script: &str| {
+        Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/sh", "-c", script])
+            .current_dir(&d.workspace)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    assert!(allowed(&format!("ls -ld {}", quoted(&d.runs))));
+    assert!(allowed(&format!("ls -ld {}", quoted(d.root.path()))));
+    assert!(allowed(
+        "/usr/bin/perl -MCwd -e 'exit(defined(Cwd::realpath(\".\")) ? 0 : 1)'"
+    ));
+
+    // That they exist, and nothing else.
+    assert!(!allowed(&format!("ls {}", quoted(&d.runs))));
+    assert!(!allowed(&format!(
+        "cat {}",
+        quoted(&d.runs.join("secret.txt"))
+    )));
+    assert!(!allowed(&format!("ls -ld {}", quoted(&other))));
+    assert!(!allowed(&format!(
+        "ls -ld {}",
+        quoted(&d.runs.join("secret.txt"))
+    )));
+    assert!(!allowed(&format!(
+        "touch {}",
+        quoted(&d.runs.join("new.txt"))
+    )));
+}
+
+#[test]
+fn a_command_can_ask_about_its_own_output_files() {
+    let d = deep_run();
+    let log = d.runs.join("step.log");
+    let asks = |profile: &str| {
+        let output = std::fs::File::create(&log).unwrap();
+        Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", profile, "/bin/sh", "-c", "/usr/bin/stat -f %z <&1"])
+            .current_dir(&d.workspace)
+            .stdout(output)
+            .status()
+            .unwrap()
+            .success()
+    };
+    let without = check_profile(&d.workspace, &d.home, &[], &[]);
+    assert!(!asks(&without), "if this passes, the test proves nothing");
+    let with = with_own_output(without, &[&log]);
+    assert!(asks(&with));
+    // Only the file itself: what's written to it still gets there, and reading it doesn't work.
+    assert!(
+        !Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &with, "/bin/cat", &log.to_string_lossy()])
+            .current_dir(&d.workspace)
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn toolchains_can_be_read_and_cargo_credentials_cannot() {
+    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    let s = sandbox();
+    // `~/.cargo/bin` opens up, and the file right next to it doesn't.
+    let credentials = home.join(".cargo/credentials.toml");
+    if credentials.exists() {
+        assert!(!s.allowed(&format!("cat {}", quoted(&credentials))));
+    }
+    let profile = check_profile(s.workspace.path(), &home, &[], &[]);
+    for dir in ["Library/pnpm", ".cargo/bin", ".rustup"] {
+        assert!(
+            profile.contains(&format!("(subpath \"{}\")", home.join(dir).display())),
+            "{dir}"
+        );
+    }
+    assert!(!profile.contains(&format!("(subpath \"{}\")", home.join(".cargo").display())));
 }
 
 #[test]

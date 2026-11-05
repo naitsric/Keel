@@ -238,6 +238,11 @@ const MIGRATIONS: &[&str] = &[
     create unique index card_issue_once on card (project_id, issue_number) where issue_number is not null;
     alter table project add column default_workflow text;
 "#,
+    // 9: Removing a project only hides it. Its runs, audit and Brain stay, and adding its folder
+    // again brings it back.
+    r#"
+    alter table project add column removed_at text;
+"#,
 ];
 
 /// The attempt that says where a run stands, for a query that calls its run `r`. Of each step's
@@ -1039,12 +1044,57 @@ impl Store {
         Ok(())
     }
 
+    /// The projects in use. A removed one is only reachable by `project` and `project_by_path`.
     pub fn projects(&self) -> Result<Vec<Project>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
-            "select {PROJECT_COLUMNS} from project order by name"
+            "select {PROJECT_COLUMNS} from project where removed_at is null order by name"
         ))?;
         let rows = stmt.query_map([], project_from)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Hides a project, unless a run of its hasn't finished or a card of its is being started, which
+    /// is a run about to exist. False if it changed nothing.
+    pub fn remove_project(&self, id: &str) -> Result<bool> {
+        let changed = self.lock().execute(
+            "update project set removed_at = ?2 where id = ?1 and removed_at is null
+             and not exists (select 1 from run where project_id = ?1 and finished_at is null)
+             and not exists (select 1 from card where project_id = ?1 and lane = 'started' and run_id is null)",
+            params![id, now()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    pub fn restore_project(&self, id: &str) -> Result<()> {
+        self.lock()
+            .execute("update project set removed_at = null where id = ?1", [id])?;
+        Ok(())
+    }
+
+    pub fn project_is_removed(&self, id: &str) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "select exists (select 1 from project where id = ?1 and removed_at is not null)",
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn set_project_repo(&self, id: &str, repo: Option<&str>) -> Result<()> {
+        self.lock().execute(
+            "update project set github_repo = ?2 where id = ?1",
+            params![id, repo],
+        )?;
+        Ok(())
+    }
+
+    /// Runs of this project that still have steps ahead, oldest first.
+    pub fn open_runs_of_project(&self, project_id: &str) -> Result<Vec<Run>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "select {RUN_COLUMNS} from run where project_id = ?1 and finished_at is null order by created_at"
+        ))?;
+        let rows = stmt.query_map([project_id], run_from)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1234,10 +1284,12 @@ impl Store {
         Ok(())
     }
 
-    /// Proposals waiting for a person, across all projects.
+    /// Proposals waiting for a person, across all projects. Not those of a removed project, since
+    /// the Brain can't show them and nothing could clear the count.
     pub fn pending_proposals(&self) -> Result<i64> {
         Ok(self.lock().query_row(
-            "select count(*) from brain_note where state = 'proposed'",
+            "select count(*) from brain_note n join project p on p.id = n.project_id
+             where n.state = 'proposed' and p.removed_at is null",
             [],
             |r| r.get(0),
         )?)
@@ -1538,9 +1590,11 @@ impl Store {
         Ok(true)
     }
 
+    /// Cards that could start now. A removed project's wait where they are until it comes back.
     pub fn has_todo_cards(&self) -> Result<bool> {
         Ok(self.lock().query_row(
-            "select exists (select 1 from card where lane = 'todo')",
+            "select exists (select 1 from card c join project p on p.id = c.project_id
+                            where c.lane = 'todo' and p.removed_at is null)",
             [],
             |r| r.get(0),
         )?)
@@ -1548,13 +1602,15 @@ impl Store {
 
     /// Takes the card to start next out of Todo, and returns it as it is at that moment: the top
     /// one of each project's Todo, and of those, whichever has waited longest. After this nobody
-    /// can drag it away or edit it, and it can't start twice.
+    /// can drag it away or edit it, and it can't start twice. Never a removed project's.
     pub fn claim_next_todo_card(&self) -> Result<Option<Card>> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let tops = read_cards(
             &tx,
-            "c.lane = 'todo' and not exists (
+            "c.lane = 'todo'
+             and c.project_id in (select id from project where removed_at is null)
+             and not exists (
                 select 1 from card o where o.project_id = c.project_id and o.lane = 'todo'
                   and (o.position, o.created_at, o.id) < (c.position, c.created_at, c.id))",
             [],
@@ -1869,6 +1925,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 alter table project drop column removed_at;
                  drop table card;
                  alter table project drop column default_workflow;
                  drop table mcp_call;
@@ -2217,7 +2274,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("keel.db");
         // Exactly what the last release left: every migration before the board, and real rows.
-        let before_the_board = MIGRATIONS.len() - 1;
+        let before_the_board = 7;
         {
             let conn = Connection::open(&path).unwrap();
             for migration in &MIGRATIONS[..before_the_board] {
@@ -2934,6 +2991,87 @@ mod tests {
             store.move_card("gone", CardLane::Todo, 0, "en"),
             Err(Error::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn a_removed_project_leaves_the_lists_and_keeps_everything_else() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .patch_run("r", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        store.add_decision("p", "r", "a", "reject", "why").unwrap();
+        let paths = vec!["a.py".to_owned()];
+        let note = store
+            .add_brain_note(&NewBrainNote {
+                project_id: "p",
+                kind: "learning",
+                state: "proposed",
+                text: "known",
+                evidence: None,
+                paths: &paths,
+                commit_sha: None,
+                run_id: "r",
+                attempt_id: "a",
+            })
+            .unwrap();
+        let event = store
+            .append_event("a", "note", &serde_json::json!({}))
+            .unwrap();
+        assert_eq!(store.pending_proposals().unwrap(), 1);
+
+        assert!(store.remove_project("p").unwrap());
+        assert!(!store.remove_project("p").unwrap(), "it already is");
+        assert!(store.project_is_removed("p").unwrap());
+        assert!(store.projects().unwrap().is_empty());
+        assert_eq!(
+            store.pending_proposals().unwrap(),
+            0,
+            "nothing could clear it"
+        );
+
+        assert_eq!(store.project("p").unwrap().name, "demo");
+        assert_eq!(store.project_by_path("/demo").unwrap().unwrap().id, "p");
+        assert_eq!(store.runs(10).unwrap()[0].project_name, "demo");
+        assert_eq!(store.attempts_of_run("r").unwrap().len(), 1);
+        assert_eq!(store.events("a", event - 1).unwrap().len(), 1);
+        assert_eq!(store.decisions("p").unwrap().len(), 1);
+        assert_eq!(store.brain_note(note).unwrap().text, "known");
+
+        store.restore_project("p").unwrap();
+        assert!(!store.project_is_removed("p").unwrap());
+        assert_eq!(store.projects().unwrap()[0].id, "p");
+        assert_eq!(store.pending_proposals().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_project_with_a_run_that_has_not_finished_stays() {
+        let (_dir, store) = store();
+        seeded(&store);
+        assert_eq!(store.open_runs_of_project("p").unwrap().len(), 1);
+        assert!(!store.remove_project("p").unwrap());
+        assert_eq!(store.projects().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_database_from_before_removing_projects_keeps_them_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        {
+            let store = Store::open(&path).unwrap();
+            seeded(&store);
+        }
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "pragma user_version = 8;
+                 alter table project drop column removed_at;",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.projects().unwrap().len(), 1);
+        assert!(!store.project_is_removed("p").unwrap());
     }
 
     #[test]

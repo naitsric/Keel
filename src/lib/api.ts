@@ -82,6 +82,27 @@ export interface ProjectSettings {
   defaultWorkflow: string | null;
 }
 
+/** What a project's files give away. Nothing is saved until a person says so. */
+export interface Guess {
+  check: string | null;
+  setup: string | null;
+  from: string[];
+}
+
+export interface ProjectSetup {
+  project: Project;
+  guess: Guess;
+}
+
+export type MapStart = { status: "started" } | { status: "notStarted"; reason: Reason };
+
+export interface ProjectAdded {
+  project: Project;
+  outcome: "new" | "existing" | "restored";
+  /** Null when the folder was already in Keel, which starts nothing. */
+  map: MapStart | null;
+}
+
 export interface GithubAccount {
   login: string;
   active: boolean;
@@ -390,7 +411,10 @@ export const api = {
   preflight: () => invoke<Preflight>("preflight"),
   refreshSession: () => invoke<Preflight>("refresh_session"),
   overview: () => invoke<Overview>("overview"),
-  projectAdd: (path: string, language: string) => invoke<Project>("project_add", { path, language }),
+  projectAdd: (path: string, language: string) => invoke<ProjectAdded>("project_add", { path, language }),
+  projectSetup: (projectId: string) => invoke<ProjectSetup>("project_setup", { projectId }),
+  projectTryCheck: (projectId: string, setup: string, check: string, language: string) => invoke<string>("project_try_check", { projectId, setup, check, language }),
+  projectRemove: (projectId: string) => invoke<void>("project_remove", { projectId }),
   githubAccounts: () => invoke<GithubAccount[]>("github_accounts"),
   openGithubLogin: () => invoke<void>("open_github_login"),
   openHelp: (topic: "claude" | "git" | "gh") => invoke<void>("open_help", { topic }),

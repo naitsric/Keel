@@ -5,6 +5,7 @@ import { api, type StepRole, type StepSpec, type ToolProfile, type Workflow, typ
 import { errorText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Segmented } from "../ui/primitives";
+import { AddProject } from "./AddProject";
 import { ModelField } from "./ModelField";
 import { TopBar } from "./TopBar";
 
@@ -283,7 +284,10 @@ export function WorkflowsView() {
         <h1 className="text-[18px] font-semibold">{t("workflows.title")}</h1>
         <p className="mt-0.5 text-[12.5px] text-muted">{t("workflows.subtitle")}</p>
         {projects.length === 0 ? (
-          <p className="mt-4 text-[12.5px] text-subtle">{t("workflows.noProjects")}</p>
+          <div className="mt-4">
+            <p className="text-[12.5px] text-subtle">{t("workflows.noProjects")}</p>
+            <AddProject className="mt-2" variant="primary" />
+          </div>
         ) : (
           <div className="mt-4 grid gap-4 lg:grid-cols-[240px_1fr]">
             <div className="space-y-3 self-start">

@@ -1,5 +1,4 @@
-import { open as openFolder } from "@tauri-apps/plugin-dialog";
-import { FolderPlus, ShieldCheck, UserRound } from "lucide-react";
+import { ShieldCheck, UserRound } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type Issue, type ToolProfile, type Workflow } from "../lib/api";
@@ -7,6 +6,7 @@ import { errorText } from "../lib/reason";
 import { accountLabel } from "../lib/session";
 import { useApp } from "../lib/store";
 import { Button, cx, Field, inputClass, Modal, Segmented } from "../ui/primitives";
+import { AddProjectButton, useAddProject } from "./AddProject";
 import { ModelField } from "./ModelField";
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -35,6 +35,7 @@ export function NewRunDialog() {
   const auth = useApp((s) => s.preflight?.auth);
   const refreshOverview = useApp((s) => s.refreshOverview);
   const navigate = useApp((s) => s.navigate);
+  const openSetup = useApp((s) => s.openProjectSetup);
 
   const [projectId, setProjectId] = useState("");
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
@@ -50,12 +51,14 @@ export function NewRunDialog() {
   const [maxTurns, setMaxTurns] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [mapStarted, setMapStarted] = useState(false);
+  const adding = useAddProject({ fromNewRun: true, onAdded: (added) => setProjectId(added.id) });
 
   const project = projects.find((p) => p.id === projectId);
+  const finishSetup = () => project && openSetup({ projectId: project.id, added: null, returnToNewRun: true });
 
+  // This stays mounted, so what's selected can have been removed since.
   useEffect(() => {
-    if (!projectId && projects.length > 0) setProjectId(projects[0].id);
+    if (!projects.some((p) => p.id === projectId)) setProjectId(projects[0]?.id ?? "");
   }, [projects, projectId]);
 
   useEffect(() => {
@@ -88,20 +91,6 @@ export function NewRunDialog() {
       current = false;
     };
   }, [source, projectId, t]);
-
-  const addProject = async () => {
-    setError(null);
-    const path = await openFolder({ directory: true, multiple: false });
-    if (typeof path !== "string") return;
-    try {
-      const added = await api.projectAdd(path, i18n.language);
-      await refreshOverview();
-      setProjectId(added.id);
-      setMapStarted(true);
-    } catch (e) {
-      setError(errorText(t, e));
-    }
-  };
 
   const turns = maxTurns.trim() === "" ? null : Number(maxTurns);
   const hasRequest = source === "issue" ? issue !== null : prompt.trim() !== "";
@@ -158,13 +147,9 @@ export function NewRunDialog() {
                 </option>
               ))}
             </select>
-            <Button className="h-auto shrink-0" onClick={() => void addProject()}>
-              <FolderPlus size={14} />
-              {t("newRun.addProject")}
-            </Button>
+            <AddProjectButton add={adding.add} busy={adding.busy} className="h-auto shrink-0" />
           </div>
         </Field>
-        {mapStarted && <p className="-mt-2 text-[11.5px] text-subtle">{t("newRun.mapStarted")}</p>}
 
         <div>
           <Field label={t("newRun.workflow")}>
@@ -236,18 +221,16 @@ export function NewRunDialog() {
 
         {!single ? (
           <>
-            {!project?.checkCommand && <p className="text-[11.5px] text-subtle">{t("newRun.checkNone")}</p>}
             {needsGithub && (
               <div role="alert" className="flex items-center gap-2 rounded-md border border-border-strong bg-inset px-3 py-2 text-[12.5px] text-warning">
                 <span className="flex-1">{project?.githubRepo ? t("newRun.needsGithub") : t("reasons.noGithubRemote")}</span>
-                <Button
-                  onClick={() => {
-                    setOpen(false);
-                    navigate({ name: "settings" });
-                  }}
-                >
-                  {t("newRun.openSettings")}
-                </Button>
+                <Button onClick={finishSetup}>{t("projects.finishSetup")}</Button>
+              </div>
+            )}
+            {project && !project.checkCommand && (
+              <div className="flex items-center gap-2 rounded-md border border-border-strong bg-inset px-3 py-2 text-[12.5px] text-warning">
+                <span className="flex-1">{t("newRun.checkNone")}</span>
+                <Button onClick={finishSetup}>{t("projects.finishSetup")}</Button>
               </div>
             )}
           </>
@@ -297,9 +280,9 @@ export function NewRunDialog() {
           <ShieldCheck size={14} className="mt-px shrink-0" />
           {t("newRun.isolation")}
         </p>
-        {error && (
+        {(error || adding.error) && (
           <p role="alert" className="text-[12px] text-danger">
-            {error}
+            {error ?? adding.error}
           </p>
         )}
         <div className="flex justify-end gap-2">

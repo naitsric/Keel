@@ -5,9 +5,11 @@ import { type ComponentProps, type CSSProperties, type FormEvent, type ReactNode
 import { useTranslation } from "react-i18next";
 import { api, type Board, type BoardCard, type BoardColumn, type Issue } from "../lib/api";
 import { type BoardNotice, boardNotice, canDelete, canEdit, cardLabel, clickAction, COLUMNS, dragOver, dropDestination, groupCards, importedIssues, importNotice, isColumn, isLane, type Lane, type Layout, layoutOf, moveNotice, newestOnly, otherLane, overColumn, pausedText, waitingForRoom, withLayout } from "../lib/board";
+import { needsSetup } from "../lib/projects";
 import { needsProjectSettings } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, cx, Field, inputClass, Modal, StateBadge } from "../ui/primitives";
+import { AddProject, useAddProject } from "./AddProject";
 import { BlockerNotice } from "./Home";
 import { TopBar } from "./TopBar";
 
@@ -338,6 +340,7 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
   const revision = useApp((s) => s.revision);
   const session = useApp((s) => s.preflight);
   const navigate = useApp((s) => s.navigate);
+  const openSetup = useApp((s) => s.openProjectSetup);
 
   const [projectId, setProjectId] = useState(initialProjectId ?? "");
   const [board, setBoard] = useState<Board | null>(null);
@@ -350,8 +353,9 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
   const applyNewest = useMemo(() => newestOnly<Board>(setBoard), []);
   const paused = board?.paused ?? null;
 
+  // Coming back to a project that has since been removed lands on one that's there.
   useEffect(() => {
-    if (!projectId && projects.length > 0) setProjectId(projects[0].id);
+    if (projects.length > 0 && !projects.some((p) => p.id === projectId)) setProjectId(projects[0].id);
   }, [projects, projectId]);
 
   // Only the newest answer counts, and awaiting this means it's on screen. Otherwise a card that
@@ -493,6 +497,9 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
     setNotice(null);
   };
 
+  const adding = useAddProject({ onAdded: (added) => selectProject(added.id) });
+  const project = projects.find((p) => p.id === projectId);
+
   return (
     <>
       <TopBar back />
@@ -508,6 +515,16 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
               ))}
             </select>
           )}
+          {projects.length > 0 && (
+            <Button aria-label={t("projects.add")} title={t("projects.add")} className="px-1.5" disabled={adding.busy} onClick={() => void adding.add()}>
+              <Plus size={14} />
+            </Button>
+          )}
+          {project && needsSetup(project) && (
+            <Button variant="ghost" className="px-1.5 text-warning" onClick={() => openSetup({ projectId: project.id, added: null, returnToNewRun: false })}>
+              {t("projects.finishSetup")}
+            </Button>
+          )}
           {board && (
             <p className="text-[12px] text-muted">
               {t("board.working", { working: board.working, maxAgents: board.maxAgents })}
@@ -515,7 +532,17 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
             </p>
           )}
         </div>
-        {loaded && projects.length === 0 && <p className="text-[12.5px] text-subtle">{t("board.noProjects")}</p>}
+        {adding.error && (
+          <p role="alert" className="text-[12px] text-danger">
+            {adding.error}
+          </p>
+        )}
+        {loaded && projects.length === 0 && (
+          <div>
+            <p className="text-[12.5px] text-subtle">{t("board.noProjects")}</p>
+            <AddProject className="mt-2" variant="primary" />
+          </div>
+        )}
         {paused && <BlockerNotice blocker={paused} text={pausedText(t, paused)} />}
         {notice && <NoticeBar notice={notice} onDismiss={() => setNotice(null)} />}
         {board && board.cards.length === 0 && <p className="text-[12.5px] text-muted">{t("board.empty")}</p>}

@@ -5,8 +5,15 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-/// Claude Code's own install, which a Bash step may need to read.
-const TOOL_DIRS: [&str; 2] = ["~/.local", "~/.claude/local"];
+/// Claude Code's own install, which a Bash step may need to read, and where pnpm and Rust's
+/// installers put themselves. Only programs: Cargo's credentials are in `~/.cargo`, not in its `bin`.
+const TOOL_DIRS: [&str; 5] = [
+    "~/.local",
+    "~/.claude/local",
+    "~/Library/pnpm",
+    "~/.cargo/bin",
+    "~/.rustup",
+];
 
 /// `sockets` are the folders of the project's service sockets. Only these open up, and they're the
 /// only way a sandboxed command reaches a local server: TCP on localhost would expose all of them.
@@ -78,6 +85,14 @@ fn profile(
         Some(rest) => home.join(rest).to_string_lossy().into_owned(),
         None => path.to_owned(),
     };
+    // Node and uv look up each folder on the way to a file as they work out its real path, and stop
+    // when one is refused. This says only that these folders exist, not what's in them.
+    let way_in: String = workspace
+        .ancestors()
+        .skip(1)
+        .filter(|folder| folder.starts_with(home) && *folder != home)
+        .map(|folder| format!(" (literal \"{}\")", quote(&folder.to_string_lossy())))
+        .collect();
     let workspace = quote(&workspace.to_string_lossy());
     // Git would run whatever these name, so nothing here gets to change them. Moving `.git` away
     // and making another would get around that, so `.git` itself stays put as well.
@@ -120,12 +135,28 @@ fn profile(
          {socket_rules}\
          (deny file-read* (subpath \"{home_text}\"))\n\
          (allow file-read* {read_rules})\n\
-         (allow file-read-metadata (literal \"{home_text}\"))\n\
+         (allow file-read-metadata (literal \"{home_text}\"){way_in})\n\
          (deny file-write*)\n\
          (allow file-write* {write_rules} (subpath \"/private/tmp\") (subpath \"/private/var/folders\") (literal \"/dev/null\") (literal \"/dev/stdout\") (literal \"/dev/stderr\") (literal \"/dev/tty\") (regex #\"^/dev/fd/\"))\n\
          (deny file-write* {git_rules})\n\
          (deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd\") (global-name \"com.apple.secd\") (global-name \"com.apple.securityd.xpc\"))\n"
     )
+}
+
+/// A command's stdin, stdout and stderr are files beside its workspace. Node asks about them as it
+/// starts and aborts if that's refused, so a check that uses it dies before running anything.
+pub fn with_own_output(profile: String, files: &[&Path]) -> String {
+    let rules: String = files
+        .iter()
+        .map(|file| {
+            let path = file
+                .to_string_lossy()
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"");
+            format!(" (literal \"{path}\")")
+        })
+        .collect();
+    format!("{profile}(allow file-read-metadata{rules})\n")
 }
 
 #[cfg(test)]

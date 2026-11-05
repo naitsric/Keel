@@ -12,8 +12,8 @@ use keel_core::{
     serialize_masked,
 };
 use keel_engine::{
-    Board, BrainView, Config, DEFAULT_BRAIN_MODEL, Engine, Error as EngineError, GithubStatus,
-    Preflight, RawCheck, StartRun, Workflow, request_from_issue, title_from_issue,
+    AddedProject, Board, BrainView, Config, Engine, Error as EngineError, GithubStatus, Preflight,
+    ProjectSetup, RawCheck, StartRun, Workflow, request_from_issue, title_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
@@ -145,19 +145,44 @@ fn overview(state: State<'_, AppState>) -> CommandResult<Overview> {
     })
 }
 
+/// The project isn't masked, for the same reason as in `overview`: the dialog saves it back.
 #[tauri::command(async)]
 fn project_add(
     state: State<'_, AppState>,
     path: String,
     language: String,
-) -> CommandResult<Project> {
+) -> CommandResult<AddedProject> {
     state.ready.wait();
-    let project = state.engine.add_project(Path::new(&path))?;
-    // Without a Claude Code session this can't start yet. The Brain screen offers it again.
-    let _ = state
+    Ok(state
         .engine
-        .first_map(&project.id, DEFAULT_BRAIN_MODEL, &language);
-    Ok(project)
+        .add_project_with_map(Path::new(&path), &language)?)
+}
+
+/// Not masked, for the same reason as in `overview`: the dialog saves it back.
+#[tauri::command(async)]
+fn project_setup(state: State<'_, AppState>, project_id: String) -> CommandResult<ProjectSetup> {
+    state.ready.wait();
+    Ok(state.engine.project_setup(&project_id)?)
+}
+
+/// Returns the run. Its output is read the way any run's is, masked.
+#[tauri::command(async)]
+fn project_try_check(
+    state: State<'_, AppState>,
+    project_id: String,
+    setup: String,
+    check: String,
+    language: String,
+) -> CommandResult<String> {
+    state.ready.wait();
+    Ok(state
+        .engine
+        .try_check(&project_id, &setup, &check, &language)?)
+}
+
+#[tauri::command(async)]
+fn project_remove(state: State<'_, AppState>, project_id: String) -> CommandResult<()> {
+    Ok(state.engine.remove_project(&project_id)?)
 }
 
 #[tauri::command(async)]
@@ -773,6 +798,9 @@ pub fn run() {
             refresh_session,
             overview,
             project_add,
+            project_setup,
+            project_try_check,
+            project_remove,
             run_start,
             mcp::mcp_overview,
             mcp::mcp_settings_save,
@@ -872,6 +900,42 @@ mod tests {
             finished_at: None,
             last_activity_at: None,
         }
+    }
+
+    #[test]
+    fn the_settings_can_be_read_back_from_a_whole_project() {
+        // The setup dialog sends the project with only what changed replaced.
+        let mut sent = serde_json::to_value(Project {
+            id: "p1".into(),
+            name: "demo".into(),
+            path: "/Users/you/demo".into(),
+            created_at: "2026-11-05T10:00:00Z".into(),
+            github_account: None,
+            github_repo: Some("acme/app".into()),
+            setup_command: None,
+            check_command: None,
+            allowed_domains: vec!["pypi.org".into()],
+            allowed_read: vec!["~/.nvm".into()],
+            services: vec![Service::Bridge {
+                name: "db".into(),
+                port: 5432,
+                socket: None,
+            }],
+            env: vec![EnvVar {
+                name: "DB".into(),
+                value: SECRET.into(),
+            }],
+            default_workflow: Some("mine".into()),
+        })
+        .unwrap();
+        sent["checkCommand"] = json!("pnpm test");
+        let settings: ProjectSettingsInput = serde_json::from_value(sent).unwrap();
+        assert_eq!(settings.check_command.as_deref(), Some("pnpm test"));
+        assert_eq!(settings.allowed_domains, ["pypi.org"]);
+        assert_eq!(settings.allowed_read, ["~/.nvm"]);
+        assert_eq!(settings.services.len(), 1);
+        assert_eq!(settings.env[0].value, SECRET);
+        assert_eq!(settings.default_workflow.as_deref(), Some("mine"));
     }
 
     #[test]

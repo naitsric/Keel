@@ -280,6 +280,25 @@ async fn a_web_page_cannot_reach_it_even_with_a_token() {
 }
 
 #[tokio::test]
+async fn a_removed_project_is_not_there_for_a_client() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    w.engine.remove_project(&w.project_id).unwrap();
+
+    let projects = ok(&call(&client, "list_projects", json!({})).await);
+    assert_eq!(projects["projects"], json!([]));
+    for wanted in [w.project_id.as_str(), "app"] {
+        let refused = call(
+            &client,
+            "start_run",
+            json!({ "project": wanted, "workflow": w.workflow_id, "request": "x" }),
+        )
+        .await;
+        assert_eq!(refused.is_error, Some(true), "{wanted}");
+    }
+}
+
+#[tokio::test]
 async fn a_client_that_may_only_read_can_read_and_nothing_else() {
     let w = world().await;
     let client = w.client(&w.token(false)).await;

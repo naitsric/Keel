@@ -10,6 +10,7 @@ import { useApp } from "../lib/store";
 import { api } from "../lib/api";
 import { Button, Card, StateBadge } from "../ui/primitives";
 import { Onboarding } from "./Onboarding";
+import { ProjectsRow } from "./ProjectsRow";
 import { TopBar } from "./TopBar";
 
 /** Why runs can't start, and the way out. `text` replaces the reason's sentence, for a screen with more to say. */
@@ -135,7 +136,9 @@ export function Home() {
       <main className="flex-1 space-y-4 overflow-y-auto p-5">
         {isNew && <Onboarding />}
         {!isNew && <SessionBar />}
-        {!isNew && (
+        {loaded && !isNew && <ProjectsRow />}
+        {/* With every project removed, their runs are still history to look at. */}
+        {(!isNew || runs.length > 0) && (
           <>
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
           <Metric label={t("cards.running")} value={formatNumber(totals.running)} detail={t("cards.runningDetail")} />
