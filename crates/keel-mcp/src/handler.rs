@@ -44,8 +44,9 @@ const GET_BRAIN: &str = "Get what Keel knows about a project: the map, accepted 
 const WAIT_FOR_RUN: &str = "Wait until a run finishes or needs the person, for up to `seconds` (default 30, at \
                             most 50), and return it as get_run does. If it's still working, call it again.";
 const START_RUN: &str = "Start a run of a saved workflow, from `request` text, a GitHub `issue` number, or both. \
-                         It appears in Keel at once, marked as started by this client, and the person sees it \
-                         advance there. It spends the person's Claude usage. A workflow that delivers stops for \
+                         It appears in Keel at once, marked as started by this client, with a card on the \
+                         project's board, and the person sees it advance there. An issue that already has a run \
+                         open is refused. It spends the person's Claude usage. A workflow that delivers stops for \
                          the person's approval before any pull request, and you can't approve. Refused if this \
                          client may only read, or already has 3 runs open.";
 const STOP_RUN: &str = "Ask whatever a run has working to stop. It doesn't reject or abandon the run: what \

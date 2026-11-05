@@ -11,7 +11,8 @@ use keel_harness::github::Issue;
 use keel_store::{Card, NewCard, Project, Store};
 
 use crate::{
-    Engine, Error, Result, StartRun, locked, new_id, request_from_issue, title_from_issue,
+    Engine, Error, Result, StartRun, locked, new_id, request_from_issue, title_from,
+    title_from_issue,
 };
 
 const MAX_AGENTS_KEY: &str = "max_agents";
@@ -317,6 +318,59 @@ impl Engine {
                 }
             }
             std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    /// Starts a run from outside the board and puts it there, so all the work is in one place. It
+    /// starts now rather than waiting for a place: whoever asked is waiting for a run, and it counts
+    /// as working, so Todo cards wait for it. `InvalidState` if its issue's card has a run still open.
+    pub fn start_run_on_board(&self, request: StartRun) -> Result<String> {
+        if let Some(reason) = self.preflight().blocker {
+            return Err(Error::Blocked(reason));
+        }
+        let store = &self.inner.store;
+        let project = store.project(&request.project_id)?;
+        self.check_can_run(&project, &request.workflow)?;
+        let issue = request.source_issue.as_ref();
+        let title = match issue {
+            Some(issue) => issue.title.clone(),
+            None => title_from(&request.request),
+        };
+        // If this run is rejected, the card goes back to Backlog, and what's on it is what runs next.
+        let body = match issue {
+            Some(_) => String::new(),
+            None if request.request.trim() == title => String::new(),
+            None => request.request.trim().to_owned(),
+        };
+        let card = store
+            .add_started_card(
+                &NewCard {
+                    id: new_id(),
+                    project_id: project.id,
+                    title,
+                    body,
+                    issue: issue.and_then(|issue| serde_json::to_string(issue).ok()),
+                    issue_number: issue.map(|issue| issue.number),
+                },
+                &request.language,
+            )?
+            .ok_or(Error::InvalidState)?;
+        match self.start_run_in_session(request, Some(&card)) {
+            Ok(run_id) => {
+                self.inner.changed(&run_id);
+                Ok(run_id)
+            }
+            Err(error) => {
+                let reason = match &error {
+                    Error::Blocked(reason) => reason.clone(),
+                    other => Reason::PrepareFailed {
+                        detail: other.to_string(),
+                    },
+                };
+                store.card_start_failed(&card, &reason)?;
+                self.inner.changed("");
+                Err(error)
+            }
         }
     }
 

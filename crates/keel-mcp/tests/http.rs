@@ -331,6 +331,13 @@ async fn a_run_it_starts_shows_who_started_it_and_waits_for_the_person() {
     assert_eq!(row.id, run);
     assert_eq!(row.started_by.as_deref(), Some("Claude Code"));
 
+    // And so does the board, with a card that points at this run.
+    let board = w.engine.board(&w.project_id).unwrap();
+    assert_eq!(board.cards.len(), 1);
+    assert_eq!(board.cards[0].title, "Fix the bug");
+    assert_eq!(board.cards[0].run_id.as_deref(), Some(run.as_str()));
+    assert_eq!(started["cardId"], json!(board.cards[0].id));
+
     let mut view = json!({});
     for _ in 0..20 {
         view = ok(&call(&client, "wait_for_run", json!({ "run": run, "seconds": 5 })).await);

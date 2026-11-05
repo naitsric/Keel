@@ -341,6 +341,24 @@ impl World {
         self.engine.board(&self.project_id).unwrap().working
     }
 
+    /// The attempt of a run's approval step, once it's waiting.
+    fn wait_approval(&self, run: &str) -> String {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            let waiting = self
+                .store
+                .attempts_of_run(run)
+                .unwrap()
+                .into_iter()
+                .find(|attempt| attempt.state == AttemptState::WaitingApproval.as_str());
+            if let Some(attempt) = waiting {
+                return attempt.id;
+            }
+            assert!(Instant::now() < deadline, "never reached approval");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn wait_column(&self, id: &str, column: BoardColumn) -> BoardCard {
         let deadline = Instant::now() + PATIENCE;
         loop {
@@ -644,6 +662,145 @@ fn an_issue_is_imported_once_and_starts_as_the_new_run_dialog_would_start_it() {
         1,
         "the card is a copy: nothing looks at the issue again"
     );
+}
+
+// A run started from outside the board, as an assistant does over MCP, is on the board too.
+
+fn outside_run(w: &World, workflow: Vec<WorkflowStep>, request: &str) -> StartRun {
+    StartRun {
+        project_id: w.project_id.clone(),
+        title: None,
+        request: request.to_owned(),
+        workflow,
+        language: "en".into(),
+        source_issue: None,
+    }
+}
+
+fn steps_of(w: &World, id: &str) -> Vec<WorkflowStep> {
+    w.engine
+        .workflows(&w.project_id, "en")
+        .unwrap()
+        .into_iter()
+        .find(|workflow| workflow.id == id)
+        .unwrap()
+        .steps
+}
+
+#[test]
+fn a_run_from_outside_gets_a_card_that_follows_the_columns_and_starts_once() {
+    let mut w = world();
+    let workflow = answer_step(&w.engine, &w.project_id);
+    w.engine.start_board();
+    let run = w
+        .engine
+        .start_run_on_board(outside_run(
+            &w,
+            steps_of(&w, &workflow),
+            "Add a triple function\n\nWith its test.",
+        ))
+        .unwrap();
+
+    let card = w.store.card_of_run(&run).unwrap().expect("it has a card");
+    let waiting = w.wait_column(&card, BoardColumn::HumanReview);
+    assert_eq!(waiting.title, "Add a triple function");
+    assert_eq!(waiting.body, "Add a triple function\n\nWith its test.");
+    assert_eq!(waiting.run_id.as_deref(), Some(run.as_str()));
+
+    // Neither the scheduler nor a restart starts it again.
+    w.engine.board_tick().unwrap();
+    std::thread::sleep(A_MOMENT);
+    w.reopen(|_| {});
+    w.engine.start_board();
+    std::thread::sleep(A_MOMENT);
+    assert_eq!(w.store.runs(10).unwrap().len(), 1);
+    assert_eq!(w.card(&card).column, BoardColumn::HumanReview);
+
+    let approval = w
+        .store
+        .attempts_of_run(&run)
+        .unwrap()
+        .into_iter()
+        .find(|attempt| attempt.step_id == "ask")
+        .unwrap();
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    w.wait_column(&card, BoardColumn::Done);
+}
+
+#[test]
+fn a_run_from_outside_holds_a_place_so_todo_waits_for_it() {
+    let w = world();
+    w.use_one_step();
+    w.engine.set_max_agents(1).unwrap();
+    let workflow = answer_step(&w.engine, &w.project_id);
+    let run = w
+        .engine
+        .start_run_on_board(outside_run(&w, steps_of(&w, &workflow), "From outside"))
+        .unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    assert_eq!(w.card(&card).column, BoardColumn::InProgress);
+    assert_eq!(w.working(), 1);
+
+    w.engine.start_board();
+    let queued = w.queued("Waits its turn");
+    std::thread::sleep(A_MOMENT);
+    assert_eq!(w.card(&queued).column, BoardColumn::Todo);
+    assert_eq!(w.store.runs(10).unwrap().len(), 1);
+}
+
+#[test]
+fn an_issue_keeps_its_one_card_when_a_run_starts_from_outside() {
+    let w = world();
+    let workflow = answer_step(&w.engine, &w.project_id);
+    let issue = w.engine.issues(&w.project_id).unwrap().remove(0);
+    let card = w.engine.card_import_issue(&w.project_id, &issue).unwrap();
+    let request = StartRun {
+        title: Some(format!("#{} {}", issue.number, issue.title)),
+        source_issue: Some(issue.clone()),
+        ..outside_run(&w, steps_of(&w, &workflow), &request_from_issue(&issue, ""))
+    };
+
+    // A card waiting in Backlog is the one that starts.
+    let run = w.engine.start_run_on_board(request.clone()).unwrap();
+    assert_eq!(
+        w.store.card_of_run(&run).unwrap().as_deref(),
+        Some(card.as_str())
+    );
+    assert_eq!(w.engine.board(&w.project_id).unwrap().cards.len(), 1);
+
+    // While that run is open, a second one is refused, and nothing changes.
+    let refused = w.engine.start_run_on_board(request.clone());
+    assert!(matches!(refused, Err(Error::InvalidState)));
+    assert_eq!(w.store.runs(10).unwrap().len(), 1);
+    assert_eq!(
+        w.store.card_of_run(&run).unwrap().as_deref(),
+        Some(card.as_str())
+    );
+
+    // Once it's rejected, it's back in Backlog, and it can go again on the same card.
+    let approval = w.wait_approval(&run);
+    w.engine
+        .answer_approval(&approval, false, "Keep it smaller")
+        .unwrap();
+    w.wait_column(&card, BoardColumn::Backlog);
+    let again = w.engine.start_run_on_board(request).unwrap();
+    assert_ne!(again, run);
+    assert_eq!(
+        w.store.card_of_run(&again).unwrap().as_deref(),
+        Some(card.as_str())
+    );
+    assert_eq!(w.engine.board(&w.project_id).unwrap().cards.len(), 1);
+}
+
+#[test]
+fn a_run_that_could_never_start_leaves_no_card_behind() {
+    let w = world();
+    let refused = w
+        .engine
+        .start_run_on_board(outside_run(&w, vec![], "Nothing to do"));
+    assert!(matches!(refused, Err(Error::Blocked(_))));
+    assert!(w.engine.board(&w.project_id).unwrap().cards.is_empty());
+    assert!(w.store.runs(10).unwrap().is_empty());
 }
 
 // Criterion 3: only as many as the limit work at once, and the rest enter in order.
