@@ -4,12 +4,14 @@ import { useTranslation } from "react-i18next";
 import { useRunCommands } from "../commands/pageCommands";
 import { useSearchEverywhere } from "../commands/SearchEverywhere";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck, type Run } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "../lib/audit";
+import { attemptChoices, type FlowNode, flowOf, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
 import { useApp, type View } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
 import { ProposalRow } from "./BrainPage";
+import { FlowDiagram } from "./FlowDiagram";
 import { TopBar } from "./TopBar";
 
 type Tab = "activity" | "commands" | "changes" | "prompt" | "details" | "output";
@@ -885,6 +887,30 @@ function DetailsTab({ attempt, events }: { attempt: Attempt; events: AuditEvent[
   );
 }
 
+/** Each round and retry of a step keeps its own record, so all of them stay one click away. */
+function AttemptChoice({ node, attempt, onChoose }: { node: FlowNode; attempt: Attempt; onChoose: (attemptId: string) => void }) {
+  const { t } = useTranslation();
+  const choices = attemptChoices(node.attempts);
+  if (choices.length < 2) return null;
+  return (
+    <Segmented<string>
+      label={t("flow.whichAttempt")}
+      value={attempt.id}
+      onChange={onChoose}
+      options={choices.map((choice) => ({
+        value: choice.attempt.id,
+        label: (
+          <span className="flex items-center gap-1.5">
+            {[choice.round !== null && t("run.round", { number: choice.round }), choice.number !== null && t("run.attemptTitle", { number: choice.number })].filter(Boolean).join(" · ")}
+            <StateBadge state={choice.attempt.state} label="" />
+            <span className="sr-only">{t(`states.${choice.attempt.state}`)}</span>
+          </span>
+        ),
+      }))}
+    />
+  );
+}
+
 /** If any part of the record doesn't check out, that's what the person needs to know. */
 function worstRawCheck(checks: RawCheck[]): RawCheck {
   for (const check of ["changed", "missing", "pending"] as const) {
@@ -898,7 +924,9 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
   const revision = useApp((s) => s.revision);
   const [run, setRun] = useState<Run | null>(null);
   const [attempts, setAttempts] = useState<Attempt[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
+  // A node, and which of its attempts if the person chose one. Until then the page follows the run.
+  const [selectedNode, setSelectedNode] = useState<string | null>(null);
+  const [selectedAttempt, setSelectedAttempt] = useState<string | null>(null);
   const [eventsByAttempt, setEventsByAttempt] = useState<Record<string, AuditEvent[]>>({});
   const [rawChecks, setRawChecks] = useState<Record<string, RawCheck>>({});
   const [tab, setTab] = useState<Tab>("activity");
@@ -907,7 +935,9 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
 
   const latest = focusAttempt(attempts);
   const accounts = accountsOf(attempts);
-  const attempt = attempts.find((a) => a.id === selected) ?? latest;
+  const flow = useMemo(() => flowOf(parseSteps(run?.workflow) ?? [], attempts, run?.round), [run, attempts]);
+  const shownNode = nodeWithKey(flow, selectedNode) ?? nodeOfAttempt(flow, latest);
+  const attempt = selectedNode === null ? latest : (shownNode?.attempts.find((a) => a.id === selectedAttempt) ?? shownNode?.attempt);
   const [runDiff, setRunDiff] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -949,14 +979,14 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
     stopStep: latest && isActive(latest.state) ? () => void api.attemptStop(latest.id).catch((e) => setError(errorText(t, e))) : null,
   });
 
-  if (!attempt || !latest || !run) {
+  if (!latest || !run) {
     return <TopBar back={backTo ?? true} />;
   }
 
-  // A step can have run several times. The list shows each attempt, then what's still ahead.
-  const pending = flatSteps(run?.workflow ?? []).filter((step) => !attempts.some((a) => a.stepId === step.id));
-  const kindTabs: Tab[] = attempt.state === "skipped" ? ["activity", "prompt"] : attempt.kind === "agent" ? ["activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
+  const kindTabs: Tab[] = !attempt ? [] : attempt.state === "skipped" ? ["activity", "prompt"] : attempt.kind === "agent" ? ["activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
   const shownTab: Tab = kindTabs.includes(tab) ? tab : kindTabs[0];
+  // Of the attempt on show, which may be an earlier one than the node's own.
+  const shownModel = attempt?.kind === "agent" ? (attempt.modelActual ?? attempt.modelRequested) : shownNode?.model;
 
   return (
     <>
@@ -1000,42 +1030,54 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
         <Modal open={runDiff !== null} onOpenChange={(open) => !open && setRunDiff(null)} title={t("run.changesTitle")} className="w-[900px]">
           {runDiff ? <DiffView diff={runDiff} /> : <p className="text-[12.5px] text-subtle">{t("changes.empty")}</p>}
         </Modal>
-        <div className="grid gap-4 lg:grid-cols-[210px_1fr]">
-          <Card className="self-start p-2">
-            <h2 className="px-2 pt-1 pb-1.5 text-[12px] font-semibold text-muted">{t("run.stepsTitle")}</h2>
-            <ul className="space-y-0.5">
-              {attempts.map((a) => (
-                <li key={a.id}>
-                  <button type="button" onClick={() => setSelected(a.id)} className={cx("w-full rounded-md px-2 py-1.5 text-left hover:bg-hover", a.id === attempt.id && "bg-active")}>
-                    <span className="block truncate text-[12.5px] font-medium">{a.stepId}</span>
-                    <span className="mt-0.5 flex items-center justify-between gap-2">
-                      <span className="text-[11px] text-subtle">{a.round > 0 ? t("run.round", { number: a.round + 1 }) : a.number > 1 && t("run.attemptTitle", { number: a.number })}</span>
-                      <StateBadge state={a.state} label={t(`states.${a.state}`)} />
-                    </span>
-                    {a.kind === "agent" && <span className="mt-0.5 block truncate font-mono text-[11px] text-subtle">{a.modelActual ?? a.modelRequested}</span>}
-                  </button>
-                </li>
-              ))}
-              {pending.map((step) => (
-                <li key={step.id} className="px-2 py-1.5 opacity-60">
-                  <span className="block truncate text-[12.5px] font-medium">{step.id}</span>
-                  <span className="text-[11px] text-subtle">{t("run.pending")}</span>
-                </li>
-              ))}
-            </ul>
-          </Card>
-          <Card className="min-w-0 p-4">
-            <Segmented<Tab> label={t("tabs.details")} value={shownTab} onChange={setTab} options={kindTabs.map((value) => ({ value, label: t(`tabs.${value}`) }))} />
-            <div className="mt-4">
-              {shownTab === "activity" && <ActivityTab events={events} />}
-              {shownTab === "commands" && <CommandsTab commands={commands} />}
-              {shownTab === "changes" && <ChangesTab attempt={attempt} revision={revision} />}
-              {shownTab === "output" && <OutputTab events={events} attempt={attempt} />}
-              {shownTab === "prompt" && <pre className="overflow-auto rounded bg-inset p-3 font-mono text-[12px] leading-relaxed whitespace-pre-wrap">{attempt.prompt}</pre>}
-              {shownTab === "details" && <DetailsTab attempt={attempt} events={events} />}
+        <Card className="p-3">
+          <h2 className="px-1 pb-2 text-[12px] font-semibold text-muted">{t("run.stepsTitle")}</h2>
+          <FlowDiagram
+            flow={flow}
+            label={t("run.stepsTitle")}
+            selected={shownNode?.key ?? null}
+            onSelect={(key) => {
+              setSelectedNode(key);
+              setSelectedAttempt(null);
+            }}
+          />
+        </Card>
+        <Card className="min-w-0 p-4">
+          {shownNode && (
+            <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-2">
+              <h2 className="min-w-0 truncate text-[13px] font-semibold">{shownNode.id}</h2>
+              {shownModel && <span className="min-w-0 truncate font-mono text-[11.5px] text-subtle">{shownModel}</span>}
+              {attempt && <StateBadge state={attempt.state} label={t(`states.${attempt.state}`)} />}
+              {attempt && (
+                <div className="ml-auto max-w-full overflow-x-auto">
+                  <AttemptChoice
+                    node={shownNode}
+                    attempt={attempt}
+                    onChoose={(attemptId) => {
+                      setSelectedNode(shownNode.key);
+                      setSelectedAttempt(attemptId);
+                    }}
+                  />
+                </div>
+              )}
             </div>
-          </Card>
-        </div>
+          )}
+          {attempt ? (
+            <>
+              <Segmented<Tab> label={t("tabs.details")} value={shownTab} onChange={setTab} options={kindTabs.map((value) => ({ value, label: t(`tabs.${value}`) }))} />
+              <div className="mt-4">
+                {shownTab === "activity" && <ActivityTab events={events} />}
+                {shownTab === "commands" && <CommandsTab commands={commands} />}
+                {shownTab === "changes" && <ChangesTab attempt={attempt} revision={revision} />}
+                {shownTab === "output" && <OutputTab events={events} attempt={attempt} />}
+                {shownTab === "prompt" && <pre className="overflow-auto rounded bg-inset p-3 font-mono text-[12px] leading-relaxed whitespace-pre-wrap">{attempt.prompt}</pre>}
+                {shownTab === "details" && <DetailsTab attempt={attempt} events={events} />}
+              </div>
+            </>
+          ) : (
+            <p className="text-[12.5px] text-subtle">{t("flow.notStarted")}</p>
+          )}
+        </Card>
       </main>
     </>
   );
