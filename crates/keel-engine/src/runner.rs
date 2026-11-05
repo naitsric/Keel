@@ -200,6 +200,7 @@ impl Inner {
             &json!({ "state": state.as_str(), "reason": reason }),
         );
         locked(&self.controls).remove(attempt_id);
+        self.close_failed_trial(run_id, state);
         self.changed(run_id);
     }
 
@@ -1026,6 +1027,7 @@ impl Inner {
             m.counts_as_agent,
         );
         locked(&self.controls).remove(&m.attempt_id);
+        self.close_failed_trial(&m.run_id, state);
         self.changed(&m.run_id);
         if state == AttemptState::Succeeded
             && let Ok(attempt) = store.attempt(&m.attempt_id)

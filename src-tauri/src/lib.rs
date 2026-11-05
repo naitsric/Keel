@@ -12,8 +12,8 @@ use keel_core::{
     serialize_masked,
 };
 use keel_engine::{
-    Board, BrainView, Config, DEFAULT_BRAIN_MODEL, Engine, Error as EngineError, GithubStatus,
-    Preflight, RawCheck, StartRun, Workflow, request_from_issue, title_from_issue,
+    AddedProject, Board, BrainView, Config, Engine, Error as EngineError, GithubStatus, Preflight,
+    ProjectSetup, RawCheck, StartRun, Workflow, request_from_issue, title_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
@@ -145,19 +145,44 @@ fn overview(state: State<'_, AppState>) -> CommandResult<Overview> {
     })
 }
 
+/// The project isn't masked, for the same reason as in `overview`: the dialog saves it back.
 #[tauri::command(async)]
 fn project_add(
     state: State<'_, AppState>,
     path: String,
     language: String,
-) -> CommandResult<Project> {
+) -> CommandResult<AddedProject> {
     state.ready.wait();
-    let project = state.engine.add_project(Path::new(&path))?;
-    // Without a Claude Code session this can't start yet. The Brain screen offers it again.
-    let _ = state
+    Ok(state
         .engine
-        .first_map(&project.id, DEFAULT_BRAIN_MODEL, &language);
-    Ok(project)
+        .add_project_with_map(Path::new(&path), &language)?)
+}
+
+/// Not masked, for the same reason as in `overview`: the dialog saves it back.
+#[tauri::command(async)]
+fn project_setup(state: State<'_, AppState>, project_id: String) -> CommandResult<ProjectSetup> {
+    state.ready.wait();
+    Ok(state.engine.project_setup(&project_id)?)
+}
+
+/// Returns the run. Its output is read the way any run's is, masked.
+#[tauri::command(async)]
+fn project_try_check(
+    state: State<'_, AppState>,
+    project_id: String,
+    setup: String,
+    check: String,
+    language: String,
+) -> CommandResult<String> {
+    state.ready.wait();
+    Ok(state
+        .engine
+        .try_check(&project_id, &setup, &check, &language)?)
+}
+
+#[tauri::command(async)]
+fn project_remove(state: State<'_, AppState>, project_id: String) -> CommandResult<()> {
+    Ok(state.engine.remove_project(&project_id)?)
 }
 
 #[tauri::command(async)]
@@ -773,6 +798,9 @@ pub fn run() {
             refresh_session,
             overview,
             project_add,
+            project_setup,
+            project_try_check,
+            project_remove,
             run_start,
             mcp::mcp_overview,
             mcp::mcp_settings_save,

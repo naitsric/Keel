@@ -4,6 +4,7 @@
 mod board;
 mod brain;
 mod deliver;
+mod detect;
 mod git;
 mod prompts;
 mod runner;
@@ -18,6 +19,7 @@ use std::time::{Duration, Instant};
 
 pub use board::{Board, BoardCard, BoardIssue};
 pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
+pub use detect::Guess;
 pub use git::{Git, GitError, Snapshot};
 use keel_core::{AttemptState, Reason, StepRole, StepSpec, WorkflowStep};
 use keel_harness::auth::{self, AuthStatus, VersionCheck};
@@ -165,6 +167,52 @@ pub struct GithubStatus {
 
 /// `repo` covers everything Keel does. `read:org` and `gist` are what `gh` asks for at minimum.
 const NEEDED_SCOPES: [&str; 3] = ["repo", "read:org", "gist"];
+
+/// What adding a folder did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AddOutcome {
+    New,
+    /// It was already in Keel.
+    Existing,
+    /// It had been removed, and it's back with its history.
+    Restored,
+}
+
+/// Whether a new project's map really started.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum MapStart {
+    Started,
+    NotStarted {
+        #[serde(serialize_with = "keel_core::serialize_masked")]
+        reason: Reason,
+    },
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddedProject {
+    pub project: Project,
+    pub outcome: AddOutcome,
+    /// Only a new project starts one, so anything else says nothing about a map.
+    pub map: Option<MapStart>,
+}
+
+/// What the setup dialog starts from.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectSetup {
+    pub project: Project,
+    pub guess: Guess,
+}
+
+/// The step that marks a run as someone trying a command. See `Inner::close_failed_trial`.
+const TRY_CHECK_STEP: &str = "try-check";
 
 #[derive(Default)]
 struct Slots {
@@ -332,13 +380,48 @@ impl Engine {
     }
 
     pub fn add_project(&self, path: &Path) -> Result<Project> {
+        Ok(self.add_folder(path)?.0)
+    }
+
+    /// Adds a folder, and starts a new project's map. Without a Claude Code session the map can't
+    /// start, which isn't a reason to refuse the project: the Brain screen offers it again.
+    pub fn add_project_with_map(&self, path: &Path, language: &str) -> Result<AddedProject> {
+        let (project, outcome) = self.add_folder(path)?;
+        let map = if outcome != AddOutcome::New {
+            None
+        } else {
+            match self.first_map(&project.id, DEFAULT_BRAIN_MODEL, language) {
+                Ok(run) => run.map(|_| MapStart::Started),
+                Err(Error::Blocked(reason)) => Some(MapStart::NotStarted { reason }),
+                Err(other) => Some(MapStart::NotStarted {
+                    reason: Reason::PrepareFailed {
+                        detail: other.to_string(),
+                    },
+                }),
+            }
+        };
+        Ok(AddedProject {
+            project,
+            outcome,
+            map,
+        })
+    }
+
+    /// A folder already in Keel keeps its row, so a removed one comes back with its history.
+    fn add_folder(&self, path: &Path) -> Result<(Project, AddOutcome)> {
         let git = self.git()?;
         let root = git
             .toplevel(path)
             .map_err(|_| Error::NotARepo(path.to_string_lossy().into_owned()))?;
         let root_text = root.to_string_lossy().into_owned();
         if let Some(existing) = self.inner.store.project_by_path(&root_text)? {
-            return Ok(existing);
+            let outcome = if self.inner.store.project_is_removed(&existing.id)? {
+                self.inner.store.restore_project(&existing.id)?;
+                AddOutcome::Restored
+            } else {
+                AddOutcome::Existing
+            };
+            return Ok((self.refresh_repo(&existing.id)?, outcome));
         }
         let name = root
             .file_name()
@@ -361,7 +444,109 @@ impl Engine {
             default_workflow: None,
         };
         self.inner.store.add_project(&project)?;
+        Ok((project, AddOutcome::New))
+    }
+
+    /// A repo can be published long after it's added, or move, and only its folder knows. A folder
+    /// that's gone says nothing about GitHub, so what was known stays.
+    fn refresh_repo(&self, id: &str) -> Result<Project> {
+        let project = self.inner.store.project(id)?;
+        let root = Path::new(&project.path);
+        let Ok(git) = self.git() else {
+            return Ok(project);
+        };
+        if git.toplevel(root).is_err() {
+            return Ok(project);
+        }
+        let repo = git
+            .origin_url(root)
+            .and_then(|url| github::github_repo(&url));
+        if repo == project.github_repo {
+            return Ok(project);
+        }
+        self.inner.store.set_project_repo(id, repo.as_deref())?;
+        let project = self.inner.store.project(id)?;
+        self.inner.compare_map_with_github(&project)?;
         Ok(project)
+    }
+
+    /// Where the setup dialog starts: the project as it is now, and a guess at its commands. Only
+    /// reads the repo, and saves nothing but which GitHub repo it's on.
+    pub fn project_setup(&self, id: &str) -> Result<ProjectSetup> {
+        let project = self.refresh_repo(id)?;
+        let guess = detect::guess(Path::new(&project.path));
+        Ok(ProjectSetup { project, guess })
+    }
+
+    /// Tries commands before anyone saves them, in the real sandbox and with no model. Saved
+    /// settings aren't touched, and what's being tried replaces them for this run.
+    pub fn try_check(
+        &self,
+        project_id: &str,
+        setup: &str,
+        check: &str,
+        language: &str,
+    ) -> Result<String> {
+        let (setup, check) = (setup.trim(), check.trim());
+        if check.is_empty() {
+            return Err(Error::Blocked(Reason::InvalidSetting {
+                field: "checkCommand".to_owned(),
+                value: String::new(),
+            }));
+        }
+        // An emptied field means no setup, and `start_run` would put the saved one in front.
+        let saved = self.inner.store.project(project_id)?.setup_command;
+        let setup = match (setup.is_empty(), saved) {
+            (false, _) => Some(setup),
+            (true, Some(_)) => Some("true"),
+            (true, None) => None,
+        };
+        let mut workflow = Vec::new();
+        if let Some(run) = setup {
+            workflow.push(WorkflowStep::Setup {
+                id: "setup".to_owned(),
+                run: run.to_owned(),
+            });
+        }
+        workflow.push(WorkflowStep::Check {
+            id: TRY_CHECK_STEP.to_owned(),
+            run: check.to_owned(),
+        });
+        let what = if language.starts_with("es") {
+            format!("Probar la verificación: {check}")
+        } else {
+            format!("Try the check: {check}")
+        };
+        self.start_run_in_session(
+            StartRun {
+                project_id: project_id.to_owned(),
+                title: Some(title_from(&what)),
+                request: what,
+                workflow,
+                language: language.to_owned(),
+                source_issue: None,
+            },
+            None,
+        )
+    }
+
+    /// Hides a project from Keel. Deletes nothing, here or in its folder. Not while a run of its
+    /// hasn't finished, since that run would go on with no project anyone can see.
+    pub fn remove_project(&self, id: &str) -> Result<()> {
+        let store = &self.inner.store;
+        store.project(id)?;
+        if store.remove_project(id)? {
+            return Ok(());
+        }
+        let open = store.open_runs_of_project(id)?;
+        match open.first() {
+            Some(run) => Err(Error::Blocked(Reason::ProjectHasOpenRuns {
+                count: open.len(),
+                run_id: run.id.clone(),
+                title: run.title.clone(),
+            })),
+            None => Ok(()),
+        }
     }
 
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<Project> {
@@ -458,6 +643,9 @@ impl Engine {
     /// when a card asks to.
     fn check_can_run(&self, project: &Project, workflow: &[WorkflowStep]) -> Result<()> {
         workflows::validate(workflow).map_err(Error::Blocked)?;
+        if self.inner.store.project_is_removed(&project.id)? {
+            return Err(Error::Blocked(Reason::ProjectRemoved));
+        }
         if workflow
             .iter()
             .any(|s| matches!(s, WorkflowStep::Deliver { .. }))
@@ -473,8 +661,8 @@ impl Engine {
         Ok(())
     }
 
-    /// `start_run`, for a caller that has already looked at the session. A run for a card is linked
-    /// to it from the moment it exists.
+    /// `start_run`, for a caller that has already looked at the session or doesn't need one. A run
+    /// for a card is linked to it from the moment it exists.
     fn start_run_in_session(&self, request: StartRun, card: Option<&str>) -> Result<String> {
         let project = self.inner.store.project(&request.project_id)?;
         self.check_can_run(&project, &request.workflow)?;
@@ -688,6 +876,9 @@ impl Engine {
             return Err(Error::InvalidState);
         }
         let run = store.run(&attempt.run_id)?;
+        if store.project_is_removed(&run.project_id)? {
+            return Err(Error::Blocked(Reason::ProjectRemoved));
+        }
         let number = store
             .attempts_of_run(&attempt.run_id)?
             .iter()
@@ -701,17 +892,18 @@ impl Engine {
         let step = workflows::find_step(&steps, &attempt.step_id).ok_or(Error::InvalidState)?;
         let resume_session =
             (resume && attempt.kind == "agent").then(|| attempt.session_id.clone());
-        let new_attempt = self.inner.start_step(
+        // Before the step starts: a quick one can be over, and have closed the run, by the time
+        // `start_step` returns.
+        if run.finished_at.is_some() {
+            store.patch_run(&attempt.run_id, &[("finished_at", Value::Null)])?;
+        }
+        self.inner.start_step(
             &attempt.run_id,
             &step,
             number,
             resume_session.clone(),
             resume_session.is_some().then(|| attempt.id.clone()),
-        )?;
-        if run.finished_at.is_some() {
-            store.patch_run(&attempt.run_id, &[("finished_at", Value::Null)])?;
-        }
-        Ok(new_attempt)
+        )
     }
 
     pub fn abandon(&self, attempt_id: &str) -> Result<()> {
@@ -868,6 +1060,24 @@ fn restrict_dir(dir: &Path) {
 impl Inner {
     fn changed(&self, run_id: &str) {
         (self.on_change)(run_id);
+    }
+
+    /// Any other run that fails waits for a person to retry or abandon it. Someone trying a command
+    /// has already seen the answer, and no agent was paid for. Left open, this run would stop the
+    /// project from being removed. Retrying it from its page still works.
+    fn close_failed_trial(&self, run_id: &str, state: AttemptState) {
+        if matches!(state, AttemptState::Succeeded | AttemptState::Skipped) {
+            return;
+        }
+        let Ok(run) = self.store.run(run_id) else {
+            return;
+        };
+        let steps: Vec<WorkflowStep> = serde_json::from_value(run.workflow).unwrap_or_default();
+        if run.finished_at.is_none() && steps.iter().any(|s| s.id() == TRY_CHECK_STEP) {
+            let _ = self
+                .store
+                .patch_run(run_id, &[("finished_at", Value::Text(now()))]);
+        }
     }
 
     fn run_dir(&self, run_id: &str) -> PathBuf {

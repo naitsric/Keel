@@ -371,6 +371,15 @@ pub enum Reason {
     },
     /// The workflow a project starts its cards with no longer exists.
     DefaultWorkflowMissing,
+    /// A project can't be removed while a run of its hasn't finished. `run_id` and `title` are the
+    /// oldest one, and `count` is how many there are.
+    ProjectHasOpenRuns {
+        count: usize,
+        run_id: String,
+        title: String,
+    },
+    /// The project was removed from Keel, so nothing new can start on it until it's added again.
+    ProjectRemoved,
 }
 
 impl Reason {
@@ -409,7 +418,9 @@ impl Reason {
             | Self::ServiceFailed { .. }
             | Self::InvalidSetting { .. }
             | Self::InvalidWorkflow { .. }
-            | Self::DefaultWorkflowMissing => false,
+            | Self::DefaultWorkflowMissing
+            | Self::ProjectHasOpenRuns { .. }
+            | Self::ProjectRemoved => false,
             // One run.
             Self::Stalled { .. }
             | Self::WaitingForProject
@@ -672,6 +683,15 @@ mod tests {
             ),
             (Reason::DefaultWorkflowMissing, false),
             (Reason::ClaudeNotResponding, false),
+            (
+                Reason::ProjectHasOpenRuns {
+                    count: 1,
+                    run_id: text(),
+                    title: text(),
+                },
+                false,
+            ),
+            (Reason::ProjectRemoved, false),
         ]
     }
 
@@ -713,6 +733,8 @@ mod tests {
             Reason::InvalidSetting { .. } => 32,
             Reason::DefaultWorkflowMissing => 33,
             Reason::ClaudeNotResponding => 34,
+            Reason::ProjectHasOpenRuns { .. } => 35,
+            Reason::ProjectRemoved => 36,
         }
     }
 
@@ -726,7 +748,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=34).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=36).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]

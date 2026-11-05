@@ -100,7 +100,10 @@
     "invalidWorkflow": "Este workflow no puede correr.",
     "snapshotFailed": "El paso terminó, pero Keel no pudo leer lo que cambió, así que no cuenta como hecho.",
     "brainFull": "El Brain está lleno. Retira algo primero, y luego acepta esto.",
-    "defaultWorkflowMissing": "El workflow que este proyecto usa por defecto ya no existe. Elige otro en Ajustes."
+    "defaultWorkflowMissing": "El workflow que este proyecto usa por defecto ya no existe. Elige otro en Ajustes.",
+    "projectHasOpenRuns": "Este proyecto no se puede quitar todavía, porque «{{title}}» no ha terminado. Termínala o abandónala primero.",
+    "projectHasOpenRunsMany": "Este proyecto no se puede quitar todavía, porque «{{title}}» y {{others}} más no han terminado. Termínalas o abandónalas primero.",
+    "projectRemoved": "Este proyecto se quitó de Keel. Agrega su carpeta de nuevo para trabajar en él."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",

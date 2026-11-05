@@ -100,7 +100,10 @@
     "invalidWorkflow": "This workflow can't run.",
     "snapshotFailed": "The step ended, but Keel couldn't read what it changed, so it doesn't count as done.",
     "brainFull": "The Brain is full. Retire something first, and then accept this.",
-    "defaultWorkflowMissing": "The workflow this project uses by default no longer exists. Choose another one in Settings."
+    "defaultWorkflowMissing": "The workflow this project uses by default no longer exists. Choose another one in Settings.",
+    "projectHasOpenRuns": "This project can't be removed yet, because “{{title}}” hasn't finished. Finish it or abandon it first.",
+    "projectHasOpenRunsMany": "This project can't be removed yet, because “{{title}}” and {{others}} more haven't finished. Finish them or abandon them first.",
+    "projectRemoved": "This project was removed from Keel. Add its folder again to work on it."
   },
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",
