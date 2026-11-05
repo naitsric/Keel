@@ -14,6 +14,20 @@
     "brainProposals": "{{count}} propuestas esperando",
     "board": "Tablero"
   },
+  "statusBar": {
+    "running_one": "{{count}} en curso",
+    "running_other": "{{count}} en curso",
+    "idle": "Nada en curso",
+    "waiting_one": "{{count}} te espera",
+    "waiting_other": "{{count}} te esperan",
+    "version": "Claude Code {{version}}",
+    "noClaude": "Claude Code no encontrado",
+    "signedIn": "sesión iniciada",
+    "signedOut": "sin sesión",
+    "mcpOn": "MCP encendido",
+    "mcpOff": "MCP apagado",
+    "mcpFailed": "MCP no arrancó"
+  },
   "shortcuts": {
     "categories": {
       "navigate": "Navegar",
@@ -52,7 +66,6 @@
     "checking": "Comprobando tu sesión de Claude Code…",
     "account": "Claude Code: {{account}}",
     "accountNoEmail": "Claude Code: sesión iniciada",
-    "version": "versión {{version}}",
     "ignoredEnv": "Se ignora {{names}} de tu entorno, para que se use tu suscripción.",
     "signIn": "Iniciar sesión",
     "expiresSoon": "Tu sesión vence el {{date}}.",

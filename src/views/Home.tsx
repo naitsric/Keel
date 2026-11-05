@@ -5,7 +5,7 @@ import type { Reason, RunRow } from "../lib/api";
 import { isActive } from "../lib/api";
 import { elapsedMs, formatCost, formatDateTime, formatDuration, formatNumber, formatRelative } from "../lib/format";
 import { needsSignIn, reasonText } from "../lib/reason";
-import { accountLabel, sessionExpiry } from "../lib/session";
+import { sessionExpiry } from "../lib/session";
 import { useApp } from "../lib/store";
 import { api } from "../lib/api";
 import { Button, Card, StateBadge } from "../ui/primitives";
@@ -27,21 +27,16 @@ export function BlockerNotice({ blocker, text }: { blocker: Reason; text?: strin
   );
 }
 
+/** What about the session needs attention. Which account and version it is, is in the status bar. */
 function SessionBar() {
   const { t } = useTranslation();
   const preflight = useApp((s) => s.preflight);
-  if (!preflight) {
-    return <p className="text-[12px] text-subtle">{t("session.checking")}</p>;
-  }
-  const { auth, version, ignoredEnv, blocker } = preflight;
-  const account = accountLabel(auth);
+  if (!preflight) return null;
+  const { auth, ignoredEnv, blocker } = preflight;
   const expiry = auth?.loggedIn ? sessionExpiry(auth.expiresAt, Date.now()) : null;
+  if (!expiry && ignoredEnv.length === 0 && !blocker) return null;
   return (
     <div className="space-y-1.5">
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted">
-        {auth?.loggedIn && <span>{account ? t("session.account", { account }) : t("session.accountNoEmail")}</span>}
-        {version && "found" in version && <span className="text-subtle">{t("session.version", { version: version.found })}</span>}
-      </div>
       {expiry && <p className="text-[12px] text-warning">{t(expiry === "soon" ? "session.expiresSoon" : "session.expired", { date: formatDateTime(auth?.expiresAt as string) })}</p>}
       {ignoredEnv.length > 0 && <p className="text-[12px] text-warning">{t("session.ignoredEnv", { names: ignoredEnv.join(", ") })}</p>}
       {blocker && <BlockerNotice blocker={blocker} />}

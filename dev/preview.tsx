@@ -181,11 +181,14 @@ index 12ee743..4693ad3 100644
 const expires = params.get("expires");
 const expiresAt = expires === null ? null : Number.isNaN(Number(expires)) ? expires : new Date(Date.now() + Number(expires) * 86400000).toISOString();
 
+// The status bar: session=checking, session=out, claude=missing, and email=long to see it cut. With
+// runs=quiet nothing runs or waits, and runs=many has more of both than fit. mcp=on|port for MCP.
+const longEmail = "someone.with.a.very.long.address@a-company-with-a-very-long-name.example.com";
 const preflight: Preflight = {
   claudeFound: params.get("claude") !== "missing",
   gitFound: true,
-  version: { status: "supported", found: "2.1.318" },
-  auth: params.get("session") === "out" ? { loggedIn: false, method: null, provider: null, subscription: null, email: null, orgName: null, expiresAt: null } : { loggedIn: true, method: "claude.ai", provider: "firstParty", subscription: "max", email: "you@example.com", orgName: null, expiresAt },
+  version: params.get("claude") === "missing" ? null : { status: "supported", found: "2.1.318" },
+  auth: params.get("claude") === "missing" ? null : params.get("session") === "out" ? { loggedIn: false, method: null, provider: null, subscription: null, email: null, orgName: null, expiresAt: null } : { loggedIn: true, method: "claude.ai", provider: "firstParty", subscription: "max", email: params.get("email") === "long" ? longEmail : "you@example.com", orgName: null, expiresAt },
   ignoredEnv: params.get("env") === "key" ? ["ANTHROPIC_API_KEY"] : [],
   blocker: params.get("session") === "out" ? { code: "claudeLoggedOut" } : null,
   ghFound: params.get("gh") !== "missing",
@@ -212,7 +215,11 @@ const row = (id: string, title: string, s: AttemptState, reason: Reason | null, 
 const runs: RunRow[] =
   params.get("empty") === "1"
     ? []
-    : [
+    : params.get("runs") === "quiet"
+      ? [row("r1", "The add function in calc.py is wrong. Fix it, then run the tests.", "succeeded", null, "claude-haiku-5-5", 6, 90)]
+      : params.get("runs") === "many"
+        ? Array.from({ length: 150 }, (_, i) => row(`m${i}`, `Run number ${i + 1}`, i % 3 === 0 ? "running" : "waitingApproval", null, "claude-sonnet-5-5", 3, 10 + i))
+        : [
         row("r2", "Add a retry to the payment webhook", "running", null, "claude-opus-5-5", 12, 6),
         row("r3", "The calendar repeats a holiday in 2030", "stalled", REASONS.stalled ?? null, "claude-sonnet-5-5", 4, 14),
         row("r4", "Review the login form", "queued", REASONS.queued ?? null, "haiku", null, 1),
@@ -507,7 +514,8 @@ mockIPC((command, args) => {
 });
 
 void useApp.getState().refreshOverview();
-useApp.setState({ preflight });
+void useApp.getState().refreshMcp();
+useApp.setState({ preflight: params.get("session") === "checking" ? null : preflight });
 if (view === "run") useApp.setState({ view: { name: "run", runId: "r1" } });
 if (view === "settings") useApp.setState({ view: { name: "settings" } });
 if (view === "workflows") useApp.setState({ view: { name: "workflows" } });

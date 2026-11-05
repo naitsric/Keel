@@ -289,7 +289,9 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const hiddenFiles = files.length - SHOWN_FILES;
 
   return (
-    <Card role="alert" className="flex max-h-[calc(100vh-140px)] flex-col border-warning/40 p-4">
+    // Short enough for its buttons to show without scrolling: the window less the top bar (38), the
+    // status bar (24), and the run's title and the page's padding above and below (102).
+    <Card role="alert" className="flex max-h-[calc(100vh-164px)] flex-col border-warning/40 p-4">
       <p className="text-[14px] font-semibold">{t(empty ? "run.approvalEmptyTitle" : outcome === "delivers" ? "run.approvalTitle" : "run.approvalContinueTitle")}</p>
       <p className="mt-1 mb-3 text-[12.5px] text-muted">{t(empty ? "run.approvalEmptyBody" : "run.approvalBody")}</p>
       <dl className="min-h-0 overflow-y-auto">

@@ -16,6 +16,8 @@ const NOT_ALWAYS_THERE = ["project_remove", "project_try_check"];
 /** Words that mean the same, in the ids and in what the person reads. "New run" opens a dialog, so it's allowed. */
 const DECIDING_WORDS = /approve|reject|retry|resume|abandon|accept|retire|dismiss|\bto ?do\b|\bstart|deliver|merge|remove|delete|another round/i;
 const DECIDING_WORDS_ES = /aprob|rechaz|reintent|reanud|abandon|acept|retir|descart|inici|entreg|fusion|elimin|otra ronda/i;
+/** The same calls, as the code writes them. */
+const DECIDING_CALL = /api\.(approvalAnswer|reworkLimitAnswer|runStart|attemptRetry|attemptAbandon|brainAccept|brainDismiss|brainRetire|brainGenerateMap|decisionRetire|cardMove|cardDelete|projectAdd|projectRemove|projectTryCheck)\b/;
 
 /** The app's own code as text, by path. */
 const SOURCES = import.meta.glob<string>(["/src/**/*.{ts,tsx}", "!/src/**/*.test.{ts,tsx}"], { query: "?raw", import: "default", eager: true });
@@ -87,8 +89,14 @@ describe("safety", () => {
     it("the code that registers commands never mentions a deciding call", () => {
       const registering = Object.keys(SOURCES).filter((file) => !file.endsWith("/registry.ts") && SOURCES[file].includes("registerCommands("));
       expect(registering.sort()).toEqual(["/src/commands/appCommands.ts", "/src/commands/pageCommands.ts"]);
-      const deciding = /api\.(approvalAnswer|reworkLimitAnswer|runStart|attemptRetry|attemptAbandon|brainAccept|brainDismiss|brainRetire|brainGenerateMap|decisionRetire|cardMove|cardDelete|projectAdd|projectRemove|projectTryCheck)\b/;
-      for (const file of registering) expect(SOURCES[file], file).not.toMatch(deciding);
+      for (const file of registering) expect(SOURCES[file], file).not.toMatch(DECIDING_CALL);
+    });
+
+    it("the bars don't call the backend at all: they only run commands", () => {
+      for (const file of ["/src/views/TopBar.tsx", "/src/views/StatusBar.tsx"]) {
+        expect(SOURCES[file], file).not.toMatch(DECIDING_CALL);
+        expect(SOURCES[file], file).not.toMatch(/\bapi\b/);
+      }
     });
 
     it("the deciding calls are still called what this test says", () => {
@@ -326,6 +334,125 @@ describe("safety", () => {
       pressMod("A", "KeyA", { shiftKey: true });
       expect(paletteRow("Stop the step")?.getAttribute("aria-disabled")).toBe("false");
       expect(document.querySelector('[cmdk-item][aria-selected="true"]')?.textContent).toBe("Search everywhere⇧⇧");
+    });
+  });
+
+  describe("the status bar's click", () => {
+    const APPROVE = "Approve and open a draft";
+    const waiting = () => document.querySelector<HTMLButtonElement>("footer button");
+
+    it("is the only thing to click there", async () => {
+      await showApp(RUNS);
+      expect(document.querySelectorAll("footer button")).toHaveLength(1);
+      expect(document.querySelectorAll("footer a, footer input, footer [tabindex], footer [role='button']")).toHaveLength(0);
+    });
+
+    it.each(PAGES)("answers nothing, however many times, on $name", async (page) => {
+      await showApp(RUNS, page.view);
+      for (let i = 0; i < RUNS.length * 2; i++) {
+        act(() => waiting()?.click());
+        await settle(300);
+      }
+      expect(view().name).toBe("run");
+      expect(calls.filter((call) => DECIDES.includes(call.command))).toEqual([]);
+    });
+
+    it("keeps Approve off for 800 ms where it lands, with focus on the note", async () => {
+      await showApp(RUNS);
+      act(() => waiting()?.click());
+      await settle(0);
+      expect(view()).toMatchObject({ name: "run", runId: WAITING });
+      expect(button(APPROVE)?.disabled).toBe(true);
+      expect(document.activeElement).toBe(note());
+      await settle(799);
+      expect(button(APPROVE)?.disabled).toBe(true);
+      await settle(1);
+      expect(button(APPROVE)?.disabled).toBe(false);
+    });
+
+    it("starts the wait over on the next run, though the last card was armed", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      expect(button(APPROVE)?.disabled).toBe(false);
+      act(() => waiting()?.click());
+      await settle(0);
+      expect(view()).toMatchObject({ name: "run", runId: "r2" });
+      expect(button(APPROVE)?.disabled).toBe(true);
+    });
+
+    it("does nothing on the only run waiting, so the card and its note aren't disturbed", async () => {
+      await showApp([row(WAITING, "waitingApproval")], { name: "run", runId: WAITING });
+      await settle(800);
+      type("Half a thought");
+      act(() => waiting()?.click());
+      await settle(0);
+      expect((note() as HTMLTextAreaElement).value).toBe("Half a thought");
+      expect(button(APPROVE)?.disabled).toBe(false);
+      expect(answers()).toEqual([]);
+    });
+
+    it("from the keyboard, Enter opens the run and the next ones answer nothing", async () => {
+      await showApp(RUNS);
+      act(() => waiting()?.focus());
+      for (let i = 0; i < 6; i++) {
+        pressEnter();
+        await settle(300);
+      }
+      expect(view()).toMatchObject({ name: "run", runId: WAITING });
+      expect(document.activeElement).toBe(note());
+      expect(answers()).toEqual([]);
+    });
+
+    it("from the keyboard, Enter answers nothing on a card that starts with its focus on Close this run", async () => {
+      await showApp([row("empty", "waitingApproval")]);
+      act(() => waiting()?.focus());
+      for (let i = 0; i < 6; i++) {
+        pressEnter();
+        await settle(300);
+      }
+      expect(document.activeElement).toBe(button("Close this run"));
+      expect(answers()).toEqual([]);
+    });
+
+    it("held Enter doesn't go through the runs", async () => {
+      await showApp(RUNS);
+      act(() => waiting()?.focus());
+      pressEnter({ repeat: true });
+      await settle();
+      expect(view()).toEqual({ name: "home" });
+    });
+
+    it("does nothing during a board's keyboard drag or under a dialog", async () => {
+      await showApp(RUNS, { name: "board" });
+      const card = document.querySelector<HTMLElement>("[data-card]") as HTMLElement;
+      act(() => card.focus());
+      pressKey(" ", "Space");
+      await settle(0);
+      act(() => waiting()?.click());
+      await settle(0);
+      expect(view().name).toBe("board");
+      pressKey("Escape", "Escape", {}, document.body);
+      await settle(0);
+
+      act(() => useApp.setState({ newRunOpen: true }));
+      await settle(0);
+      act(() => waiting()?.click());
+      await settle(0);
+      expect(view().name).toBe("board");
+      expect(callsTo("card_move")).toEqual([]);
+    });
+  });
+
+  describe("the approval card's height", () => {
+    it("leaves room for both bars, so its buttons show without scrolling", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      const card = document.querySelector('section[role="alert"]') as HTMLElement;
+      const reserved = Number(/max-h-\[calc\(100vh-(\d+)px\)\]/.exec(card.className)?.[1]);
+      const top = Number(/h-\[(\d+)px\]/.exec((document.querySelector("header") as HTMLElement).className)?.[1]);
+      expect((document.querySelector("footer") as HTMLElement).className).toContain("h-6");
+      // Above and below the card: the page's padding, the run's title and the gap under it.
+      const page = 102;
+      expect(reserved).toBeGreaterThanOrEqual(top + 24 + page);
     });
   });
 

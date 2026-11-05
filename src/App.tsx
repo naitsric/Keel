@@ -10,6 +10,7 @@ import { NewRunDialog } from "./views/NewRunDialog";
 import { ProjectSetupDialog } from "./views/ProjectSetupDialog";
 import { RunDetail } from "./views/RunDetail";
 import { SettingsView } from "./views/SettingsView";
+import { StatusBar } from "./views/StatusBar";
 import { TopBar } from "./views/TopBar";
 import { WorkflowsView } from "./views/WorkflowsView";
 
@@ -48,6 +49,7 @@ export default function App() {
         {view.name === "brain" && <BrainPage />}
         {view.name === "board" && <BoardView initialProjectId={view.projectId} />}
       </div>
+      <StatusBar />
       <NewRunDialog />
       <ProjectSetupDialog />
       <QuitDialog />
