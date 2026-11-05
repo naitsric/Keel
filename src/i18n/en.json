@@ -2,6 +2,8 @@
   "app": {
     "name": "Keel",
     "live": "Live",
+    "runs": "Runs",
+    "pages": "Pages",
     "newRun": "New run",
     "settings": "Settings",
     "back": "Back",

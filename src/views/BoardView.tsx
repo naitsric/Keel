@@ -13,7 +13,6 @@ import { useApp } from "../lib/store";
 import { Button, cx, Field, inputClass, Modal, StateBadge } from "../ui/primitives";
 import { AddProject, useAddProject } from "./AddProject";
 import { BlockerNotice } from "./Home";
-import { TopBar } from "./TopBar";
 
 type Dialog = { kind: "task"; card: BoardCard | null } | { kind: "delete"; card: BoardCard } | { kind: "import" };
 
@@ -515,10 +514,10 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
 
   return (
     <>
-      <TopBar back />
       <main className="flex min-h-0 flex-1 flex-col gap-3 p-4">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          <h1 className="text-[18px] font-semibold">{t("board.title")}</h1>
+          {/* The top bar already says which page this is. */}
+          <h1 className="sr-only">{t("board.title")}</h1>
           {projects.length > 0 && (
             <select aria-label={t("board.project")} value={projectId} onChange={(e) => selectProject(e.target.value)} className={cx(inputClass, "w-48")}>
               {projects.map((p) => (

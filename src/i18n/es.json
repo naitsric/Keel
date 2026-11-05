@@ -2,6 +2,8 @@
   "app": {
     "name": "Keel",
     "live": "En vivo",
+    "runs": "Ejecuciones",
+    "pages": "Páginas",
     "newRun": "Nueva ejecución",
     "settings": "Ajustes",
     "back": "Volver",

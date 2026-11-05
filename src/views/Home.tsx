@@ -1,7 +1,6 @@
 import { Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { KEYS, withKey } from "../commands/keys";
 import type { Reason, RunRow } from "../lib/api";
 import { isActive } from "../lib/api";
 import { elapsedMs, formatCost, formatDateTime, formatDuration, formatNumber, formatRelative } from "../lib/format";
@@ -12,7 +11,6 @@ import { api } from "../lib/api";
 import { Button, Card, StateBadge } from "../ui/primitives";
 import { Onboarding } from "./Onboarding";
 import { ProjectsRow } from "./ProjectsRow";
-import { TopBar } from "./TopBar";
 
 /** Why runs can't start, and the way out. `text` replaces the reason's sentence, for a screen with more to say. */
 export function BlockerNotice({ blocker, text }: { blocker: Reason; text?: string }) {
@@ -126,14 +124,6 @@ export function Home() {
 
   return (
     <>
-      <TopBar>
-        {!isNew && (
-          <Button variant="primary" title={withKey(t("app.newRun"), KEYS.newRun)} onClick={() => setNewRunOpen(true)}>
-            <Plus size={14} />
-            {t("app.newRun")}
-          </Button>
-        )}
-      </TopBar>
       <main className="flex-1 space-y-4 overflow-y-auto p-5">
         {isNew && <Onboarding />}
         {!isNew && <SessionBar />}

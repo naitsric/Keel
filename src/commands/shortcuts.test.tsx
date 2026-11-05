@@ -90,12 +90,18 @@ describe("the keys", () => {
       expect(view()).toEqual({ name: "board", projectId: "p2" });
     });
 
-    it("⌘[ goes home otherwise, and leaves the key alone there", async () => {
-      await showApp(RUNS, { name: "brain" });
+    it("⌘[ goes home otherwise", async () => {
+      await showApp(RUNS, { name: "run", runId: "r2" });
       pressMod("[", "BracketLeft");
       await settle();
       expect(view()).toEqual({ name: "home" });
+    });
+
+    it.each(["home", "board", "workflows", "brain", "settings"] as const)("⌘[ leaves the key alone on %s, which has no Back", async (page) => {
+      await showApp(RUNS, { name: page });
       expect(pressMod("[", "BracketLeft").defaultPrevented).toBe(false);
+      await settle();
+      expect(view().name).toBe(page);
     });
 
     it("⌘[ works from a text field, and ⌘↑ leaves it alone", async () => {
@@ -111,11 +117,18 @@ describe("the keys", () => {
     });
 
     it("⌘↑ goes back outside text fields", async () => {
-      await showApp(RUNS, { name: "workflows" });
+      await showApp(RUNS, { name: "run", runId: "r1", backTo: { name: "workflows" } });
       (document.activeElement as HTMLElement | null)?.blur?.();
       expect(pressMod("ArrowUp", "ArrowUp").defaultPrevented).toBe(true);
       await settle();
-      expect(view().name).toBe("home");
+      expect(view().name).toBe("workflows");
+    });
+
+    it("⌘2 from a run opened on the board goes back to that project", async () => {
+      await showApp(RUNS, { name: "run", runId: "r1", backTo: { name: "board", projectId: "p2" } });
+      pressMod("2", "Digit2");
+      await settle();
+      expect(view()).toEqual({ name: "board", projectId: "p2" });
     });
   });
 
@@ -405,11 +418,11 @@ describe("the keys", () => {
     it("say the key", async () => {
       await showApp(RUNS);
       const titles = [...document.querySelectorAll("header button")].map((b) => b.getAttribute("title"));
-      expect(titles).toEqual(["New run  ⌘N", "Board  ⌘2", "Brain  ⌘4", "Workflows  ⌘3", "Settings  ⌘,"]);
+      expect(titles).toEqual(["Runs  ⌘1", "Board  ⌘2", "Workflows  ⌘3", "Brain  ⌘4", "New run  ⌘N", "Settings  ⌘,"]);
     });
 
     it("say the key for Back too", async () => {
-      await showApp(RUNS, { name: "brain" });
+      await showApp(RUNS, { name: "run", runId: "r1" });
       expect(document.querySelector("header button")?.getAttribute("title")).toBe("Back  ⌘[");
     });
   });

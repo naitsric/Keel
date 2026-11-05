@@ -84,12 +84,12 @@ const card = (id: string, title: string, projectId?: string) => ({ id, projectId
 /** Lets what's waiting happen: answers from the backend, a palette closing, a card mounting. */
 export const settle = (ms = 20) => act(() => vi.advanceTimersByTimeAsync(ms));
 
-export async function showApp(runs: RunRow[], view: View = { name: "home" }) {
+export async function showApp(runs: RunRow[], view: View = { name: "home" }, projects: Project[] = PROJECTS) {
   calls = [];
   shownRuns = runs;
   mockIPC(backend);
   await i18next.changeLanguage("en");
-  useApp.setState({ view, approvalDrafts: {}, newRunOpen: false, quitOpen: false, overviewLoaded: true, overview: { runs, projects: PROJECTS, pendingProposals: 0, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } });
+  useApp.setState({ view, approvalDrafts: {}, newRunOpen: false, quitOpen: false, overviewLoaded: true, overview: { runs, projects, pendingProposals: 0, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } });
   useSearchEverywhere.setState({ open: false, scope: "all", query: "" });
   const container = document.createElement("div");
   document.body.append(container);

@@ -1,6 +1,7 @@
 import { ShieldCheck, UserRound } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { openRun } from "../commands/runs";
 import { api, type Issue, type ToolProfile, type Workflow } from "../lib/api";
 import { errorText } from "../lib/reason";
 import { accountLabel } from "../lib/session";
@@ -126,7 +127,7 @@ export function NewRunDialog() {
       setIssue(null);
       setOpen(false);
       await refreshOverview();
-      navigate({ name: "run", runId });
+      openRun(runId);
     } catch (e) {
       setError(errorText(t, e));
     } finally {

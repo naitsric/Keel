@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { useApp } from "../lib/store";
+import { keymapHeld } from "./keymapHold";
 
 /**
  * The page a key means something on: ⌘N is New task on the board and New run everywhere else. One
@@ -79,4 +80,13 @@ export function executeCommand(id: string): void {
   const command = useCommands.getState().commands[id];
   if (!command || !isEnabled(command)) return;
   void Promise.resolve(command.run()).catch((e) => console.error(`command ${id} failed`, e));
+}
+
+/**
+ * For what's clicked rather than pressed. The bars stay clickable during a board's keyboard drag,
+ * and a dialog opened then would drop the card with the first Space typed in it, starting its run.
+ * So a hold stops clicks as it stops keys.
+ */
+export function runUnlessHeld(id: string): void {
+  if (!keymapHeld()) executeCommand(id);
 }

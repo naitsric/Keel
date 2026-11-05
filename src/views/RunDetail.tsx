@@ -7,10 +7,9 @@ import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, 
 import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "../lib/audit";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
-import { useApp, type View } from "../lib/store";
+import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
 import { ProposalRow } from "./BrainPage";
-import { TopBar } from "./TopBar";
 
 type Tab = "activity" | "commands" | "changes" | "prompt" | "details" | "output";
 
@@ -893,7 +892,7 @@ function worstRawCheck(checks: RawCheck[]): RawCheck {
   return checks.length > 0 ? "intact" : "pending";
 }
 
-export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
+export function RunDetail({ runId }: { runId: string }) {
   const { t } = useTranslation();
   const revision = useApp((s) => s.revision);
   const [run, setRun] = useState<Run | null>(null);
@@ -949,9 +948,7 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
     stopStep: latest && isActive(latest.state) ? () => void api.attemptStop(latest.id).catch((e) => setError(errorText(t, e))) : null,
   });
 
-  if (!attempt || !latest || !run) {
-    return <TopBar back={backTo ?? true} />;
-  }
+  if (!attempt || !latest || !run) return null;
 
   // A step can have run several times. The list shows each attempt, then what's still ahead.
   const pending = flatSteps(run?.workflow ?? []).filter((step) => !attempts.some((a) => a.stepId === step.id));
@@ -960,7 +957,6 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
 
   return (
     <>
-      <TopBar back={backTo ?? true} />
       <main className="flex-1 space-y-4 overflow-y-auto p-5">
         <div className="flex items-start gap-3">
           <div className="min-w-0 flex-1">

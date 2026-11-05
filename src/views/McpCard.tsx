@@ -1,10 +1,10 @@
 import { Check, Copy } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { openRun } from "../commands/runs";
 import { api, type McpClient, type McpOverview } from "../lib/api";
 import { formatRelative } from "../lib/format";
 import { errorText } from "../lib/reason";
-import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Segmented } from "../ui/primitives";
 
 /** While the server is on, so the person sees calls arrive. Tool calls don't announce themselves. */
@@ -64,7 +64,6 @@ function NewToken({ token, url }: { token: string; url: string | null }) {
 
 export function McpCard() {
   const { t } = useTranslation();
-  const navigate = useApp((s) => s.navigate);
   const [overview, setOverview] = useState<McpOverview | null>(null);
   const [port, setPort] = useState("");
   const [canRun, setCanRun] = useState(true);
@@ -225,7 +224,7 @@ export function McpCard() {
                   <span className={cx("font-mono text-[11.5px]", call.ok ? "text-fg" : "text-warning")}>{call.tool}</span>
                   <span className="min-w-0 flex-1 truncate text-subtle">{call.ok ? call.clientName : call.error}</span>
                   {call.runId && (
-                    <button type="button" className="shrink-0 text-accent hover:underline" onClick={() => navigate({ name: "run", runId: call.runId as string })}>
+                    <button type="button" className="shrink-0 text-accent hover:underline" onClick={() => openRun(call.runId as string)}>
                       {t("mcp.openRun")}
                     </button>
                   )}
