@@ -400,6 +400,19 @@ describe("the keys", () => {
     });
   });
 
+
+  describe("the tooltips", () => {
+    it("say the key", async () => {
+      await showApp(RUNS);
+      const titles = [...document.querySelectorAll("header button")].map((b) => b.getAttribute("title"));
+      expect(titles).toEqual(["New run  ⌘N", "Board  ⌘2", "Brain  ⌘4", "Workflows  ⌘3", "Settings  ⌘,"]);
+    });
+
+    it("say the key for Back too", async () => {
+      await showApp(RUNS, { name: "brain" });
+      expect(document.querySelector("header button")?.getAttribute("title")).toBe("Back  ⌘[");
+    });
+  });
 });
 
 describe("nextWaitingRun", () => {
