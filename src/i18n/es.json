@@ -125,6 +125,7 @@
     "toolsReadOnly": "Solo leer",
     "maxTurns": "Límite de turnos",
     "maxTurnsPlaceholder": "Sin límite",
+    "accountGithub": "GitHub: {{account}} en {{repo}}",
     "isolation": "Trabaja en una copia privada. No llega a tus credenciales, a GitHub ni a otras carpetas, y no toca tu repo.",
     "start": "Lanzar",
     "cancel": "Cancelar",

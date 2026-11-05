@@ -125,6 +125,7 @@
     "toolsReadOnly": "Only read",
     "maxTurns": "Turn limit",
     "maxTurnsPlaceholder": "No limit",
+    "accountGithub": "GitHub: {{account}} on {{repo}}",
     "isolation": "It works in a private copy. It can't reach your credentials, GitHub or other folders, and nothing touches your repo.",
     "start": "Start",
     "cancel": "Cancel",

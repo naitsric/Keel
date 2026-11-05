@@ -1,9 +1,10 @@
 import { open as openFolder } from "@tauri-apps/plugin-dialog";
-import { FolderPlus, ShieldCheck } from "lucide-react";
+import { FolderPlus, ShieldCheck, UserRound } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type Issue, type ToolProfile, type Workflow } from "../lib/api";
 import { errorText } from "../lib/reason";
+import { accountLabel } from "../lib/session";
 import { useApp } from "../lib/store";
 import { Button, cx, Field, inputClass, Modal, Segmented } from "../ui/primitives";
 import { ModelField } from "./ModelField";
@@ -31,6 +32,7 @@ export function NewRunDialog() {
   const open = useApp((s) => s.newRunOpen);
   const setOpen = useApp((s) => s.setNewRunOpen);
   const projects = useApp((s) => s.overview.projects);
+  const auth = useApp((s) => s.preflight?.auth);
   const refreshOverview = useApp((s) => s.refreshOverview);
   const navigate = useApp((s) => s.navigate);
 
@@ -109,6 +111,14 @@ export function NewRunDialog() {
   const needsGithub = !single && delivers && project != null && (!project.githubAccount || !project.githubRepo);
   const validChoice = single ? model && (turns === null || (Number.isInteger(turns) && turns > 0)) : workflow != null;
   const valid = projectId && hasRequest && validChoice && !needsGithub;
+  const claudeAccount = accountLabel(auth);
+  // A project missing its account has the warning below instead.
+  const accounts = [
+    auth?.loggedIn && (claudeAccount ? t("session.account", { account: claudeAccount }) : t("session.accountNoEmail")),
+    !single && delivers && !needsGithub && project && t("newRun.accountGithub", { account: project.githubAccount, repo: project.githubRepo }),
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
   const start = async () => {
     setBusy(true);
@@ -277,6 +287,12 @@ export function NewRunDialog() {
           </>
         )}
 
+        {accounts && (
+          <p className="flex gap-2 text-[11.5px] leading-snug text-subtle">
+            <UserRound size={14} className="mt-px shrink-0" />
+            <span className="selectable min-w-0 break-words">{accounts}</span>
+          </p>
+        )}
         <p className="flex gap-2 text-[11.5px] leading-snug text-subtle">
           <ShieldCheck size={14} className="mt-px shrink-0" />
           {t("newRun.isolation")}
