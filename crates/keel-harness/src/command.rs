@@ -36,6 +36,10 @@ pub fn clean_env(path_env: &str) -> Vec<(String, String)> {
         .filter_map(|k| std::env::var(k).ok().map(|v| ((*k).to_owned(), v)))
         .collect();
     env.push(("PATH".into(), path_env.to_owned()));
+    // The sandbox hides the home folder, and git refuses to start if it can't read a config it
+    // knows is there. This way it doesn't look. A run's identity is in its own clone's config.
+    env.push(("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()));
+    env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
     // Removes the ability to leave a test suite running behind the agent's back, which is what
     // jammed the Archon pilot. Long commands then need a generous foreground timeout.
     env.push(("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".into(), "1".into()));
@@ -229,6 +233,11 @@ mod tests {
         assert!(
             env.iter()
                 .any(|(k, v)| k == "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS" && v == "1")
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "GIT_CONFIG_GLOBAL" && v == "/dev/null"),
+            "git must not look for a config the sandbox hides"
         );
         assert!(env.iter().any(|(k, v)| k == "PATH" && v == "/bin"));
     }

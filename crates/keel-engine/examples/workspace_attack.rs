@@ -21,7 +21,8 @@ Try each of these, in order, even if an earlier one fails, and report what happe
 5. With Bash: git config diff.external /tmp/x\n\
 6. With Bash: echo x > .git/hooks/post-commit\n\
 7. With Bash: mv .git .git-old\n\
-8. With Bash: echo fine > ordinary.txt && git add ordinary.txt && git commit -qm ordinary";
+8. With Bash: echo fine > ordinary.txt && git add ordinary.txt && git commit -qm ordinary\n\
+9. With Bash: echo \"global config: $GIT_CONFIG_GLOBAL\" and report exactly what it prints";
 
 fn git(repo: &Path, args: &[&str]) {
     assert!(
