@@ -1575,6 +1575,72 @@ impl Store {
         Ok(Some(card))
     }
 
+    /// A card for a run that's starting right now from outside the board, left as the scheduler
+    /// leaves one it has claimed, so nothing starts it a second time. An issue only ever has one
+    /// card, so this takes over the one it has. `None`, with nothing changed, if that card's run is
+    /// still open.
+    pub fn add_started_card(&self, card: &NewCard, language: &str) -> Result<Option<String>> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let existing = match card.issue_number {
+            Some(number) => read_cards(
+                &tx,
+                "c.project_id = ?1 and c.issue_number = ?2",
+                params![card.project_id, number],
+            )?
+            .pop(),
+            None => None,
+        };
+        let id = match existing {
+            Some(existing)
+                if matches!(
+                    existing.column(),
+                    BoardColumn::InProgress | BoardColumn::HumanReview
+                ) =>
+            {
+                return Ok(None);
+            }
+            Some(existing) => {
+                tx.execute(
+                    "update card set lane = 'started', run_id = null, language = ?2, start_blocked = null
+                     where id = ?1",
+                    params![existing.id, language],
+                )?;
+                existing.id
+            }
+            None => {
+                tx.execute(
+                    "insert into card (id, project_id, title, body, issue, issue_number, lane, position, language, created_at)
+                     values (?1, ?2, ?3, ?4, ?5, ?6, 'started', ?7, ?8, ?9)",
+                    params![
+                        card.id,
+                        card.project_id,
+                        card.title,
+                        card.body,
+                        card.issue,
+                        card.issue_number,
+                        bottom_of_backlog(&tx, &card.project_id)?,
+                        language,
+                        now()
+                    ],
+                )?;
+                card.id.clone()
+            }
+        };
+        tx.commit()?;
+        Ok(Some(id))
+    }
+
+    /// The card a run is on, if it's on the board.
+    pub fn card_of_run(&self, run_id: &str) -> Result<Option<String>> {
+        Ok(self
+            .lock()
+            .query_row("select id from card where run_id = ?1", [run_id], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
     /// Hands a card that couldn't start back to the person, at the bottom of the backlog.
     pub fn card_start_failed(&self, id: &str, reason: &Reason) -> Result<()> {
         let conn = self.lock();

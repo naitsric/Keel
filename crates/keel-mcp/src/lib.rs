@@ -37,7 +37,8 @@ const SETTINGS_KEY: &str = "mcp";
 /// The server's `instructions`: how to use the tools, for the model.
 pub const INSTRUCTIONS: &str = "Keel is the person's local software factory: it runs workflows of Claude Code agents \
 on their projects, and they watch every step in the Keel app. Through this server you can see projects, workflows, \
-runs and the Brain and, if the person allowed it, start and stop runs. A run you start appears in the app at once.\n\
+runs and the Brain and, if the person allowed it, start and stop runs. A run you start appears in the app at once, \
+as a card on the project's board.\n\
 \n\
 - Start with list_projects, then list_workflows. start_run takes a workflow's id.\n\
 - Follow a run with wait_for_run rather than calling get_run in a loop.\n\

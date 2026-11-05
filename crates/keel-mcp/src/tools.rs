@@ -337,8 +337,9 @@ impl McpServer {
                 }
                 None => extra.to_owned(),
             };
+            let issue_number = issue.as_ref().map(|issue| issue.number);
             let run = engine
-                .start_run(StartRun {
+                .start_run_on_board(StartRun {
                     project_id: project.id,
                     title: issue
                         .as_ref()
@@ -348,7 +349,12 @@ impl McpServer {
                     language,
                     source_issue: issue,
                 })
-                .map_err(engine_error)?;
+                .map_err(|error| match (error, issue_number) {
+                    (Error::InvalidState, Some(number)) => ToolError::new(format!(
+                        "Issue #{number} already has a run open on the board. list_runs shows it."
+                    )),
+                    (error, _) => engine_error(error),
+                })?;
             store
                 .set_run_started_by(&run, &client.name)
                 .map_err(store_error)?;
@@ -500,6 +506,7 @@ impl McpServer {
                 "who": "The person, in the Keel app. There is no tool for this.",
             })),
             "startedBy": run.started_by,
+            "cardId": self.0.store.card_of_run(run_id).map_err(store_error)?,
             "language": run.language,
             "branch": run.branch,
             "prUrl": run.pr_url,
