@@ -8,6 +8,7 @@ import { needsSignIn, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { api } from "../lib/api";
 import { Button, Card, StateBadge } from "../ui/primitives";
+import { Onboarding } from "./Onboarding";
 import { TopBar } from "./TopBar";
 
 function SessionBar() {
@@ -99,6 +100,8 @@ export function Home() {
   const overview = useApp((s) => s.overview);
   const setNewRunOpen = useApp((s) => s.setNewRunOpen);
   const { totals, runs } = overview;
+  const loaded = useApp((s) => s.overviewLoaded);
+  const isNew = loaded && overview.projects.length === 0;
   const anyActive = runs.some((r) => isActive(r.state));
 
   // Keeps elapsed times moving while something runs.
@@ -112,13 +115,18 @@ export function Home() {
   return (
     <>
       <TopBar>
-        <Button variant="primary" onClick={() => setNewRunOpen(true)}>
-          <Plus size={14} />
-          {t("app.newRun")}
-        </Button>
+        {!isNew && (
+          <Button variant="primary" onClick={() => setNewRunOpen(true)}>
+            <Plus size={14} />
+            {t("app.newRun")}
+          </Button>
+        )}
       </TopBar>
       <main className="flex-1 space-y-4 overflow-y-auto p-5">
-        <SessionBar />
+        {isNew && <Onboarding />}
+        {!isNew && <SessionBar />}
+        {!isNew && (
+          <>
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-5">
           <Metric label={t("cards.running")} value={formatNumber(totals.running)} detail={t("cards.runningDetail")} />
           <Metric label={t("cards.retrying")} value={formatNumber(totals.retrying)} detail={t("cards.retryingDetail")} />
@@ -162,6 +170,8 @@ export function Home() {
             </div>
           )}
         </Card>
+          </>
+        )}
       </main>
     </>
   );

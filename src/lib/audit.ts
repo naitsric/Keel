@@ -85,6 +85,14 @@ export function explainingAttempts<T extends { kind: string; tools: string; role
   return agents.slice(-1);
 }
 
+/** Which accounts did this, on the record. */
+export function accountsOf(attempts: { kind: string; account: string | null }[]): { claude: string | null; github: string | null } {
+  return {
+    claude: attempts.find((a) => a.kind === "agent" && a.account)?.account ?? null,
+    github: attempts.find((a) => a.kind === "deliver" && a.account)?.account ?? null,
+  };
+}
+
 /** The latest try of each step, in the order they first ran. */
 export function latestOfEachStep<T extends { stepId: string }>(attempts: T[]): T[] {
   const latest = new Map<string, T>();

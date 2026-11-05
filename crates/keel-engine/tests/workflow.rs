@@ -336,6 +336,11 @@ fn a_request_goes_all_the_way_to_a_draft_pull_request() {
     let delivered = w.step(&run, "pull-request").unwrap();
     let events = w.store.events(&delivered.id, 0).unwrap();
     let event = events.iter().find(|e| e.kind == "delivered").unwrap();
+    assert_eq!(
+        delivered.account.as_deref(),
+        Some("alice"),
+        "the run says which account did it"
+    );
     assert_eq!(event.data["account"], "alice");
     assert_eq!(event.data["draft"], true);
 }

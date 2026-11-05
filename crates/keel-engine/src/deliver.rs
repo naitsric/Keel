@@ -172,6 +172,7 @@ impl Inner {
                 ("branch", Value::Text(branch.clone())),
             ],
         )?;
+        store.patch_attempt(&attempt.id, &[("account", Value::Text(account.clone()))])?;
         store.append_event(
             &attempt.id,
             "delivered",

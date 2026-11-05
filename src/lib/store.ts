@@ -9,6 +9,8 @@ interface AppState {
   view: View;
   preflight: Preflight | null;
   overview: Overview;
+  /** Whether `overview` has real data yet, so an empty list means there's really nothing. */
+  overviewLoaded: boolean;
   newRunOpen: boolean;
   quitOpen: boolean;
   /** Bumps whenever the backend reports a change, so open views can refetch. */
@@ -25,13 +27,14 @@ export const useApp = create<AppState>((set) => ({
   view: { name: "home" },
   preflight: null,
   overview: { runs: [], projects: [], pendingProposals: 0, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } },
+  overviewLoaded: false,
   newRunOpen: false,
   quitOpen: false,
   revision: 0,
   navigate: (view) => set({ view }),
   setNewRunOpen: (newRunOpen) => set({ newRunOpen }),
   setQuitOpen: (quitOpen) => set({ quitOpen }),
-  refreshOverview: async () => set({ overview: await api.overview() }),
+  refreshOverview: async () => set({ overview: await api.overview(), overviewLoaded: true }),
   refreshSession: async () => set({ preflight: await api.refreshSession() }),
   setLanguage: async (language) => {
     await i18next.changeLanguage(language);

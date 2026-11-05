@@ -2,7 +2,7 @@ import { AlertTriangle, Check, ExternalLink, FileDiff, GitPullRequest, Loader2, 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck, type Run } from "../lib/api";
-import { activityFrom, type ActivityItem, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, toolSummary, touchesWorkflows } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, toolSummary, touchesWorkflows } from "../lib/audit";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
@@ -621,6 +621,7 @@ export function RunDetail({ runId }: { runId: string }) {
   const lastSeq = useRef<Record<string, number>>({});
 
   const latest = focusAttempt(attempts);
+  const accounts = accountsOf(attempts);
   const attempt = attempts.find((a) => a.id === selected) ?? latest;
   const [runDiff, setRunDiff] = useState<string | null>(null);
 
@@ -675,6 +676,8 @@ export function RunDetail({ runId }: { runId: string }) {
             <h1 className="selectable text-[17px] leading-snug font-semibold">{run?.title}</h1>
             <p className="mt-0.5 flex flex-wrap gap-x-3 text-[12px] text-subtle">
               {run?.sourceIssue && <span>{t("run.fromIssue", { number: run.sourceIssue.number })}</span>}
+              {accounts.claude && <span>{t("run.accountClaude", { account: accounts.claude })}</span>}
+              {accounts.github && <span>{t("run.accountGithub", { account: accounts.github })}</span>}
               {run?.baseRef && <span>{t("run.base", { base: run.baseRef })}</span>}
             </p>
           </div>

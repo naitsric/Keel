@@ -153,13 +153,13 @@ index 12ee743..4693ad3 100644
 +    return a + b`;
 
 const preflight: Preflight = {
-  claudeFound: true,
+  claudeFound: params.get("claude") !== "missing",
   gitFound: true,
   version: { status: "supported", found: "2.1.318" },
   auth: params.get("session") === "out" ? { loggedIn: false, method: null, provider: null, subscription: null, email: null, orgName: null, expiresAt: null } : { loggedIn: true, method: "claude.ai", provider: "firstParty", subscription: "max", email: "you@example.com", orgName: null, expiresAt: null },
   ignoredEnv: params.get("env") === "key" ? ["ANTHROPIC_API_KEY"] : [],
   blocker: params.get("session") === "out" ? { code: "claudeLoggedOut" } : null,
-  ghFound: true,
+  ghFound: params.get("gh") !== "missing",
 };
 
 const row = (id: string, title: string, s: AttemptState, reason: Reason | null, model: string, turns: number | null, minutes: number): RunRow => ({
@@ -197,11 +197,13 @@ mockIPC((command) => {
     case "refresh_session":
       return preflight;
     case "overview":
-      return { pendingProposals: params.get("proposals") === "1" ? 1 : 0, runs, projects: [{ id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.cargo"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }] }], totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
+      return params.get("empty") === "1" ? { pendingProposals: 0, runs: [], projects: [], totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: params.get("proposals") === "1" ? 1 : 0, runs, projects: [{ id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.cargo"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }] }], totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
     case "run_get":
       return run;
     case "run_diff":
       return DIFF;
+    case "github_accounts":
+      return params.get("gh") === "out" ? [] : [{ login: "you-personal", active: true, ok: true, scopes: ["repo"] }];
     case "run_proposals":
       return params.get("proposals") === "1" ? proposals : [];
     case "brain_get":
