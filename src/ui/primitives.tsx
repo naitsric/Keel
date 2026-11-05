@@ -1,6 +1,8 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import type { ComponentProps, ReactNode } from "react";
 import { twMerge } from "tailwind-merge";
+import { useKeymapHold } from "../commands/keymapHold";
+import { formatKeybinding } from "../commands/keys";
 import type { AttemptState } from "../lib/api";
 
 /** Joins class names; on conflicting Tailwind utilities the later one wins. */
@@ -126,6 +128,10 @@ export function Segmented<T extends string>({
   );
 }
 
+export function Kbd({ binding, children }: { binding?: string; children?: ReactNode }) {
+  return <kbd className="rounded border border-border bg-inset px-1.5 py-px font-sans text-[11px] tracking-wider text-subtle">{binding ? formatKeybinding(binding) : children}</kbd>;
+}
+
 export function Modal({
   open,
   onOpenChange,
@@ -141,6 +147,7 @@ export function Modal({
   children: ReactNode;
   className?: string;
 }) {
+  useKeymapHold(open);
   return (
     <Dialog.Root open={open} onOpenChange={onOpenChange}>
       <Dialog.Portal>
