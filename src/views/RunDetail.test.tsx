@@ -69,6 +69,36 @@ describe("the approval card", () => {
     expect(button("Approve and open a draft")?.disabled).toBe(false);
   });
 
+  it("a click that brings the window back can't approve", () => {
+    show([builder(["calc.py"]), human], ["calc.py"]);
+    act(() => vi.advanceTimersByTime(800));
+    expect(button("Approve and open a draft")?.disabled).toBe(false);
+
+    // The person goes to another app, and it stays off however long they're away.
+    act(() => void window.dispatchEvent(new Event("blur")));
+    expect(button("Approve and open a draft")?.disabled).toBe(true);
+    act(() => vi.advanceTimersByTime(60_000));
+    expect(button("Approve and open a draft")?.disabled).toBe(true);
+
+    // They come back with a click on the button: too soon to count.
+    act(() => void window.dispatchEvent(new Event("focus")));
+    press("Approve and open a draft");
+    expect(answers).toEqual([]);
+
+    act(() => vi.advanceTimersByTime(799));
+    expect(button("Approve and open a draft")?.disabled).toBe(true);
+    act(() => vi.advanceTimersByTime(1));
+    press("Approve and open a draft");
+    expect(answers).toEqual([{ attemptId: "human", approve: true, text: "" }]);
+  });
+
+  it("a card that appears while the window is away waits again when it's back", () => {
+    show([builder(["calc.py"]), human], ["calc.py"]);
+    act(() => vi.advanceTimersByTime(800));
+    act(() => void window.dispatchEvent(new Event("focus")));
+    expect(button("Approve and open a draft")?.disabled).toBe(true);
+  });
+
   it("won't reject without a reason, and blank doesn't count as one", () => {
     show([builder(["calc.py"]), human], ["calc.py"]);
     expect(button("Reject")?.disabled).toBe(true);

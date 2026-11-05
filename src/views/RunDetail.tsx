@@ -214,9 +214,26 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [reading, setReading] = useState<"explanation" | "reviews" | null>(null);
+  // A click on this window while it's in the background acts as a click, not only as a way to bring
+  // it forward. So approving is off while it's away, and arms again a moment after it's back.
   useEffect(() => {
-    const timer = setTimeout(() => setArmed(true), 800);
-    return () => clearTimeout(timer);
+    let timer: ReturnType<typeof setTimeout>;
+    const disarm = () => {
+      clearTimeout(timer);
+      setArmed(false);
+    };
+    const arm = () => {
+      disarm();
+      timer = setTimeout(() => setArmed(true), 800);
+    };
+    arm();
+    window.addEventListener("focus", arm);
+    window.addEventListener("blur", disarm);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("focus", arm);
+      window.removeEventListener("blur", disarm);
+    };
   }, []);
   const answer = (approve: boolean) => {
     setBusy(true);
