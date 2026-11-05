@@ -255,6 +255,18 @@ fn mask_assignment(caps: &Captures, text: &str) -> String {
     format!("{head}{opening}{MASK}{closing}")
 }
 
+/// Whether a diff adds something that looks like a secret. Masking hides it on screen, but approving
+/// would still push it with the branch. Lines being removed don't count: they leave the code.
+pub fn diff_adds_secret(diff: &str) -> bool {
+    let added = diff
+        .lines()
+        .filter(|line| !line.starts_with("+++"))
+        .filter_map(|line| line.strip_prefix('+'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    mask_secrets(&added) != added
+}
+
 /// `text` with the secrets it can recognize replaced by [`MASK`].
 pub fn mask_secrets(text: &str) -> String {
     let text = PEM_BLOCK.replace_all(text, MASK);
@@ -355,6 +367,34 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn a_diff_counts_as_adding_a_secret_only_for_the_lines_it_adds() {
+        let value = ["made", "up", "value", "123456"].join("-");
+        let added = format!("--- a/.env\n+++ b/.env\n@@ -0,0 +1 @@\n+API_KEY={value}\n");
+        assert!(diff_adds_secret(&added));
+
+        let removed = format!("--- a/.env\n+++ b/.env\n@@ -1 +0,0 @@\n-API_KEY={value}\n");
+        assert!(!diff_adds_secret(&removed));
+
+        let context = format!("@@ -1,2 +1,2 @@\n API_KEY={value}\n-a = 1\n+a = 2\n");
+        assert!(!diff_adds_secret(&context));
+
+        let plain =
+            "--- a/calc.py\n+++ b/calc.py\n@@ -1 +1,2 @@\n+def triple(x):\n+    return x * 3\n";
+        assert!(!diff_adds_secret(plain));
+        assert!(!diff_adds_secret(""));
+    }
+
+    #[test]
+    fn a_private_key_added_across_lines_counts() {
+        let header = ["-----BEGIN ", "PRIVATE KEY-----"].concat();
+        let footer = ["-----END ", "PRIVATE KEY-----"].concat();
+        let diff = format!(
+            "+++ b/key.pem\n@@ -0,0 +1,3 @@\n+{header}\n+QUJDREVGR0hJSktMTU5PUA==\n+{footer}\n"
+        );
+        assert!(diff_adds_secret(&diff));
+    }
 
     /// Made up, and put together here so that no secret scanner trips on this file.
     fn fake(prefix: &str, piece: &str, times: usize) -> String {

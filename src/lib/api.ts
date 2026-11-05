@@ -367,6 +367,7 @@ export const api = {
   runStart: (request: RunRequest) => invoke<string>("run_start", { request }),
   runGet: (runId: string) => invoke<Run>("run_get", { runId }),
   runDiff: (runId: string) => invoke<string>("run_diff", { runId }),
+  runAddsSecret: (runId: string) => invoke<boolean>("run_adds_secret", { runId }),
   workflowsList: (projectId: string, language: string) => invoke<Workflow[]>("workflows_list", { projectId, language }),
   workflowSave: (projectId: string, workflow: Workflow) => invoke<Workflow>("workflow_save", { projectId, workflow }),
   workflowDelete: (projectId: string, workflowId: string) => invoke<void>("workflow_delete", { projectId, workflowId }),
