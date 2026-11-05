@@ -669,11 +669,13 @@ impl Inner {
         if quiet < self.config.stall_after {
             return;
         }
-        if locked(&self.controls)
-            .get(&m.attempt_id)
-            .and_then(|c| c.snooze_until)
-            .is_some_and(|until| Instant::now() < until)
-        {
+        let snoozed = |controls: &std::collections::HashMap<String, crate::Control>| {
+            controls
+                .get(&m.attempt_id)
+                .and_then(|c| c.snooze_until)
+                .is_some_and(|until| Instant::now() < until)
+        };
+        if snoozed(&locked(&self.controls)) {
             return;
         }
         let Some(root) = m.root_pid else { return };
@@ -687,13 +689,22 @@ impl Inner {
             minutes: quiet.as_secs() / 60,
             cpu_percent: activity.cpu_percent,
         };
-        let Ok(attempt) = self.store.attempt(&m.attempt_id) else {
-            return;
+        let already = {
+            // Looking at the process takes a while, and a person may have said to wait meanwhile.
+            // Holding this until the state is written means their answer can't be undone.
+            let controls = locked(&self.controls);
+            if snoozed(&controls) {
+                return;
+            }
+            let Ok(attempt) = self.store.attempt(&m.attempt_id) else {
+                return;
+            };
+            let already = attempt.state == AttemptState::Stalled.as_str();
+            let _ = self
+                .store
+                .set_state(&m.attempt_id, AttemptState::Stalled, Some(&reason));
+            already
         };
-        let already = attempt.state == AttemptState::Stalled.as_str();
-        let _ = self
-            .store
-            .set_state(&m.attempt_id, AttemptState::Stalled, Some(&reason));
         if !already {
             let _ = self
                 .store
