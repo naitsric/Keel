@@ -18,7 +18,8 @@
     "version": "version {{version}}",
     "ignoredEnv": "Ignoring {{names}} in your environment, so your subscription is what gets used.",
     "signIn": "Sign in",
-    "expiresSoon": "Your session expires {{date}}."
+    "expiresSoon": "Your session expires on {{date}}.",
+    "expired": "Your session expired on {{date}}."
   },
   "cards": {
     "running": "Running",

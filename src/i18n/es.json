@@ -18,7 +18,8 @@
     "version": "versión {{version}}",
     "ignoredEnv": "Se ignora {{names}} de tu entorno, para que se use tu suscripción.",
     "signIn": "Iniciar sesión",
-    "expiresSoon": "Tu sesión vence {{date}}."
+    "expiresSoon": "Tu sesión vence el {{date}}.",
+    "expired": "Tu sesión venció el {{date}}."
   },
   "cards": {
     "running": "En curso",
