@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use keel_core::{AttemptState, Reason, WorkflowStep};
+use keel_core::{AttemptState, MASK, Reason, WorkflowStep};
 use keel_engine::{Config, Engine, Error, StartRun, full_workflow, request_from_issue};
 use keel_harness::Tools;
 use keel_harness::github::Issue;
@@ -62,13 +62,15 @@ done
 {{ echo "=== CLAUDE tools=$tools"; echo "$prompt"; echo "--- system"; cat "$system"; }} >> "{log}/claude.log"
 list=$(printf '%s' "$tools" | sed 's/,/","/g')
 echo "{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake\",\"tools\":[\"$list\"],\"apiKeySource\":\"none\"}}"
+secret=""
+[ -f "{flags}/secret" ] && secret=" $(cat "{flags}/secret")"
 if [ "$tools" = "Read,Grep,Glob" ]; then
-  text="SPEC-OUTPUT: criteria 1 and 2"
+  text="SPEC-OUTPUT: criteria 1 and 2$secret"
 else
-  text="Fixed it."
+  text="Fixed it.$secret"
   if [ ! -f "{flags}/no-change" ]; then
     echo work >> fixed.txt
-    git add -A && git commit -qm "fix"
+    git add -A && git commit -qm "fix$secret"
   fi
 fi
 echo "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"$text\",\"num_turns\":1,\"total_cost_usd\":0.01,\"usage\":{{\"input_tokens\":10,\"output_tokens\":2}},\"modelUsage\":{{\"claude-fake\":{{}}}}}}"
@@ -345,6 +347,55 @@ fn a_request_goes_all_the_way_to_a_draft_pull_request() {
     );
     assert_eq!(event.data["account"], "alice");
     assert_eq!(event.data["draft"], true);
+}
+
+#[test]
+fn agents_get_the_original_and_a_pull_request_the_masked_copy() {
+    let w = world();
+    // Put together here, so no secret scanner trips on this file.
+    let secret = format!("{}{}", "ghp_", "x".repeat(36));
+    std::fs::write(w.dir.path().join("flags/secret"), &secret).unwrap();
+    let run = w.start(Some("test -f fixed.txt"));
+    let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
+
+    // `{{steps.spec.output}}` carries it whole, or the next agent couldn't do its work.
+    let spec_output = format!("SPEC-OUTPUT: criteria 1 and 2 {secret}");
+    assert!(
+        w.step(&run, "builder")
+            .unwrap()
+            .prompt
+            .contains(&spec_output)
+    );
+    assert!(w.log("claude.log").contains(&spec_output));
+
+    w.engine
+        .answer_approval(&approval.id, true, &format!("Use API_KEY={secret}"))
+        .unwrap();
+    let finished = w.wait_run_finished(&run);
+
+    // What goes to GitHub as text.
+    let body = w.log("pr-body.md");
+    assert!(!body.contains(&secret), "{body}");
+    assert!(body.contains(&format!("Fixed it. {MASK}")), "{body}");
+    assert!(body.contains(&format!("Use API_KEY={MASK}")), "{body}");
+    let pr = w.log("pr.log");
+    assert!(!pr.contains(&secret), "{pr}");
+    assert!(pr.contains(&format!("--title fix {MASK}")), "{pr}");
+
+    // The record keeps what really happened.
+    assert_eq!(
+        w.step(&run, "builder").unwrap().result_text.unwrap(),
+        format!("Fixed it. {secret}")
+    );
+    let decisions = w.engine.decisions(&w.project_id).unwrap();
+    assert_eq!(decisions[0].text, format!("Use API_KEY={secret}"));
+
+    // Masking doesn't reach what's in the branch. A person reviewing the draft has to catch that.
+    let subject = git(
+        &w.remote,
+        &["log", "-1", "--format=%s", &finished.branch.unwrap()],
+    );
+    assert!(subject.contains(&secret), "{subject}");
 }
 
 #[test]

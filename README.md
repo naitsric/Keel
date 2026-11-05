@@ -36,6 +36,15 @@ most about 4 KB, so when it's full, adding something means retiring something.
 - A setup command installs dependencies once per run, before any agent. It's the one step with
   internet access, and it still can't reach your home folder or anything else on your Mac.
 
+## Secrets in what it shows
+
+Keel hides known secrets when it shows a run, when an assistant reads one over MCP, and in a pull
+request's title and description. The audit record and what agents receive keep the original.
+
+It goes by known token shapes and names like `API_KEY`, so some secrets will slip through. It also
+doesn't stop a secret an agent committed from being pushed with the branch, so review the draft
+before merging.
+
 ## Install
 
 Download the latest `.dmg` from [Releases](https://github.com/naitsric/Keel/releases/latest) and

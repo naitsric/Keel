@@ -6,7 +6,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use keel_core::{AttemptState, Reason, StepSpec, ToolProfile};
+use keel_core::{AttemptState, MASK, Masked, Reason, StepSpec, ToolProfile, mask_secrets};
 use keel_engine::{Config, Engine, Error, RawCheck, StartRun};
 use keel_harness::Tools;
 use keel_store::Store;
@@ -528,6 +528,50 @@ fn exiting_without_a_result_is_a_failure_with_the_exit_code() {
         reason(&a),
         Reason::ExitedWithoutResult { exit_code: Some(7) }
     );
+}
+
+#[test]
+fn showing_a_step_hides_its_secrets_and_leaves_the_record_as_it_was() {
+    // Put together here, so no secret scanner trips on this file.
+    let secret = format!("{}{}", "ghp_", "x".repeat(36));
+    let body = format!(
+        r#"cat > /dev/null
+{}
+echo '{{"type":"assistant","message":{{"content":[{{"type":"text","text":"Reading .env"}},{{"type":"tool_use","id":"t1","name":"Read","input":{{"file_path":".env"}}}}]}}}}'
+echo '{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","is_error":false,"content":"API_KEY={secret}"}}]}}}}'
+echo 'API_KEY={secret}' > settings.txt
+echo '{{"type":"result","subtype":"success","is_error":false,"result":"Found {secret} in .env","num_turns":2,"duration_ms":1500,"total_cost_usd":0.25,"usage":{{"input_tokens":100,"output_tokens":20}},"modelUsage":{{"claude-fake-1":{{}}}},"permission_denials":[]}}'"#,
+        init(BUILD_TOOLS, "none")
+    );
+    let h = harness(&body);
+    let run = h.start(ToolProfile::Build);
+    let a = h.wait_for(&run, &[AttemptState::Succeeded]);
+    let raw = std::fs::read(&a.raw_path).unwrap();
+    assert!(String::from_utf8_lossy(&raw).contains(&secret));
+
+    // What the app shows.
+    let attempts = serde_json::to_string(&Masked(h.store.attempts_of_run(&run).unwrap())).unwrap();
+    let events = serde_json::to_string(&Masked(h.store.events(&a.id, 0).unwrap())).unwrap();
+    let diff = mask_secrets(&h.engine.diff(&a.id).unwrap());
+    let run_diff = mask_secrets(&h.engine.run_diff(&run).unwrap());
+    for shown in [&attempts, &events, &diff, &run_diff] {
+        assert!(!shown.contains(&secret), "{shown}");
+        assert!(shown.contains(MASK), "{shown}");
+    }
+
+    // The record behind it hasn't moved, and still checks out.
+    assert_eq!(h.engine.verify_raw(&a.id).unwrap(), RawCheck::Intact);
+    assert_eq!(std::fs::read(&a.raw_path).unwrap(), raw);
+    let stored = h.store.events(&a.id, 0).unwrap();
+    let result = stored.iter().find(|e| e.kind == "toolResult").unwrap();
+    assert_eq!(result.data["text"], format!("API_KEY={secret}"));
+    let attempt = h.store.attempt(&a.id).unwrap();
+    assert_eq!(
+        attempt.result_text.unwrap(),
+        format!("Found {secret} in .env")
+    );
+    assert!(h.engine.diff(&a.id).unwrap().contains(&secret));
+    assert!(h.engine.run_diff(&run).unwrap().contains(&secret));
 }
 
 #[test]

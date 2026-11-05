@@ -3,8 +3,9 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { RunRow } from "../lib/api";
 import { isActive } from "../lib/api";
-import { elapsedMs, formatCost, formatDuration, formatNumber, formatRelative } from "../lib/format";
+import { elapsedMs, formatCost, formatDateTime, formatDuration, formatNumber, formatRelative } from "../lib/format";
 import { needsSignIn, reasonText } from "../lib/reason";
+import { accountLabel, sessionExpiry } from "../lib/session";
 import { useApp } from "../lib/store";
 import { api } from "../lib/api";
 import { Button, Card, StateBadge } from "../ui/primitives";
@@ -19,13 +20,15 @@ function SessionBar() {
     return <p className="text-[12px] text-subtle">{t("session.checking")}</p>;
   }
   const { auth, version, ignoredEnv, blocker } = preflight;
-  const account = auth?.email ? `${auth.email}${auth.subscription ? ` (${auth.subscription})` : ""}` : null;
+  const account = accountLabel(auth);
+  const expiry = auth?.loggedIn ? sessionExpiry(auth.expiresAt, Date.now()) : null;
   return (
     <div className="space-y-1.5">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-muted">
         {auth?.loggedIn && <span>{account ? t("session.account", { account }) : t("session.accountNoEmail")}</span>}
         {version && "found" in version && <span className="text-subtle">{t("session.version", { version: version.found })}</span>}
       </div>
+      {expiry && <p className="text-[12px] text-warning">{t(expiry === "soon" ? "session.expiresSoon" : "session.expired", { date: formatDateTime(auth?.expiresAt as string) })}</p>}
       {ignoredEnv.length > 0 && <p className="text-[12px] text-warning">{t("session.ignoredEnv", { names: ignoredEnv.join(", ") })}</p>}
       {blocker && (
         <div role="alert" className="flex flex-wrap items-center gap-2 rounded-md border border-border-strong bg-inset px-3 py-2 text-[12.5px] text-warning">

@@ -18,7 +18,8 @@
     "version": "versión {{version}}",
     "ignoredEnv": "Se ignora {{names}} de tu entorno, para que se use tu suscripción.",
     "signIn": "Iniciar sesión",
-    "expiresSoon": "Tu sesión vence {{date}}."
+    "expiresSoon": "Tu sesión vence el {{date}}.",
+    "expired": "Tu sesión venció el {{date}}."
   },
   "cards": {
     "running": "En curso",
@@ -124,6 +125,7 @@
     "toolsReadOnly": "Solo leer",
     "maxTurns": "Límite de turnos",
     "maxTurnsPlaceholder": "Sin límite",
+    "accountGithub": "GitHub: {{account}} en {{repo}}",
     "isolation": "Trabaja en una copia privada. No llega a tus credenciales, a GitHub ni a otras carpetas, y no toca tu repo.",
     "start": "Lanzar",
     "cancel": "Cancelar",
@@ -337,6 +339,7 @@
     "rawFile": "Archivo crudo",
     "rawHash": "SHA-256",
     "revealRaw": "Mostrar en Finder",
+    "rawMasked": "Lo que se muestra aquí oculta los secretos conocidos, y alguno se puede escapar. Este archivo tiene el original.",
     "settings": "Reglas del sandbox",
     "systemPrompt": "Instrucciones agregadas",
     "command": "Comando",
@@ -539,7 +542,7 @@
     "decisionsHint": "Lo que dijiste al aprobar o rechazar. Van primero, y los agentes las siguen.",
     "decisionsEmpty": "Todavía no hay decisiones.",
     "prompt": "Lo que recibirá el próximo agente",
-    "promptHint": "El texto exacto. La auditoría de cada paso guarda lo que recibió ese paso.",
+    "promptHint": "El texto exacto, aquí con los secretos conocidos ocultos. La auditoría de cada paso guarda lo que recibió ese paso.",
     "staleCount_one": "1 línea puede estar desactualizada. Escribirlo de nuevo reemplaza todo el mapa.",
     "staleCount_other": "{{count}} líneas pueden estar desactualizadas. Escribirlo de nuevo reemplaza todo el mapa."
   },

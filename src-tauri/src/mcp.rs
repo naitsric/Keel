@@ -3,6 +3,7 @@
 
 use std::process::Command;
 
+use keel_core::Masked;
 use keel_mcp::{McpServer, McpSettings, ServerStatus};
 use keel_store::{McpCall, McpClient};
 use serde::Serialize;
@@ -36,7 +37,8 @@ pub struct McpOverview {
     settings: McpSettings,
     status: ServerStatus,
     clients: Vec<McpClient>,
-    calls: Vec<McpCall>,
+    /// A call's arguments and error can hold whatever a client sent or a step wrote.
+    calls: Masked<Vec<McpCall>>,
 }
 
 #[derive(Serialize)]
@@ -52,7 +54,7 @@ fn overview(state: &AppState, mcp: &McpState) -> CommandResult<McpOverview> {
         settings: mcp.0.settings()?,
         status: mcp.0.status(),
         clients: state.store.mcp_clients()?,
-        calls: state.store.mcp_calls(CALLS_SHOWN)?,
+        calls: Masked(state.store.mcp_calls(CALLS_SHOWN)?),
     })
 }
 

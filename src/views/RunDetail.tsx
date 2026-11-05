@@ -821,6 +821,7 @@ function DetailsTab({ attempt, events }: { attempt: Attempt; events: AuditEvent[
           <Button variant="ghost" className="ml-1" onClick={() => void api.revealRaw(attempt.id)}>
             {t("details.revealRaw")}
           </Button>
+          <span className="mt-0.5 block break-words text-[11.5px] leading-snug text-subtle">{t("details.rawMasked")}</span>
         </Detail>
         <Detail label={t("details.rawHash")}>{attempt.rawSha256}</Detail>
       </dl>

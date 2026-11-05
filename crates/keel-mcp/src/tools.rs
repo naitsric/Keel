@@ -3,7 +3,7 @@
 
 use std::time::{Duration, Instant};
 
-use keel_core::WorkflowStep;
+use keel_core::{WorkflowStep, mask_secrets, mask_value};
 use keel_engine::{Error, StartRun, request_from_issue};
 use keel_store::{Attempt, McpClient, NewMcpCall, Project};
 use schemars::JsonSchema;
@@ -421,7 +421,10 @@ impl McpServer {
                     duration_ms: started.elapsed().as_millis() as i64,
                 })
                 .map_err(store_error)?;
-            outcome.map(|(json, _)| json)
+            // Only what leaves here is masked. The row above keeps what really happened.
+            outcome
+                .map(|(json, _)| mask_value(json))
+                .map_err(|error| ToolError(mask_secrets(&error.0)))
         });
         done.await
             .unwrap_or_else(|e| Err(ToolError::new(format!("Keel failed on this call: {e}"))))
@@ -598,7 +601,8 @@ fn store_error(error: keel_store::Error) -> ToolError {
     ToolError::new(error.to_string())
 }
 
-/// `text` up to `limit` bytes, on a character boundary, saying when it was cut.
+/// `text` up to `limit` bytes, on a character boundary, saying when it was cut. It stops before the
+/// word it would cut, because half a token no longer has the shape that gets it masked.
 fn capped(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.to_owned();
@@ -607,7 +611,11 @@ fn capped(text: &str, limit: usize) -> String {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}\n… [cut at {limit} bytes]", &text[..end])
+    let kept = &text[..end];
+    let kept = kept
+        .rfind(char::is_whitespace)
+        .map_or(kept, |space| &kept[..space]);
+    format!("{kept}\n… [cut at {limit} bytes]")
 }
 
 #[cfg(test)]
@@ -620,5 +628,15 @@ mod tests {
         let cut = capped("ñññ", 3);
         assert!(cut.starts_with('ñ'), "{cut}");
         assert!(cut.contains("[cut at 3 bytes]"), "{cut}");
+    }
+
+    #[test]
+    fn a_cut_leaves_no_half_token_that_masking_would_not_recognize() {
+        let token = format!("{}{}", "ghp_", "x".repeat(36));
+        let text = format!("the token is {token} and more");
+        let cut = capped(&text, "the token is ghp_xxxx".len());
+        assert_eq!(mask_secrets(&cut), cut);
+        assert!(!cut.contains("ghp_"), "{cut}");
+        assert!(cut.starts_with("the token is\n"), "{cut}");
     }
 }

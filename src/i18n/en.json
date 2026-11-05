@@ -18,7 +18,8 @@
     "version": "version {{version}}",
     "ignoredEnv": "Ignoring {{names}} in your environment, so your subscription is what gets used.",
     "signIn": "Sign in",
-    "expiresSoon": "Your session expires {{date}}."
+    "expiresSoon": "Your session expires on {{date}}.",
+    "expired": "Your session expired on {{date}}."
   },
   "cards": {
     "running": "Running",
@@ -124,6 +125,7 @@
     "toolsReadOnly": "Only read",
     "maxTurns": "Turn limit",
     "maxTurnsPlaceholder": "No limit",
+    "accountGithub": "GitHub: {{account}} on {{repo}}",
     "isolation": "It works in a private copy. It can't reach your credentials, GitHub or other folders, and nothing touches your repo.",
     "start": "Start",
     "cancel": "Cancel",
@@ -337,6 +339,7 @@
     "rawFile": "Raw file",
     "rawHash": "SHA-256",
     "revealRaw": "Show in Finder",
+    "rawMasked": "What's shown here has known secrets hidden, and some can slip through. This file has the original.",
     "settings": "Sandbox rules",
     "systemPrompt": "Added instructions",
     "command": "Command",
@@ -539,7 +542,7 @@
     "decisionsHint": "What you said when approving or rejecting. These come first, and agents follow them.",
     "decisionsEmpty": "No decisions yet.",
     "prompt": "What the next agent will get",
-    "promptHint": "The exact text. Each step's audit record has what that step got.",
+    "promptHint": "The exact text, with known secrets hidden here. Each step's audit record has what that step got.",
     "staleCount_one": "1 line may be out of date. Writing it again replaces the whole map.",
     "staleCount_other": "{{count}} lines may be out of date. Writing it again replaces the whole map."
   },

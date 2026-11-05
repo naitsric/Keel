@@ -174,11 +174,15 @@ index 12ee743..4693ad3 100644
 -    return a - b
 +    return a + b`;
 
+// expires=<days from now, or anything else to send as it is>, for the session's warning.
+const expires = params.get("expires");
+const expiresAt = expires === null ? null : Number.isNaN(Number(expires)) ? expires : new Date(Date.now() + Number(expires) * 86400000).toISOString();
+
 const preflight: Preflight = {
   claudeFound: params.get("claude") !== "missing",
   gitFound: true,
   version: { status: "supported", found: "2.1.318" },
-  auth: params.get("session") === "out" ? { loggedIn: false, method: null, provider: null, subscription: null, email: null, orgName: null, expiresAt: null } : { loggedIn: true, method: "claude.ai", provider: "firstParty", subscription: "max", email: "you@example.com", orgName: null, expiresAt: null },
+  auth: params.get("session") === "out" ? { loggedIn: false, method: null, provider: null, subscription: null, email: null, orgName: null, expiresAt: null } : { loggedIn: true, method: "claude.ai", provider: "firstParty", subscription: "max", email: "you@example.com", orgName: null, expiresAt },
   ignoredEnv: params.get("env") === "key" ? ["ANTHROPIC_API_KEY"] : [],
   blocker: params.get("session") === "out" ? { code: "claudeLoggedOut" } : null,
   ghFound: params.get("gh") !== "missing",
