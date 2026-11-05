@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuditEvent } from "./api";
-import { accountsOf, activityFrom, commandsFrom, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, latestOfEachStep, toolSummary, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, approvalOutcome, commandsFrom, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -79,6 +79,90 @@ describe("run summary", () => {
     const reviewed = { filesChanged: null, runFiles: null };
     expect(filesChangedBy([added, removed, reviewed])).toEqual(["a.py"]);
     expect(filesChangedBy([{ filesChanged: ["old.py"] }])).toEqual(["old.py"]);
+  });
+});
+
+describe("the gist of what an agent wrote", () => {
+  it("keeps a short message whole", () => {
+    expect(gist("I fixed `add` in calc.py: it subtracted instead of adding.")).toEqual({ text: "I fixed `add` in calc.py: it subtracted instead of adding.", cut: false });
+  });
+
+  it("takes two sentences of the first paragraph, and says it left the rest out", () => {
+    const text = "I fixed add in calc.py, which subtracted. I added a test. I also renamed a variable.\n\nTests: make test passes.";
+    expect(gist(text)).toEqual({ text: "I fixed add in calc.py, which subtracted. I added a test.", cut: true });
+  });
+
+  it("doesn't take a file name or a version for the end of a sentence", () => {
+    expect(gist("Moved calc.py to v1.2 of the helper, and fixed a bug there. Done.").text).toBe("Moved calc.py to v1.2 of the helper, and fixed a bug there. Done.");
+  });
+
+  it("skips headings", () => {
+    expect(gist("## Summary\n\nI fixed the login form so it keeps the email.").text).toBe("I fixed the login form so it keeps the email.");
+    expect(gist("**Resumen**\nCorregí el formulario para que conserve el correo.").text).toBe("Corregí el formulario para que conserve el correo.");
+  });
+
+  it("reads past an opening that says nothing on its own", () => {
+    expect(gist("Listo.\n\nCorregí el formulario para que conserve el correo. Y algo más. Y otra cosa.").text).toBe("Listo. Corregí el formulario para que conserve el correo.");
+    expect(gist("Here's what I did, as you asked for it today:\n\n- Fixed the form\n- Added a test").text).toBe("Here's what I did, as you asked for it today: Fixed the form Added a test");
+  });
+
+  it("cuts text with no sentences at a word, within the limit", () => {
+    const { text, cut } = gist("word ".repeat(100));
+    expect(text.length).toBeLessThanOrEqual(241);
+    expect(text.endsWith("word…")).toBe(true);
+    expect(cut).toBe(true);
+  });
+
+  it("doesn't come back empty from a message that's only a heading", () => {
+    expect(gist("## Done").text).not.toBe("");
+  });
+});
+
+describe("the reviews of a round", () => {
+  const a = (role: string, round: number, output: unknown = null) => ({ role, round, output });
+
+  it("only speaks for the round it's asked about", () => {
+    const oldReview = a("reviewer", 0, {});
+    const newReview = a("reviewer", 1, {});
+    const oldApprover = a("approver", 0, { decision: "rework" });
+    const { reviewers, approver } = reviewsOfRound([oldReview, oldApprover, newReview, a("worker", 1)], 1);
+    expect(reviewers).toEqual([newReview]);
+    expect(approver).toBeUndefined();
+  });
+
+  it("takes the approver's last answer, not a try that gave none", () => {
+    const answered = a("approver", 0, { decision: "approve" });
+    expect(reviewsOfRound([answered, a("approver", 0)], 0).approver).toBe(answered);
+  });
+});
+
+describe("what approving leads to", () => {
+  const spec = { type: "agent", id: "spec" };
+  const human = { type: "approval", id: "human" };
+  const pr = { type: "deliver", id: "pr" };
+  const learn = { type: "agent", id: "learn", role: { kind: "learner" } };
+
+  it("opens a pull request when delivery comes next", () => {
+    expect(approvalOutcome([spec, human, pr], "human", ["a.py"])).toBe("delivers");
+    expect(approvalOutcome([spec, human, pr, learn], "human", ["a.py"])).toBe("delivers");
+  });
+
+  it("has nothing to deliver when the run changed nothing", () => {
+    expect(approvalOutcome([spec, human, pr], "human", [])).toBe("nothingToDeliver");
+    expect(approvalOutcome([spec, human, pr, learn], "human", [])).toBe("nothingToDeliver");
+  });
+
+  it("isn't empty yet when the approval comes before the building", () => {
+    const builder = { type: "agent", id: "builder" };
+    expect(approvalOutcome([spec, human, builder, pr], "human", [])).toBe("deliversLater");
+    expect(approvalOutcome([spec, human, builder, pr], "human", ["a.py"])).toBe("deliversLater");
+  });
+
+  it("pushes nothing in a workflow that never delivers", () => {
+    expect(approvalOutcome([spec, human], "human", [])).toBe("noDelivery");
+    expect(approvalOutcome([spec, human], "human", ["a.py"])).toBe("noDelivery");
+    expect(approvalOutcome([spec, human, learn], "human", ["a.py"])).toBe("noDelivery");
+    expect(approvalOutcome([spec, human, { type: "check", id: "check" }], "human", ["a.py"])).toBe("noDelivery");
   });
 });
 

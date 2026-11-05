@@ -85,6 +85,51 @@ export function explainingAttempts<T extends { kind: string; tools: string; role
   return agents.slice(-1);
 }
 
+const flat = (text: string) =>
+  text
+    .replace(/^\s*(?:[-*•]|\d+\.)\s+/gm, "")
+    .replace(/\*\*/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+/** A sentence or two from the start of what an agent wrote, for where its whole message doesn't fit. */
+export function gist(text: string, limit = 240): { text: string; cut: boolean } {
+  // A heading names a section. It doesn't say what happened.
+  const body = text.replace(/^[ \t]*(?:#{1,6}\s.*|\*\*[^*\n]+\*\*:?)[ \t]*$/gm, "").trim() || text.trim();
+  const [first = "", second = ""] = body.split(/\n\s*\n/);
+  // "Done." or "Here's what I did:" say nothing without what follows them.
+  const opensOnly = first.trimEnd().endsWith(":") || flat(first).length < 40;
+  const lead = flat(opensOnly ? `${first}\n${second}` : first);
+  const sentences = lead.match(/.+?(?:[.!?…]+(?=\s|$)|$)/g) ?? [];
+  let short = sentences.slice(0, 2).join("").trim();
+  if (short.length > limit) short = `${short.slice(0, limit).replace(/\s+\S*$/, "")}…`;
+  return { text: short, cut: short !== flat(body) };
+}
+
+/** What a round's reviewers said, and what the approver made of it. */
+export function reviewsOfRound<T extends { role: string; round: number; output: unknown }>(attempts: T[], round: number): { reviewers: T[]; approver: T | undefined } {
+  const current = attempts.filter((a) => a.round === round);
+  return {
+    reviewers: current.filter((a) => a.role === "reviewer"),
+    approver: [...current].reverse().find((a) => a.role === "approver" && a.output),
+  };
+}
+
+export type ApprovalOutcome = "delivers" | "deliversLater" | "noDelivery" | "nothingToDeliver";
+
+/**
+ * What approving leads to. It isn't always a pull request: a workflow can ask before it builds, in
+ * which case no files yet is normal, or never deliver at all. With no files and delivery next,
+ * approving can only fail.
+ */
+export function approvalOutcome(steps: { type: string; id: string; role?: { kind: string } }[], approvalId: string, files: string[]): ApprovalOutcome {
+  // The step that proposes notes runs after everything else, and pushes nothing.
+  const rest = steps.slice(steps.findIndex((s) => s.id === approvalId) + 1).filter((s) => s.role?.kind !== "learner");
+  if (!rest.some((s) => s.type === "deliver")) return "noDelivery";
+  if (rest[0].type !== "deliver") return "deliversLater";
+  return files.length === 0 ? "nothingToDeliver" : "delivers";
+}
+
 /** Which accounts did this, on the record. */
 export function accountsOf(attempts: { kind: string; account: string | null }[]): { claude: string | null; github: string | null } {
   return {
