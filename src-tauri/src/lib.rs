@@ -7,7 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
-use keel_core::{EnvVar, Reason, Service, StepSpec, ToolProfile, WorkflowStep};
+use keel_core::{
+    EnvVar, Masked, Reason, Service, StepSpec, ToolProfile, WorkflowStep, mask_secrets,
+    serialize_masked,
+};
 use keel_engine::{
     BrainView, Config, DEFAULT_BRAIN_MODEL, Engine, Error as EngineError, GithubStatus, Preflight,
     RawCheck, StartRun, Workflow, request_from_issue,
@@ -55,12 +58,15 @@ struct AppState {
     quit_allowed: AtomicBool,
 }
 
-/// Every command's error: a code the UI translates, with the reason when there is one.
+/// Every command's error: a code the UI translates, with the reason when there is one. These can
+/// quote what git, `gh` or an agent said.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CommandError {
     code: &'static str,
+    #[serde(serialize_with = "serialize_masked")]
     reason: Option<Reason>,
+    #[serde(serialize_with = "serialize_masked")]
     detail: Option<String>,
 }
 
@@ -122,8 +128,9 @@ fn refresh_session(state: State<'_, AppState>) -> Preflight {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Overview {
-    runs: Vec<RunRow>,
+    runs: Masked<Vec<RunRow>>,
     totals: Totals,
+    /// Not masked: Settings saves back what it gets, which would overwrite the real values.
     projects: Vec<Project>,
     pending_proposals: i64,
 }
@@ -131,7 +138,7 @@ struct Overview {
 #[tauri::command(async)]
 fn overview(state: State<'_, AppState>) -> CommandResult<Overview> {
     Ok(Overview {
-        runs: state.store.runs(200)?,
+        runs: Masked(state.store.runs(200)?),
         totals: state.store.totals()?,
         projects: state.store.projects()?,
         pending_proposals: state.store.pending_proposals()?,
@@ -154,8 +161,8 @@ fn project_add(
 }
 
 #[tauri::command(async)]
-fn brain_get(state: State<'_, AppState>, project_id: String) -> CommandResult<BrainView> {
-    Ok(state.engine.brain(&project_id)?)
+fn brain_get(state: State<'_, AppState>, project_id: String) -> CommandResult<Masked<BrainView>> {
+    Ok(Masked(state.engine.brain(&project_id)?))
 }
 
 #[tauri::command(async)]
@@ -184,8 +191,11 @@ fn brain_retire(state: State<'_, AppState>, seq: i64) -> CommandResult<()> {
 }
 
 #[tauri::command(async)]
-fn run_proposals(state: State<'_, AppState>, run_id: String) -> CommandResult<Vec<BrainNote>> {
-    Ok(state.engine.proposals_of_run(&run_id)?)
+fn run_proposals(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> CommandResult<Masked<Vec<BrainNote>>> {
+    Ok(Masked(state.engine.proposals_of_run(&run_id)?))
 }
 
 #[derive(Deserialize)]
@@ -227,13 +237,16 @@ fn github_status(
     state: State<'_, AppState>,
     project_id: String,
     account: Option<String>,
-) -> CommandResult<GithubStatus> {
+) -> CommandResult<Masked<GithubStatus>> {
     state.ready.wait();
-    Ok(state
-        .engine
-        .github_status(&project_id, account.as_deref())?)
+    Ok(Masked(
+        state
+            .engine
+            .github_status(&project_id, account.as_deref())?,
+    ))
 }
 
+/// Not masked: the dialog hands the chosen issue back to `run_start`, and agents get it as written.
 #[tauri::command(async)]
 fn issues_list(state: State<'_, AppState>, project_id: String) -> CommandResult<Vec<Issue>> {
     state.ready.wait();
@@ -241,8 +254,11 @@ fn issues_list(state: State<'_, AppState>, project_id: String) -> CommandResult<
 }
 
 #[tauri::command(async)]
-fn decisions_list(state: State<'_, AppState>, project_id: String) -> CommandResult<Vec<Decision>> {
-    Ok(state.engine.decisions(&project_id)?)
+fn decisions_list(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CommandResult<Masked<Vec<Decision>>> {
+    Ok(Masked(state.engine.decisions(&project_id)?))
 }
 
 #[tauri::command(async)]
@@ -335,6 +351,7 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
     })?)
 }
 
+/// Not masked: the editor saves back what it gets, which would overwrite the real commands.
 #[tauri::command(async)]
 fn workflows_list(
     state: State<'_, AppState>,
@@ -364,7 +381,7 @@ fn workflow_delete(
 
 #[tauri::command(async)]
 fn run_diff(state: State<'_, AppState>, run_id: String) -> CommandResult<String> {
-    Ok(state.engine.run_diff(&run_id)?)
+    Ok(mask_secrets(&state.engine.run_diff(&run_id)?))
 }
 
 #[tauri::command(async)]
@@ -379,8 +396,8 @@ fn rework_limit_answer(
 }
 
 #[tauri::command(async)]
-fn run_get(state: State<'_, AppState>, run_id: String) -> CommandResult<Run> {
-    Ok(state.store.run(&run_id)?)
+fn run_get(state: State<'_, AppState>, run_id: String) -> CommandResult<Masked<Run>> {
+    Ok(Masked(state.store.run(&run_id)?))
 }
 
 #[tauri::command(async)]
@@ -415,8 +432,8 @@ fn open_github_url(url: String) -> CommandResult<()> {
 }
 
 #[tauri::command(async)]
-fn run_attempts(state: State<'_, AppState>, run_id: String) -> CommandResult<Vec<Attempt>> {
-    Ok(state.store.attempts_of_run(&run_id)?)
+fn run_attempts(state: State<'_, AppState>, run_id: String) -> CommandResult<Masked<Vec<Attempt>>> {
+    Ok(Masked(state.store.attempts_of_run(&run_id)?))
 }
 
 #[tauri::command(async)]
@@ -424,13 +441,13 @@ fn attempt_events(
     state: State<'_, AppState>,
     attempt_id: String,
     after_seq: i64,
-) -> CommandResult<Vec<Event>> {
-    Ok(state.store.events(&attempt_id, after_seq)?)
+) -> CommandResult<Masked<Vec<Event>>> {
+    Ok(Masked(state.store.events(&attempt_id, after_seq)?))
 }
 
 #[tauri::command(async)]
 fn attempt_diff(state: State<'_, AppState>, attempt_id: String) -> CommandResult<String> {
-    Ok(state.engine.diff(&attempt_id)?)
+    Ok(mask_secrets(&state.engine.diff(&attempt_id)?))
 }
 
 #[tauri::command(async)]
@@ -748,4 +765,97 @@ pub fn run() {
             let _ = handle.emit(QUIT_EVENT, ());
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use keel_core::MASK;
+    use serde_json::json;
+
+    use super::*;
+
+    const SECRET: &str = "made-up-Value-123";
+
+    fn row(title: &str) -> RunRow {
+        RunRow {
+            id: "r1".into(),
+            title: title.into(),
+            pr_url: None,
+            started_by: None,
+            project_id: "p1".into(),
+            project_name: "demo".into(),
+            step_id: "builder".into(),
+            attempt_id: "a1".into(),
+            attempt_number: 1,
+            state: "failed".into(),
+            reason: Some(json!({ "code": "prepareFailed", "detail": format!("API_KEY={SECRET}") })),
+            model: "sonnet".into(),
+            turns: None,
+            started_at: "2026-11-05T10:00:00Z".into(),
+            finished_at: None,
+            last_activity_at: None,
+        }
+    }
+
+    #[test]
+    fn an_error_hides_what_it_quotes() {
+        let error = CommandError::from(EngineError::Blocked(Reason::DeliveryFailed {
+            kind: "other".into(),
+            detail: format!("https://bot:{SECRET}@example.com/a.git: denied"),
+        }));
+        assert_eq!(
+            serde_json::to_value(&error).unwrap()["reason"]["detail"],
+            format!("https://bot:{MASK}@example.com/a.git: denied")
+        );
+
+        let error = CommandError {
+            code: "internal",
+            reason: None,
+            detail: Some(format!("password={SECRET}1")),
+        };
+        assert_eq!(
+            serde_json::to_value(&error).unwrap()["detail"],
+            format!("password={MASK}")
+        );
+    }
+
+    #[test]
+    fn the_overview_masks_runs_and_not_the_settings_that_get_saved_back() {
+        let overview = Overview {
+            runs: Masked(vec![row(&format!("Use API_KEY={SECRET} to test"))]),
+            totals: Totals::default(),
+            projects: vec![Project {
+                id: "p1".into(),
+                name: "demo".into(),
+                path: "/Users/you/demo".into(),
+                created_at: "2026-11-05T10:00:00Z".into(),
+                github_account: None,
+                github_repo: None,
+                setup_command: None,
+                check_command: Some(format!("API_KEY={SECRET} make test")),
+                allowed_domains: vec![],
+                allowed_read: vec![],
+                services: vec![],
+                env: vec![EnvVar {
+                    name: "API_KEY".into(),
+                    value: SECRET.into(),
+                }],
+            }],
+            pending_proposals: 0,
+        };
+        let shown = serde_json::to_value(&overview).unwrap();
+        assert_eq!(
+            shown["runs"][0]["title"],
+            format!("Use API_KEY={MASK} to test")
+        );
+        assert_eq!(
+            shown["runs"][0]["reason"]["detail"],
+            format!("API_KEY={MASK}")
+        );
+        assert_eq!(shown["projects"][0]["env"][0]["value"], SECRET);
+        assert_eq!(
+            shown["projects"][0]["checkCommand"],
+            format!("API_KEY={SECRET} make test")
+        );
+    }
 }

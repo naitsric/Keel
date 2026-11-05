@@ -3,7 +3,11 @@
 //! Nothing here holds user-facing text. Reasons are codes with data, and the UI translates
 //! them, so the backend stays language-neutral.
 
+mod secrets;
+
 use serde::{Deserialize, Serialize};
+
+pub use secrets::{MASK, Masked, mask_secrets, mask_value, serialize_masked};
 
 /// What a step may do. Maps to the exact tools Claude Code gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

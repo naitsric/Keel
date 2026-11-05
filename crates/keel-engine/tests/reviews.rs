@@ -275,6 +275,38 @@ fn reviews_run_at_once_and_the_approver_gets_their_answers() {
 }
 
 #[test]
+fn a_reviewer_gets_the_diff_with_any_secret_still_in_it() {
+    let w = world();
+    // Put together here, so no secret scanner trips on this file.
+    let secret = format!("{}{}", "ghp_", "x".repeat(36));
+    let run = w.start(vec![
+        WorkflowStep::Agent(spec(
+            "builder",
+            ToolProfile::Build,
+            StepRole::Worker,
+            &[],
+            &format!("BUILD API_KEY={secret}"),
+        )),
+        WorkflowStep::Parallel {
+            id: "reviews".into(),
+            steps: vec![spec(
+                "security",
+                ToolProfile::ReadOnly,
+                StepRole::Reviewer,
+                &[],
+                "REVIEW security\nDIFF:{{diff}}",
+            )],
+        },
+    ]);
+    w.wait(&run, "security", AttemptState::Succeeded);
+    let prompts = w.prompts();
+    assert!(
+        prompts.contains(&format!("+BUILD API_KEY={secret}")),
+        "{prompts}"
+    );
+}
+
+#[test]
 fn a_reviewer_with_nothing_to_look_at_is_skipped_on_the_record() {
     let w = world();
     let run = w.start(workflow(2));

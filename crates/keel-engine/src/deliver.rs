@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use keel_core::{AttemptState, Reason};
+use keel_core::{AttemptState, Reason, mask_secrets};
 use keel_harness::github::{Gh, GhError, Token};
 use keel_store::rusqlite_value::Value;
 use keel_store::{Attempt, Project, Run};
@@ -168,7 +168,8 @@ impl Inner {
         )
         .map_err(git_failed)?;
 
-        let body = self.pull_request_body(&run, &project)?;
+        // A pull request is read by people who never saw the run, and what it says stays on GitHub.
+        let body = mask_secrets(&self.pull_request_body(&run, &project)?);
         let body_file = self.run_dir(&run.id).join("pull-request.md");
         std::fs::write(&body_file, &body)?;
         // An issue's title already names the problem. Otherwise the commit says what changed better
@@ -180,6 +181,7 @@ impl Inner {
                 .filter(|subject| !subject.is_empty() && !subject.starts_with("keel:"))
                 .unwrap_or_else(|| run.title.clone())
         };
+        let title = mask_secrets(&title);
         let url = self.open_pull_request(
             &gh,
             &token,

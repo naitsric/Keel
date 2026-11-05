@@ -337,6 +337,7 @@
     "rawFile": "Archivo crudo",
     "rawHash": "SHA-256",
     "revealRaw": "Mostrar en Finder",
+    "rawMasked": "Lo que se muestra aquí oculta los secretos conocidos, y alguno se puede escapar. Este archivo tiene el original.",
     "settings": "Reglas del sandbox",
     "systemPrompt": "Instrucciones agregadas",
     "command": "Comando",
@@ -539,7 +540,7 @@
     "decisionsHint": "Lo que dijiste al aprobar o rechazar. Van primero, y los agentes las siguen.",
     "decisionsEmpty": "Todavía no hay decisiones.",
     "prompt": "Lo que recibirá el próximo agente",
-    "promptHint": "El texto exacto. La auditoría de cada paso guarda lo que recibió ese paso.",
+    "promptHint": "El texto exacto, aquí con los secretos conocidos ocultos. La auditoría de cada paso guarda lo que recibió ese paso.",
     "staleCount_one": "1 línea puede estar desactualizada. Escribirlo de nuevo reemplaza todo el mapa.",
     "staleCount_other": "{{count}} líneas pueden estar desactualizadas. Escribirlo de nuevo reemplaza todo el mapa."
   },

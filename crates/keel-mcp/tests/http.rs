@@ -8,7 +8,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use keel_core::{AttemptState, StepSpec, ToolProfile, WorkflowStep};
+use keel_core::{AttemptState, MASK, StepSpec, ToolProfile, WorkflowStep};
 use keel_engine::{Config, Engine, Workflow};
 use keel_harness::Tools;
 use keel_mcp::{MAX_OPEN_RUNS, MCP_PATH, McpServer, StartError};
@@ -417,6 +417,59 @@ async fn every_call_is_on_record_also_the_refused_ones() {
     assert!(calls[0].args.contains("Fix it"));
     assert_eq!(calls[1].tool, "list_projects");
     assert!(calls[1].ok);
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_client_gets_secrets_masked_and_the_record_keeps_them() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    // Put together here, so no secret scanner trips on this file.
+    let secret = format!("{}{}", "ghp_", "x".repeat(36));
+    let request = format!("Use API_KEY={secret} to test");
+
+    let result = call(&client, "start_run", w.start_args(&request)).await;
+    assert!(!format!("{result:?}").contains(&secret), "{result:?}");
+    let started = ok(&result);
+    assert_eq!(started["request"], format!("Use API_KEY={MASK} to test"));
+    let run = started["id"].as_str().unwrap().to_owned();
+
+    let mut view = json!({});
+    for _ in 0..20 {
+        view = ok(&call(&client, "wait_for_run", json!({ "run": run, "seconds": 5 })).await);
+        if view["state"] != "working" {
+            break;
+        }
+    }
+    let attempt = view["steps"][0]["attemptId"].as_str().unwrap();
+    let step = ok(&call(&client, "get_step", json!({ "attempt": attempt })).await);
+    assert!(!step.to_string().contains(&secret), "{step}");
+    assert!(step["prompt"].as_str().unwrap().contains(MASK), "{step}");
+
+    // A refusal quotes what it was given.
+    let wrong = format!("API_KEY={secret}");
+    let refusal = refused(&call(&client, "get_brain", json!({ "project": wrong })).await);
+    assert!(!refusal.contains(&secret), "{refusal}");
+    assert!(refusal.contains(MASK), "{refusal}");
+
+    // The agent worked from the original, and the audit log has what really happened.
+    assert_eq!(w.store.run(&run).unwrap().request, request);
+    assert!(
+        w.store
+            .attempt(attempt)
+            .unwrap()
+            .prompt
+            .contains(&format!("API_KEY={secret}"))
+    );
+    let calls = w.store.mcp_calls(10).unwrap();
+    let started = calls.iter().find(|c| c.tool == "start_run").unwrap();
+    assert!(started.args.contains(&secret), "{started:?}");
+    let refused = calls.iter().find(|c| c.tool == "get_brain").unwrap();
+    assert!(refused.args.contains(&secret), "{refused:?}");
+    assert!(
+        refused.error.as_deref().unwrap().contains(&secret),
+        "{refused:?}"
+    );
     client.cancel().await.unwrap();
 }
 
