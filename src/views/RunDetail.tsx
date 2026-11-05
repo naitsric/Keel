@@ -1022,7 +1022,7 @@ export function RunDetail({ runId }: { runId: string }) {
             </ul>
           </Card>
           <Card className="min-w-0 p-4">
-            <Segmented<Tab> label={t("tabs.details")} value={shownTab} onChange={setTab} options={kindTabs.map((value) => ({ value, label: t(`tabs.${value}`) }))} />
+            <Segmented<Tab> arrows label={t("tabs.details")} value={shownTab} onChange={setTab} options={kindTabs.map((value) => ({ value, label: t(`tabs.${value}`) }))} />
             <div className="mt-4">
               {shownTab === "activity" && <ActivityTab events={events} />}
               {shownTab === "commands" && <CommandsTab commands={commands} />}

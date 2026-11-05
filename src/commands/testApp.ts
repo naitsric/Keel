@@ -18,7 +18,7 @@ export const row = (id: string, state: AttemptState, extra: Partial<RunRow> = {}
 const project = (id: string, name: string) => ({ id, name, path: `/Users/you/${name}`, githubAccount: "you-work", githubRepo: `acme/${name}`, setupCommand: null, checkCommand: null, allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null }) as Project;
 export const PROJECTS = [project("p1", "demo"), project("p2", "payments")];
 
-const attempt = (fields: Partial<Attempt>) => ({ kind: "agent", role: "worker", tools: "build", state: "succeeded", round: 0, number: 1, output: null, resultText: null, filesChanged: null, runFiles: null, ...fields }) as Attempt;
+const attempt = (fields: Partial<Attempt>) => ({ kind: "agent", role: "worker", tools: "build", state: "succeeded", round: 0, number: 1, output: null, resultText: null, filesChanged: null, runFiles: null, startedAt: "2026-11-05T10:00:00Z", ...fields }) as Attempt;
 const DELIVERS = [
   { type: "agent", id: "builder" },
   { type: "approval", id: "human" },

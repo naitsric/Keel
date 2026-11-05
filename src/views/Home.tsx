@@ -1,5 +1,5 @@
 import { Plus } from "lucide-react";
-import { useEffect, useState } from "react";
+import { type KeyboardEvent, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Reason, RunRow } from "../lib/api";
 import { isActive } from "../lib/api";
@@ -54,15 +54,15 @@ function Metric({ label, value, detail }: { label: string; value: string; detail
   );
 }
 
-function Row({ run, now }: { run: RunRow; now: number }) {
+function Row({ run, now, tabStop }: { run: RunRow; now: number; tabStop: boolean }) {
   const { t } = useTranslation();
   const navigate = useApp((s) => s.navigate);
   const open = () => navigate({ name: "run", runId: run.id });
   const last = run.lastActivityAt ?? run.startedAt;
   return (
-    <tr onClick={open} className="cursor-pointer border-t border-border hover:bg-hover">
+    <tr data-run={run.id} onClick={open} className="cursor-pointer border-t border-border hover:bg-hover has-[:focus-visible]:bg-hover">
       <td className="max-w-[340px] px-4 py-2.5">
-        <button type="button" onClick={open} className="block max-w-full truncate text-left text-[12.5px] font-medium">
+        <button type="button" tabIndex={tabStop ? 0 : -1} onClick={open} className="block max-w-full truncate text-left text-[12.5px] font-medium">
           {run.title}
         </button>
         <p className="truncate text-[11.5px] text-subtle">
@@ -71,6 +71,7 @@ function Row({ run, now }: { run: RunRow; now: number }) {
           {run.prUrl && (
             <button
               type="button"
+              tabIndex={tabStop ? 0 : -1}
               className="ml-2 text-accent hover:underline"
               onClick={(e) => {
                 e.stopPropagation();
@@ -117,6 +118,24 @@ export function Home() {
     return () => clearInterval(timer);
   }, [anyActive]);
 
+  // The row Tab lands on, which ↑ ↓ move. Enter is that row's own button, so it only ever opens the run.
+  const [cursor, setCursor] = useState<string | null>(null);
+  const tabStop = runs.some((run) => run.id === cursor) ? cursor : (runs[0]?.id ?? null);
+  const onRowKeyDown = (e: KeyboardEvent<HTMLTableSectionElement>) => {
+    // Held down, Enter isn't choosing this row. It may be what opened this page.
+    if (e.key === "Enter" && e.repeat) e.preventDefault();
+    if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+    const at = runs.findIndex((run) => run.id === tabStop);
+    const wanted = e.key === "ArrowDown" ? at + 1 : e.key === "ArrowUp" ? at - 1 : e.key === "Home" ? 0 : e.key === "End" ? runs.length - 1 : null;
+    if (wanted === null) return;
+    e.preventDefault();
+    const next = Math.max(0, Math.min(runs.length - 1, wanted));
+    setCursor(runs[next].id);
+    const row = e.currentTarget.children[next];
+    row.querySelector("button")?.focus({ preventScroll: true });
+    row.scrollIntoView({ block: "nearest" });
+  };
+
   return (
     <>
       <main className="flex-1 space-y-4 overflow-y-auto p-5">
@@ -160,9 +179,9 @@ export function Home() {
                     <th className="px-4 py-2 font-medium">{t("table.lastActivity")}</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody onKeyDown={onRowKeyDown} onFocus={(e) => setCursor((e.target as HTMLElement).closest("tr")?.dataset.run ?? null)}>
                   {runs.map((run) => (
-                    <Row key={run.id} run={run} now={now} />
+                    <Row key={run.id} run={run} now={now} tabStop={run.id === tabStop} />
                   ))}
                 </tbody>
               </table>

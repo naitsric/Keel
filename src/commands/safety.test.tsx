@@ -631,6 +631,90 @@ describe("safety", () => {
     });
   });
 
+  describe("the arrow keys", () => {
+    const APPROVE = "Approve and open a draft";
+    const firstRow = () => document.querySelector<HTMLButtonElement>("tbody button") as HTMLButtonElement;
+    const enters = async () => {
+      for (let i = 0; i < 6; i++) {
+        pressEnter();
+        await settle(300);
+      }
+    };
+
+    it("⏎ on a row opens the run, and the ones after it answer nothing, on a card long since armed", async () => {
+      await showApp(RUNS);
+      act(() => firstRow().focus());
+      pressKey("ArrowDown", "ArrowDown");
+      expect(document.activeElement?.textContent).toBe("Run r2");
+      await enters();
+      expect(view()).toMatchObject({ name: "run", runId: "r2" });
+      expect(document.activeElement).toBe(note());
+      expect(button(APPROVE)?.disabled).toBe(false);
+      expect(answers()).toEqual([]);
+    });
+
+    it("⏎ on a row leaves Approve off for its 800 ms", async () => {
+      await showApp(RUNS);
+      act(() => firstRow().focus());
+      pressEnter();
+      await settle(0);
+      expect(button(APPROVE)?.disabled).toBe(true);
+      await settle(799);
+      expect(button(APPROVE)?.disabled).toBe(true);
+    });
+
+    it("⏎ on a row answers nothing on a card that starts with its focus on Close this run", async () => {
+      await showApp([row("empty", "waitingApproval")]);
+      act(() => firstRow().focus());
+      await enters();
+      expect(document.activeElement).toBe(button("Close this run"));
+      expect(answers()).toEqual([]);
+    });
+
+    it("held down on a row, Enter doesn't open it", async () => {
+      await showApp(RUNS);
+      act(() => firstRow().focus());
+      pressEnter({ repeat: true });
+      await settle();
+      expect(view()).toEqual({ name: "home" });
+    });
+
+    it.each(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"])("%s only moves, wherever it's pressed on a card that's armed", async (key) => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      type("A reason");
+      const places = [note(), button(APPROVE), button("Reject"), ...document.querySelectorAll('[role="radio"]')];
+      for (const place of places) {
+        act(() => (place as HTMLElement).focus());
+        pressKey(key, key);
+        await settle();
+      }
+      expect(view()).toEqual({ name: "run", runId: WAITING });
+      expect(calls.filter((call) => DECIDES.includes(call.command))).toEqual([]);
+    });
+
+    it("↑ ↓ on the rows call nothing that decides, and don't press what they land on", async () => {
+      await showApp(RUNS);
+      act(() => firstRow().focus());
+      for (const key of ["ArrowDown", "ArrowDown", "ArrowUp", "End", "Home"]) pressKey(key, key);
+      await settle();
+      expect(view()).toEqual({ name: "home" });
+      expect(calls.filter((call) => DECIDES.includes(call.command))).toEqual([]);
+    });
+
+    it("the MCP switch and the language don't move with the arrows", async () => {
+      await showApp(RUNS, { name: "settings" });
+      for (const radio of document.querySelectorAll<HTMLElement>('[role="radio"]')) {
+        act(() => radio.focus());
+        pressKey("ArrowRight", "ArrowRight");
+        pressKey("ArrowLeft", "ArrowLeft");
+      }
+      await settle();
+      expect(callsTo("mcp_settings_save")).toEqual([]);
+      expect(callsTo("language_set")).toEqual([]);
+    });
+  });
+
   describe("the approval card's height", () => {
     it("leaves room for both bars, so its buttons show without scrolling", async () => {
       await showApp(RUNS, { name: "run", runId: WAITING });

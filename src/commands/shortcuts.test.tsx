@@ -414,6 +414,152 @@ describe("the keys", () => {
   });
 
 
+  describe("the runs table", () => {
+    const rows = () => [...document.querySelectorAll<HTMLButtonElement>("tbody tr td:first-child button:first-child")];
+    const focused = () => document.activeElement?.textContent;
+    const tabStops = () => [...document.querySelectorAll<HTMLElement>("tbody button")].filter((b) => b.tabIndex === 0).map((b) => b.textContent);
+    const press = (key: string, init: KeyboardEventInit = {}) => pressKey(key, key, init);
+
+    it("is one stop for Tab, on the first row", async () => {
+      await showApp(RUNS);
+      expect(rows()).toHaveLength(5);
+      expect(tabStops()).toEqual(["Run r1"]);
+    });
+
+    it("↑ ↓ move between rows, and stop at the ends", async () => {
+      await showApp(RUNS);
+      act(() => rows()[0].focus());
+      expect(press("ArrowUp").defaultPrevented).toBe(true);
+      expect(focused()).toBe("Run r1");
+      press("ArrowDown");
+      expect(focused()).toBe("Run r2");
+      expect(tabStops()).toEqual(["Run r2"]);
+      press("ArrowDown");
+      press("ArrowUp");
+      expect(focused()).toBe("Run r2");
+      for (let i = 0; i < 6; i++) press("ArrowDown");
+      expect(focused()).toBe("Run r5");
+    });
+
+    it("Home and End go to the ends", async () => {
+      await showApp(RUNS);
+      act(() => rows()[2].focus());
+      press("End");
+      expect(focused()).toBe("Run r5");
+      press("Home");
+      expect(focused()).toBe("Run r1");
+    });
+
+    it("keeps the row in view", async () => {
+      await showApp(RUNS);
+      const row = rows()[1].closest("tr") as HTMLElement;
+      const scrolled = vi.spyOn(row, "scrollIntoView");
+      act(() => rows()[0].focus());
+      press("ArrowDown");
+      expect(scrolled).toHaveBeenCalledWith({ block: "nearest" });
+    });
+
+    it("⏎ opens the row, and Back comes home", async () => {
+      await showApp(RUNS);
+      act(() => rows()[0].focus());
+      press("ArrowDown");
+      pressEnter();
+      await settle();
+      expect(view()).toMatchObject({ name: "run", runId: "r2" });
+      pressMod("[", "BracketLeft");
+      await settle();
+      expect(view()).toEqual({ name: "home" });
+    });
+
+    it("leaves modified arrows alone, for the keymap", async () => {
+      await showApp(RUNS);
+      act(() => rows()[0].focus());
+      expect(press("ArrowDown", { shiftKey: true }).defaultPrevented).toBe(false);
+      expect(press("ArrowDown", { altKey: true }).defaultPrevented).toBe(false);
+      expect(pressMod("ArrowDown", "ArrowDown").defaultPrevented).toBe(false);
+      expect(focused()).toBe("Run r1");
+    });
+
+    it("does nothing without focus on it", async () => {
+      await showApp(RUNS);
+      (document.activeElement as HTMLElement | null)?.blur?.();
+      expect(press("ArrowDown").defaultPrevented).toBe(false);
+      expect(tabStops()).toEqual(["Run r1"]);
+    });
+
+    it("remembers the row across a refresh, and goes back to the first if it's gone", async () => {
+      await showApp(RUNS);
+      act(() => rows()[0].focus());
+      press("ArrowDown");
+      act(() => useApp.setState({ overview: { ...useApp.getState().overview, runs: [row("new", "running"), ...RUNS] } }));
+      expect(tabStops()).toEqual(["Run r2"]);
+      expect(focused()).toBe("Run r2");
+      press("ArrowUp");
+      expect(focused()).toBe("Run r1");
+      act(() => useApp.setState({ overview: { ...useApp.getState().overview, runs: RUNS.filter((r) => r.id !== "r1") } }));
+      expect(tabStops()).toEqual(["Run r2"]);
+    });
+
+    it("a tab stop is what focus lands on by any other route", async () => {
+      await showApp(RUNS);
+      act(() => rows()[3].focus());
+      expect(tabStops()).toEqual(["Run r4"]);
+    });
+  });
+
+  describe("the run page's tabs", () => {
+    const tabs = () => [...document.querySelectorAll<HTMLElement>('[role="radio"]')];
+    const selected = () => document.querySelector('[role="radio"][aria-checked="true"]')?.textContent;
+    const press = (key: string, init: KeyboardEventInit = {}) => pressKey(key, key, init);
+
+    it("← → move between them and take focus, going round", async () => {
+      await showApp([row("r1", "running")], { name: "run", runId: "r1" });
+      act(() => tabs()[0].focus());
+      expect(selected()).toBe("Activity");
+      expect(press("ArrowRight").defaultPrevented).toBe(true);
+      expect(selected()).toBe("Commands");
+      expect(document.activeElement?.textContent).toBe("Commands");
+      press("ArrowLeft");
+      press("ArrowLeft");
+      expect(selected()).toBe("Details");
+      expect(document.activeElement?.textContent).toBe("Details");
+      press("ArrowRight");
+      expect(selected()).toBe("Activity");
+    });
+
+    it("are one stop for Tab, on the one showing", async () => {
+      await showApp([row("r1", "running")], { name: "run", runId: "r1" });
+      expect(tabs().filter((tab) => tab.tabIndex === 0).map((tab) => tab.textContent)).toEqual(["Activity"]);
+      act(() => tabs()[0].focus());
+      press("ArrowRight");
+      expect(tabs().filter((tab) => tab.tabIndex === 0).map((tab) => tab.textContent)).toEqual(["Commands"]);
+    });
+
+    it("leave modified arrows and ↑ ↓ alone", async () => {
+      await showApp([row("r1", "running")], { name: "run", runId: "r1" });
+      act(() => tabs()[0].focus());
+      expect(press("ArrowRight", { shiftKey: true }).defaultPrevented).toBe(false);
+      expect(press("ArrowDown").defaultPrevented).toBe(false);
+      expect(selected()).toBe("Activity");
+    });
+
+    it("do nothing without focus on them, so ← → in the note stay the note's", async () => {
+      await showApp([row("r1", "waitingApproval")], { name: "run", runId: "r1" });
+      expect(document.activeElement).toBe(note());
+      expect(press("ArrowRight").defaultPrevented).toBe(false);
+      expect(selected()).toBe("Activity");
+    });
+
+    it("work in Spanish too", async () => {
+      await showApp([row("r1", "running")], { name: "run", runId: "r1" });
+      await act(() => i18next.changeLanguage("es"));
+      act(() => tabs()[0].focus());
+      press("ArrowRight");
+      expect(selected()).toBe(i18next.t("tabs.commands"));
+      await act(() => i18next.changeLanguage("en"));
+    });
+  });
+
   describe("the tooltips", () => {
     it("say the key", async () => {
       await showApp(RUNS);
