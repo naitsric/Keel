@@ -18,7 +18,7 @@ export const row = (id: string, state: AttemptState, extra: Partial<RunRow> = {}
 const project = (id: string, name: string) => ({ id, name, path: `/Users/you/${name}`, githubAccount: "you-work", githubRepo: `acme/${name}`, setupCommand: null, checkCommand: null, allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null }) as Project;
 export const PROJECTS = [project("p1", "demo"), project("p2", "payments")];
 
-const attempt = (fields: Partial<Attempt>) => ({ kind: "agent", role: "worker", tools: "build", state: "succeeded", round: 0, number: 1, output: null, resultText: null, filesChanged: null, runFiles: null, ...fields }) as Attempt;
+const attempt = (fields: Partial<Attempt>) => ({ kind: "agent", role: "worker", tools: "build", state: "succeeded", round: 0, number: 1, output: null, resultText: null, filesChanged: null, runFiles: null, startedAt: "2026-11-05T10:00:00Z", ...fields }) as Attempt;
 const DELIVERS = [
   { type: "agent", id: "builder" },
   { type: "approval", id: "human" },
@@ -84,12 +84,12 @@ const card = (id: string, title: string, projectId?: string) => ({ id, projectId
 /** Lets what's waiting happen: answers from the backend, a palette closing, a card mounting. */
 export const settle = (ms = 20) => act(() => vi.advanceTimersByTimeAsync(ms));
 
-export async function showApp(runs: RunRow[], view: View = { name: "home" }) {
+export async function showApp(runs: RunRow[], view: View = { name: "home" }, projects: Project[] = PROJECTS) {
   calls = [];
   shownRuns = runs;
-  mockIPC(backend);
+  mockIPC(backend, { shouldMockEvents: true });
   await i18next.changeLanguage("en");
-  useApp.setState({ view, approvalDrafts: {}, newRunOpen: false, quitOpen: false, overviewLoaded: true, overview: { runs, projects: PROJECTS, pendingProposals: 0, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } });
+  useApp.setState({ view, preflight: null, mcp: null, approvalDrafts: {}, newRunOpen: false, quitOpen: false, overviewLoaded: true, overview: { runs, projects, pendingProposals: 0, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } });
   useSearchEverywhere.setState({ open: false, scope: "all", query: "" });
   const container = document.createElement("div");
   document.body.append(container);

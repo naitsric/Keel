@@ -10,7 +10,6 @@ import { Button, Card, Field, inputClass, Segmented } from "../ui/primitives";
 import { AddProjectButton, useAddProject } from "./AddProject";
 import { McpCard } from "./McpCard";
 import { RemoveProjectDialog } from "./RemoveProjectDialog";
-import { TopBar } from "./TopBar";
 
 const lines = (text: string) =>
   text
@@ -361,7 +360,6 @@ export function SettingsView() {
   };
   return (
     <>
-      <TopBar back />
       <main className="flex-1 overflow-y-auto p-5">
         <h1 className="text-[18px] font-semibold">{t("settings.title")}</h1>
         <div className="mt-4 max-w-3xl space-y-4">

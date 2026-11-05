@@ -11,16 +11,20 @@ const app = () => useApp.getState();
 
 const showPalette = (scope: SearchScope) => () => useSearchEverywhere.getState().show(scope);
 
-/** Already there, nothing changes: a page keeps what it's showing, like the board's project. */
-const goTo = (view: View) => () => {
-  if (app().view.name !== view.name) app().navigate(view);
+/**
+ * Already there, nothing changes: a page keeps what it's showing, like the board's project. From a
+ * run opened on that page, it's the same as Back, so it comes back to that project too.
+ */
+const goTo = (target: View) => () => {
+  const { view, navigate } = app();
+  if (view.name === target.name) return;
+  navigate(view.name === "run" && view.backTo?.name === target.name ? view.backTo : target);
 };
 
-/** Where the top bar's Back goes, or null where it doesn't show. */
+/** Where the top bar's Back goes, or null where it doesn't show: only a run has one. */
 function backTarget(): View | null {
   const { view } = app();
-  if (view.name === "home") return null;
-  return (view.name === "run" && view.backTo) || { name: "home" };
+  return view.name === "run" ? (view.backTo ?? { name: "home" }) : null;
 }
 
 function goBack() {

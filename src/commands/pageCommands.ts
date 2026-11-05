@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { KEYS } from "./keys";
 import { registerCommands } from "./registry";
 
@@ -27,11 +27,16 @@ export function useRunCommands(actions: RunPageActions) {
   );
 }
 
-/** `newTask` is null until the board can take one, and then ⌘N is New run as everywhere else. */
+/**
+ * `newTask` is null until the board can take one, and then ⌘N is New run as everywhere else. The
+ * top bar's button shows which, so this registers again when it changes, and before paint, so the
+ * button doesn't say New run for a moment on the way in.
+ */
 export function useBoardCommands(newTask: (() => void) | null) {
   const page = useLatest(newTask);
-  useEffect(
+  const canTakeOne = newTask !== null;
+  useLayoutEffect(
     () => registerCommands([{ id: "board.newTask", title: "shortcuts.newTask", category: "shortcuts.categories.board", keybinding: KEYS.newRun, context: "board", enabled: () => page.current !== null, run: () => page.current?.() }]),
-    [page],
+    [page, canTakeOne],
   );
 }

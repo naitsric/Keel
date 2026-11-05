@@ -99,12 +99,12 @@ const LONG_TEXT = "I rebuilt how `add` handles its arguments in calc.py, because
 const LONG_FILES = Array.from({ length: 14 }, (_, i) => `src/modules/billing/invoices/generated/handlers/handler_${i}.py`);
 const builtText = noChanges ? "I changed nothing. The bug in `add` is already fixed on main, in commit 8a3f21c, and `python3 test_calc.py` passes without touching the code.\n\nThere's no change to review. You can close this issue." : long ? LONG_TEXT : "I fixed `add` in calc.py: it subtracted instead of adding.\n\nTests: `make test` passes.";
 const builtFiles = noChanges ? [] : [...(long ? LONG_FILES : ["calc.py"]), ...(params.get("workflows") === "1" ? [".github/workflows/ci.yml"] : [])];
+const round = params.get("round") === "2" ? 1 : 0;
 const specAttempt: Attempt = { ...attempt, id: "a0", stepId: "spec", tools: "readOnly", state: "succeeded", reason: null, modelActual: "claude-opus-5-5", filesChanged: null, resultText: "1. add returns the sum.\n2. The tests pass.", finishedAt: at(2) };
 const builtAttempt: Attempt = { ...attempt, state: "succeeded", reason: null, shaAfter: "28c696fd11223344556677889900aabbccddeeff", finishedAt: at(1), rawSha256: "9f2c", resultText: builtText, filesChanged: builtFiles, runFiles: builtFiles };
-const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12" };
-const approvalAttempt: Attempt = { ...attempt, id: "a3", stepId: "approval", kind: "approval", tools: "none", state: delivered ? "succeeded" : "waitingApproval", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, rawSha256: null, finishedAt: delivered ? at(0) : null };
+const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", round, state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12" };
+const approvalAttempt: Attempt = { ...attempt, id: "a3", stepId: "approval", kind: "approval", tools: "none", round, state: delivered ? "succeeded" : "waitingApproval", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, rawSha256: null, finishedAt: delivered ? at(0) : null };
 const prAttempt: Attempt = { ...attempt, id: "a4", stepId: "pull-request", kind: "deliver", tools: "none", state: "succeeded", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: "https://github.com/acme/app/pull/12", rawSha256: null, finishedAt: at(0) };
-const round = params.get("round") === "2" ? 1 : 0;
 const reworkAttempt: Attempt = { ...builtAttempt, id: "a1b", number: 2, round: 1, resultText: "I added the role check the security review asked for, in app/api.py.\n\nTests: `make test` passes." };
 const reviewer = (id: string, verdict: "approved" | "changes", summary: string, findings: string[]): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "succeeded", reason: null, tools: "readOnly", filesChanged: null, resultText: null, finishedAt: at(1), output: { verdict, findings, summary } as Attempt["output"] });
 const skippedReviewer = (id: string): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "skipped", reason: { code: "noMatchingPaths", paths: ["**/*.tsx"] }, tools: "readOnly", filesChanged: null, resultText: null, modelActual: null, finishedAt: at(1), output: null });
@@ -126,6 +126,47 @@ const runWorkflow: WorkflowStep[] =
     : gate === "end"
       ? [...stepNamed("spec"), ...stepNamed("builder"), ...stepNamed("approval")]
       : workflow.filter((step) => !(noCheck && step.type === "check") && !(noReviews && (step.id === "reviews" || step.id === "approver")));
+// The flow diagram's scenes, as flow=running|rework|skipped|failed|many|unreadable|try. The others that
+// show it: flow=approval|limit|delivered, and no flow at all for a single step. They all work on
+// view=run, and flow=many also on view=workflows. width=900 is the narrowest the window gets.
+// node=<a step's name> selects it once the page has loaded, and saveProblem=noPrompt:builder makes
+// saving fail like that (with click=Save a copy to press it). Add theme=light to any of them.
+const learnerStep: WorkflowStep = { ...agentStep("learnings", "sonnet", "readOnly"), role: { kind: "learner" } };
+const setupStep: WorkflowStep = { type: "setup", id: "setup", run: "uv sync --frozen" };
+const fullWorkflow: WorkflowStep[] = [setupStep, ...workflow, learnerStep];
+const ran = (stepId: string, s: AttemptState, fields: Partial<Attempt> = {}): Attempt => ({ ...attempt, id: `${stepId}-${fields.round ?? 0}-${fields.number ?? 1}`, stepId, state: s, reason: null, tools: "readOnly", filesChanged: null, resultText: null, modelActual: s === "skipped" ? null : "claude-sonnet-5-5", ...fields });
+const setupRan = ran("setup", "succeeded", { kind: "setup", tools: "setup", modelRequested: "", modelActual: null });
+const specRan = ran("spec", "succeeded", { modelRequested: "opus", modelActual: "claude-opus-5-5", resultText: "1. add returns the sum.\n2. The tests pass." });
+const builderRan = (fields: Partial<Attempt> = {}) => ran("builder", "succeeded", { tools: "build", filesChanged: ["calc.py"], runFiles: ["calc.py"], resultText: "I fixed add in calc.py.", ...fields });
+const checkRan = (s: AttemptState = "succeeded", fields: Partial<Attempt> = {}) => ran("check", s, { kind: "check", tools: "check", modelRequested: "", modelActual: null, prompt: "make test", exitCode: s === "succeeded" ? 0 : 1, reason: s === "failed" ? { code: "checkFailed", exitCode: 1 } : null, ...fields });
+const reviewRan = (id: string, s: AttemptState, fields: Partial<Attempt> = {}) => ran(id, s, { role: "reviewer", reason: s === "skipped" ? { code: "noMatchingPaths", paths: ["**/*.tsx"] } : null, ...fields });
+const verdict = (v: "approved" | "changes") => ({ output: { verdict: v, findings: [], summary: v === "approved" ? "No problems." : "The endpoint skips the role check." } as unknown as Attempt["output"] });
+const decided = (decision: "approve" | "rework") => ran("approver", "succeeded", { role: "approver", modelRequested: "opus", modelActual: "claude-opus-5-5", output: { decision, risk: "medium", reasons: "The finding is real.", instructions: "Add the role check." } as unknown as Attempt["output"] });
+const humanWaits = ran("approval", "waitingApproval", { kind: "approval", tools: "none", modelRequested: "", modelActual: null });
+const manySteps: WorkflowStep[] = [
+  setupStep,
+  ...Array.from({ length: 6 }, (_, i) => agentStep(`step-${i + 1}`, i % 2 ? "sonnet" : "opus", "build")),
+  agentStep("a-step-whose-name-is-much-too-long-to-fit-in-any-node-at-all", "claude-a-model-with-a-very-long-name-indeed", "build"),
+  { type: "check", id: "check", run: "make test" },
+  { type: "parallel", id: "reviews-with-a-rather-long-name-too", steps: [reviewerStep("security", []), reviewerStep("ux", ["**/*.tsx"]), reviewerStep("ui", ["**/*.tsx"]), reviewerStep("code", []), reviewerStep("a-reviewer-with-a-very-long-name-as-well", [])] },
+  { ...agentStep("approver", "opus", "readOnly"), role: { kind: "approver", reworkTo: "step-6", maxRounds: 2 } },
+  agentStep("after-the-reviews", "sonnet", "build"),
+  { type: "check", id: "check-again", run: "make test" },
+  { type: "approval", id: "approval" },
+  { type: "deliver", id: "pull-request" },
+  learnerStep,
+];
+const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Attempt[]; round: number }> = {
+  running: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "running", { modelActual: "claude-sonnet-5-5" }), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "running")] },
+  // Back at the builder: what ran after it is from round 1, so it doesn't count as done.
+  rework: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "succeeded", verdict("changes")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", verdict("approved")), decided("rework"), builderRan({ round: 1, number: 2, state: "running", finishedAt: null })] },
+  skipped: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), humanWaits] },
+  failed: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("failed"), checkRan("failed", { number: 2 })] },
+  many: { steps: manySteps, round: 0, attempts: [setupRan, ...Array.from({ length: 6 }, (_, i) => ran(`step-${i + 1}`, "succeeded", { modelRequested: i % 2 ? "sonnet" : "opus", modelActual: i % 2 ? "claude-sonnet-5-5" : "claude-opus-5-5" })), ran("a-step-whose-name-is-much-too-long-to-fit-in-any-node-at-all", "succeeded", { modelRequested: "claude-a-model-with-a-very-long-name-indeed", modelActual: "claude-a-model-with-a-very-long-name-indeed" }), checkRan(), reviewRan("security", "succeeded", verdict("approved")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", verdict("approved")), reviewRan("a-reviewer-with-a-very-long-name-as-well", "succeeded", verdict("approved")), decided("approve"), ran("after-the-reviews", "succeeded", { filesChanged: ["calc.py"], runFiles: ["calc.py"] }), checkRan("succeeded", { id: "check-again-0-1", stepId: "check-again" }), humanWaits] },
+  unreadable: { steps: null, round: 0, attempts: [setupRan, specRan, builderRan(), reviewRan("security", "succeeded", verdict("approved")), checkRan("failed")] },
+  try: { steps: [setupStep, { type: "check", id: "try-check", run: "pnpm test" }], round: 0, attempts: [setupRan, checkRan("failed", { id: "try-check-0-1", stepId: "try-check", prompt: "pnpm test" })] },
+};
+const flowScene = FLOW_SCENES[params.get("flow") ?? ""];
 const note = (seq: number, text: string, paths: string[]): BrainNote => ({ seq, projectId: "p1", kind: "map", state: "active", text, evidence: null, paths, commitSha: "4f4c706aa11", runId: "r1", attemptId: "a1", createdAt: at(4000), decidedAt: null });
 const mapNotes = [
   { ...note(1, "The API lives in app/api, one file per resource.", ["app/api"]), stale: false, included: true },
@@ -140,13 +181,13 @@ const run: Run = {
   title: "#7 The add function in calc.py is wrong",
   baseRef: "main",
   request: "Fix add",
-  workflow: waiting ? runWorkflow : [agentStep("builder", "sonnet", "build")],
+  workflow: flowScene ? (flowScene.steps as WorkflowStep[]) : waiting ? runWorkflow : [agentStep("builder", "sonnet", "build")],
   language: "en",
   sourceIssue: waiting ? { number: 7, title: "add is wrong", author: "someone", url: "https://github.com/acme/app/issues/7" } : null,
   branch: "keel/5e882d0f",
   prUrl: delivered ? "https://github.com/acme/app/pull/12" : null,
   prNumber: delivered ? 12 : null,
-  round: params.get("round") === "2" ? 1 : 0,
+  round: flowScene?.round ?? (params.get("round") === "2" ? 1 : 0),
   createdAt: at(4),
   finishedAt: delivered ? at(0) : null,
 };
@@ -181,11 +222,14 @@ index 12ee743..4693ad3 100644
 const expires = params.get("expires");
 const expiresAt = expires === null ? null : Number.isNaN(Number(expires)) ? expires : new Date(Date.now() + Number(expires) * 86400000).toISOString();
 
+// The status bar: session=checking, session=out, claude=missing, and email=long to see it cut. With
+// runs=quiet nothing runs or waits, and runs=many has more of both than fit. mcp=on|port for MCP.
+const longEmail = "someone.with.a.very.long.address@a-company-with-a-very-long-name.example.com";
 const preflight: Preflight = {
   claudeFound: params.get("claude") !== "missing",
   gitFound: true,
-  version: { status: "supported", found: "2.1.318" },
-  auth: params.get("session") === "out" ? { loggedIn: false, method: null, provider: null, subscription: null, email: null, orgName: null, expiresAt: null } : { loggedIn: true, method: "claude.ai", provider: "firstParty", subscription: "max", email: "you@example.com", orgName: null, expiresAt },
+  version: params.get("claude") === "missing" ? null : { status: "supported", found: "2.1.318" },
+  auth: params.get("claude") === "missing" ? null : params.get("session") === "out" ? { loggedIn: false, method: null, provider: null, subscription: null, email: null, orgName: null, expiresAt: null } : { loggedIn: true, method: "claude.ai", provider: "firstParty", subscription: "max", email: params.get("email") === "long" ? longEmail : "you@example.com", orgName: null, expiresAt },
   ignoredEnv: params.get("env") === "key" ? ["ANTHROPIC_API_KEY"] : [],
   blocker: params.get("session") === "out" ? { code: "claudeLoggedOut" } : null,
   ghFound: params.get("gh") !== "missing",
@@ -212,7 +256,11 @@ const row = (id: string, title: string, s: AttemptState, reason: Reason | null, 
 const runs: RunRow[] =
   params.get("empty") === "1"
     ? []
-    : [
+    : params.get("runs") === "quiet"
+      ? [row("r1", "The add function in calc.py is wrong. Fix it, then run the tests.", "succeeded", null, "claude-haiku-5-5", 6, 90)]
+      : params.get("runs") === "many"
+        ? Array.from({ length: 150 }, (_, i) => row(`m${i}`, `Run number ${i + 1}`, i % 3 === 0 ? "running" : "waitingApproval", null, "claude-sonnet-5-5", 3, 10 + i))
+        : [
         row("r2", "Add a retry to the payment webhook", "running", null, "claude-opus-5-5", 12, 6),
         row("r3", "The calendar repeats a holiday in 2030", "stalled", REASONS.stalled ?? null, "claude-sonnet-5-5", 4, 14),
         row("r4", "Review the login form", "queued", REASONS.queued ?? null, "haiku", null, 1),
@@ -411,11 +459,17 @@ mockIPC((command, args) => {
       };
     case "workflows_list":
       return [
-        { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: workflow },
+        ...(params.get("flow") === "many" ? [{ id: "many", name: i18next.language === "es" ? "Muchos pasos" : "Many steps", builtin: false, steps: manySteps }] : []),
+        { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: [...workflow, learnerStep] },
         { id: "mine", name: i18next.language === "es" ? "Solo revisiones" : "Reviews only", builtin: false, steps: workflow.slice(3) },
       ];
+    case "workflow_save": {
+      const problem = params.get("saveProblem")?.split(":");
+      if (problem) throw { code: "blocked", reason: { code: "invalidWorkflow", problem: problem[0], step: problem[1] ?? "" }, detail: null };
+      return (args as { workflow: unknown }).workflow;
+    }
     case "run_attempts":
-      return (args as { runId?: string } | undefined)?.runId === "try1" ? tryAttempts() : attemptsList;
+      return (args as { runId?: string } | undefined)?.runId === "try1" ? tryAttempts() : flowScene ? flowScene.attempts : attemptsList;
     case "github_status": {
       if ((args as { projectId?: string } | undefined)?.projectId === freshProject.id) return setupAccounts((args as { account?: string | null }).account);
       const access = params.get("access");
@@ -507,8 +561,11 @@ mockIPC((command, args) => {
 });
 
 void useApp.getState().refreshOverview();
-useApp.setState({ preflight });
-if (view === "run") useApp.setState({ view: { name: "run", runId: "r1" } });
+void useApp.getState().refreshMcp();
+useApp.setState({ preflight: params.get("session") === "checking" ? null : preflight });
+// from=board or from=brain shows a run opened on that page: it stays the current one in the top bar.
+const from = params.get("from");
+if (view === "run") useApp.setState({ view: { name: "run", runId: "r1", backTo: from === "board" ? { name: "board", projectId: "p1" } : from === "brain" ? { name: "brain" } : undefined } });
 if (view === "settings") useApp.setState({ view: { name: "settings" } });
 if (view === "workflows") useApp.setState({ view: { name: "workflows" } });
 if (view === "brain") useApp.setState({ view: { name: "brain" } });
@@ -523,6 +580,14 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <App />
   </React.StrictMode>,
 );
+
+const width = params.get("width");
+const page = document.getElementById("root");
+if (width && page) page.style.width = `${width}px`;
+const flowNode = params.get("node");
+if (flowNode) {
+  setTimeout(() => document.querySelector<HTMLElement>(`[data-flow-id="${flowNode}"]`)?.click(), 1000);
+}
 
 // click=<a button's text> presses it once the page has loaded, to see what it opens. then=<another>
 // presses the last one with that text a moment later, which is the one in a dialog it opened.

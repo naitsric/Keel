@@ -160,8 +160,3 @@ export function focusAttempt<T extends { stepId: string; state: string; role?: s
   // Proposals are a bonus: if they failed, the run is still about what came before them.
   return [...attempts].reverse().find((a) => a.role !== "learner") ?? attempts[attempts.length - 1];
 }
-
-/** Steps of a workflow with parallel groups opened up, in order. */
-export function flatSteps(steps: { type: string; id: string; steps?: { id: string }[] }[]): { id: string }[] {
-  return steps.flatMap((step) => (step.type === "parallel" ? (step.steps ?? []) : [step]));
-}

@@ -1,9 +1,13 @@
 // Approving publishes work, and plain Enter runs whatever is in the palette. These hold the line.
+import { emit } from "@tauri-apps/api/event";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import i18next from "../i18n";
 import en from "../i18n/en.json";
 import es from "../i18n/es.json";
-import type { View } from "../lib/store";
+import { useApp, type View } from "../lib/store";
+import { buildMenuModel, type MenuSpec, type PredefinedItem } from "../menu/menuModel";
+import { runMenuCommand } from "../menu/nativeMenu";
 import { KEYS } from "./keys";
 import { useCommands, type Command } from "./registry";
 import { answers, button, callsTo, calls, hideApp, note, paletteOpen, paletteRow, paletteRows, pressEnter, pressKey, pressMod, row, settle, showApp, tapShift, type, view } from "./testApp";
@@ -16,6 +20,8 @@ const NOT_ALWAYS_THERE = ["project_remove", "project_try_check"];
 /** Words that mean the same, in the ids and in what the person reads. "New run" opens a dialog, so it's allowed. */
 const DECIDING_WORDS = /approve|reject|retry|resume|abandon|accept|retire|dismiss|\bto ?do\b|\bstart|deliver|merge|remove|delete|another round/i;
 const DECIDING_WORDS_ES = /aprob|rechaz|reintent|reanud|abandon|acept|retir|descart|inici|entreg|fusion|elimin|otra ronda/i;
+/** The same calls, as the code writes them. */
+const DECIDING_CALL = /api\.(approvalAnswer|reworkLimitAnswer|runStart|attemptRetry|attemptAbandon|brainAccept|brainDismiss|brainRetire|brainGenerateMap|decisionRetire|cardMove|cardDelete|projectAdd|projectRemove|projectTryCheck)\b/;
 
 /** The app's own code as text, by path. */
 const SOURCES = import.meta.glob<string>(["/src/**/*.{ts,tsx}", "!/src/**/*.test.{ts,tsx}"], { query: "?raw", import: "default", eager: true });
@@ -87,8 +93,14 @@ describe("safety", () => {
     it("the code that registers commands never mentions a deciding call", () => {
       const registering = Object.keys(SOURCES).filter((file) => !file.endsWith("/registry.ts") && SOURCES[file].includes("registerCommands("));
       expect(registering.sort()).toEqual(["/src/commands/appCommands.ts", "/src/commands/pageCommands.ts"]);
-      const deciding = /api\.(approvalAnswer|reworkLimitAnswer|runStart|attemptRetry|attemptAbandon|brainAccept|brainDismiss|brainRetire|brainGenerateMap|decisionRetire|cardMove|cardDelete|projectAdd|projectRemove|projectTryCheck)\b/;
-      for (const file of registering) expect(SOURCES[file], file).not.toMatch(deciding);
+      for (const file of registering) expect(SOURCES[file], file).not.toMatch(DECIDING_CALL);
+    });
+
+    it("the bars don't call the backend at all: they only run commands", () => {
+      for (const file of ["/src/views/TopBar.tsx", "/src/views/StatusBar.tsx"]) {
+        expect(SOURCES[file], file).not.toMatch(DECIDING_CALL);
+        expect(SOURCES[file], file).not.toMatch(/\bapi\b/);
+      }
     });
 
     it("the deciding calls are still called what this test says", () => {
@@ -111,7 +123,7 @@ describe("safety", () => {
     });
 
     it("binds nothing the native menu takes first, or main.tsx blocks", async () => {
-      // src-tauri/src/menu.rs: Quit, Hide, Hide Others, Close, Minimize, Settings, and the Edit menu.
+      // The system's items in src/menu/menuModel.ts: Quit, Hide, Hide Others, Close, Minimize, and the Edit menu. And Settings.
       const MENU = ["$mod+KeyQ", "$mod+KeyH", "$mod+Alt+KeyH", "$mod+KeyW", "$mod+KeyM", "$mod+Comma", "$mod+KeyZ", "$mod+Shift+KeyZ", "$mod+KeyX", "$mod+KeyC", "$mod+KeyV", "$mod+KeyA"];
       // src/main.tsx: reload and zoom.
       const BLOCKED = ["$mod+KeyR", "$mod+Equal", "$mod+Shift+Equal", "$mod+Minus", "$mod+Digit0"];
@@ -329,6 +341,393 @@ describe("safety", () => {
     });
   });
 
+  describe("the native menu", () => {
+    const entries = (menus: MenuSpec[]) => menus.flatMap((menu) => menu.items);
+    const commandItems = (menus: MenuSpec[]) => entries(menus).flatMap((entry) => (entry.kind === "command" ? [entry] : []));
+    const inLanguage = (language: object) => (key: string) => translated(language, key) as string;
+    const modelHere = (language: object = en) => buildMenuModel(Object.values(useCommands.getState().commands), inLanguage(language));
+
+    /** The only things in the menu that aren't commands. None of them answers a run. */
+    const SYSTEM_ITEMS: PredefinedItem[] = ["about", "hide", "hideOthers", "showAll", "quit", "undo", "redo", "cut", "copy", "paste", "selectAll", "minimize", "zoom", "close"];
+
+    it.each(PAGES)("has only registered commands and the system's own items, on $name", async (page) => {
+      await showApp(RUNS, page.view);
+      const registered = Object.keys(useCommands.getState().commands);
+      const items = commandItems(modelHere());
+      expect(items.length).toBeGreaterThan(0);
+      for (const item of items) expect(registered).toContain(item.commandId);
+      for (const entry of entries(modelHere())) {
+        expect(["command", "predefined", "separator"]).toContain(entry.kind);
+        if (entry.kind === "predefined") expect(SYSTEM_ITEMS).toContain(entry.name);
+      }
+    });
+
+    it.each(PAGES)("no item is about deciding, in any language, on $name", async (page) => {
+      await showApp(RUNS, page.view);
+      for (const [language, words] of [[en, DECIDING_WORDS], [es, DECIDING_WORDS_ES]] as const) {
+        const menus = modelHere(language);
+        for (const menu of menus) expect(menu.title).toBeTruthy();
+        expect(menus.map((menu) => menu.title).join(" ")).not.toMatch(words);
+        for (const entry of entries(menus)) {
+          if (entry.kind === "separator") continue;
+          expect(entry.title, JSON.stringify(entry)).toBeTruthy();
+          expect(entry.title).not.toMatch(words);
+        }
+      }
+    });
+
+    it.each(PAGES)("no item reaches a deciding call when chosen, on $name", async (page) => {
+      await showApp(RUNS, page.view);
+      for (const item of commandItems(modelHere())) {
+        act(() => runMenuCommand(item.commandId));
+        await settle();
+        pressEsc();
+        await settle();
+      }
+      expect(calls.filter((call) => DECIDES.includes(call.command))).toEqual([]);
+    });
+
+    it("gives an accelerator only to a key that means one thing everywhere", async () => {
+      await showApp(RUNS);
+      const keys = Object.fromEntries(commandItems(modelHere()).map((item) => [item.commandId, item.accelerator]));
+      expect(keys).toEqual({
+        "search.everywhere": null,
+        "search.findAction": "CmdOrCtrl+Shift+A",
+        "navigate.goToRun": "CmdOrCtrl+O",
+        "navigate.runs": "CmdOrCtrl+1",
+        "navigate.board": "CmdOrCtrl+2",
+        "navigate.workflows": "CmdOrCtrl+3",
+        "navigate.brain": "CmdOrCtrl+4",
+        "navigate.settings": "CmdOrCtrl+Comma",
+        "navigate.back": "CmdOrCtrl+BracketLeft",
+        "run.nextWaiting": null,
+        "run.previousWaiting": null,
+        "run.new": "CmdOrCtrl+N",
+      });
+    });
+
+    it("leaves the keys bound to a page to the keymap, as AppKit would take them first", async () => {
+      await showApp(RUNS, { name: "run", runId: "working" });
+      const onRun = Object.fromEntries(commandItems(modelHere()).map((item) => [item.commandId, item.accelerator]));
+      expect(onRun["run.showChanges"]).toBeNull();
+      expect(onRun["run.stopStep"]).toBeNull();
+      await hideApp();
+      await showApp(RUNS, { name: "board" });
+      const onBoard = Object.fromEntries(commandItems(modelHere()).map((item) => [item.commandId, item.accelerator]));
+      expect(onBoard["run.new"]).toBeNull();
+      expect(onBoard["board.newTask"]).toBeNull();
+    });
+
+    it("never gives an accelerator to a key without a modifier, on any page", async () => {
+      for (const page of PAGES) {
+        await showApp(RUNS, page.view);
+        for (const { accelerator } of commandItems(modelHere())) if (accelerator) expect(accelerator).toMatch(/^CmdOrCtrl\+/);
+        await hideApp();
+      }
+      await showApp(RUNS);
+    });
+
+    it("runs nothing while a dialog holds the keymap: ⌘, doesn't go to Settings behind it", async () => {
+      await showApp(RUNS);
+      act(() => useApp.setState({ newRunOpen: true }));
+      await settle();
+      for (const { commandId } of commandItems(modelHere())) {
+        act(() => runMenuCommand(commandId));
+        await settle();
+      }
+      expect(view()).toEqual({ name: "home" });
+      expect(paletteOpen()).toBe(false);
+    });
+
+    it("⌘, works once the dialog is gone, through the event Rust sends", async () => {
+      await showApp(RUNS);
+      act(() => useApp.setState({ newRunOpen: true }));
+      await settle();
+      await act(() => emit("keel://menu-command", "navigate.settings"));
+      await settle();
+      expect(view()).toEqual({ name: "home" });
+
+      pressKey("Escape", "Escape", {}, document.body);
+      await settle();
+      await act(() => emit("keel://menu-command", "navigate.settings"));
+      await settle();
+      expect(view()).toEqual({ name: "settings" });
+    });
+
+    it("runs nothing during a board's keyboard drag", async () => {
+      await showApp(RUNS, { name: "board" });
+      const card = document.querySelector<HTMLElement>("[data-card]") as HTMLElement;
+      act(() => card.focus());
+      pressKey(" ", "Space");
+      await settle(0);
+      for (const { commandId } of commandItems(modelHere())) {
+        act(() => runMenuCommand(commandId));
+        await settle(0);
+      }
+      expect(view().name).toBe("board");
+      expect(paletteOpen()).toBe(false);
+      expect(document.querySelector("form")).toBeNull();
+      expect(callsTo("card_move")).toEqual([]);
+    });
+
+    it("ignores a command it doesn't know, whatever the event says", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      for (const name of ["run.approve", "approval_answer", "card_move", ""]) await act(() => emit("keel://menu-command", name));
+      await settle();
+      expect(calls.filter((call) => DECIDES.includes(call.command))).toEqual([]);
+      expect(view()).toEqual({ name: "run", runId: WAITING });
+    });
+
+    it("from a run, a menu item opening another one starts the card's wait over", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      expect(button("Approve and open a draft")?.disabled).toBe(false);
+      await act(() => emit("keel://menu-command", "run.nextWaiting"));
+      await settle(0);
+      expect(view()).toMatchObject({ name: "run", runId: "r2" });
+      expect(button("Approve and open a draft")?.disabled).toBe(true);
+      expect(answers()).toEqual([]);
+    });
+
+    it("doesn't run a command twice when the key and the menu both fire for one press", async () => {
+      await showApp(RUNS);
+      pressMod("n", "KeyN");
+      await settle();
+      pressEsc();
+      await settle();
+      expect(useApp.getState().newRunOpen).toBe(false);
+      act(() => runMenuCommand("run.new"));
+      await settle();
+      expect(useApp.getState().newRunOpen).toBe(false);
+      await settle(300);
+      act(() => runMenuCommand("run.new"));
+      await settle();
+      expect(useApp.getState().newRunOpen).toBe(true);
+    });
+
+    it("is what's sent to Rust, in the language showing, and again when it changes", async () => {
+      await showApp(RUNS);
+      await settle(200);
+      const sent = () => (callsTo("menu_set").at(-1)?.args as { menus: MenuSpec[] }).menus;
+      expect(sent().map((menu) => menu.title)).toEqual(["Keel", "Edit", "Navigate", "Run", "Window"]);
+      await act(() => i18next.changeLanguage("es"));
+      await settle(200);
+      expect(sent().map((menu) => menu.title)).toEqual(["Keel", "Edición", "Navegar", "Ejecución", "Ventana"]);
+      expect(commandItems(sent()).find((item) => item.commandId === "run.new")?.title).toBe("Nueva ejecución");
+      await act(() => i18next.changeLanguage("en"));
+    });
+
+    it("the menu's code never mentions a deciding call", () => {
+      const files = Object.keys(SOURCES).filter((file) => file.startsWith("/src/menu/"));
+      expect(files.sort()).toEqual(["/src/menu/menuModel.ts", "/src/menu/nativeMenu.ts"]);
+      for (const file of files) expect(SOURCES[file], file).not.toMatch(DECIDING_CALL);
+    });
+  });
+
+  describe("the status bar's click", () => {
+    const APPROVE = "Approve and open a draft";
+    const waiting = () => document.querySelector<HTMLButtonElement>("footer button");
+
+    it("is the only thing to click there", async () => {
+      await showApp(RUNS);
+      expect(document.querySelectorAll("footer button")).toHaveLength(1);
+      expect(document.querySelectorAll("footer a, footer input, footer [tabindex], footer [role='button']")).toHaveLength(0);
+    });
+
+    it.each(PAGES)("answers nothing, however many times, on $name", async (page) => {
+      await showApp(RUNS, page.view);
+      for (let i = 0; i < RUNS.length * 2; i++) {
+        act(() => waiting()?.click());
+        await settle(300);
+      }
+      expect(view().name).toBe("run");
+      expect(calls.filter((call) => DECIDES.includes(call.command))).toEqual([]);
+    });
+
+    it("keeps Approve off for 800 ms where it lands, with focus on the note", async () => {
+      await showApp(RUNS);
+      act(() => waiting()?.click());
+      await settle(0);
+      expect(view()).toMatchObject({ name: "run", runId: WAITING });
+      expect(button(APPROVE)?.disabled).toBe(true);
+      expect(document.activeElement).toBe(note());
+      await settle(799);
+      expect(button(APPROVE)?.disabled).toBe(true);
+      await settle(1);
+      expect(button(APPROVE)?.disabled).toBe(false);
+    });
+
+    it("starts the wait over on the next run, though the last card was armed", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      expect(button(APPROVE)?.disabled).toBe(false);
+      act(() => waiting()?.click());
+      await settle(0);
+      expect(view()).toMatchObject({ name: "run", runId: "r2" });
+      expect(button(APPROVE)?.disabled).toBe(true);
+    });
+
+    it("does nothing on the only run waiting, so the card and its note aren't disturbed", async () => {
+      await showApp([row(WAITING, "waitingApproval")], { name: "run", runId: WAITING });
+      await settle(800);
+      type("Half a thought");
+      act(() => waiting()?.click());
+      await settle(0);
+      expect((note() as HTMLTextAreaElement).value).toBe("Half a thought");
+      expect(button(APPROVE)?.disabled).toBe(false);
+      expect(answers()).toEqual([]);
+    });
+
+    it("from the keyboard, Enter opens the run and the next ones answer nothing", async () => {
+      await showApp(RUNS);
+      act(() => waiting()?.focus());
+      for (let i = 0; i < 6; i++) {
+        pressEnter();
+        await settle(300);
+      }
+      expect(view()).toMatchObject({ name: "run", runId: WAITING });
+      expect(document.activeElement).toBe(note());
+      expect(answers()).toEqual([]);
+    });
+
+    it("from the keyboard, Enter answers nothing on a card that starts with its focus on Close this run", async () => {
+      await showApp([row("empty", "waitingApproval")]);
+      act(() => waiting()?.focus());
+      for (let i = 0; i < 6; i++) {
+        pressEnter();
+        await settle(300);
+      }
+      expect(document.activeElement).toBe(button("Close this run"));
+      expect(answers()).toEqual([]);
+    });
+
+    it("held Enter doesn't go through the runs", async () => {
+      await showApp(RUNS);
+      act(() => waiting()?.focus());
+      pressEnter({ repeat: true });
+      await settle();
+      expect(view()).toEqual({ name: "home" });
+    });
+
+    it("does nothing during a board's keyboard drag or under a dialog", async () => {
+      await showApp(RUNS, { name: "board" });
+      const card = document.querySelector<HTMLElement>("[data-card]") as HTMLElement;
+      act(() => card.focus());
+      pressKey(" ", "Space");
+      await settle(0);
+      act(() => waiting()?.click());
+      await settle(0);
+      expect(view().name).toBe("board");
+      pressKey("Escape", "Escape", {}, document.body);
+      await settle(0);
+
+      act(() => useApp.setState({ newRunOpen: true }));
+      await settle(0);
+      act(() => waiting()?.click());
+      await settle(0);
+      expect(view().name).toBe("board");
+      expect(callsTo("card_move")).toEqual([]);
+    });
+  });
+
+  describe("the arrow keys", () => {
+    const APPROVE = "Approve and open a draft";
+    const firstRow = () => document.querySelector<HTMLButtonElement>("tbody button") as HTMLButtonElement;
+    const enters = async () => {
+      for (let i = 0; i < 6; i++) {
+        pressEnter();
+        await settle(300);
+      }
+    };
+
+    it("⏎ on a row opens the run, and the ones after it answer nothing, on a card long since armed", async () => {
+      await showApp(RUNS);
+      act(() => firstRow().focus());
+      pressKey("ArrowDown", "ArrowDown");
+      expect(document.activeElement?.textContent).toBe("Run r2");
+      await enters();
+      expect(view()).toMatchObject({ name: "run", runId: "r2" });
+      expect(document.activeElement).toBe(note());
+      expect(button(APPROVE)?.disabled).toBe(false);
+      expect(answers()).toEqual([]);
+    });
+
+    it("⏎ on a row leaves Approve off for its 800 ms", async () => {
+      await showApp(RUNS);
+      act(() => firstRow().focus());
+      pressEnter();
+      await settle(0);
+      expect(button(APPROVE)?.disabled).toBe(true);
+      await settle(799);
+      expect(button(APPROVE)?.disabled).toBe(true);
+    });
+
+    it("⏎ on a row answers nothing on a card that starts with its focus on Close this run", async () => {
+      await showApp([row("empty", "waitingApproval")]);
+      act(() => firstRow().focus());
+      await enters();
+      expect(document.activeElement).toBe(button("Close this run"));
+      expect(answers()).toEqual([]);
+    });
+
+    it("held down on a row, Enter doesn't open it", async () => {
+      await showApp(RUNS);
+      act(() => firstRow().focus());
+      pressEnter({ repeat: true });
+      await settle();
+      expect(view()).toEqual({ name: "home" });
+    });
+
+    it.each(["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End"])("%s only moves, wherever it's pressed on a card that's armed", async (key) => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      type("A reason");
+      const places = [note(), button(APPROVE), button("Reject"), ...document.querySelectorAll('[role="radio"]')];
+      for (const place of places) {
+        act(() => (place as HTMLElement).focus());
+        pressKey(key, key);
+        await settle();
+      }
+      expect(view()).toEqual({ name: "run", runId: WAITING });
+      expect(calls.filter((call) => DECIDES.includes(call.command))).toEqual([]);
+    });
+
+    it("↑ ↓ on the rows call nothing that decides, and don't press what they land on", async () => {
+      await showApp(RUNS);
+      act(() => firstRow().focus());
+      for (const key of ["ArrowDown", "ArrowDown", "ArrowUp", "End", "Home"]) pressKey(key, key);
+      await settle();
+      expect(view()).toEqual({ name: "home" });
+      expect(calls.filter((call) => DECIDES.includes(call.command))).toEqual([]);
+    });
+
+    it("the MCP switch and the language don't move with the arrows", async () => {
+      await showApp(RUNS, { name: "settings" });
+      for (const radio of document.querySelectorAll<HTMLElement>('[role="radio"]')) {
+        act(() => radio.focus());
+        pressKey("ArrowRight", "ArrowRight");
+        pressKey("ArrowLeft", "ArrowLeft");
+      }
+      await settle();
+      expect(callsTo("mcp_settings_save")).toEqual([]);
+      expect(callsTo("language_set")).toEqual([]);
+    });
+  });
+
+  describe("the approval card's height", () => {
+    it("leaves room for both bars, so its buttons show without scrolling", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      const card = document.querySelector('section[role="alert"]') as HTMLElement;
+      const reserved = Number(/max-h-\[calc\(100vh-(\d+)px\)\]/.exec(card.className)?.[1]);
+      const top = Number(/h-\[(\d+)px\]/.exec((document.querySelector("header") as HTMLElement).className)?.[1]);
+      expect((document.querySelector("footer") as HTMLElement).className).toContain("h-6");
+      // Above and below the card: the page's padding, the run's title and the gap under it.
+      const page = 102;
+      expect(reserved).toBeGreaterThanOrEqual(top + 24 + page);
+    });
+  });
+
   describe("Approve around the palette", () => {
     const APPROVE = "Approve and open a draft";
 
@@ -352,6 +751,63 @@ describe("safety", () => {
       expect(button(APPROVE)?.disabled).toBe(true);
       await settle(800);
       expect(button(APPROVE)?.disabled).toBe(false);
+    });
+
+    it("is off when the palette opens from the top bar's field too", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      expect(button(APPROVE)?.disabled).toBe(false);
+      act(() => button("Search⇧⇧")?.click());
+      await settle(0);
+      expect(paletteOpen()).toBe(true);
+      expect(button(APPROVE)?.disabled).toBe(true);
+    });
+
+    it("is off under New run, which is a click away on the run page, and waits again after it closes", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      expect(button(APPROVE)?.disabled).toBe(false);
+
+      act(() => button("New run")?.click());
+      await settle(0);
+      expect(useApp.getState().newRunOpen).toBe(true);
+      expect(button(APPROVE)?.disabled).toBe(true);
+      await settle(5000);
+      expect(button(APPROVE)?.disabled).toBe(true);
+
+      pressKey("Escape", "Escape", {}, document.body);
+      await settle(0);
+      expect(useApp.getState().newRunOpen).toBe(false);
+      act(() => button(APPROVE)?.click());
+      expect(answers()).toEqual([]);
+      await settle(799);
+      expect(button(APPROVE)?.disabled).toBe(true);
+      await settle(1);
+      expect(button(APPROVE)?.disabled).toBe(false);
+    });
+
+    it("waits for a dialog already open when the card appears under it", async () => {
+      await showApp(RUNS);
+      act(() => useApp.setState({ newRunOpen: true, view: { name: "run", runId: WAITING } }));
+      await settle(5000);
+      expect(button(APPROVE)?.disabled).toBe(true);
+      pressKey("Escape", "Escape", {}, document.body);
+      await settle(799);
+      expect(button(APPROVE)?.disabled).toBe(true);
+      await settle(1);
+      expect(button(APPROVE)?.disabled).toBe(false);
+    });
+
+    it("waits under the changes too, even if the window comes back meanwhile", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      pressMod("d", "KeyD");
+      await settle();
+      expect(button(APPROVE)?.disabled).toBe(true);
+      act(() => void window.dispatchEvent(new Event("blur")));
+      act(() => void window.dispatchEvent(new Event("focus")));
+      await settle(5000);
+      expect(button(APPROVE)?.disabled).toBe(true);
     });
 
     it("goes off with the window even while the card is open, as before", async () => {
@@ -402,6 +858,27 @@ describe("safety", () => {
       pressMod("n", "KeyN");
       await settle(0);
       expect(document.querySelector("form")).not.toBeNull();
+      expect(callsTo("card_move")).toEqual([]);
+    });
+
+    it("a board drag holds clicks on the top bar too, so nothing opens that typing would drop the card from", async () => {
+      await showApp(RUNS, { name: "board" });
+      const card = document.querySelector<HTMLElement>("[data-card]") as HTMLElement;
+      act(() => card.focus());
+      pressKey(" ", "Space");
+      await settle(0);
+      for (const clickable of document.querySelectorAll<HTMLElement>("header button")) act(() => clickable.click());
+      await settle(0);
+      expect(paletteOpen()).toBe(false);
+      expect(document.querySelector("form")).toBeNull();
+      expect(useApp.getState().newRunOpen).toBe(false);
+      expect(view().name).toBe("board");
+
+      pressKey("Escape", "Escape", {}, document.body);
+      await settle(0);
+      act(() => button("Search⇧⇧")?.click());
+      await settle(0);
+      expect(paletteOpen()).toBe(true);
       expect(callsTo("card_move")).toEqual([]);
     });
   });

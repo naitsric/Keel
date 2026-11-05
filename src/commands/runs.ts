@@ -11,6 +11,9 @@ const WAITING_FOR_YOU: AttemptState[] = ["waitingApproval", "blocked", "stalled"
 
 export const isWaitingForYou = (state: AttemptState) => WAITING_FOR_YOU.includes(state);
 
+/** A run with a step working now. A queued one is waiting for room, and a stalled one for you. */
+export const isWorking = (state: AttemptState) => state === "preparing" || state === "running";
+
 /**
  * The next waiting run after the one showing, going round; `step` -1 goes the other way. It only
  * sees the runs the overview loads, the newest 200: one waiting further back can't be reached with

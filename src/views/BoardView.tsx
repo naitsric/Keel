@@ -13,7 +13,6 @@ import { useApp } from "../lib/store";
 import { Button, cx, Field, inputClass, Modal, StateBadge } from "../ui/primitives";
 import { AddProject, useAddProject } from "./AddProject";
 import { BlockerNotice } from "./Home";
-import { TopBar } from "./TopBar";
 
 type Dialog = { kind: "task"; card: BoardCard | null } | { kind: "delete"; card: BoardCard } | { kind: "import" };
 
@@ -29,7 +28,7 @@ function NoticeBar({ notice, onDismiss }: { notice: BoardNotice; onDismiss?: () 
   const navigate = useApp((s) => s.navigate);
   return (
     <div role="alert" className="flex flex-wrap items-center gap-2 rounded-md border border-border-strong bg-inset px-3 py-2 text-[12.5px] text-warning">
-      <span className="min-w-0 flex-1">{notice.text}</span>
+      <span className="selectable min-w-0 flex-1">{notice.text}</span>
       {notice.settings && <Button onClick={() => navigate({ name: "settings" })}>{t("newRun.openSettings")}</Button>}
       {onDismiss && (
         <Button variant="ghost" aria-label={t("board.dismiss")} title={t("board.dismiss")} className="px-1.5" onClick={onDismiss}>
@@ -355,7 +354,8 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
   const applyNewest = useMemo(() => newestOnly<Board>(setBoard), []);
   const paused = board?.paused ?? null;
 
-  useBoardCommands(board ? () => setDialog({ kind: "task", card: null }) : null);
+  // By project, not by whether this one's cards have loaded, or the top bar's button would change its mind on every switch.
+  useBoardCommands(projects.length > 0 ? () => setDialog({ kind: "task", card: null }) : null);
   // A keyboard drag ends on Space, Enter or Tab anywhere in the window. Typing in a dialog or the
   // palette opened mid-drag would drop the card, and on Todo that starts a run.
   useKeymapHold(activeId !== null);
@@ -515,10 +515,10 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
 
   return (
     <>
-      <TopBar back />
       <main className="flex min-h-0 flex-1 flex-col gap-3 p-4">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
-          <h1 className="text-[18px] font-semibold">{t("board.title")}</h1>
+          {/* The top bar already says which page this is. */}
+          <h1 className="sr-only">{t("board.title")}</h1>
           {projects.length > 0 && (
             <select aria-label={t("board.project")} value={projectId} onChange={(e) => selectProject(e.target.value)} className={cx(inputClass, "w-48")}>
               {projects.map((p) => (

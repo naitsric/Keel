@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuditEvent } from "./api";
-import { accountsOf, activityFrom, approvalOutcome, commandsFrom, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, approvalOutcome, commandsFrom, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -205,9 +205,5 @@ describe("a run with several steps", () => {
     expect(focusAttempt([delivered, { stepId: "learn", state: "running", role: "learner" }])?.stepId).toBe("learn");
     const alone = { stepId: "learn", state: "failed", role: "learner" };
     expect(focusAttempt([alone])).toBe(alone);
-  });
-
-  it("opens up parallel groups", () => {
-    expect(flatSteps([{ type: "agent", id: "a" }, { type: "parallel", id: "g", steps: [{ id: "b" }, { id: "c" }] }]).map((s) => s.id)).toEqual(["a", "b", "c"]);
   });
 });

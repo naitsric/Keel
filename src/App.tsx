@@ -10,6 +10,8 @@ import { NewRunDialog } from "./views/NewRunDialog";
 import { ProjectSetupDialog } from "./views/ProjectSetupDialog";
 import { RunDetail } from "./views/RunDetail";
 import { SettingsView } from "./views/SettingsView";
+import { StatusBar } from "./views/StatusBar";
+import { TopBar } from "./views/TopBar";
 import { WorkflowsView } from "./views/WorkflowsView";
 
 function QuitDialog() {
@@ -37,12 +39,17 @@ export default function App() {
     <div className="flex h-full flex-col">
       {/* First, so its commands register before a page's and the palette keeps them on top. */}
       <Shortcuts />
-      {view.name === "home" && <Home />}
-      {view.name === "run" && <RunDetail key={view.runId} runId={view.runId} backTo={view.backTo} />}
-      {view.name === "settings" && <SettingsView />}
-      {view.name === "workflows" && <WorkflowsView />}
-      {view.name === "brain" && <BrainPage />}
-      {view.name === "board" && <BoardView initialProjectId={view.projectId} />}
+      <TopBar />
+      {/* One page at a time, which scrolls by itself, so what's above and below it stays put. */}
+      <div className="flex min-h-0 flex-1 flex-col">
+        {view.name === "home" && <Home />}
+        {view.name === "run" && <RunDetail key={view.runId} runId={view.runId} />}
+        {view.name === "settings" && <SettingsView />}
+        {view.name === "workflows" && <WorkflowsView />}
+        {view.name === "brain" && <BrainPage />}
+        {view.name === "board" && <BoardView initialProjectId={view.projectId} />}
+      </div>
+      <StatusBar />
       <NewRunDialog />
       <ProjectSetupDialog />
       <QuitDialog />

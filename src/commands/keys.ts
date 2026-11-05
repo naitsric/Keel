@@ -3,8 +3,8 @@
  *
  * Not here on purpose: Esc, which must stay Radix's to close a dialog (a dialog holding the keymap
  * would prevent its default, and Radix skips closing when it sees that), and what the native menu
- * in src-tauri/src/menu.rs takes first, or src/main.tsx blocks. `settings` is the menu's: it's only
- * shown.
+ * takes for its own items (see src/menu/menuModel.ts), or src/main.tsx blocks. `settings` is the
+ * menu's: it's only shown.
  */
 export const KEYS = {
   searchEverywhere: "Shift Shift",
