@@ -67,6 +67,7 @@
     "claudeMissing": "Claude Code no está instalado, o Keel no lo encuentra.",
     "gitMissing": "Git no está instalado, o Keel no lo encuentra.",
     "claudeLoggedOut": "No has iniciado sesión en Claude Code.",
+    "claudeNotResponding": "Claude Code no responde, así que Keel no puede comprobar tu sesión. Seguirá intentándolo.",
     "cliVersionTooOld": "Claude Code {{found}} es anterior a {{minimum}}, la versión más antigua que Keel soporta. Actualízalo e inténtalo de nuevo.",
     "cliVersionUntested": "Claude Code {{found}} no se ha probado con Keel, que soporta versiones anteriores a {{below}}. Las ejecuciones quedan en pausa para que el aislamiento no cambie sin aviso.",
     "unexpectedAuth": "Este paso no estaba usando tu sesión de suscripción ({{source}}), así que Keel lo detuvo antes de que hiciera trabajo.",
