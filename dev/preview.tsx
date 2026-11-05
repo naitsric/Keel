@@ -316,6 +316,8 @@ mockIPC((command, args) => {
       return run;
     case "run_diff":
       return DIFF;
+    case "run_adds_secret":
+      return params.get("secret") === "1";
     case "github_accounts":
       return params.get("gh") === "out" ? [] : [{ login: "you-personal", active: true, ok: true, scopes: ["repo"] }];
     case "run_proposals":

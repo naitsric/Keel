@@ -445,6 +445,14 @@ fn run_diff(state: State<'_, AppState>, run_id: String) -> CommandResult<String>
     Ok(mask_secrets(&state.engine.run_diff(&run_id)?))
 }
 
+/// Whether what approving would push looks like it holds a secret, which masking only hides here.
+#[tauri::command(async)]
+fn run_adds_secret(state: State<'_, AppState>, run_id: String) -> CommandResult<bool> {
+    Ok(keel_core::diff_adds_secret(
+        &state.engine.run_diff(&run_id)?,
+    ))
+}
+
 #[tauri::command(async)]
 fn rework_limit_answer(
     state: State<'_, AppState>,
@@ -780,6 +788,7 @@ pub fn run() {
             brain_dismiss,
             brain_retire,
             run_diff,
+            run_adds_secret,
             board_get,
             card_create,
             card_import_issue,

@@ -235,6 +235,20 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
       window.removeEventListener("blur", disarm);
     };
   }, []);
+  // Masking only hides a secret here. Approving would still push it with the branch.
+  const [addsSecret, setAddsSecret] = useState(false);
+  const changesSomething = files.length > 0;
+  useEffect(() => {
+    if (!changesSomething) return;
+    let current = true;
+    api
+      .runAddsSecret(run.id)
+      .then((found) => current && setAddsSecret(found))
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [run.id, changesSomething]);
   const answer = (approve: boolean) => {
     setBusy(true);
     api.approvalAnswer(attempt.id, approve, note).catch((e) => {
@@ -331,6 +345,12 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
         <p className="mt-2 flex gap-1.5 rounded-md border border-warning/40 bg-inset p-2 text-[12.5px] font-medium text-warning">
           <AlertTriangle size={14} className="mt-0.5 shrink-0" />
           {t("run.workflowWarning")}
+        </p>
+      )}
+      {addsSecret && (
+        <p className="mt-2 flex gap-1.5 rounded-md border border-warning/40 bg-inset p-2 text-[12.5px] font-medium text-warning">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          {t(delivers ? "run.secretWarning" : "run.secretWarningLocal")}
         </p>
       )}
       {empty ? (

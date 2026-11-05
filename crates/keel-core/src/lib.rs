@@ -7,7 +7,7 @@ mod secrets;
 
 use serde::{Deserialize, Serialize};
 
-pub use secrets::{MASK, Masked, mask_secrets, mask_value, serialize_masked};
+pub use secrets::{MASK, Masked, diff_adds_secret, mask_secrets, mask_value, serialize_masked};
 
 /// What a step may do. Maps to the exact tools Claude Code gets.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
