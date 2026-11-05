@@ -69,10 +69,16 @@ export function useKeymap(onDoubleShift: () => void) {
         },
       ]),
     );
-    return tinykeys(window, bindings, {
-      capture: true,
-      ignore: (event) => event.repeat || event.isComposing,
-    });
+    try {
+      return tinykeys(window, bindings, {
+        capture: true,
+        ignore: (event) => event.repeat || event.isComposing,
+      });
+    } catch (error) {
+      // tinykeys reads its keys with a regex lookbehind, which WebKit only has from Safari 16.4, and
+      // macOS 13.0 to 13.2 are older. Keel works without keys there. Throwing here would blank it.
+      console.error("keyboard shortcuts are off", error);
+    }
   }, [commands]);
 
   useEffect(() => detectDoubleShift(() => !keymapHeld() && onDoubleShift()), [onDoubleShift]);
