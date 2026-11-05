@@ -345,8 +345,10 @@ impl Engine {
         self.gh()?.accounts().map_err(gh_blocked)
     }
 
-    /// The accounts in `gh`, and what the project's account can do. Never changes the active one.
-    pub fn github_status(&self, project_id: &str) -> Result<GithubStatus> {
+    /// The accounts in `gh`, and what `account` can do in the project's repo. It takes the account
+    /// rather than reading the saved one, so a person sees what an account can do before saving it.
+    /// An account `gh` doesn't have counts as none. Never changes the active one.
+    pub fn github_status(&self, project_id: &str, account: Option<&str>) -> Result<GithubStatus> {
         let project = self.inner.store.project(project_id)?;
         let mut status = GithubStatus {
             repo: project.github_repo.clone(),
@@ -363,17 +365,18 @@ impl Engine {
             }
         };
         status.accounts = gh.accounts().map_err(gh_blocked)?;
-        let Some(login) = project.github_account else {
+        let Some(chosen) =
+            account.and_then(|login| status.accounts.iter().find(|a| a.login == login))
+        else {
             return Ok(status);
         };
-        if let Some(account) = status.accounts.iter().find(|a| a.login == login) {
-            status.excess_scopes = account
-                .scopes
-                .iter()
-                .filter(|s| !NEEDED_SCOPES.contains(&s.as_str()))
-                .cloned()
-                .collect();
-        }
+        let login = chosen.login.clone();
+        status.excess_scopes = chosen
+            .scopes
+            .iter()
+            .filter(|s| !NEEDED_SCOPES.contains(&s.as_str()))
+            .cloned()
+            .collect();
         let Some(repo) = project.github_repo else {
             status.error = Some(Reason::NoGithubRemote);
             return Ok(status);

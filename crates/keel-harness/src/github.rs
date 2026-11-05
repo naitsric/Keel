@@ -105,6 +105,7 @@ pub fn classify_error(text: &str) -> &'static str {
         "must have",
         "write access",
         "repository not found",
+        "could not resolve to a repository",
         "http 404",
     ]) {
         "noPermission"
@@ -402,6 +403,10 @@ mod tests {
             ("HTTP 401: Bad credentials", "notSignedIn"),
             (
                 "remote: Permission to a/b.git denied to someone.",
+                "noPermission",
+            ),
+            (
+                "GraphQL: Could not resolve to a Repository with the name 'a/b'. (repository)",
                 "noPermission",
             ),
             ("something else entirely", "other"),

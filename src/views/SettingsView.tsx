@@ -1,8 +1,9 @@
 import { AlertTriangle } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Language } from "../i18n";
 import { api, type EnvVar, type GithubStatus, type Project, type Service } from "../lib/api";
+import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, Field, inputClass, Segmented } from "../ui/primitives";
@@ -70,12 +71,47 @@ function ProjectSettingsCard({ project }: { project: Project }) {
   const [status, setStatus] = useState<GithubStatus | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const latestRequest = useRef(0);
+  const selected = account === NONE ? null : account;
 
+  // Asks about the account that's selected, saved or not. An answer that comes late never wins.
   const load = useCallback(() => {
-    api.githubStatus(project.id).then(setStatus).catch((e) => setError(errorText(t, e)));
-  }, [project.id, t]);
+    const request = ++latestRequest.current;
+    setChecking(true);
+    api
+      .githubStatus(project.id, selected)
+      .then((next) => {
+        if (request !== latestRequest.current) return;
+        setStatus(next);
+        setCheckError(null);
+      })
+      .catch((e) => {
+        if (request === latestRequest.current) setCheckError(errorText(t, e));
+      })
+      .finally(() => {
+        if (request === latestRequest.current) setChecking(false);
+      });
+  }, [project.id, selected, t]);
 
   useEffect(load, [load]);
+
+  // Access is given in the browser and accounts connect in Terminal, so look again on the way back.
+  useEffect(() => {
+    window.addEventListener("focus", load);
+    return () => window.removeEventListener("focus", load);
+  }, [load]);
+
+  const openOnGithub = (url: string) => {
+    setError(null);
+    api.openGithubUrl(url).catch((e) => setError(errorText(t, e)));
+  };
+
+  const connectAccount = () => {
+    setError(null);
+    api.openGithubLogin().catch((e) => setError(errorText(t, e)));
+  };
 
   const save = async () => {
     setError(null);
@@ -104,6 +140,9 @@ function ProjectSettingsCard({ project }: { project: Project }) {
   };
 
   const info = status?.info;
+  const repo = status?.repo ?? null;
+  const access = githubAccess(status);
+  const needsAccess = selected !== null && (access === "none" || access === "readOnly");
   return (
     <Card className="p-4">
       <h3 className="text-[14px] font-semibold">{project.name}</h3>
@@ -143,7 +182,33 @@ function ProjectSettingsCard({ project }: { project: Project }) {
           {t("settings.githubScopes", { scopes: status.excessScopes.join(", ") })}
         </p>
       )}
-      {status?.error && <p className="mt-1 text-[12px] text-danger">{reasonText(t, status.error)}</p>}
+      {status?.error && !needsAccess && <p className="mt-1 text-[12px] text-danger">{reasonText(t, status.error)}</p>}
+      {checkError && <p className="mt-1 text-[12px] text-danger">{checkError}</p>}
+      {needsAccess && repo && (
+        <div role="alert" className="mt-2 rounded-md border border-border-strong bg-inset px-3 py-2.5">
+          <p className="flex gap-1.5 text-[12.5px] text-warning">
+            <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+            {t(access === "none" ? "settings.githubNoAccess" : "settings.githubReadOnly", { account: selected })}
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button onClick={() => openOnGithub(repoAccessUrl(repo))}>{t("settings.githubGiveAccess")}</Button>
+            <Button onClick={() => openOnGithub(repoInvitationUrl(repo))}>{t("settings.githubAcceptInvite")}</Button>
+            <Button variant="ghost" disabled={checking} onClick={load}>
+              {t(checking ? "settings.githubChecking" : "settings.githubCheckAgain")}
+            </Button>
+          </div>
+          <p className="mt-2 text-[11.5px] leading-snug text-subtle">{t("settings.githubAccessHint", { account: selected })}</p>
+        </div>
+      )}
+      {status && status.error?.code !== "ghMissing" && (
+        <div className="mt-2">
+          <div className="flex flex-wrap gap-2">
+            {repo && !needsAccess && <Button onClick={() => openOnGithub(repoAccessUrl(repo))}>{t("settings.githubManageAccess")}</Button>}
+            <Button onClick={connectAccount}>{t("settings.githubConnect")}</Button>
+          </div>
+          <p className="mt-1.5 text-[11.5px] leading-snug text-subtle">{t(repo && !needsAccess ? "settings.githubLinksHint" : "settings.githubConnectHint")}</p>
+        </div>
+      )}
 
       <div className="mt-4 space-y-3">
         <Field label={t("settings.setupCommand")} hint={t("settings.setupCommandHint")}>
