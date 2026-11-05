@@ -12,6 +12,40 @@
     "brainProposals": "{{count}} propuestas esperando",
     "board": "Tablero"
   },
+  "shortcuts": {
+    "categories": {
+      "navigate": "Navegar",
+      "run": "Ejecución",
+      "board": "Tablero"
+    },
+    "searchEverywhere": "Buscar en todo",
+    "findAction": "Buscar una acción",
+    "goToRun": "Ir a una ejecución",
+    "runs": "Ir a Ejecuciones",
+    "board": "Ir al Tablero",
+    "workflows": "Ir a Workflows",
+    "brain": "Ir a Brain",
+    "settings": "Ir a Ajustes",
+    "back": "Volver",
+    "nextWaiting": "Siguiente ejecución que te espera",
+    "previousWaiting": "Ejecución anterior que te espera",
+    "newRun": "Nueva ejecución",
+    "newTask": "Nueva tarea",
+    "showChanges": "Ver los cambios de la ejecución",
+    "stopStep": "Detener el paso"
+  },
+  "palette": {
+    "label": "Buscar",
+    "placeholder": {
+      "all": "Busca ejecuciones, proyectos y acciones…",
+      "actions": "Busca acciones…",
+      "runs": "Ir a una ejecución…"
+    },
+    "runs": "Ejecuciones",
+    "projects": "Proyectos",
+    "empty": "No se encontró nada",
+    "noRuns": "Todavía no se ha ejecutado nada."
+  },
   "session": {
     "checking": "Comprobando tu sesión de Claude Code…",
     "account": "Claude Code: {{account}}",

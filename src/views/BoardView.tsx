@@ -3,6 +3,8 @@ import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalList
 import { Check, Download, GitPullRequest, Lock, Pencil, Plus, Trash2, X } from "lucide-react";
 import { type ComponentProps, type CSSProperties, type FormEvent, type ReactNode, type Ref, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useKeymapHold } from "../commands/keymapHold";
+import { useBoardCommands } from "../commands/pageCommands";
 import { api, type Board, type BoardCard, type BoardColumn, type Issue } from "../lib/api";
 import { type BoardNotice, boardNotice, canDelete, canEdit, cardLabel, clickAction, COLUMNS, dragOver, dropDestination, groupCards, importedIssues, importNotice, isColumn, isLane, type Lane, type Layout, layoutOf, moveNotice, newestOnly, otherLane, overColumn, pausedText, waitingForRoom, withLayout } from "../lib/board";
 import { needsSetup } from "../lib/projects";
@@ -353,6 +355,15 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
   const applyNewest = useMemo(() => newestOnly<Board>(setBoard), []);
   const paused = board?.paused ?? null;
 
+  useBoardCommands(board ? () => setDialog({ kind: "task", card: null }) : null);
+  // A keyboard drag ends on Space, Enter or Tab anywhere in the window. Typing in a dialog or the
+  // palette opened mid-drag would drop the card, and on Todo that starts a run.
+  useKeymapHold(activeId !== null);
+  // The palette can open a project while the board is showing another.
+  useEffect(() => {
+    if (initialProjectId && initialProjectId !== projectId) selectProject(initialProjectId);
+  }, [initialProjectId]);
+
   // Coming back to a project that has since been removed lands on one that's there.
   useEffect(() => {
     if (projects.length > 0 && !projects.some((p) => p.id === projectId)) setProjectId(projects[0].id);
@@ -495,6 +506,8 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
     setBoard(null);
     setLayout(null);
     setNotice(null);
+    // The view says which project too, so Back from a run lands on this one.
+    navigate({ name: "board", projectId: id });
   };
 
   const adding = useAddProject({ onAdded: (added) => selectProject(added.id) });

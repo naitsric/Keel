@@ -1,4 +1,5 @@
 import { useTranslation } from "react-i18next";
+import { Shortcuts } from "./commands/Shortcuts";
 import { api } from "./lib/api";
 import { useApp } from "./lib/store";
 import { Button, Modal } from "./ui/primitives";
@@ -34,6 +35,8 @@ export default function App() {
   const view = useApp((s) => s.view);
   return (
     <div className="flex h-full flex-col">
+      {/* First, so its commands register before a page's and the palette keeps them on top. */}
+      <Shortcuts />
       {view.name === "home" && <Home />}
       {view.name === "run" && <RunDetail key={view.runId} runId={view.runId} backTo={view.backTo} />}
       {view.name === "settings" && <SettingsView />}

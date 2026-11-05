@@ -1,6 +1,8 @@
 import { AlertTriangle, Check, ExternalLink, FileDiff, GitPullRequest, Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useRunCommands } from "../commands/pageCommands";
+import { useSearchEverywhere } from "../commands/SearchEverywhere";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck, type Run } from "../lib/api";
 import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "../lib/audit";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -238,10 +240,15 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
     arm();
     window.addEventListener("focus", arm);
     window.addEventListener("blur", disarm);
+    // The palette's overlay covers the card, and a second click on it would land here once it's gone.
+    const unwatchPalette = useSearchEverywhere.subscribe((palette, before) => {
+      if (palette.open !== before.open) (palette.open ? disarm : arm)();
+    });
     return () => {
       clearTimeout(timer);
       window.removeEventListener("focus", arm);
       window.removeEventListener("blur", disarm);
+      unwatchPalette();
     };
   }, []);
   // Masking only hides a secret here. Approving would still push it with the branch.
@@ -935,6 +942,12 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
   const allCommands = useMemo(() => attempts.flatMap((a) => commandsFrom(eventsByAttempt[a.id] ?? [])), [attempts, eventsByAttempt]);
   const rawCheck = worstRawCheck(Object.values(rawChecks));
   const files = useMemo(() => filesChangedBy(attempts), [attempts]);
+  const showChanges = () => void api.runDiff(runId).then(setRunDiff);
+
+  useRunCommands({
+    showChanges: files.length > 0 ? showChanges : null,
+    stopStep: latest && isActive(latest.state) ? () => void api.attemptStop(latest.id).catch((e) => setError(errorText(t, e))) : null,
+  });
 
   if (!attempt || !latest || !run) {
     return <TopBar back={backTo ?? true} />;
@@ -944,7 +957,6 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
   const pending = flatSteps(run?.workflow ?? []).filter((step) => !attempts.some((a) => a.stepId === step.id));
   const kindTabs: Tab[] = attempt.state === "skipped" ? ["activity", "prompt"] : attempt.kind === "agent" ? ["activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
   const shownTab: Tab = kindTabs.includes(tab) ? tab : kindTabs[0];
-  const showChanges = () => void api.runDiff(runId).then(setRunDiff);
 
   return (
     <>
