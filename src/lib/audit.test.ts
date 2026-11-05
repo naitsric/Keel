@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuditEvent } from "./api";
-import { activityFrom, commandsFrom, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, latestOfEachStep, toolSummary, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, commandsFrom, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, latestOfEachStep, toolSummary, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -79,6 +79,18 @@ describe("run summary", () => {
     const reviewed = { filesChanged: null, runFiles: null };
     expect(filesChangedBy([added, removed, reviewed])).toEqual(["a.py"]);
     expect(filesChangedBy([{ filesChanged: ["old.py"] }])).toEqual(["old.py"]);
+  });
+});
+
+describe("the accounts a run used", () => {
+  it("says which Claude Code and which GitHub account did the work", () => {
+    const attempts = [
+      { kind: "check", account: null },
+      { kind: "agent", account: "you@example.com" },
+      { kind: "deliver", account: "you-work" },
+    ];
+    expect(accountsOf(attempts)).toEqual({ claude: "you@example.com", github: "you-work" });
+    expect(accountsOf([{ kind: "agent", account: null }])).toEqual({ claude: null, github: null });
   });
 });
 

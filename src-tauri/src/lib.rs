@@ -12,7 +12,7 @@ use keel_engine::{
     RawCheck, StartRun, Workflow, request_from_issue,
 };
 use keel_harness::Tools;
-use keel_harness::github::Issue;
+use keel_harness::github::{Account, Issue};
 use keel_store::{
     Attempt, BrainNote, Decision, Event, Project, ProjectSettings, Run, RunRow, Store, Totals,
 };
@@ -487,9 +487,37 @@ fn open_claude_login(state: State<'_, AppState>) -> CommandResult<()> {
             detail: None,
         });
     };
-    let script = state.data_dir.join("claude-login.command");
-    let quoted = claude.to_string_lossy().replace('\'', r"'\''");
-    let write = std::fs::write(&script, format!("#!/bin/sh\nexec '{quoted}' auth login\n"))
+    open_in_terminal(&state, "claude-login.command", &claude, "auth login")
+}
+
+/// Signing in to `gh` is between the person and GitHub, in Terminal. Keel never sees it.
+#[tauri::command(async)]
+fn open_github_login(state: State<'_, AppState>) -> CommandResult<()> {
+    let gh = state
+        .tools
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .gh
+        .clone();
+    let Some(gh) = gh else {
+        return Err(CommandError {
+            code: "blocked",
+            reason: Some(Reason::GhMissing),
+            detail: None,
+        });
+    };
+    open_in_terminal(&state, "gh-login.command", &gh, "auth login")
+}
+
+fn open_in_terminal(
+    state: &State<'_, AppState>,
+    name: &str,
+    program: &Path,
+    arguments: &str,
+) -> CommandResult<()> {
+    let script = state.data_dir.join(name);
+    let quoted = program.to_string_lossy().replace('\'', r"'\''");
+    let write = std::fs::write(&script, format!("#!/bin/sh\nexec '{quoted}' {arguments}\n"))
         .and_then(|()| {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
@@ -504,6 +532,37 @@ fn open_claude_login(state: State<'_, AppState>) -> CommandResult<()> {
         reason: None,
         detail: Some(e.to_string()),
     })
+}
+
+/// Where to install what Keel needs. Fixed addresses, never one from the UI.
+#[tauri::command(async)]
+fn open_help(topic: String) -> CommandResult<()> {
+    let url = match topic.as_str() {
+        "claude" => "https://claude.com/product/claude-code",
+        "git" => "https://git-scm.com/downloads/mac",
+        "gh" => "https://cli.github.com",
+        _ => {
+            return Err(CommandError {
+                code: "invalidState",
+                reason: None,
+                detail: None,
+            });
+        }
+    };
+    std::process::Command::new("/usr/bin/open")
+        .arg(url)
+        .status()
+        .map(|_| ())
+        .map_err(|e| CommandError {
+            code: "internal",
+            reason: None,
+            detail: Some(e.to_string()),
+        })
+}
+
+#[tauri::command(async)]
+fn github_accounts(state: State<'_, AppState>) -> CommandResult<Vec<Account>> {
+    Ok(state.engine.github_accounts()?)
 }
 
 /// Shows a file of this attempt in Finder. Only paths the store recorded, never one from the UI.
@@ -644,6 +703,9 @@ pub fn run() {
             language_get,
             language_set,
             open_claude_login,
+            open_github_login,
+            open_help,
+            github_accounts,
             reveal_raw,
             active_count,
             app_quit,

@@ -36,12 +36,25 @@ most about 4 KB, so when it's full, adding something means retiring something.
 - A setup command installs dependencies once per run, before any agent. It's the one step with
   internet access, and it still can't reach your home folder or anything else on your Mac.
 
-## Requirements
+## Install
+
+Download the latest `.dmg` from [Releases](https://github.com/naitsric/Keel/releases/latest) and
+drag Keel to Applications.
+
+Builds aren't notarized yet, so macOS blocks the first launch. Run this once after installing:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/Keel.app
+```
+
+You need:
 
 - macOS 13 or later, on Apple Silicon
 - [Claude Code](https://claude.com/product/claude-code), signed in
 - Git
 - [GitHub CLI](https://cli.github.com), signed in, to open pull requests
+
+The first screen checks these and says how to get what's missing.
 
 ## Develop
 

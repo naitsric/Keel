@@ -223,7 +223,9 @@
     "proposalsHint": "If you accept one, every agent on this project gets it from now on.",
     "openBrain": "Open the Brain",
     "mapWritten": "It wrote a map with {{count}} lines.",
-    "decideMap": "Nothing. Read it in the Brain, and retire any line that's wrong."
+    "decideMap": "Nothing. Read it in the Brain, and retire any line that's wrong.",
+    "accountClaude": "Claude Code: {{account}}",
+    "accountGithub": "GitHub: {{account}}"
   },
   "tabs": {
     "activity": "Activity",
@@ -503,5 +505,21 @@
     "promptHint": "The exact text. Each step's audit record has what that step got.",
     "staleCount_one": "1 line may be out of date. Writing it again replaces the whole map.",
     "staleCount_other": "{{count}} lines may be out of date. Writing it again replaces the whole map."
+  },
+  "onboarding": {
+    "title": "Welcome to Keel",
+    "intro": "Keel runs Claude Code agents on private copies of your repos, step by step, and shows what each one did. A person always decides what ships.",
+    "optional": "optional",
+    "install": "How to install it",
+    "claude": "Claude Code",
+    "git": "Git",
+    "gitReady": "Ready.",
+    "github": "GitHub CLI",
+    "githubReady": "Signed in as {{accounts}}. Each project picks its own account.",
+    "githubMissing": "Without it, work stays on this Mac. With it, Keel opens draft pull requests.",
+    "githubSignedOut": "It's installed, but nobody is signed in.",
+    "project": "Your first project",
+    "projectHint": "Pick a folder with a git repo. Keel works on a copy and never changes yours. An agent will read it to write its map, using your Claude Code plan.",
+    "checkAgain": "Check again"
   }
 }

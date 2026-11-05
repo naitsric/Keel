@@ -223,7 +223,9 @@
     "proposalsHint": "Si aceptas algo, todos los agentes de este proyecto lo reciben de ahora en adelante.",
     "openBrain": "Abrir el Brain",
     "mapWritten": "Escribió un mapa de {{count}} líneas.",
-    "decideMap": "Nada. Léelo en el Brain y retira cualquier línea que esté mal."
+    "decideMap": "Nada. Léelo en el Brain y retira cualquier línea que esté mal.",
+    "accountClaude": "Claude Code: {{account}}",
+    "accountGithub": "GitHub: {{account}}"
   },
   "tabs": {
     "activity": "Actividad",
@@ -503,5 +505,21 @@
     "promptHint": "El texto exacto. La auditoría de cada paso guarda lo que recibió ese paso.",
     "staleCount_one": "1 línea puede estar desactualizada. Escribirlo de nuevo reemplaza todo el mapa.",
     "staleCount_other": "{{count}} líneas pueden estar desactualizadas. Escribirlo de nuevo reemplaza todo el mapa."
+  },
+  "onboarding": {
+    "title": "Te damos la bienvenida a Keel",
+    "intro": "Keel corre agentes de Claude Code en copias privadas de tus repos, paso a paso, y muestra qué hizo cada uno. Una persona siempre decide qué sale.",
+    "optional": "opcional",
+    "install": "Cómo instalarlo",
+    "claude": "Claude Code",
+    "git": "Git",
+    "gitReady": "Listo.",
+    "github": "GitHub CLI",
+    "githubReady": "Sesión iniciada como {{accounts}}. Cada proyecto elige su cuenta.",
+    "githubMissing": "Sin él, el trabajo se queda en este Mac. Con él, Keel abre pull requests en borrador.",
+    "githubSignedOut": "Está instalado, pero nadie ha iniciado sesión.",
+    "project": "Tu primer proyecto",
+    "projectHint": "Elige una carpeta con un repo de git. Keel trabaja en una copia y nunca cambia el tuyo. Un agente lo leerá para escribir su mapa, con tu plan de Claude Code.",
+    "checkAgain": "Volver a comprobar"
   }
 }

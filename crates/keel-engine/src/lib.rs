@@ -340,6 +340,11 @@ impl Engine {
         Ok(self.inner.store.project(id)?)
     }
 
+    /// The accounts signed in to `gh`. Never changes the active one.
+    pub fn github_accounts(&self) -> Result<Vec<github::Account>> {
+        self.gh()?.accounts().map_err(gh_blocked)
+    }
+
     /// The accounts in `gh`, and what the project's account can do. Never changes the active one.
     pub fn github_status(&self, project_id: &str) -> Result<GithubStatus> {
         let project = self.inner.store.project(project_id)?;
