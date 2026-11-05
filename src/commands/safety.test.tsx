@@ -1,9 +1,13 @@
 // Approving publishes work, and plain Enter runs whatever is in the palette. These hold the line.
+import { emit } from "@tauri-apps/api/event";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import i18next from "../i18n";
 import en from "../i18n/en.json";
 import es from "../i18n/es.json";
 import { useApp, type View } from "../lib/store";
+import { buildMenuModel, type MenuSpec, type PredefinedItem } from "../menu/menuModel";
+import { runMenuCommand } from "../menu/nativeMenu";
 import { KEYS } from "./keys";
 import { useCommands, type Command } from "./registry";
 import { answers, button, callsTo, calls, hideApp, note, paletteOpen, paletteRow, paletteRows, pressEnter, pressKey, pressMod, row, settle, showApp, tapShift, type, view } from "./testApp";
@@ -334,6 +338,190 @@ describe("safety", () => {
       pressMod("A", "KeyA", { shiftKey: true });
       expect(paletteRow("Stop the step")?.getAttribute("aria-disabled")).toBe("false");
       expect(document.querySelector('[cmdk-item][aria-selected="true"]')?.textContent).toBe("Search everywhere⇧⇧");
+    });
+  });
+
+  describe("the native menu", () => {
+    const entries = (menus: MenuSpec[]) => menus.flatMap((menu) => menu.items);
+    const commandItems = (menus: MenuSpec[]) => entries(menus).flatMap((entry) => (entry.kind === "command" ? [entry] : []));
+    const inLanguage = (language: object) => (key: string) => translated(language, key) as string;
+    const modelHere = (language: object = en) => buildMenuModel(Object.values(useCommands.getState().commands), inLanguage(language));
+
+    /** The only things in the menu that aren't commands. None of them answers a run. */
+    const SYSTEM_ITEMS: PredefinedItem[] = ["about", "hide", "hideOthers", "showAll", "quit", "undo", "redo", "cut", "copy", "paste", "selectAll", "minimize", "zoom", "close"];
+
+    it.each(PAGES)("has only registered commands and the system's own items, on $name", async (page) => {
+      await showApp(RUNS, page.view);
+      const registered = Object.keys(useCommands.getState().commands);
+      const items = commandItems(modelHere());
+      expect(items.length).toBeGreaterThan(0);
+      for (const item of items) expect(registered).toContain(item.commandId);
+      for (const entry of entries(modelHere())) {
+        expect(["command", "predefined", "separator"]).toContain(entry.kind);
+        if (entry.kind === "predefined") expect(SYSTEM_ITEMS).toContain(entry.name);
+      }
+    });
+
+    it.each(PAGES)("no item is about deciding, in any language, on $name", async (page) => {
+      await showApp(RUNS, page.view);
+      for (const [language, words] of [[en, DECIDING_WORDS], [es, DECIDING_WORDS_ES]] as const) {
+        const menus = modelHere(language);
+        for (const menu of menus) expect(menu.title).toBeTruthy();
+        expect(menus.map((menu) => menu.title).join(" ")).not.toMatch(words);
+        for (const entry of entries(menus)) {
+          if (entry.kind === "separator") continue;
+          expect(entry.title, JSON.stringify(entry)).toBeTruthy();
+          expect(entry.title).not.toMatch(words);
+        }
+      }
+    });
+
+    it.each(PAGES)("no item reaches a deciding call when chosen, on $name", async (page) => {
+      await showApp(RUNS, page.view);
+      for (const item of commandItems(modelHere())) {
+        act(() => runMenuCommand(item.commandId));
+        await settle();
+        pressEsc();
+        await settle();
+      }
+      expect(calls.filter((call) => DECIDES.includes(call.command))).toEqual([]);
+    });
+
+    it("gives an accelerator only to a key that means one thing everywhere", async () => {
+      await showApp(RUNS);
+      const keys = Object.fromEntries(commandItems(modelHere()).map((item) => [item.commandId, item.accelerator]));
+      expect(keys).toEqual({
+        "search.everywhere": null,
+        "search.findAction": "CmdOrCtrl+Shift+A",
+        "navigate.goToRun": "CmdOrCtrl+O",
+        "navigate.runs": "CmdOrCtrl+1",
+        "navigate.board": "CmdOrCtrl+2",
+        "navigate.workflows": "CmdOrCtrl+3",
+        "navigate.brain": "CmdOrCtrl+4",
+        "navigate.settings": "CmdOrCtrl+Comma",
+        "navigate.back": "CmdOrCtrl+BracketLeft",
+        "run.nextWaiting": null,
+        "run.previousWaiting": null,
+        "run.new": "CmdOrCtrl+N",
+      });
+    });
+
+    it("leaves the keys bound to a page to the keymap, as AppKit would take them first", async () => {
+      await showApp(RUNS, { name: "run", runId: "working" });
+      const onRun = Object.fromEntries(commandItems(modelHere()).map((item) => [item.commandId, item.accelerator]));
+      expect(onRun["run.showChanges"]).toBeNull();
+      expect(onRun["run.stopStep"]).toBeNull();
+      await hideApp();
+      await showApp(RUNS, { name: "board" });
+      const onBoard = Object.fromEntries(commandItems(modelHere()).map((item) => [item.commandId, item.accelerator]));
+      expect(onBoard["run.new"]).toBeNull();
+      expect(onBoard["board.newTask"]).toBeNull();
+    });
+
+    it("never gives an accelerator to a key without a modifier, on any page", async () => {
+      for (const page of PAGES) {
+        await showApp(RUNS, page.view);
+        for (const { accelerator } of commandItems(modelHere())) if (accelerator) expect(accelerator).toMatch(/^CmdOrCtrl\+/);
+        await hideApp();
+      }
+      await showApp(RUNS);
+    });
+
+    it("runs nothing while a dialog holds the keymap: ⌘, doesn't go to Settings behind it", async () => {
+      await showApp(RUNS);
+      act(() => useApp.setState({ newRunOpen: true }));
+      await settle();
+      for (const { commandId } of commandItems(modelHere())) {
+        act(() => runMenuCommand(commandId));
+        await settle();
+      }
+      expect(view()).toEqual({ name: "home" });
+      expect(paletteOpen()).toBe(false);
+    });
+
+    it("⌘, works once the dialog is gone, through the event Rust sends", async () => {
+      await showApp(RUNS);
+      act(() => useApp.setState({ newRunOpen: true }));
+      await settle();
+      await act(() => emit("keel://menu-command", "navigate.settings"));
+      await settle();
+      expect(view()).toEqual({ name: "home" });
+
+      pressKey("Escape", "Escape", {}, document.body);
+      await settle();
+      await act(() => emit("keel://menu-command", "navigate.settings"));
+      await settle();
+      expect(view()).toEqual({ name: "settings" });
+    });
+
+    it("runs nothing during a board's keyboard drag", async () => {
+      await showApp(RUNS, { name: "board" });
+      const card = document.querySelector<HTMLElement>("[data-card]") as HTMLElement;
+      act(() => card.focus());
+      pressKey(" ", "Space");
+      await settle(0);
+      for (const { commandId } of commandItems(modelHere())) {
+        act(() => runMenuCommand(commandId));
+        await settle(0);
+      }
+      expect(view().name).toBe("board");
+      expect(paletteOpen()).toBe(false);
+      expect(document.querySelector("form")).toBeNull();
+      expect(callsTo("card_move")).toEqual([]);
+    });
+
+    it("ignores a command it doesn't know, whatever the event says", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      for (const name of ["run.approve", "approval_answer", "card_move", ""]) await act(() => emit("keel://menu-command", name));
+      await settle();
+      expect(calls.filter((call) => DECIDES.includes(call.command))).toEqual([]);
+      expect(view()).toEqual({ name: "run", runId: WAITING });
+    });
+
+    it("from a run, a menu item opening another one starts the card's wait over", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      expect(button("Approve and open a draft")?.disabled).toBe(false);
+      await act(() => emit("keel://menu-command", "run.nextWaiting"));
+      await settle(0);
+      expect(view()).toMatchObject({ name: "run", runId: "r2" });
+      expect(button("Approve and open a draft")?.disabled).toBe(true);
+      expect(answers()).toEqual([]);
+    });
+
+    it("doesn't run a command twice when the key and the menu both fire for one press", async () => {
+      await showApp(RUNS);
+      pressMod("n", "KeyN");
+      await settle();
+      pressEsc();
+      await settle();
+      expect(useApp.getState().newRunOpen).toBe(false);
+      act(() => runMenuCommand("run.new"));
+      await settle();
+      expect(useApp.getState().newRunOpen).toBe(false);
+      await settle(300);
+      act(() => runMenuCommand("run.new"));
+      await settle();
+      expect(useApp.getState().newRunOpen).toBe(true);
+    });
+
+    it("is what's sent to Rust, in the language showing, and again when it changes", async () => {
+      await showApp(RUNS);
+      await settle(200);
+      const sent = () => (callsTo("menu_set").at(-1)?.args as { menus: MenuSpec[] }).menus;
+      expect(sent().map((menu) => menu.title)).toEqual(["Keel", "Edit", "Navigate", "Run", "Window"]);
+      await act(() => i18next.changeLanguage("es"));
+      await settle(200);
+      expect(sent().map((menu) => menu.title)).toEqual(["Keel", "Edición", "Navegar", "Ejecución", "Ventana"]);
+      expect(commandItems(sent()).find((item) => item.commandId === "run.new")?.title).toBe("Nueva ejecución");
+      await act(() => i18next.changeLanguage("en"));
+    });
+
+    it("the menu's code never mentions a deciding call", () => {
+      const files = Object.keys(SOURCES).filter((file) => file.startsWith("/src/menu/"));
+      expect(files.sort()).toEqual(["/src/menu/menuModel.ts", "/src/menu/nativeMenu.ts"]);
+      for (const file of files) expect(SOURCES[file], file).not.toMatch(DECIDING_CALL);
     });
   });
 

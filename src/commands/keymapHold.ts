@@ -5,7 +5,8 @@ import { useLayoutEffect } from "react";
  * behind it) and Shift Shift opens nothing; the dialog's own keys (Tab, Enter, Space, Escape) reach
  * it as usual.
  *
- * Checked where keys are dispatched (see keymap.ts), not by each command.
+ * Checked where keys are dispatched (see keymap.ts) and for the bars and the native menu (see
+ * `runUnlessHeld`), not by each command.
  */
 const holds = new Set<symbol>();
 const watchers = new Set<() => void>();

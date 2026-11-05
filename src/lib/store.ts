@@ -79,40 +79,13 @@ export const useApp = create<AppState>((set, get) => ({
   setLanguage: async (language) => {
     await i18next.changeLanguage(language);
     await api.languageSet(language);
-    await syncMenu();
   },
 }));
-
-const MENU_KEYS = [
-  "about",
-  "settings",
-  "hide",
-  "hideOthers",
-  "showAll",
-  "quit",
-  "edit",
-  "undo",
-  "redo",
-  "cut",
-  "copy",
-  "paste",
-  "selectAll",
-  "window",
-  "minimize",
-  "zoom",
-  "close",
-];
-
-/** The native menu takes its labels from the translations, so it follows the language. */
-async function syncMenu() {
-  await api.menuSet(Object.fromEntries(MENU_KEYS.map((key) => [key, i18next.t(`menu.${key}`)])));
-}
 
 /** Loads what the app needs and starts listening to the backend. */
 export async function startApp() {
   const saved = await api.languageGet().catch(() => null);
   await i18next.changeLanguage(saved === "es" || saved === "en" ? saved : systemLanguage());
-  await syncMenu().catch(() => undefined);
 
   const { refreshOverview, refreshMcp } = useApp.getState();
   void refreshOverview();
@@ -132,5 +105,4 @@ export async function startApp() {
   });
   await listen("keel://mcp-changed", () => void refreshMcp().catch(() => undefined));
   await listen("keel://quit-requested", () => useApp.setState({ quitOpen: true }));
-  await listen("keel://open-settings", () => useApp.setState({ view: { name: "settings" } }));
 }

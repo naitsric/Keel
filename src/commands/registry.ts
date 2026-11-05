@@ -9,7 +9,7 @@ import { keymapHeld } from "./keymapHold";
 export type FocusContext = "run" | "board";
 
 /**
- * An action the keymap and the palette can run, with no extra wiring, and later the native menu.
+ * An action the keymap and the palette can run, with no extra wiring, and the native menu too.
  *
  * Plain Enter runs whatever is registered, so what decides or spends never is: approving, rejecting,
  * answering the rework limit, retrying, resuming, abandoning, the Brain's accept, reject and retire,
@@ -26,7 +26,7 @@ export interface Command {
   keybinding?: string;
   /** A second key for the same thing, that leaves text fields alone: there ⌘↑ moves the caret. */
   keybindingOutsideFields?: string;
-  /** Shown in the palette but handled elsewhere, like ⌘, which the native menu takes first. */
+  /** Shown in the palette but handled elsewhere, like ⌘, which the native menu takes first. See menuModel.ts. */
   displayKey?: string;
   /**
    * Limits the keybinding to this page. Commands may share a binding: see {@link pickCommand}. The

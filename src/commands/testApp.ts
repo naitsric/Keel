@@ -87,7 +87,7 @@ export const settle = (ms = 20) => act(() => vi.advanceTimersByTimeAsync(ms));
 export async function showApp(runs: RunRow[], view: View = { name: "home" }, projects: Project[] = PROJECTS) {
   calls = [];
   shownRuns = runs;
-  mockIPC(backend);
+  mockIPC(backend, { shouldMockEvents: true });
   await i18next.changeLanguage("en");
   useApp.setState({ view, preflight: null, mcp: null, approvalDrafts: {}, newRunOpen: false, quitOpen: false, overviewLoaded: true, overview: { runs, projects, pendingProposals: 0, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } });
   useSearchEverywhere.setState({ open: false, scope: "all", query: "" });
