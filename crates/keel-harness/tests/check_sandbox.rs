@@ -6,6 +6,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use keel_harness::clean_env;
 use keel_harness::settings::{check_profile, setup_profile};
 
 struct Sandbox {
@@ -40,9 +41,12 @@ fn sandbox() -> Sandbox {
 impl Sandbox {
     fn run(&self, script: &str) -> std::process::Output {
         let profile = check_profile(self.workspace.path(), &self.home, &[], &[]);
+        // The environment a real check gets.
         Command::new("/usr/bin/sandbox-exec")
             .args(["-p", &profile, "/bin/sh", "-c", script])
             .current_dir(self.workspace.path())
+            .env_clear()
+            .envs(clean_env(&std::env::var("PATH").unwrap()))
             .output()
             .unwrap()
     }
@@ -128,6 +132,52 @@ fn a_check_cannot_change_what_git_will_run() {
 
     // Ordinary work still happens, and that's why the rest of `.git` stays open.
     assert!(s.allowed("git add -A && git commit -qm work && git branch other && git status"));
+}
+
+#[test]
+fn git_works_when_the_home_folder_has_a_git_config() {
+    // Most Macs have one. The sandbox hides it, and git gives up when it can't read it.
+    let s = sandbox();
+    std::fs::write(
+        s.canary_dir.path().join(".gitconfig"),
+        "[user]\n\tname = X\n",
+    )
+    .unwrap();
+    // Keel makes the clone, outside the sandbox. A check can't create a `.git` of its own.
+    let init = Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(s.workspace.path())
+        .status()
+        .unwrap();
+    assert!(init.success());
+    let profile = check_profile(s.workspace.path(), &s.home, &[], &[]);
+    let path = std::env::var("PATH").unwrap();
+    let git_status = |env: Vec<(String, String)>| {
+        Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", &profile, "/bin/sh", "-c", "git status"])
+            .current_dir(s.workspace.path())
+            .env_clear()
+            .envs(env)
+            .env("HOME", s.canary_dir.path())
+            .output()
+            .unwrap()
+    };
+    let without = git_status(vec![("PATH".to_owned(), path.clone())]);
+    assert!(
+        !without.status.success(),
+        "if this passes, the test proves nothing"
+    );
+    assert!(
+        String::from_utf8_lossy(&without.stderr).contains(".gitconfig"),
+        "{}",
+        String::from_utf8_lossy(&without.stderr)
+    );
+    let with = git_status(clean_env(&path));
+    assert!(
+        with.status.success(),
+        "{}",
+        String::from_utf8_lossy(&with.stderr)
+    );
 }
 
 #[test]
