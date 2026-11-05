@@ -11,7 +11,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
-import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, Project, Reason, Run, RunRow, WorkflowStep } from "../src/lib/api";
+import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, Project, ProjectAdded, Reason, Run, RunRow, WorkflowStep } from "../src/lib/api";
 import { useApp } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -235,10 +235,68 @@ const mcpOverview = () => {
 };
 
 let defaultWorkflow: string | null = params.get("defaultWorkflow");
-const demoProject: Project = { id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.cargo"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }], defaultWorkflow };
+const demoProject: Project = { id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: noCheck ? null : "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.nvm"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }], defaultWorkflow };
 // A second project on the board, with one card, to try the selector and coming back from a run.
 const otherProject: Project = { ...demoProject, id: "p2", name: "payments", path: "/Users/you/payments", services: [], env: [], defaultWorkflow: null };
 const projects = view === "board" ? [demoProject, otherProject] : [demoProject];
+
+// Adding a project. dialog=setup opens its dialog right away, and click=Add project… gets there the
+// long way. setup=pnpm|npm|yarn|uv|cargo|go|make|unknown is what the folder gives away.
+// accounts=one|several|readonly|none, gh=missing and repo=none are what GitHub has to say.
+// added=new|existing|restored says how it got here (with session=out or map=failed for a map that
+// didn't start), and leaving it out is reopening it from "Finish setup".
+// try=pass|fail|setupfail|notfound|running is how Try it ends, with click=Try it to press it.
+// projects=mixed puts a project that needs setup beside one that doesn't. remove=refused refuses
+// removing, addError=1 refuses the folder, picker=cancel closes the picker, and history=1 with empty=1
+// keeps the runs of projects that are all gone.
+const freshProject: Project = { ...otherProject, id: "p3", name: "shop", path: "/Users/you/www/shop", githubAccount: null, githubRepo: params.get("repo") === "none" ? null : "acme/shop", setupCommand: null, checkCommand: null, allowedDomains: ["pypi.org"], allowedRead: [], services: [{ type: "bridge", name: "db", port: 5432, socket: null }], env: [{ name: "DB_HOST", value: "{{socketDir:db}}" }] };
+let listedProjects: Project[] = params.get("empty") === "1" ? [] : [...projects, ...(params.get("projects") === "mixed" || params.get("dialog") === "setup" ? [freshProject] : [])];
+const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[] }> = {
+  pnpm: { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"] },
+  npm: { check: "npm test", setup: "npm ci", from: ["package.json", "package-lock.json"] },
+  yarn: { check: "yarn test", setup: "yarn install --frozen-lockfile", from: ["package.json", "yarn.lock"] },
+  uv: { check: "uv run --frozen pytest", setup: "uv sync --frozen", from: ["uv.lock"] },
+  cargo: { check: "cargo test", setup: "cargo fetch", from: ["Cargo.toml"] },
+  go: { check: "go test ./...", setup: "go mod download", from: ["go.mod"] },
+  make: { check: "make test", setup: null, from: ["Makefile"] },
+  unknown: { check: null, setup: null, from: [] },
+};
+const addedAnswer = (): { project: Project; outcome: string; map: unknown } => {
+  const outcome = params.get("added") ?? "new";
+  if (outcome !== "new") return { project: freshProject, outcome, map: null };
+  const map = params.get("map") === "failed" ? { status: "notStarted", reason: { code: "gitMissing" } } : params.get("session") === "out" ? { status: "notStarted", reason: { code: "claudeLoggedOut" } } : { status: "started" };
+  return { project: freshProject, outcome, map };
+};
+const tryOutput = { pass: { stdout: "> shop@1.0.0 test\n> vitest run\n\n ✓ 42 tests passed\n", stderr: "" }, fail: { stdout: " ✗ 1 test failed: checkout > applies the discount\n", stderr: "" }, setupfail: { stdout: "", stderr: "ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with \"frozen-lockfile\"\n" }, notfound: { stdout: "", stderr: "/bin/sh: pnpm: command not found\n" }, running: { stdout: "", stderr: "" } } as const;
+const tryAttempt = (id: string, kind: "setup" | "check", s: AttemptState, reason: Reason | null, exitCode: number | null): Attempt => ({ ...attempt, id, runId: "try1", stepId: kind === "check" ? "try-check" : "setup", kind, tools: kind, state: s, reason, exitCode, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, finishedAt: s === "running" ? null : at(0) });
+const tryAttempts = (): Attempt[] => {
+  const setup = tryAttempt("try-setup", "setup", "succeeded", null, 0);
+  switch (params.get("try")) {
+    case "fail":
+      return [setup, tryAttempt("try-check", "check", "failed", { code: "checkFailed", exitCode: 1 }, 1)];
+    case "setupfail":
+      return [tryAttempt("try-setup", "setup", "failed", { code: "setupFailed", exitCode: 1 }, 1)];
+    case "notfound":
+      return [setup, tryAttempt("try-check", "check", "failed", { code: "checkFailed", exitCode: 127 }, 127)];
+    case "running":
+      return [tryAttempt("try-setup", "setup", "running", null, null)];
+    default:
+      return [setup, tryAttempt("try-check", "check", "succeeded", null, 0)];
+  }
+};
+const setupAccounts = (account: string | null | undefined) => {
+  const scene = params.get("accounts") ?? "one";
+  const repo = freshProject.githubRepo;
+  const accounts = [
+    { login: "you-personal", active: true, ok: true, scopes: ["repo"] },
+    { login: "you-work", active: false, ok: true, scopes: ["repo"] },
+  ];
+  if (params.get("gh") === "missing") return { repo, accounts: [], info: null, excessScopes: [], error: { code: "ghMissing" } };
+  if (scene === "none") return { repo, accounts: [], info: null, excessScopes: [], error: null };
+  if (!repo || !account) return { repo, accounts, info: null, excessScopes: [], error: null };
+  const canPush = scene === "several" || (scene === "one" && account === "you-work");
+  return { repo, accounts, info: { defaultBranch: "main", permission: canPush ? "WRITE" : "READ", private: true, defaultBranchProtected: true }, excessScopes: [], error: null };
+};
 
 const PR = "https://github.com/acme/app/pull/12";
 const issueOf = (number: number, title: string) => ({ number, title, author: "someone", url: `https://github.com/acme/app/issues/${number}` });
@@ -307,7 +365,21 @@ mockIPC((command, args) => {
       // A new object each time, as the real answer is.
       return { ...preflight };
     case "overview":
-      return params.get("empty") === "1" ? { pendingProposals: 0, runs: [], projects: [], totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: params.get("proposals") === "1" ? 1 : 0, runs, projects: projects.map((p) => (p.id === "p1" ? { ...p, defaultWorkflow } : p)), totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
+      return params.get("empty") === "1" ? { pendingProposals: 0, runs: params.get("history") === "1" ? runs : [], projects: listedProjects, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: params.get("proposals") === "1" ? 1 : 0, runs, projects: listedProjects.map((p) => (p.id === "p1" ? { ...p, defaultWorkflow } : p)), totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
+    case "plugin:dialog|open":
+      return params.get("picker") === "cancel" ? null : freshProject.path;
+    case "project_add":
+      if (params.get("addError") === "1") throw { code: "notARepo", reason: null, detail: "/Users/you/Downloads" };
+      if (!listedProjects.some((p) => p.id === freshProject.id)) listedProjects = [...listedProjects, freshProject];
+      return addedAnswer();
+    case "project_setup":
+      return { project: listedProjects.find((p) => p.id === (args as { projectId: string }).projectId) ?? freshProject, guess: GUESSES[params.get("setup") ?? "pnpm"] ?? GUESSES.unknown };
+    case "project_try_check":
+      return "try1";
+    case "project_remove":
+      if (params.get("remove") === "refused") throw { code: "blocked", reason: { code: "projectHasOpenRuns", count: 2, runId: "r1", title: "The add function in calc.py is wrong" }, detail: null };
+      listedProjects = listedProjects.filter((p) => p.id !== (args as { projectId: string }).projectId);
+      return null;
     case "mcp_overview":
     case "mcp_settings_save":
     case "mcp_connect_claude":
@@ -339,8 +411,9 @@ mockIPC((command, args) => {
         { id: "mine", name: i18next.language === "es" ? "Solo revisiones" : "Reviews only", builtin: false, steps: workflow.slice(3) },
       ];
     case "run_attempts":
-      return attemptsList;
+      return (args as { runId?: string } | undefined)?.runId === "try1" ? tryAttempts() : attemptsList;
     case "github_status": {
+      if ((args as { projectId?: string } | undefined)?.projectId === freshProject.id) return setupAccounts((args as { account?: string | null }).account);
       const access = params.get("access");
       const accounts = [
         { login: "you-personal", active: true, ok: true, scopes: ["repo"] },
@@ -408,10 +481,16 @@ mockIPC((command, args) => {
     case "max_agents_set":
       maxAgents = (args as { value: number }).value;
       return null;
-    case "project_update":
-      defaultWorkflow = (args as { settings: { defaultWorkflow: string | null } }).settings.defaultWorkflow;
+    case "project_update": {
+      const { projectId, settings } = args as { projectId: string; settings: Partial<Project> & { defaultWorkflow: string | null } };
+      if (projectId === "p1") defaultWorkflow = settings.defaultWorkflow;
+      listedProjects = listedProjects.map((p) => (p.id === projectId ? { ...p, ...settings } : p));
       return null;
+    }
     case "attempt_events":
+      if ((args as { attemptId?: string } | undefined)?.attemptId?.startsWith("try-")) {
+        return [{ seq: 1, attemptId: "try-check", at: at(0), kind: "checkResult", data: tryOutput[(params.get("try") ?? "pass") as keyof typeof tryOutput] ?? tryOutput.pass }];
+      }
       // Only one step has a log, or the run's commands would count once per step.
       return (args as { attemptId?: string } | undefined)?.attemptId === attempt.id ? events : [];
     case "attempt_diff":
@@ -432,6 +511,7 @@ if (view === "brain") useApp.setState({ view: { name: "brain" } });
 if (view === "board") useApp.setState({ view: { name: "board" } });
 if (params.get("dialog") === "newRun") useApp.setState({ newRunOpen: true });
 if (params.get("dialog") === "quit") useApp.setState({ quitOpen: true });
+if (params.get("dialog") === "setup") useApp.setState({ projectSetup: { projectId: freshProject.id, added: params.get("added") ? (addedAnswer() as ProjectAdded) : null, returnToNewRun: false } });
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
@@ -439,8 +519,13 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   </React.StrictMode>,
 );
 
-// click=<a button's text> presses it once the page has loaded, to see what it opens.
+// click=<a button's text> presses it once the page has loaded, to see what it opens. then=<another>
+// presses the last one with that text a moment later, which is the one in a dialog it opened.
 const click = params.get("click");
 if (click) {
   setTimeout(() => [...document.querySelectorAll("button")].find((button) => button.textContent === click)?.click(), 1500);
+}
+const then = params.get("then");
+if (then) {
+  setTimeout(() => [...document.querySelectorAll("button")].filter((button) => button.textContent === then).pop()?.click(), 2200);
 }
