@@ -1,5 +1,6 @@
 //! The desktop shell. Commands are thin: the rules live in `keel-engine`.
 
+mod mcp;
 mod menu;
 
 use std::path::{Path, PathBuf};
@@ -656,6 +657,8 @@ pub fn run() {
             );
             let ready = Arc::new(Ready::default());
             let tools_shared = Arc::new(Mutex::new(Tools::default()));
+            let mcp_server = keel_mcp::McpServer::new(engine.clone(), store.clone());
+            app.manage(mcp::McpState(mcp_server.clone()));
             {
                 let engine = engine.clone();
                 let ready = ready.clone();
@@ -669,6 +672,8 @@ pub fn run() {
                     let _ = engine.recover();
                     ready.set();
                     let _ = handle.emit(CHANGED_EVENT, "");
+                    // After the tools are known, so no client ever finds Keel half ready.
+                    mcp::start_if_enabled(mcp_server);
                 });
             }
             app.manage(AppState {
@@ -687,6 +692,12 @@ pub fn run() {
             overview,
             project_add,
             run_start,
+            mcp::mcp_overview,
+            mcp::mcp_settings_save,
+            mcp::mcp_client_create,
+            mcp::mcp_client_set_can_run,
+            mcp::mcp_client_revoke,
+            mcp::mcp_connect_claude,
             run_get,
             run_proposals,
             brain_get,

@@ -7,6 +7,7 @@ import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, Field, inputClass, Segmented } from "../ui/primitives";
+import { McpCard } from "./McpCard";
 import { TopBar } from "./TopBar";
 
 const lines = (text: string) =>
@@ -291,6 +292,7 @@ export function SettingsView() {
               ]}
             />
           </Card>
+          <McpCard />
           <h2 className="pt-1 text-[14px] font-semibold">{t("settings.projects")}</h2>
           {projects.length === 0 && <p className="text-[12.5px] text-subtle">{t("settings.noProjects")}</p>}
           {projects.map((project) => (

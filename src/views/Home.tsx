@@ -63,6 +63,7 @@ function Row({ run, now }: { run: RunRow; now: number }) {
         </button>
         <p className="truncate text-[11.5px] text-subtle">
           {run.projectName}
+          {run.startedBy && <span className="ml-2">{t("run.startedBy", { client: run.startedBy })}</span>}
           {run.prUrl && (
             <button
               type="button"

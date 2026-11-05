@@ -100,7 +100,9 @@
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",
     "invalidState": "This step can't do that right now.",
-    "internal": "Something went wrong: {{detail}}"
+    "internal": "Something went wrong: {{detail}}",
+    "mcpNotRunning": "Turn the MCP server on first.",
+    "mcpConnectFailed": "Claude Code couldn't add the server: {{detail}}"
   },
   "newRun": {
     "title": "New run",
@@ -225,7 +227,8 @@
     "mapWritten": "It wrote a map with {{count}} lines.",
     "decideMap": "Nothing. Read it in the Brain, and retire any line that's wrong.",
     "accountClaude": "Claude Code: {{account}}",
-    "accountGithub": "GitHub: {{account}}"
+    "accountGithub": "GitHub: {{account}}",
+    "startedBy": "Started by {{client}}"
   },
   "tabs": {
     "activity": "Activity",
@@ -532,5 +535,35 @@
     "project": "Your first project",
     "projectHint": "Pick a folder with a git repo. Keel works on a copy and never changes yours. An agent will read it to write its map, using your Claude Code plan.",
     "checkAgain": "Check again"
+  },
+  "mcp": {
+    "title": "MCP server",
+    "hint": "Lets an assistant like Claude Code see your projects and start runs on this Mac, and you watch them here. Only this Mac can reach it, and it's off until you turn it on.",
+    "limits": "It can't approve or reject a step, merge, change settings or workflows, or accept anything into the Brain. Those stay with you, here.",
+    "off": "Off",
+    "on": "On",
+    "port": "Port",
+    "applyPort": "Use this port",
+    "portInUse": "Port {{port}} is in use by another program. Choose another one.",
+    "listenFailed": "Keel couldn't listen on port {{port}}: {{message}}",
+    "connectClaude": "Connect Claude Code",
+    "reconnectClaude": "Connect Claude Code again",
+    "connected": "Connected. New Claude Code sessions see it on their own. In one that's already open, run /mcp.",
+    "canRun": "Can start and stop runs",
+    "clients": "Clients",
+    "noClients": "No clients yet.",
+    "lastSeen": "used {{when}}",
+    "neverSeen": "not used yet",
+    "revoked": "revoked",
+    "revoke": "Revoke",
+    "otherClient": "Another client",
+    "otherClientPlaceholder": "Its name",
+    "createClient": "Create a token",
+    "tokenOnce": "This is the only time Keel shows this token. Copy it now.",
+    "copy": "Copy",
+    "copied": "Copied",
+    "activity": "Activity",
+    "noActivity": "No calls yet.",
+    "openRun": "Open the run"
   }
 }

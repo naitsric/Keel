@@ -100,7 +100,9 @@
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
     "invalidState": "Este paso no puede hacer eso ahora.",
-    "internal": "Algo salió mal: {{detail}}"
+    "internal": "Algo salió mal: {{detail}}",
+    "mcpNotRunning": "Enciende primero el servidor MCP.",
+    "mcpConnectFailed": "Claude Code no pudo agregar el servidor: {{detail}}"
   },
   "newRun": {
     "title": "Nueva ejecución",
@@ -225,7 +227,8 @@
     "mapWritten": "Escribió un mapa de {{count}} líneas.",
     "decideMap": "Nada. Léelo en el Brain y retira cualquier línea que esté mal.",
     "accountClaude": "Claude Code: {{account}}",
-    "accountGithub": "GitHub: {{account}}"
+    "accountGithub": "GitHub: {{account}}",
+    "startedBy": "Lanzada por {{client}}"
   },
   "tabs": {
     "activity": "Actividad",
@@ -532,5 +535,35 @@
     "project": "Tu primer proyecto",
     "projectHint": "Elige una carpeta con un repo de git. Keel trabaja en una copia y nunca cambia el tuyo. Un agente lo leerá para escribir su mapa, con tu plan de Claude Code.",
     "checkAgain": "Volver a comprobar"
+  },
+  "mcp": {
+    "title": "Servidor MCP",
+    "hint": "Deja que un asistente como Claude Code vea tus proyectos y lance ejecuciones en este Mac, y tú las ves aquí. Solo este Mac puede llegar a él, y está apagado hasta que lo enciendas.",
+    "limits": "No puede aprobar ni rechazar un paso, mergear, cambiar ajustes o workflows, ni aceptar nada en el Brain. Eso sigue siendo tuyo, aquí.",
+    "off": "Apagado",
+    "on": "Encendido",
+    "port": "Puerto",
+    "applyPort": "Usar este puerto",
+    "portInUse": "Otro programa está usando el puerto {{port}}. Elige otro.",
+    "listenFailed": "Keel no pudo escuchar en el puerto {{port}}: {{message}}",
+    "connectClaude": "Conectar Claude Code",
+    "reconnectClaude": "Conectar Claude Code de nuevo",
+    "connected": "Conectado. Las sesiones nuevas de Claude Code lo ven solas. En una que ya esté abierta, corre /mcp.",
+    "canRun": "Puede lanzar y detener ejecuciones",
+    "clients": "Clientes",
+    "noClients": "Todavía no hay clientes.",
+    "lastSeen": "usado {{when}}",
+    "neverSeen": "sin usar",
+    "revoked": "revocado",
+    "revoke": "Revocar",
+    "otherClient": "Otro cliente",
+    "otherClientPlaceholder": "Su nombre",
+    "createClient": "Crear un token",
+    "tokenOnce": "Esta es la única vez que Keel muestra este token. Cópialo ahora.",
+    "copy": "Copiar",
+    "copied": "Copiado",
+    "activity": "Actividad",
+    "noActivity": "Todavía no hay llamadas.",
+    "openRun": "Abrir la ejecución"
   }
 }
