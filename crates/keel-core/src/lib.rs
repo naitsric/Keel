@@ -348,6 +348,8 @@ pub enum Reason {
         detail: String,
     },
     NothingToDeliver,
+    /// A change can't be rejected without saying why: the reason is what later runs learn from.
+    RejectionNeedsReason,
     /// Keel refuses to push to anything but its own branches.
     UnsafeBranch {
         branch: String,

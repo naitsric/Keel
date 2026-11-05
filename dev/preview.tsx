@@ -85,15 +85,27 @@ const workflow: WorkflowStep[] = [
 ];
 const delivered = params.get("flow") === "delivered";
 const waiting = params.get("flow") === "approval" || params.get("flow") === "limit" || delivered;
+// Variants of an approval: check=none, reviews=none, changes=none (the run changed nothing), long=1
+// (text that would push the buttons away), gate=build (asks before building), gate=end (never delivers).
+const noCheck = params.get("check") === "none";
+const noReviews = params.get("reviews") === "none";
+const noChanges = params.get("changes") === "none";
+const long = params.get("long") === "1";
+const gate = params.get("gate");
+const LONG_TEXT = "I rebuilt how `add` handles its arguments in calc.py, because it subtracted instead of adding and every caller compensated for that in its own way, which meant changing the invoices, the reports and the export too. I kept the old signature so nothing else had to change.\n\n## Details\n\n" + "- Each caller now passes plain numbers, and the rounding moved into one helper that the tests cover directly.\n".repeat(30);
+const LONG_FILES = Array.from({ length: 14 }, (_, i) => `src/modules/billing/invoices/generated/handlers/handler_${i}.py`);
+const builtText = noChanges ? "I changed nothing. The bug in `add` is already fixed on main, in commit 8a3f21c, and `python3 test_calc.py` passes without touching the code.\n\nThere's no change to review. You can close this issue." : long ? LONG_TEXT : "I fixed `add` in calc.py: it subtracted instead of adding.\n\nTests: `make test` passes.";
+const builtFiles = noChanges ? [] : [...(long ? LONG_FILES : ["calc.py"]), ...(params.get("workflows") === "1" ? [".github/workflows/ci.yml"] : [])];
 const specAttempt: Attempt = { ...attempt, id: "a0", stepId: "spec", tools: "readOnly", state: "succeeded", reason: null, modelActual: "claude-opus-5-5", filesChanged: null, resultText: "1. add returns the sum.\n2. The tests pass.", finishedAt: at(2) };
-const builtAttempt: Attempt = { ...attempt, state: "succeeded", reason: null, shaAfter: "28c696fd11223344556677889900aabbccddeeff", finishedAt: at(1), rawSha256: "9f2c", resultText: "I fixed `add` in calc.py: it subtracted instead of adding.\n\nTests: `make test` passes.", filesChanged: params.get("workflows") === "1" ? ["calc.py", ".github/workflows/ci.yml"] : ["calc.py"] };
+const builtAttempt: Attempt = { ...attempt, state: "succeeded", reason: null, shaAfter: "28c696fd11223344556677889900aabbccddeeff", finishedAt: at(1), rawSha256: "9f2c", resultText: builtText, filesChanged: builtFiles, runFiles: builtFiles };
 const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12" };
 const approvalAttempt: Attempt = { ...attempt, id: "a3", stepId: "approval", kind: "approval", tools: "none", state: delivered ? "succeeded" : "waitingApproval", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, rawSha256: null, finishedAt: delivered ? at(0) : null };
 const prAttempt: Attempt = { ...attempt, id: "a4", stepId: "pull-request", kind: "deliver", tools: "none", state: "succeeded", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: "https://github.com/acme/app/pull/12", rawSha256: null, finishedAt: at(0) };
 const round = params.get("round") === "2" ? 1 : 0;
+const reworkAttempt: Attempt = { ...builtAttempt, id: "a1b", number: 2, round: 1, resultText: "I added the role check the security review asked for, in app/api.py.\n\nTests: `make test` passes." };
 const reviewer = (id: string, verdict: "approved" | "changes", summary: string, findings: string[]): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "succeeded", reason: null, tools: "readOnly", filesChanged: null, resultText: null, finishedAt: at(1), output: { verdict, findings, summary } as Attempt["output"] });
 const skippedReviewer = (id: string): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "skipped", reason: { code: "noMatchingPaths", paths: ["**/*.tsx"] }, tools: "readOnly", filesChanged: null, resultText: null, modelActual: null, finishedAt: at(1), output: null });
-const approverAttempt = (decision: "approve" | "rework"): Attempt => ({ ...attempt, id: "r-approver", stepId: "approver", role: "approver", round, state: params.get("flow") === "limit" ? "blocked" : "succeeded", reason: params.get("flow") === "limit" ? { code: "reworkLimit", rounds: 2 } : null, tools: "readOnly", modelActual: "claude-opus-5-5", filesChanged: null, resultText: null, finishedAt: at(1), output: { decision, risk: "medium", reasons: "The security finding is real: the new endpoint skips the role check.", instructions: "Add the role check." } as Attempt["output"] });
+const approverAttempt = (decision: "approve" | "rework"): Attempt => ({ ...attempt, id: "r-approver", stepId: "approver", role: "approver", round, state: params.get("flow") === "limit" ? "blocked" : "succeeded", reason: params.get("flow") === "limit" ? { code: "reworkLimit", rounds: 2 } : null, tools: "readOnly", modelActual: "claude-opus-5-5", filesChanged: null, resultText: null, finishedAt: at(1), output: { decision, risk: params.get("risk") ?? "medium", reasons: long ? "The security finding is real: the new endpoint skips the role check, and the same pattern repeats in every handler. ".repeat(6) : "The security finding is real: the new endpoint skips the role check.", instructions: "Add the role check.", overriddenByPerson: params.get("override") === "1" } as Attempt["output"] });
 const reviews: Attempt[] = [
   reviewer("security", params.get("findings") === "1" ? "changes" : "approved", params.get("findings") === "1" ? "The new endpoint skips the role check." : "No problems in authorization, logs or input handling.", params.get("findings") === "1" ? ["app/api.py:42 doesn't call require_role"] : []),
   skippedReviewer("ux"),
@@ -101,7 +113,16 @@ const reviews: Attempt[] = [
   reviewer("code", "approved", "It meets each criterion, and the tests prove it.", []),
   approverAttempt(params.get("findings") === "1" ? "rework" : "approve"),
 ];
-const attemptsList: Attempt[] = params.get("flow") === "limit" ? [specAttempt, builtAttempt, checkAttempt, ...reviews] : waiting ? [specAttempt, builtAttempt, checkAttempt, ...reviews, approvalAttempt, ...(delivered ? [prAttempt] : [])] : [attempt];
+const built = [builtAttempt, ...(round > 0 ? [reworkAttempt] : [])];
+const gated = gate === "build" ? [specAttempt, approvalAttempt] : gate === "end" ? [specAttempt, builtAttempt, approvalAttempt] : null;
+const attemptsList: Attempt[] = params.get("flow") === "limit" ? [specAttempt, builtAttempt, checkAttempt, ...reviews] : gated ?? (waiting ? [specAttempt, ...built, ...(noCheck ? [] : [checkAttempt]), ...(noReviews ? [] : reviews), approvalAttempt, ...(delivered ? [prAttempt] : [])] : [attempt]);
+const stepNamed = (id: string) => workflow.filter((step) => step.id === id);
+const runWorkflow: WorkflowStep[] =
+  gate === "build"
+    ? [...stepNamed("spec"), ...stepNamed("approval"), ...stepNamed("builder"), ...stepNamed("pull-request")]
+    : gate === "end"
+      ? [...stepNamed("spec"), ...stepNamed("builder"), ...stepNamed("approval")]
+      : workflow.filter((step) => !(noCheck && step.type === "check") && !(noReviews && (step.id === "reviews" || step.id === "approver")));
 const note = (seq: number, text: string, paths: string[]): BrainNote => ({ seq, projectId: "p1", kind: "map", state: "active", text, evidence: null, paths, commitSha: "4f4c706aa11", runId: "r1", attemptId: "a1", createdAt: at(4000), decidedAt: null });
 const mapNotes = [
   { ...note(1, "The API lives in app/api, one file per resource.", ["app/api"]), stale: false, included: true },
@@ -116,7 +137,7 @@ const run: Run = {
   title: "#7 The add function in calc.py is wrong",
   baseRef: "main",
   request: "Fix add",
-  workflow: waiting ? workflow : [agentStep("builder", "sonnet", "build")],
+  workflow: waiting ? runWorkflow : [agentStep("builder", "sonnet", "build")],
   language: "en",
   sourceIssue: waiting ? { number: 7, title: "add is wrong", author: "someone", url: "https://github.com/acme/app/issues/7" } : null,
   branch: "keel/5e882d0f",
@@ -278,7 +299,8 @@ mockIPC((command, args) => {
         { number: 9, title: "Holiday repeated in 2030", author: "other", url: "u", body: "b" },
       ];
     case "attempt_events":
-      return events;
+      // Only one step has a log, or the run's commands would count once per step.
+      return (args as { attemptId?: string } | undefined)?.attemptId === attempt.id ? events : [];
     case "attempt_diff":
       return state === "succeeded" ? DIFF : "";
     case "attempt_raw_check":
@@ -302,3 +324,9 @@ ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <App />
   </React.StrictMode>,
 );
+
+// click=<a button's text> presses it once the page has loaded, to see what it opens.
+const click = params.get("click");
+if (click) {
+  setTimeout(() => [...document.querySelectorAll("button")].find((button) => button.textContent === click)?.click(), 1500);
+}

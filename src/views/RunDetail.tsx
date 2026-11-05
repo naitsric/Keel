@@ -2,7 +2,7 @@ import { AlertTriangle, Check, ExternalLink, FileDiff, GitPullRequest, Loader2, 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck, type Run } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, toolSummary, touchesWorkflows } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "../lib/audit";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
@@ -40,6 +40,19 @@ function SummaryBlock({ title, note, children }: { title: string; note?: string;
   );
 }
 
+/** What the agents that explain the run wrote, in full, one round after another. */
+function Explanations({ attempts }: { attempts: Attempt[] }) {
+  const { t } = useTranslation();
+  return attempts.map((attempt) => (
+    <div key={attempt.id} className="mb-3 last:mb-0">
+      {attempt.round > 0 && <p className="mb-1 text-[12px] font-medium text-warning">{t("run.round", { number: attempt.round + 1 })}</p>}
+      <p className="selectable whitespace-pre-wrap">{attempt.resultText}</p>
+    </div>
+  ));
+}
+
+const auditKey = (rawCheck: RawCheck) => `run.audit${rawCheck[0].toUpperCase()}${rawCheck.slice(1)}`;
+
 /** The rule of the product: never just "finished". What it did, changed, proved, and what's next. */
 function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: { run: Run | null; attempts: Attempt[]; current: Attempt; commands: CommandRun[]; rawCheck: RawCheck; onShowChanges: () => void }) {
   const { t } = useTranslation();
@@ -67,12 +80,7 @@ function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: 
           </>
         )}
         {!mapper && explaining.length === 0 && <p className="selectable whitespace-pre-wrap">{(anyActive ? t("run.noResultYet") : current.state === "succeeded" ? t("run.noResult") : t("run.noResultEnded"))}</p>}
-        {explaining.map((attempt) => (
-          <div key={attempt.id} className="mb-3 last:mb-0">
-            {attempt.round > 0 && <p className="mb-1 text-[12px] font-medium text-warning">{t("run.round", { number: attempt.round + 1 })}</p>}
-            <p className="selectable whitespace-pre-wrap">{attempt.resultText}</p>
-          </div>
-        ))}
+        <Explanations attempts={explaining} />
       </SummaryBlock>
       <div className="space-y-4">
         <SummaryBlock title={t("run.whatChanged")}>
@@ -98,7 +106,7 @@ function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: 
           )}
           <p className="text-muted">{commands.length === 0 ? t("run.noCommands") : t("run.commandsPassed", { passed, total: commands.length })}</p>
           <p className={cx("mt-0.5", rawCheck === "changed" || rawCheck === "missing" ? "font-medium text-danger" : "text-muted")}>
-            {t(`run.audit${rawCheck[0].toUpperCase()}${rawCheck.slice(1)}`)}
+            {t(auditKey(rawCheck))}
           </p>
         </SummaryBlock>
         <SummaryBlock title={t("run.whatToDecide")}>
@@ -109,12 +117,103 @@ function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: 
   );
 }
 
-/** Rejecting is the easy path: it has the focus, Enter never approves, and approve arms after a moment. */
-function ApprovalCard({ attempt, files, onError }: { attempt: Attempt; files: string[]; onError: (message: string) => void }) {
+function ApprovalRow({ label, note, action, children }: { label: string; note?: string; action?: React.ReactNode; children: React.ReactNode }) {
+  return (
+    <div className="grid grid-cols-[116px_1fr] gap-x-3 border-t border-border py-2 first:border-t-0 first:pt-0">
+      <dt className="text-[12px] leading-5 font-semibold text-muted">
+        {label}
+        {note && <span className="block text-[11px] leading-4 font-normal text-subtle">{note}</span>}
+      </dt>
+      <dd className="flex min-w-0 items-start gap-3 text-[12.5px] leading-5">
+        <div className="min-w-0 flex-1">{children}</div>
+        {action && <div className="-my-1 shrink-0">{action}</div>}
+      </dd>
+    </div>
+  );
+}
+
+function ApprovalProof({ attempts, commands, rawCheck, reviewed }: { attempts: Attempt[]; commands: CommandRun[]; rawCheck: RawCheck; reviewed: boolean }) {
   const { t } = useTranslation();
+  const checks = latestOfEachStep(attempts.filter((a) => a.kind === "check"));
+  const passed = commands.filter((c) => c.status === "ok").length;
+  return (
+    <>
+      {checks.map((check) =>
+        check.state === "succeeded" ? (
+          <p key={check.id} className="selectable flex gap-1.5">
+            <Check size={13} className="mt-1 shrink-0 text-success" />
+            <span className="min-w-0 break-words">{t("run.approvalCheckPassed", { command: check.prompt })}</span>
+          </p>
+        ) : (
+          <p key={check.id} className="selectable font-medium break-words text-danger">
+            {t("run.approvalCheckFailed", { command: check.prompt })}
+          </p>
+        ),
+      )}
+      {checks.length === 0 && (
+        <p>
+          {t("run.approvalNoCheck")}
+          {reviewed && ` ${t("run.approvalReviewsOnlyRead")}`}
+        </p>
+      )}
+      <p className="text-muted">
+        {commands.length === 0 ? t("run.noCommands") : t("run.commandsPassed", { passed, total: commands.length })} <span className={cx((rawCheck === "changed" || rawCheck === "missing") && "font-medium text-danger")}>{t(auditKey(rawCheck))}</span>
+      </p>
+    </>
+  );
+}
+
+/** The conclusions only. What each reviewer said in full is one click away. */
+function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number }) {
+  const { t } = useTranslation();
+  const { reviewers, approver } = reviewsOfRound(attempts, round);
+  const latest = latestOfEachStep(reviewers);
+  const ran = latest.filter((review) => review.state !== "skipped");
+  const skipped = latest.filter((review) => review.state === "skipped");
+  return (
+    <div className="space-y-0.5">
+      {ran.length > 0 && (
+        <ul className="flex flex-wrap gap-x-3">
+          {ran.map((review) => (
+            <li key={review.id} className="flex items-baseline gap-1.5">
+              <span className="font-mono text-[12px] font-medium">{review.stepId}</span>
+              <ReviewVerdict review={review} />
+            </li>
+          ))}
+        </ul>
+      )}
+      {ran
+        .filter((review) => review.output?.verdict === "changes" && review.output.summary)
+        .map((review) => (
+          <p key={review.id} className="selectable text-muted">
+            <span className="font-mono text-[12px]">{review.stepId}</span>: {gist(review.output?.summary ?? "", 140).text}
+          </p>
+        ))}
+      {skipped.length > 0 && <p className="text-subtle">{t("run.approvalSkipped", { names: skipped.map((review) => review.stepId).join(", ") })}</p>}
+      {approver?.output && (
+        <div className={cx(ran.length + skipped.length > 0 && "pt-1")}>
+          <ApproverVerdict output={approver.output} riskClass={approver.output.risk === "high" ? "font-medium text-warning" : "text-fg"} />
+          {approver.output.reasons && <p className="selectable text-muted">{gist(approver.output.reasons, 160).text}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const SHOWN_FILES = 5;
+
+/**
+ * What's being decided, in one place, so nobody has to scroll to find out. Rejecting takes a reason,
+ * so the focus starts on the note, where Enter only adds a line. Enter never approves, and approve
+ * arms after a moment.
+ */
+export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck, onShowChanges, onError }: { attempt: Attempt; run: Run; attempts: Attempt[]; files: string[]; commands: CommandRun[]; rawCheck: RawCheck; onShowChanges: () => void; onError: (message: string) => void }) {
+  const { t } = useTranslation();
+  const project = useApp((s) => s.overview.projects.find((p) => p.id === run.projectId));
   const [note, setNote] = useState("");
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [reading, setReading] = useState<"explanation" | "reviews" | null>(null);
   useEffect(() => {
     const timer = setTimeout(() => setArmed(true), 800);
     return () => clearTimeout(timer);
@@ -126,48 +225,163 @@ function ApprovalCard({ attempt, files, onError }: { attempt: Attempt; files: st
       onError(errorText(t, e));
     });
   };
+
+  const outcome = approvalOutcome(run.workflow, attempt.stepId, files);
+  const empty = outcome === "nothingToDeliver";
+  const delivers = outcome === "delivers" || outcome === "deliversLater";
+  const explaining = explainingAttempts(attempts);
+  // After rework, how it started and how it ended tell the story.
+  const told = explaining.length > 2 ? [explaining[0], explaining[explaining.length - 1]] : explaining;
+  const gists = told.map((a) => ({ attempt: a, ...gist(a.resultText ?? "") }));
+  const hasMore = explaining.length > told.length || gists.some((g) => g.cut);
+  const { reviewers, approver } = reviewsOfRound(attempts, run.round);
+  const reviewed = reviewers.some((review) => review.state !== "skipped") || approver != null;
+  const hiddenFiles = files.length - SHOWN_FILES;
+
   return (
-    <Card role="alert" className="border-warning/40 p-4">
-      <p className="text-[14px] font-semibold">{t("run.approvalTitle")}</p>
-      <p className="mt-1 text-[12.5px] text-muted">{t("run.approvalBody")}</p>
+    <Card role="alert" className="flex max-h-[calc(100vh-140px)] flex-col border-warning/40 p-4">
+      <p className="text-[14px] font-semibold">{t(empty ? "run.approvalEmptyTitle" : outcome === "delivers" ? "run.approvalTitle" : "run.approvalContinueTitle")}</p>
+      <p className="mt-1 mb-3 text-[12.5px] text-muted">{t(empty ? "run.approvalEmptyBody" : "run.approvalBody")}</p>
+      <dl className="min-h-0 overflow-y-auto">
+        <ApprovalRow
+          label={t("run.whatItDid")}
+          note={explaining.length > 0 ? t("run.generated") : undefined}
+          action={
+            !empty &&
+            hasMore && (
+              <Button variant="ghost" onClick={() => setReading("explanation")}>
+                {t("run.approvalReadAll")}
+              </Button>
+            )
+          }
+        >
+          {explaining.length === 0 && <p>{t("run.noResult")}</p>}
+          {empty ? (
+            <Explanations attempts={explaining} />
+          ) : (
+            gists.map((g) => (
+              <p key={g.attempt.id} className="selectable mb-1 break-words last:mb-0">
+                {g.attempt.round > 0 && <span className="mr-1.5 font-medium text-warning">{t("run.round", { number: g.attempt.round + 1 })}</span>}
+                {g.text}
+              </p>
+            ))
+          )}
+        </ApprovalRow>
+        {!empty && (
+          <ApprovalRow
+            label={t("run.whatChanged")}
+            action={
+              files.length > 0 && (
+                <Button variant="ghost" onClick={onShowChanges}>
+                  <FileDiff size={14} />
+                  {t("run.viewDiff")}
+                </Button>
+              )
+            }
+          >
+            {files.length === 0 ? (
+              <p className="text-muted">{t("run.noChanges")}</p>
+            ) : (
+              <ul className="selectable flex flex-wrap gap-x-3 font-mono text-[12px]">
+                {files.slice(0, SHOWN_FILES).map((file) => (
+                  <li key={file} className="min-w-0 break-all">
+                    {file}
+                  </li>
+                ))}
+                {hiddenFiles > 0 && <li className="font-sans text-[12.5px] text-muted">{t("run.approvalMoreFiles", { count: hiddenFiles })}</li>}
+              </ul>
+            )}
+          </ApprovalRow>
+        )}
+        <ApprovalRow label={t("run.whatProves")}>
+          <ApprovalProof attempts={attempts} commands={commands} rawCheck={rawCheck} reviewed={reviewed} />
+        </ApprovalRow>
+        {(reviewers.length > 0 || approver) && (
+          <ApprovalRow
+            label={t("run.reviewsTitle")}
+            note={run.round > 0 ? t("run.round", { number: run.round + 1 }) : undefined}
+            action={
+              <Button variant="ghost" onClick={() => setReading("reviews")}>
+                {t("run.approvalSeeReviews")}
+              </Button>
+            }
+          >
+            <ReviewsGlance attempts={attempts} round={run.round} />
+          </ApprovalRow>
+        )}
+      </dl>
       {touchesWorkflows(files) && (
         <p className="mt-2 flex gap-1.5 rounded-md border border-warning/40 bg-inset p-2 text-[12.5px] font-medium text-warning">
           <AlertTriangle size={14} className="mt-0.5 shrink-0" />
           {t("run.workflowWarning")}
         </p>
       )}
-      <div className="mt-3">
-        <Field label={t("run.approvalNote")}>
-          <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} placeholder={t("run.approvalNotePlaceholder")} className={`${inputClass} resize-y`} />
-        </Field>
-      </div>
-      <div className="mt-3 flex gap-2">
-        <Button autoFocus disabled={busy} onClick={() => answer(false)}>
-          {t("run.reject")}
-        </Button>
-        <Button
-          variant="primary"
-          disabled={!armed || busy}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") e.preventDefault();
-          }}
-          onClick={() => answer(true)}
-        >
-          <GitPullRequest size={14} />
-          {t("run.approve")}
-        </Button>
-      </div>
+      {empty ? (
+        <div className="mt-3 border-t border-border pt-3">
+          <Button autoFocus variant="primary" disabled={busy} onClick={() => answer(false)}>
+            {t("run.approvalClose")}
+          </Button>
+          <p className="mt-1 text-[11.5px] text-muted">{t("run.approvalCloseHint")}</p>
+        </div>
+      ) : (
+        <>
+          <div className="mt-2 border-t border-border pt-3">
+            <Field label={t("run.approvalNote")} hint={delivers ? `${t("run.approvalNoteHint")} ${t("run.approvalNotePrHint")}` : t("run.approvalNoteHint")}>
+              <textarea autoFocus rows={2} value={note} onChange={(e) => setNote(e.target.value)} className={`${inputClass} resize-y`} />
+            </Field>
+          </div>
+          <div className="mt-3 grid grid-cols-2 gap-4">
+            <div>
+              <Button disabled={busy || !note.trim()} onClick={() => answer(false)}>
+                {t("run.reject")}
+              </Button>
+              <p className="mt-1 text-[11.5px] text-muted">{t("run.approvalRejectHint")}</p>
+              {!note.trim() && <p className="mt-0.5 text-[11.5px] text-muted">{t("run.approvalRejectNeedsReason")}</p>}
+            </div>
+            <div>
+              <Button
+                variant="primary"
+                disabled={!armed || busy}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") e.preventDefault();
+                }}
+                onClick={() => answer(true)}
+              >
+                {outcome === "delivers" && <GitPullRequest size={14} />}
+                {t(outcome === "delivers" ? "run.approve" : "run.approveContinue")}
+              </Button>
+              <p className="mt-1 text-[11.5px] text-muted">{t(outcome === "delivers" ? "run.approvalApproveHint" : outcome === "deliversLater" ? "run.approvalLaterHint" : "run.approvalNoPushHint")}</p>
+              {delivers && (
+                <p className="selectable mt-0.5 flex flex-wrap gap-x-2 text-[11.5px] text-muted">
+                  {t("run.approvalWhere")}
+                  {project?.githubRepo && <span className="font-mono text-fg">{project.githubRepo}</span>}
+                  {run.branch && <span className="font-mono text-fg">{run.branch}</span>}
+                  {project?.githubAccount && <span className="text-fg">{t("run.accountGithub", { account: project.githubAccount })}</span>}
+                </p>
+              )}
+              {delivers && project && !project.githubRepo && <p className="mt-0.5 text-[11.5px] text-warning">{t("reasons.noGithubRemote")}</p>}
+              {delivers && project?.githubRepo && !project.githubAccount && <p className="mt-0.5 text-[11.5px] text-warning">{t("reasons.githubAccountMissing")}</p>}
+            </div>
+          </div>
+        </>
+      )}
+      <Modal open={reading !== null} onOpenChange={(open) => !open && setReading(null)} title={t(reading === "reviews" ? "run.reviewsTitle" : "run.approvalExplanationTitle")} className="w-[720px]">
+        {reading === "reviews" ? (
+          <ReviewsList attempts={attempts} round={run.round} />
+        ) : (
+          <div className="text-[13px] leading-relaxed">
+            <Explanations attempts={explaining} />
+          </div>
+        )}
+      </Modal>
     </Card>
   );
 }
 
-function Actions({ attempt, files, onError }: { attempt: Attempt; files: string[]; onError: (message: string) => void }) {
+function Actions({ attempt, onError }: { attempt: Attempt; onError: (message: string) => void }) {
   const { t } = useTranslation();
   const navigate = useApp((s) => s.navigate);
   const act = (run: () => Promise<unknown>) => run().catch((e) => onError(errorText(t, e)));
-  if (attempt.state === "waitingApproval") {
-    return <ApprovalCard attempt={attempt} files={files} onError={onError} />;
-  }
   if (attempt.reason?.code === "reworkLimit") {
     return (
       <Card role="alert" className="border-warning/40 p-4">
@@ -460,29 +674,35 @@ function ProposalsCard({ runId, revision }: { runId: string; revision: number })
   );
 }
 
-/** What every reviewer said in the current round, and what the approver made of it. */
-function ReviewsCard({ attempts, round }: { attempts: Attempt[]; round: number }) {
+function ReviewVerdict({ review }: { review: Attempt }) {
   const { t } = useTranslation();
-  const current = attempts.filter((a) => a.round === round);
-  const reviewers = current.filter((a) => a.role === "reviewer");
-  const approver = [...current].reverse().find((a) => a.role === "approver" && a.output);
-  if (reviewers.length === 0 && !approver) return null;
+  if (!review.output) return <StateBadge state={review.state} label={t(`states.${review.state}`)} />;
+  return <span className={review.output.verdict === "approved" ? "text-success" : "text-warning"}>{review.output.verdict === "approved" ? t("run.verdictApproved") : t("run.verdictChanges")}</span>;
+}
+
+function ApproverVerdict({ output, riskClass = "text-subtle" }: { output: NonNullable<Attempt["output"]>; riskClass?: string }) {
+  const { t } = useTranslation();
   return (
-    <Card className="p-4">
-      <h2 className="flex items-baseline gap-2 text-[13px] font-semibold">
-        {t("run.reviewsTitle")}
-        {round > 0 && <span className="text-[12px] font-normal text-warning">{t("run.round", { number: round + 1 })}</span>}
-      </h2>
-      <ul className="mt-2.5 space-y-2">
+    <div className="flex flex-wrap items-baseline gap-2">
+      <span className="font-medium">{t("run.approverTitle")}</span>
+      <span className={output.decision === "approve" ? "text-success" : "text-warning"}>{output.overriddenByPerson ? t("run.decisionOverridden") : output.decision === "approve" ? t("run.decisionApprove") : t("run.decisionRework")}</span>
+      <span className={riskClass}>
+        {t("run.risk")}: {t(`run.risk${output.risk[0].toUpperCase()}${output.risk.slice(1)}`)}
+      </span>
+    </div>
+  );
+}
+
+function ReviewsList({ attempts, round }: { attempts: Attempt[]; round: number }) {
+  const { reviewers, approver } = reviewsOfRound(attempts, round);
+  return (
+    <>
+      <ul className="space-y-2">
         {reviewers.map((review) => (
           <li key={review.id} className="text-[12.5px]">
             <div className="flex flex-wrap items-baseline gap-2">
               <span className="font-mono text-[12px] font-medium">{review.stepId}</span>
-              {review.output ? (
-                <span className={review.output.verdict === "approved" ? "text-success" : "text-warning"}>{review.output.verdict === "approved" ? t("run.verdictApproved") : t("run.verdictChanges")}</span>
-              ) : (
-                <StateBadge state={review.state} label={t(`states.${review.state}`)} />
-              )}
+              <ReviewVerdict review={review} />
             </div>
             {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
             {(review.output?.findings ?? []).length > 0 && (
@@ -497,18 +717,26 @@ function ReviewsCard({ attempts, round }: { attempts: Attempt[]; round: number }
       </ul>
       {approver?.output && (
         <div className="mt-3 border-t border-border pt-2.5 text-[12.5px]">
-          <div className="flex flex-wrap items-baseline gap-2">
-            <span className="font-medium">{t("run.approverTitle")}</span>
-            <span className={approver.output.decision === "approve" ? "text-success" : "text-warning"}>
-              {approver.output.overriddenByPerson ? t("run.decisionOverridden") : approver.output.decision === "approve" ? t("run.decisionApprove") : t("run.decisionRework")}
-            </span>
-            <span className="text-subtle">
-              {t("run.risk")}: {t(`run.risk${approver.output.risk[0].toUpperCase()}${approver.output.risk.slice(1)}`)}
-            </span>
-          </div>
+          <ApproverVerdict output={approver.output} />
           {approver.output.reasons && <p className="selectable mt-0.5 text-muted">{approver.output.reasons}</p>}
         </div>
       )}
+    </>
+  );
+}
+
+/** What every reviewer said in the current round, and what the approver made of it. */
+function ReviewsCard({ attempts, round }: { attempts: Attempt[]; round: number }) {
+  const { t } = useTranslation();
+  const { reviewers, approver } = reviewsOfRound(attempts, round);
+  if (reviewers.length === 0 && !approver) return null;
+  return (
+    <Card className="p-4">
+      <h2 className="mb-2.5 flex items-baseline gap-2 text-[13px] font-semibold">
+        {t("run.reviewsTitle")}
+        {round > 0 && <span className="text-[12px] font-normal text-warning">{t("run.round", { number: round + 1 })}</span>}
+      </h2>
+      <ReviewsList attempts={attempts} round={round} />
     </Card>
   );
 }
@@ -658,7 +886,7 @@ export function RunDetail({ runId }: { runId: string }) {
   const rawCheck = worstRawCheck(Object.values(rawChecks));
   const files = useMemo(() => filesChangedBy(attempts), [attempts]);
 
-  if (!attempt || !latest) {
+  if (!attempt || !latest || !run) {
     return <TopBar back />;
   }
 
@@ -666,6 +894,7 @@ export function RunDetail({ runId }: { runId: string }) {
   const pending = flatSteps(run?.workflow ?? []).filter((step) => !attempts.some((a) => a.stepId === step.id));
   const kindTabs: Tab[] = attempt.state === "skipped" ? ["activity", "prompt"] : attempt.kind === "agent" ? ["activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
   const shownTab: Tab = kindTabs.includes(tab) ? tab : kindTabs[0];
+  const showChanges = () => void api.runDiff(runId).then(setRunDiff);
 
   return (
     <>
@@ -696,9 +925,15 @@ export function RunDetail({ runId }: { runId: string }) {
             {error}
           </p>
         )}
-        <Actions attempt={latest} files={files} onError={setError} />
-        <Summary run={run} attempts={attempts} current={latest} commands={allCommands} rawCheck={rawCheck} onShowChanges={() => void api.runDiff(runId).then(setRunDiff)} />
-        <ReviewsCard attempts={attempts} round={run?.round ?? 0} />
+        {latest.state === "waitingApproval" ? (
+          <ApprovalCard attempt={latest} run={run} attempts={attempts} files={files} commands={allCommands} rawCheck={rawCheck} onShowChanges={showChanges} onError={setError} />
+        ) : (
+          <>
+            <Actions attempt={latest} onError={setError} />
+            <Summary run={run} attempts={attempts} current={latest} commands={allCommands} rawCheck={rawCheck} onShowChanges={showChanges} />
+            <ReviewsCard attempts={attempts} round={run.round} />
+          </>
+        )}
         <ProposalsCard runId={runId} revision={revision} />
         <Modal open={runDiff !== null} onOpenChange={(open) => !open && setRunDiff(null)} title={t("run.changesTitle")} className="w-[900px]">
           {runDiff ? <DiffView diff={runDiff} /> : <p className="text-[12.5px] text-subtle">{t("changes.empty")}</p>}
