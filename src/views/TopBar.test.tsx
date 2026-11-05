@@ -1,7 +1,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useSearchEverywhere } from "../commands/SearchEverywhere";
-import { hideApp, note, paletteOpen, pressKey, row, settle, showApp, view } from "../commands/testApp";
+import { callsTo, hideApp, note, paletteOpen, paletteRow, pressKey, pressMod, row, settle, showApp, view } from "../commands/testApp";
 import i18next from "../i18n";
 import { useApp, type View } from "../lib/store";
 
@@ -162,6 +162,63 @@ describe("the top bar", () => {
       await act(() => i18next.changeLanguage("es"));
       expect(field()).toBeUndefined();
       expect(headerButton("Buscar")?.textContent).toBe("Buscar⇧⇧");
+      await act(() => i18next.changeLanguage("en"));
+    });
+  });
+
+  describe("the primary button", () => {
+    it.each<[string, View]>([
+      ["home", { name: "home" }],
+      ["workflows", { name: "workflows" }],
+      ["brain", { name: "brain" }],
+      ["settings", { name: "settings" }],
+      ["a run", { name: "run", runId: "r1" }],
+    ])("is New run on %s: it opens the dialog and starts nothing", async (_name, at) => {
+      await showApp(RUNS, at);
+      expect(headerButton("New run")?.title).toBe("New run  ⌘N");
+      await click(headerButton("New run"));
+      expect(useApp.getState().newRunOpen).toBe(true);
+      expect(view()).toEqual(at);
+      expect(callsTo("run_start")).toEqual([]);
+    });
+
+    it("is New task on the board, as ⌘N is there", async () => {
+      await showApp(RUNS, { name: "board" });
+      expect(headerButton("New run")).toBeUndefined();
+      expect(headerButton("New task")?.title).toBe("New task  ⌘N");
+      await click(headerButton("New task"));
+      expect(useApp.getState().newRunOpen).toBe(false);
+      expect(document.querySelector("form")).not.toBeNull();
+      expect(document.body.textContent).toContain(i18next.t("board.task.newTitle"));
+      expect(callsTo("card_create")).toEqual([]);
+    });
+
+    it("says what ⌘N would run, everywhere", async () => {
+      for (const at of [{ name: "home" }, { name: "board" }, { name: "run", runId: "r1" }] as View[]) {
+        await showApp(RUNS, at);
+        pressMod("A", "KeyA", { shiftKey: true });
+        const label = headerButton("New")?.textContent as string;
+        expect(paletteRow(label)?.textContent, label).toBe(`${label}⌘N`);
+        await hideApp();
+      }
+      await showApp(RUNS);
+    });
+
+    it("isn't there without a project to run in, on any page", async () => {
+      for (const at of [{ name: "home" }, { name: "board" }, { name: "settings" }] as View[]) {
+        await showApp(RUNS, at, []);
+        expect(headerButton("New")).toBeUndefined();
+        await hideApp();
+      }
+      await showApp(RUNS);
+    });
+
+    it("fits Nueva ejecución and Nueva tarea in Spanish", async () => {
+      await showApp(RUNS);
+      await act(() => i18next.changeLanguage("es"));
+      expect(headerButton("Nueva")?.textContent).toBe("Nueva ejecución");
+      await click(headerButton("Tablero"));
+      expect(headerButton("Nueva")?.textContent).toBe("Nueva tarea");
       await act(() => i18next.changeLanguage("en"));
     });
   });

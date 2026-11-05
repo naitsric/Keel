@@ -1,8 +1,8 @@
 import { AlertTriangle, Check, ExternalLink, FileDiff, GitPullRequest, Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { useSearchEverywhere } from "../commands/SearchEverywhere";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck, type Run } from "../lib/api";
 import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "../lib/audit";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -232,22 +232,21 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
       clearTimeout(timer);
       setArmed(false);
     };
+    // The palette and every dialog hold the keymap. Their overlays cover the card, and a second
+    // click on one would land here once it's gone, so it waits for them. New run is one click away.
     const arm = () => {
       disarm();
-      timer = setTimeout(() => setArmed(true), 800);
+      if (!keymapHeld()) timer = setTimeout(() => setArmed(true), 800);
     };
     arm();
     window.addEventListener("focus", arm);
     window.addEventListener("blur", disarm);
-    // The palette's overlay covers the card, and a second click on it would land here once it's gone.
-    const unwatchPalette = useSearchEverywhere.subscribe((palette, before) => {
-      if (palette.open !== before.open) (palette.open ? disarm : arm)();
-    });
+    const unwatchHold = watchKeymapHold(arm);
     return () => {
       clearTimeout(timer);
       window.removeEventListener("focus", arm);
       window.removeEventListener("blur", disarm);
-      unwatchPalette();
+      unwatchHold();
     };
   }, []);
   // Masking only hides a secret here. Approving would still push it with the branch.

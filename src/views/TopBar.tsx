@@ -1,7 +1,7 @@
 import { ArrowLeft, Plus, Search, Settings } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { KEYS, withKey } from "../commands/keys";
-import { runUnlessHeld } from "../commands/registry";
+import { focusContext, pickCommand, runUnlessHeld, useCommands } from "../commands/registry";
 import { useApp, type View } from "../lib/store";
 import { Button, cx, Kbd } from "../ui/primitives";
 
@@ -23,13 +23,18 @@ export function TopBar() {
   const { t } = useTranslation();
   const view = useApp((s) => s.view);
   const proposals = useApp((s) => s.overview.pendingProposals);
-  const setNewRunOpen = useApp((s) => s.setNewRunOpen);
+  const commands = useCommands((s) => s.commands);
   const noProjects = useApp((s) => s.overviewLoaded && s.overview.projects.length === 0);
   const noRuns = useApp((s) => s.overview.runs.length === 0);
   // The welcome screen says what to do first, and there's nothing yet on the other pages. Anywhere
   // else, like Settings, these are the way back.
   const welcome = view.name === "home" && noProjects && noRuns;
   const current = currentPage(view);
+  // Whatever ⌘N does here, so the button and the key can't disagree: New task on the board, and New run everywhere else.
+  const primary = pickCommand(
+    Object.values(commands).filter((command) => command.keybinding === KEYS.newRun),
+    focusContext(),
+  );
   return (
     <header data-tauri-drag-region className="flex h-[38px] shrink-0 items-center gap-2 border-b border-border pr-3 pl-[var(--traffic-lights-inset)]">
       {/* The same width with or without Back, so the pages don't move under the pointer. */}
@@ -77,10 +82,10 @@ export function TopBar() {
         </button>
       )}
       <div data-tauri-drag-region className="min-w-0 flex-1" />
-      {view.name === "home" && !noProjects && (
-        <Button variant="primary" title={withKey(t("app.newRun"), KEYS.newRun)} onClick={() => setNewRunOpen(true)}>
+      {primary && !noProjects && (
+        <Button variant="primary" title={withKey(t(primary.title), KEYS.newRun)} onClick={() => runUnlessHeld(primary.id)}>
           <Plus size={14} />
-          {t("app.newRun")}
+          {t(primary.title)}
         </Button>
       )}
       <Button variant="ghost" aria-label={t("app.settings")} aria-current={current === "settings" ? "page" : undefined} className={cx(current === "settings" && "bg-active text-fg")} title={withKey(t("app.settings"), KEYS.settings)} onClick={() => runUnlessHeld("navigate.settings")}>

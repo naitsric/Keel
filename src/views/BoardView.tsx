@@ -354,7 +354,8 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
   const applyNewest = useMemo(() => newestOnly<Board>(setBoard), []);
   const paused = board?.paused ?? null;
 
-  useBoardCommands(board ? () => setDialog({ kind: "task", card: null }) : null);
+  // By project, not by whether this one's cards have loaded, or the top bar's button would change its mind on every switch.
+  useBoardCommands(projects.length > 0 ? () => setDialog({ kind: "task", card: null }) : null);
   // A keyboard drag ends on Space, Enter or Tab anywhere in the window. Typing in a dialog or the
   // palette opened mid-drag would drop the card, and on Todo that starts a run.
   useKeymapHold(activeId !== null);

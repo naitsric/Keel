@@ -8,16 +8,31 @@ import { useLayoutEffect } from "react";
  * Checked where keys are dispatched (see keymap.ts), not by each command.
  */
 const holds = new Set<symbol>();
+const watchers = new Set<() => void>();
+
+const changed = () => {
+  for (const watcher of [...watchers]) watcher();
+};
 
 /** Holds the keymap until the returned function is called. */
 export function holdKeymap(): () => void {
   const hold = Symbol("keymap hold");
   holds.add(hold);
-  return () => void holds.delete(hold);
+  changed();
+  return () => {
+    holds.delete(hold);
+    changed();
+  };
 }
 
 export function keymapHeld(): boolean {
   return holds.size > 0;
+}
+
+/** Calls `watcher` whenever a hold starts or ends. Returns a function that stops it. */
+export function watchKeymapHold(watcher: () => void): () => void {
+  watchers.add(watcher);
+  return () => void watchers.delete(watcher);
 }
 
 /** Holds the keymap while `active`: some dialogs stay mounted when they're closed. */

@@ -364,6 +364,53 @@ describe("safety", () => {
       expect(button(APPROVE)?.disabled).toBe(true);
     });
 
+    it("is off under New run, which is a click away on the run page, and waits again after it closes", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      expect(button(APPROVE)?.disabled).toBe(false);
+
+      act(() => button("New run")?.click());
+      await settle(0);
+      expect(useApp.getState().newRunOpen).toBe(true);
+      expect(button(APPROVE)?.disabled).toBe(true);
+      await settle(5000);
+      expect(button(APPROVE)?.disabled).toBe(true);
+
+      pressKey("Escape", "Escape", {}, document.body);
+      await settle(0);
+      expect(useApp.getState().newRunOpen).toBe(false);
+      act(() => button(APPROVE)?.click());
+      expect(answers()).toEqual([]);
+      await settle(799);
+      expect(button(APPROVE)?.disabled).toBe(true);
+      await settle(1);
+      expect(button(APPROVE)?.disabled).toBe(false);
+    });
+
+    it("waits for a dialog already open when the card appears under it", async () => {
+      await showApp(RUNS);
+      act(() => useApp.setState({ newRunOpen: true, view: { name: "run", runId: WAITING } }));
+      await settle(5000);
+      expect(button(APPROVE)?.disabled).toBe(true);
+      pressKey("Escape", "Escape", {}, document.body);
+      await settle(799);
+      expect(button(APPROVE)?.disabled).toBe(true);
+      await settle(1);
+      expect(button(APPROVE)?.disabled).toBe(false);
+    });
+
+    it("waits under the changes too, even if the window comes back meanwhile", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      pressMod("d", "KeyD");
+      await settle();
+      expect(button(APPROVE)?.disabled).toBe(true);
+      act(() => void window.dispatchEvent(new Event("blur")));
+      act(() => void window.dispatchEvent(new Event("focus")));
+      await settle(5000);
+      expect(button(APPROVE)?.disabled).toBe(true);
+    });
+
     it("goes off with the window even while the card is open, as before", async () => {
       await showApp(RUNS, { name: "run", runId: WAITING });
       await settle(800);
