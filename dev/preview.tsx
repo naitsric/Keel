@@ -11,11 +11,14 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
+import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
 import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, Project, ProjectAdded, Reason, Run, RunRow, WorkflowStep } from "../src/lib/api";
 import { useApp } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
 const view = params.get("view") ?? "home";
+// palette=all, actions or runs opens the search palette. q=<text> starts it on a search.
+const palette = params.get("palette") as SearchScope | null;
 const state = (params.get("state") ?? "succeeded") as AttemptState;
 const theme = params.get("theme") ?? "dark";
 document.documentElement.dataset.theme = theme;
@@ -215,6 +218,7 @@ const runs: RunRow[] =
         row("r4", "Review the login form", "queued", REASONS.queued ?? null, "haiku", null, 1),
         row("r5", "Rotate the staging keys", "blocked", REASONS.blocked ?? null, "claude-sonnet-5-5", 0, 40),
         row("r1", "The add function in calc.py is wrong. Fix it, then run the tests.", "succeeded", null, "claude-haiku-5-5", 6, 90),
+        ...(palette ? [row("r6", "Holiday repeated in 2030", "waitingApproval", null, "claude-sonnet-5-5", 3, 20)] : []),
       ];
 
 const mcpOverview = () => {
@@ -238,7 +242,7 @@ let defaultWorkflow: string | null = params.get("defaultWorkflow");
 const demoProject: Project = { id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: noCheck ? null : "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.nvm"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }], defaultWorkflow };
 // A second project on the board, with one card, to try the selector and coming back from a run.
 const otherProject: Project = { ...demoProject, id: "p2", name: "payments", path: "/Users/you/payments", services: [], env: [], defaultWorkflow: null };
-const projects = view === "board" ? [demoProject, otherProject] : [demoProject];
+const projects = view === "board" || palette ? [demoProject, otherProject] : [demoProject];
 
 // Adding a project. dialog=setup opens its dialog right away, and click=Add project… gets there the
 // long way. setup=pnpm|npm|yarn|uv|cargo|go|make|unknown is what the folder gives away.
@@ -512,6 +516,7 @@ if (view === "board") useApp.setState({ view: { name: "board" } });
 if (params.get("dialog") === "newRun") useApp.setState({ newRunOpen: true });
 if (params.get("dialog") === "quit") useApp.setState({ quitOpen: true });
 if (params.get("dialog") === "setup") useApp.setState({ projectSetup: { projectId: freshProject.id, added: params.get("added") ? (addedAnswer() as ProjectAdded) : null, returnToNewRun: false } });
+if (palette) useSearchEverywhere.setState({ open: true, scope: palette, query: params.get("q") ?? "" });
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
