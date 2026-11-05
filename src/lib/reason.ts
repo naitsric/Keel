@@ -41,7 +41,7 @@ export function errorText(t: TFunction, error: unknown): string {
   const e = error as Partial<CommandError> | string;
   if (typeof e === "string") return t("errors.internal", { detail: e });
   if (e?.reason) return reasonText(t, e.reason);
-  if (e?.code === "notARepo" || e?.code === "invalidState") return t(`errors.${e.code}`, { detail: e.detail ?? "" });
+  if (e?.code === "notARepo" || e?.code === "invalidState" || e?.code === "mcpNotRunning" || e?.code === "mcpConnectFailed") return t(`errors.${e.code}`, { detail: e.detail ?? "" });
   return t("errors.internal", { detail: e?.detail ?? String(error) });
 }
 

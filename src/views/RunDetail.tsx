@@ -675,6 +675,7 @@ export function RunDetail({ runId }: { runId: string }) {
           <div className="min-w-0 flex-1">
             <h1 className="selectable text-[17px] leading-snug font-semibold">{run?.title}</h1>
             <p className="mt-0.5 flex flex-wrap gap-x-3 text-[12px] text-subtle">
+              {run?.startedBy && <span>{t("run.startedBy", { client: run.startedBy })}</span>}
               {run?.sourceIssue && <span>{t("run.fromIssue", { number: run.sourceIssue.number })}</span>}
               {accounts.claude && <span>{t("run.accountClaude", { account: accounts.claude })}</span>}
               {accounts.github && <span>{t("run.accountGithub", { account: accounts.github })}</span>}

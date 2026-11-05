@@ -86,6 +86,43 @@ export interface GithubAccount {
   scopes: string[];
 }
 
+export interface McpSettings {
+  enabled: boolean;
+  port: number;
+}
+
+export type McpStartError = { code: "portInUse"; port: number } | { code: "listen"; port: number; message: string };
+
+export interface McpClient {
+  id: string;
+  name: string;
+  tokenPrefix: string;
+  canRun: boolean;
+  createdAt: string;
+  lastSeenAt: string | null;
+  revokedAt: string | null;
+}
+
+export interface McpCall {
+  seq: number;
+  clientId: string;
+  clientName: string;
+  tool: string;
+  args: string;
+  ok: boolean;
+  error: string | null;
+  runId: string | null;
+  at: string;
+  durationMs: number;
+}
+
+export interface McpOverview {
+  settings: McpSettings;
+  status: { running: boolean; port: number | null; url: string | null; error: McpStartError | null };
+  clients: McpClient[];
+  calls: McpCall[];
+}
+
 export interface GithubStatus {
   repo: string | null;
   accounts: GithubAccount[];
@@ -204,6 +241,8 @@ export interface Run {
   round: number;
   createdAt: string;
   finishedAt: string | null;
+  /** The MCP client that started it. Null when a person did, in the app. */
+  startedBy: string | null;
 }
 
 export type WorkflowChoice =
@@ -213,6 +252,7 @@ export type WorkflowChoice =
 export interface RunRow {
   id: string;
   title: string;
+  startedBy: string | null;
   prUrl: string | null;
   projectId: string;
   projectName: string;
@@ -334,6 +374,12 @@ export const api = {
   runAttempts: (runId: string) => invoke<Attempt[]>("run_attempts", { runId }),
   projectUpdate: (projectId: string, settings: ProjectSettings) => invoke<Project>("project_update", { projectId, settings }),
   githubStatus: (projectId: string, account: string | null) => invoke<GithubStatus>("github_status", { projectId, account }),
+  mcpOverview: () => invoke<McpOverview>("mcp_overview"),
+  mcpSettingsSave: (settings: McpSettings) => invoke<McpOverview>("mcp_settings_save", { settings }),
+  mcpClientCreate: (name: string, canRun: boolean) => invoke<{ client: McpClient; token: string }>("mcp_client_create", { name, canRun }),
+  mcpClientSetCanRun: (id: string, canRun: boolean) => invoke<void>("mcp_client_set_can_run", { id, canRun }),
+  mcpClientRevoke: (id: string) => invoke<void>("mcp_client_revoke", { id }),
+  mcpConnectClaude: (canRun: boolean) => invoke<McpOverview>("mcp_connect_claude", { canRun }),
   issuesList: (projectId: string) => invoke<Issue[]>("issues_list", { projectId }),
   decisionsList: (projectId: string) => invoke<Decision[]>("decisions_list", { projectId }),
   decisionRetire: (seq: number) => invoke<void>("decision_retire", { seq }),

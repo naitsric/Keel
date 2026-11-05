@@ -111,6 +111,7 @@ const mapNotes = [
 const proposals: BrainNote[] = [{ ...note(7, "Migrations must be added in order: the app refuses to start if one is missing.", ["db/migrations"]), kind: "learning", state: "proposed", evidence: "The check failed with 'migration 12 missing' until the builder renamed the file." }];
 const run: Run = {
   id: "r1",
+  startedBy: params.get("mcp") === "on" ? "Claude Code" : null,
   projectId: "p1",
   title: "#7 The add function in calc.py is wrong",
   baseRef: "main",
@@ -165,6 +166,7 @@ const preflight: Preflight = {
 const row = (id: string, title: string, s: AttemptState, reason: Reason | null, model: string, turns: number | null, minutes: number): RunRow => ({
   id,
   title,
+  startedBy: params.get("mcp") === "on" && id === "r1" ? "Claude Code" : null,
   prUrl: s === "succeeded" ? "https://github.com/acme/app/pull/12" : null,
   projectId: "p1",
   projectName: "demo",
@@ -190,6 +192,23 @@ const runs: RunRow[] =
         row("r1", "The add function in calc.py is wrong. Fix it, then run the tests.", "succeeded", null, "claude-haiku-5-5", 6, 90),
       ];
 
+const mcpOverview = () => {
+  const mcp = params.get("mcp");
+  const on = mcp === "on" || mcp === "port";
+  return {
+    settings: { enabled: on, port: 7413 },
+    status: mcp === "on" ? { running: true, port: 7413, url: "http://127.0.0.1:7413/mcp", error: null } : { running: false, port: null, url: null, error: mcp === "port" ? { code: "portInUse", port: 7413 } : null },
+    clients: mcp === "on" ? [{ id: "c1", name: "Claude Code", tokenPrefix: "keel_Ab3xYz", canRun: true, createdAt: at(4000), lastSeenAt: at(20), revokedAt: null }, { id: "c2", name: "Cursor", tokenPrefix: "keel_Qr8Lmn", canRun: false, createdAt: at(90000), lastSeenAt: null, revokedAt: at(4000) }] : [],
+    calls: mcp === "on"
+      ? [
+          { seq: 3, clientId: "c1", clientName: "Claude Code", tool: "wait_for_run", args: '{"run":"r1"}', ok: true, error: null, runId: "r1", at: at(20), durationMs: 4000 },
+          { seq: 2, clientId: "c1", clientName: "Claude Code", tool: "start_run", args: '{"project":"demo"}', ok: true, error: null, runId: "r1", at: at(90), durationMs: 300 },
+          { seq: 1, clientId: "c2", clientName: "Cursor", tool: "start_run", args: '{"project":"demo"}', ok: false, error: "This client may only read. The person can let it start runs in Keel's settings.", runId: null, at: at(600), durationMs: 2 },
+        ]
+      : [],
+  };
+};
+
 mockWindows("main");
 mockIPC((command, args) => {
   switch (command) {
@@ -198,6 +217,10 @@ mockIPC((command, args) => {
       return preflight;
     case "overview":
       return params.get("empty") === "1" ? { pendingProposals: 0, runs: [], projects: [], totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: params.get("proposals") === "1" ? 1 : 0, runs, projects: [{ id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.cargo"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }] }], totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
+    case "mcp_overview":
+    case "mcp_settings_save":
+    case "mcp_connect_claude":
+      return mcpOverview();
     case "run_get":
       return run;
     case "run_diff":

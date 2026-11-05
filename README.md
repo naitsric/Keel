@@ -69,6 +69,19 @@ cargo test --workspace
 `pnpm dev`, then `/dev/preview.html`, shows the real screens with made-up data, for example
 `/dev/preview.html?view=run&state=stalled&lang=es`.
 
+## Connect an assistant over MCP
+
+Keel has a built-in [MCP](https://modelcontextprotocol.io) server, so an assistant can see your projects and start runs while you watch them in the app. Only this Mac can reach it, and it's off until you turn it on.
+
+1. In **Settings → MCP server**, turn it on.
+2. Press **Connect Claude Code**. A new Claude Code session sees it on its own. In one that's already open, run `/mcp`.
+
+For another client, create a token there and give it the URL and the header it shows, once.
+
+A client can read projects, workflows, runs, issues and the Brain. If you allow it, it can also start and stop runs, with up to 3 open at a time. It can't approve or reject a step, merge, change settings or workflows, or accept anything into the Brain: a run that needs you waits for you in the app. **Settings** shows every call, and revoking a client cuts it off at once.
+
+Connecting stores the token in Claude Code's own configuration, `~/.claude.json`, as it does for any MCP server.
+
 ## License
 
 [Apache-2.0](LICENSE)

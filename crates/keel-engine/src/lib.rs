@@ -485,6 +485,11 @@ impl Engine {
         Ok(run_id)
     }
 
+    /// Tells the app to look at this run again, for a change made outside the engine.
+    pub fn announce(&self, run_id: &str) {
+        self.inner.changed(run_id);
+    }
+
     /// Answers an approval step. The text, if any, becomes a decision later runs of this project
     /// follow. Rejecting ends the run; approving lets it continue.
     pub fn answer_approval(&self, attempt_id: &str, approve: bool, text: &str) -> Result<()> {

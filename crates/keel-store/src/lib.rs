@@ -184,7 +184,96 @@ const MIGRATIONS: &[&str] = &[
     create trigger brain_note_no_delete before delete on brain_note
     begin select raise(abort, 'brain notes are never deleted'); end;
 "#,
+    // 7: MCP clients, what they called, and which client started a run.
+    r#"
+    alter table run add column started_by text;
+    create table mcp_client (
+        id text primary key,
+        name text not null,
+        token_hash blob not null unique,
+        token_prefix text not null,
+        can_run integer not null default 0,
+        created_at text not null,
+        last_seen_at text,
+        revoked_at text
+    );
+    create table mcp_call (
+        seq integer primary key autoincrement,
+        client_id text not null references mcp_client (id),
+        client_name text not null,
+        tool text not null,
+        args text not null,
+        ok integer not null,
+        error text,
+        run_id text,
+        at text not null,
+        duration_ms integer not null
+    );
+    create index mcp_call_by_run on mcp_call (run_id);
+    create trigger mcp_call_no_update before update on mcp_call
+    begin select raise(abort, 'mcp calls are never rewritten'); end;
+    create trigger mcp_call_no_delete before delete on mcp_call
+    begin select raise(abort, 'mcp calls are never deleted'); end;
+    create trigger mcp_client_no_delete before delete on mcp_client
+    begin select raise(abort, 'mcp clients are revoked, not deleted'); end;
+"#,
 ];
+
+/// An assistant allowed to reach Keel over MCP. Its token's hash is never read back.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpClient {
+    pub id: String,
+    pub name: String,
+    /// The token's first characters, to tell tokens apart.
+    pub token_prefix: String,
+    /// May start and stop runs, and not only read.
+    pub can_run: bool,
+    pub created_at: String,
+    pub last_seen_at: Option<String>,
+    pub revoked_at: Option<String>,
+}
+
+/// One tool call by an MCP client, as it happened. Never rewritten.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpCall {
+    pub seq: i64,
+    pub client_id: String,
+    pub client_name: String,
+    pub tool: String,
+    pub args: String,
+    pub ok: bool,
+    pub error: Option<String>,
+    pub run_id: Option<String>,
+    pub at: String,
+    pub duration_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewMcpCall<'a> {
+    pub client: &'a McpClient,
+    pub tool: &'a str,
+    pub args: &'a str,
+    pub error: Option<&'a str>,
+    pub run_id: Option<&'a str>,
+    pub duration_ms: i64,
+}
+
+const MCP_CLIENT_COLUMNS: &str =
+    "id, name, token_prefix, can_run, created_at, last_seen_at, revoked_at";
+
+fn mcp_client_from(r: &Row) -> rusqlite::Result<McpClient> {
+    Ok(McpClient {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        token_prefix: r.get(2)?,
+        can_run: r.get(3)?,
+        created_at: r.get(4)?,
+        last_seen_at: r.get(5)?,
+        revoked_at: r.get(6)?,
+    })
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -256,6 +345,8 @@ pub struct Run {
     pub round: i64,
     pub created_at: String,
     pub finished_at: Option<String>,
+    /// The MCP client that started it. None when a person did, in the app.
+    pub started_by: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -269,7 +360,7 @@ pub struct NewRun {
     pub source_issue: Option<String>,
 }
 
-const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round";
+const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by";
 
 fn run_from(r: &Row) -> rusqlite::Result<Run> {
     let source_issue: Option<String> = r.get(7)?;
@@ -289,6 +380,7 @@ fn run_from(r: &Row) -> rusqlite::Result<Run> {
         created_at: r.get(11)?,
         finished_at: r.get(12)?,
         round: r.get(13)?,
+        started_by: r.get(14)?,
     })
 }
 
@@ -453,6 +545,7 @@ pub struct RunRow {
     pub id: String,
     pub title: String,
     pub pr_url: Option<String>,
+    pub started_by: Option<String>,
     pub project_id: String,
     pub project_name: String,
     pub step_id: String,
@@ -580,6 +673,143 @@ impl Store {
         self.lock().execute(
             "insert into setting (key, value) values (?1, ?2) on conflict (key) do update set value = excluded.value",
             [key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn mcp_clients(&self) -> Result<Vec<McpClient>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "select {MCP_CLIENT_COLUMNS} from mcp_client order by revoked_at is not null, created_at desc"
+        ))?;
+        let rows = stmt.query_map([], mcp_client_from)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn mcp_client(&self, id: &str) -> Result<McpClient> {
+        self.lock()
+            .query_row(
+                &format!("select {MCP_CLIENT_COLUMNS} from mcp_client where id = ?1"),
+                [id],
+                mcp_client_from,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("mcp client {id}")))
+    }
+
+    pub fn add_mcp_client(
+        &self,
+        id: &str,
+        name: &str,
+        token_hash: &[u8; 32],
+        token_prefix: &str,
+        can_run: bool,
+    ) -> Result<McpClient> {
+        self.lock().execute(
+            "insert into mcp_client (id, name, token_hash, token_prefix, can_run, created_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![id, name, &token_hash[..], token_prefix, can_run, now()],
+        )?;
+        self.mcp_client(id)
+    }
+
+    /// The client this token belongs to, unless it was revoked. Read on every request, so
+    /// revoking or changing a client takes effect at once. Records that it was seen.
+    pub fn mcp_client_by_token(&self, token_hash: &[u8; 32]) -> Result<Option<McpClient>> {
+        let conn = self.lock();
+        let client = conn
+            .query_row(
+                &format!(
+                    "select {MCP_CLIENT_COLUMNS} from mcp_client
+                     where token_hash = ?1 and revoked_at is null"
+                ),
+                [&token_hash[..]],
+                mcp_client_from,
+            )
+            .optional()?;
+        if let Some(client) = &client {
+            conn.execute(
+                "update mcp_client set last_seen_at = ?2 where id = ?1",
+                rusqlite::params![client.id, now()],
+            )?;
+        }
+        Ok(client)
+    }
+
+    pub fn set_mcp_client_can_run(&self, id: &str, can_run: bool) -> Result<McpClient> {
+        self.lock().execute(
+            "update mcp_client set can_run = ?2 where id = ?1",
+            rusqlite::params![id, can_run],
+        )?;
+        self.mcp_client(id)
+    }
+
+    pub fn revoke_mcp_client(&self, id: &str) -> Result<McpClient> {
+        self.lock().execute(
+            "update mcp_client set revoked_at = ?2 where id = ?1 and revoked_at is null",
+            rusqlite::params![id, now()],
+        )?;
+        self.mcp_client(id)
+    }
+
+    pub fn add_mcp_call(&self, call: &NewMcpCall) -> Result<()> {
+        self.lock().execute(
+            "insert into mcp_call (client_id, client_name, tool, args, ok, error, run_id, at, duration_ms)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                call.client.id,
+                call.client.name,
+                call.tool,
+                call.args,
+                call.error.is_none(),
+                call.error,
+                call.run_id,
+                now(),
+                call.duration_ms,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The latest calls, newest first.
+    pub fn mcp_calls(&self, limit: i64) -> Result<Vec<McpCall>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select seq, client_id, client_name, tool, args, ok, error, run_id, at, duration_ms
+             from mcp_call order by seq desc limit ?1",
+        )?;
+        let rows = stmt.query_map([limit], |r| {
+            Ok(McpCall {
+                seq: r.get(0)?,
+                client_id: r.get(1)?,
+                client_name: r.get(2)?,
+                tool: r.get(3)?,
+                args: r.get(4)?,
+                ok: r.get(5)?,
+                error: r.get(6)?,
+                run_id: r.get(7)?,
+                at: r.get(8)?,
+                duration_ms: r.get(9)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Runs this client started that haven't finished.
+    pub fn open_runs_of_mcp_client(&self, client_id: &str) -> Result<i64> {
+        Ok(self.lock().query_row(
+            "select count(distinct r.id) from run r
+             join mcp_call c on c.run_id = r.id
+             where c.client_id = ?1 and c.tool = 'start_run' and c.ok = 1 and r.finished_at is null",
+            [client_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    pub fn set_run_started_by(&self, run_id: &str, client_name: &str) -> Result<()> {
+        self.lock().execute(
+            "update run set started_by = ?2 where id = ?1",
+            rusqlite::params![run_id, client_name],
         )?;
         Ok(())
     }
@@ -954,7 +1184,7 @@ impl Store {
         let mut stmt = conn.prepare(
             "select r.id, r.title, r.project_id, p.name as project_name, a.step_id, a.id as attempt_id, a.number,
                     a.state, a.reason, coalesce(a.model_actual, a.model_requested) as model, a.turns,
-                    a.started_at, a.finished_at, a.last_activity_at, r.pr_url
+                    a.started_at, a.finished_at, a.last_activity_at, r.pr_url, r.started_by
              from run r
              join project p on p.id = r.project_id
              join attempt a on a.run_id = r.id
@@ -974,6 +1204,7 @@ impl Store {
                 id: r.get(0)?,
                 title: r.get(1)?,
                 pr_url: r.get(14)?,
+                started_by: r.get(15)?,
                 project_id: r.get(2)?,
                 project_name: r.get(3)?,
                 step_id: r.get(4)?,
@@ -1156,6 +1387,9 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 drop table mcp_call;
+                 drop table mcp_client;
+                 alter table run drop column started_by;
                  drop table brain_note;
                  drop trigger attempt_round_fixed;
                  alter table run drop column round;
@@ -1423,5 +1657,64 @@ mod tests {
         }
         let store = Store::open(&path).unwrap();
         assert_eq!(store.setting("language").unwrap().as_deref(), Some("es"));
+    }
+
+    #[test]
+    fn an_mcp_client_is_found_by_its_token_until_it_is_revoked() {
+        let (_dir, store) = store();
+        let hash = [7u8; 32];
+        let client = store
+            .add_mcp_client("c1", "Claude Code", &hash, "keel_abc", false)
+            .unwrap();
+        assert!(!client.can_run);
+        assert_eq!(client.last_seen_at, None);
+
+        let found = store.mcp_client_by_token(&hash).unwrap().unwrap();
+        assert_eq!(found.id, "c1");
+        assert!(store.mcp_client("c1").unwrap().last_seen_at.is_some());
+        assert_eq!(store.mcp_client_by_token(&[8u8; 32]).unwrap(), None);
+
+        assert!(store.set_mcp_client_can_run("c1", true).unwrap().can_run);
+        let revoked = store.revoke_mcp_client("c1").unwrap();
+        assert!(revoked.revoked_at.is_some());
+        assert_eq!(store.mcp_client_by_token(&hash).unwrap(), None);
+        assert_eq!(store.mcp_clients().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn what_an_mcp_client_did_cannot_be_rewritten_or_deleted() {
+        let (_dir, store) = store();
+        let client = store
+            .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        store
+            .add_mcp_call(&NewMcpCall {
+                client: &client,
+                tool: "list_projects",
+                args: "{}",
+                error: None,
+                run_id: None,
+                duration_ms: 3,
+            })
+            .unwrap();
+        store
+            .add_mcp_call(&NewMcpCall {
+                client: &client,
+                tool: "start_run",
+                args: "{}",
+                error: Some("no"),
+                run_id: None,
+                duration_ms: 1,
+            })
+            .unwrap();
+        let calls = store.mcp_calls(10).unwrap();
+        assert_eq!(calls[0].tool, "start_run");
+        assert!(!calls[0].ok);
+        assert!(calls[1].ok);
+
+        let conn = store.lock();
+        assert!(conn.execute("update mcp_call set ok = 1", []).is_err());
+        assert!(conn.execute("delete from mcp_call", []).is_err());
+        assert!(conn.execute("delete from mcp_client", []).is_err());
     }
 }
