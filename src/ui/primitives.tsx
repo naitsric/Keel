@@ -1,5 +1,5 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import type { ComponentProps, ReactNode } from "react";
+import type { ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { twMerge } from "tailwind-merge";
 import { useKeymapHold } from "../commands/keymapHold";
 import { formatKeybinding } from "../commands/keys";
@@ -95,20 +95,33 @@ export interface SegmentOption<T extends string> {
   label: ReactNode;
 }
 
-/** One choice out of a few, as a row of segments. */
+/**
+ * One choice out of a few, as a row of segments. With `arrows`, ← → move between them. Only ask for
+ * it where changing one just shows something else: elsewhere this is a setting, like MCP on or off.
+ */
 export function Segmented<T extends string>({
   value,
   options,
   onChange,
   label,
+  arrows,
 }: {
   value: T;
   options: readonly SegmentOption<T>[];
   onChange: (value: T) => void;
   label: string;
+  arrows?: boolean;
 }) {
+  const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
+    const step = e.key === "ArrowRight" ? 1 : e.key === "ArrowLeft" ? -1 : 0;
+    if (!step || e.metaKey || e.ctrlKey || e.altKey || e.shiftKey) return;
+    e.preventDefault();
+    const next = (options.findIndex((option) => option.value === value) + step + options.length) % options.length;
+    onChange(options[next].value);
+    (e.currentTarget.children[next] as HTMLElement).focus();
+  };
   return (
-    <div role="radiogroup" aria-label={label} className="inline-flex items-center rounded-md bg-inset p-0.5 text-[12px]">
+    <div role="radiogroup" aria-label={label} onKeyDown={arrows ? onKeyDown : undefined} className="inline-flex items-center rounded-md bg-inset p-0.5 text-[12px]">
       {options.map((option) => {
         const selected = option.value === value;
         return (
@@ -117,6 +130,7 @@ export function Segmented<T extends string>({
             type="button"
             role="radio"
             aria-checked={selected}
+            tabIndex={arrows && !selected ? -1 : undefined}
             onClick={() => onChange(option.value)}
             className={cx("h-6 rounded px-2.5 font-medium transition-colors", selected ? "bg-elevated text-fg shadow-sm" : "text-muted hover:text-fg")}
           >

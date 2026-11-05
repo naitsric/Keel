@@ -1,6 +1,7 @@
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { openRun } from "../commands/runs";
 import { api, type BrainNote, type BrainView, type DecisionView, type NoteView } from "../lib/api";
 import { formatDateTime, formatNumber } from "../lib/format";
 import { errorText } from "../lib/reason";
@@ -8,7 +9,6 @@ import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass } from "../ui/primitives";
 import { AddProject } from "./AddProject";
 import { ModelField } from "./ModelField";
-import { TopBar } from "./TopBar";
 
 export function Paths({ paths, commit }: { paths: string[]; commit?: string | null }) {
   if (paths.length === 0) return null;
@@ -100,7 +100,6 @@ export function BrainPage() {
   const projects = useApp((s) => s.overview.projects);
   const revision = useApp((s) => s.revision);
   const refreshOverview = useApp((s) => s.refreshOverview);
-  const navigate = useApp((s) => s.navigate);
   const wanted = useApp((s) => s.brainProjectId);
   const [projectId, setProjectId] = useState(wanted ?? "");
   const [brain, setBrain] = useState<BrainView | null>(null);
@@ -135,10 +134,10 @@ export function BrainPage() {
 
   return (
     <>
-      <TopBar back />
       <main className="flex-1 overflow-y-auto p-5">
-        <h1 className="text-[18px] font-semibold">{t("brain.title")}</h1>
-        <p className="mt-0.5 text-[12.5px] text-muted">{t("brain.subtitle")}</p>
+        {/* The top bar already says which page this is. */}
+        <h1 className="sr-only">{t("brain.title")}</h1>
+        <p className="text-[12.5px] text-muted">{t("brain.subtitle")}</p>
         {projects.length === 0 ? (
           <div className="mt-4">
             <p className="text-[12.5px] text-subtle">{t("brain.noProjects")}</p>
@@ -184,7 +183,7 @@ export function BrainPage() {
                 {brain.mapRun ? (
                   <p className="mb-2.5 text-[12.5px] text-muted">
                     {t("brain.mapRunning")}{" "}
-                    <button type="button" className="text-accent hover:underline" onClick={() => brain.mapRun && navigate({ name: "run", runId: brain.mapRun })}>
+                    <button type="button" className="text-accent hover:underline" onClick={() => brain.mapRun && openRun(brain.mapRun)}>
                       {t("brain.mapRunningLink")}
                     </button>
                   </p>

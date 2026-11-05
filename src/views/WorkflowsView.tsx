@@ -9,7 +9,6 @@ import { Button, Card, cx, Field, inputClass, Segmented } from "../ui/primitives
 import { AddProject } from "./AddProject";
 import { FlowDiagram } from "./FlowDiagram";
 import { ModelField } from "./ModelField";
-import { TopBar } from "./TopBar";
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 const DEFAULT_EFFORT = "__default__";
@@ -441,10 +440,10 @@ export function WorkflowsView() {
 
   return (
     <>
-      <TopBar back />
       <main className="flex-1 overflow-y-auto p-5">
-        <h1 className="text-[18px] font-semibold">{t("workflows.title")}</h1>
-        <p className="mt-0.5 text-[12.5px] text-muted">{t("workflows.subtitle")}</p>
+        {/* The top bar already says which page this is. */}
+        <h1 className="sr-only">{t("workflows.title")}</h1>
+        <p className="text-[12.5px] text-muted">{t("workflows.subtitle")}</p>
         {projects.length === 0 ? (
           <div className="mt-4">
             <p className="text-[12.5px] text-subtle">{t("workflows.noProjects")}</p>

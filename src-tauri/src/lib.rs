@@ -780,7 +780,7 @@ pub fn run() {
                     ready.set();
                     let _ = handle.emit(CHANGED_EVENT, "");
                     // After the tools are known, so no client ever finds Keel half ready.
-                    mcp::start_if_enabled(mcp_server);
+                    mcp::start_if_enabled(mcp_server, handle);
                 });
             }
             app.manage(AppState {

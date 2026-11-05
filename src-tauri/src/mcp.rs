@@ -7,7 +7,7 @@ use keel_core::Masked;
 use keel_mcp::{McpServer, McpSettings, ServerStatus};
 use keel_store::{McpCall, McpClient};
 use serde::Serialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::{AppState, CommandError, CommandResult};
 
@@ -15,15 +15,18 @@ use crate::{AppState, CommandError, CommandResult};
 const SERVER_NAME: &str = "keel";
 const CLAUDE_CLIENT: &str = "Claude Code";
 const CALLS_SHOWN: i64 = 30;
+/// For the status bar. A server that starts or stops says nothing else that the UI would hear.
+const MCP_EVENT: &str = "keel://mcp-changed";
 
 pub struct McpState(pub McpServer);
 
 /// Starts the server if the person left it on. A failure is in its status, for the UI to show.
-pub fn start_if_enabled(server: McpServer) {
+pub fn start_if_enabled(server: McpServer, app: AppHandle) {
     match server.settings() {
         Ok(settings) if settings.enabled => {
             tauri::async_runtime::spawn(async move {
                 let _ = server.start(settings.port).await;
+                let _ = app.emit(MCP_EVENT, ());
             });
         }
         Ok(_) => {}
@@ -79,6 +82,7 @@ pub fn mcp_overview(
 #[tauri::command]
 pub async fn mcp_settings_save(
     settings: McpSettings,
+    app: AppHandle,
     state: State<'_, AppState>,
     mcp: State<'_, McpState>,
 ) -> CommandResult<McpOverview> {
@@ -90,6 +94,7 @@ pub async fn mcp_settings_save(
         // A failure is in the status, which the overview carries.
         let _ = mcp.0.start(settings.port).await;
     }
+    let _ = app.emit(MCP_EVENT, ());
     overview(&state, &mcp)
 }
 

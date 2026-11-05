@@ -1,18 +1,17 @@
 import { AlertTriangle, Check, ExternalLink, FileDiff, GitPullRequest, Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { useSearchEverywhere } from "../commands/SearchEverywhere";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck, type Run } from "../lib/api";
 import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "../lib/audit";
 import { attemptChoices, type FlowNode, flowOf, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
-import { useApp, type View } from "../lib/store";
+import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
 import { ProposalRow } from "./BrainPage";
 import { FlowDiagram } from "./FlowDiagram";
-import { TopBar } from "./TopBar";
 
 type Tab = "activity" | "commands" | "changes" | "prompt" | "details" | "output";
 
@@ -235,22 +234,21 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
       clearTimeout(timer);
       setArmed(false);
     };
+    // The palette and every dialog hold the keymap. Their overlays cover the card, and a second
+    // click on one would land here once it's gone, so it waits for them. New run is one click away.
     const arm = () => {
       disarm();
-      timer = setTimeout(() => setArmed(true), 800);
+      if (!keymapHeld()) timer = setTimeout(() => setArmed(true), 800);
     };
     arm();
     window.addEventListener("focus", arm);
     window.addEventListener("blur", disarm);
-    // The palette's overlay covers the card, and a second click on it would land here once it's gone.
-    const unwatchPalette = useSearchEverywhere.subscribe((palette, before) => {
-      if (palette.open !== before.open) (palette.open ? disarm : arm)();
-    });
+    const unwatchHold = watchKeymapHold(arm);
     return () => {
       clearTimeout(timer);
       window.removeEventListener("focus", arm);
       window.removeEventListener("blur", disarm);
-      unwatchPalette();
+      unwatchHold();
     };
   }, []);
   // Masking only hides a secret here. Approving would still push it with the branch.
@@ -293,10 +291,13 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const hiddenFiles = files.length - SHOWN_FILES;
 
   return (
-    <Card role="alert" className="flex max-h-[calc(100vh-140px)] flex-col border-warning/40 p-4">
+    // Short enough for its buttons to show without scrolling: the window less the top bar (38), the
+    // status bar (24), and the run's title and the page's padding above and below (102).
+    <Card role="alert" className="flex max-h-[calc(100vh-164px)] flex-col overflow-y-auto border-warning/40 p-4">
       <p className="text-[14px] font-semibold">{t(empty ? "run.approvalEmptyTitle" : outcome === "delivers" ? "run.approvalTitle" : "run.approvalContinueTitle")}</p>
       <p className="mt-1 mb-3 text-[12.5px] text-muted">{t(empty ? "run.approvalEmptyBody" : "run.approvalBody")}</p>
-      <dl className="min-h-0 overflow-y-auto">
+      {/* What's being approved never shrinks away: in a short window the card scrolls instead. */}
+      <dl className="max-h-[50vh] min-h-24 shrink-0 overflow-y-auto">
         <ApprovalRow
           label={t("run.whatItDid")}
           note={explaining.length > 0 ? t("run.generated") : undefined}
@@ -919,7 +920,7 @@ function worstRawCheck(checks: RawCheck[]): RawCheck {
   return checks.length > 0 ? "intact" : "pending";
 }
 
-export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
+export function RunDetail({ runId }: { runId: string }) {
   const { t } = useTranslation();
   const revision = useApp((s) => s.revision);
   const [run, setRun] = useState<Run | null>(null);
@@ -979,9 +980,7 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
     stopStep: latest && isActive(latest.state) ? () => void api.attemptStop(latest.id).catch((e) => setError(errorText(t, e))) : null,
   });
 
-  if (!latest || !run) {
-    return <TopBar back={backTo ?? true} />;
-  }
+  if (!latest || !run) return null;
 
   const kindTabs: Tab[] = !attempt ? [] : attempt.state === "skipped" ? ["activity", "prompt"] : attempt.kind === "agent" ? ["activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
   const shownTab: Tab = kindTabs.includes(tab) ? tab : kindTabs[0];
@@ -990,7 +989,6 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
 
   return (
     <>
-      <TopBar back={backTo ?? true} />
       <main className="flex-1 space-y-4 overflow-y-auto p-5">
         <div className="flex items-start gap-3">
           <div className="min-w-0 flex-1">
@@ -1064,7 +1062,7 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
           )}
           {attempt ? (
             <>
-              <Segmented<Tab> label={t("tabs.details")} value={shownTab} onChange={setTab} options={kindTabs.map((value) => ({ value, label: t(`tabs.${value}`) }))} />
+              <Segmented<Tab> arrows label={t("tabs.details")} value={shownTab} onChange={setTab} options={kindTabs.map((value) => ({ value, label: t(`tabs.${value}`) }))} />
               <div className="mt-4">
                 {shownTab === "activity" && <ActivityTab events={events} />}
                 {shownTab === "commands" && <CommandsTab commands={commands} />}

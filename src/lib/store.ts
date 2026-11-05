@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import i18next, { type Language, systemLanguage } from "../i18n";
-import { api, type Overview, type Preflight, type ProjectAdded } from "./api";
+import { api, type McpOverview, type Overview, type Preflight, type ProjectAdded } from "./api";
 
 export type View = { name: "home" } | { name: "run"; runId: string; backTo?: View } | { name: "settings" } | { name: "workflows" } | { name: "brain" } | { name: "board"; projectId?: string };
 
@@ -28,6 +28,8 @@ interface AppState {
   approvalDrafts: Record<string, string>;
   /** Bumps whenever the backend reports a change, so open views can refetch. */
   revision: number;
+  /** Whether the MCP server is up, for the status bar. Null until the first answer. */
+  mcp: McpOverview["status"] | null;
   navigate: (view: View) => void;
   setNewRunOpen: (open: boolean) => void;
   openProjectSetup: (request: ProjectSetupRequest) => void;
@@ -36,6 +38,7 @@ interface AppState {
   setApprovalDraft: (attemptId: string, text: string) => void;
   refreshOverview: () => Promise<void>;
   refreshSession: () => Promise<void>;
+  refreshMcp: () => Promise<void>;
   setLanguage: (language: Language) => Promise<void>;
 }
 
@@ -50,6 +53,7 @@ export const useApp = create<AppState>((set, get) => ({
   quitOpen: false,
   approvalDrafts: {},
   revision: 0,
+  mcp: null,
   navigate: (view) => set({ view }),
   setNewRunOpen: (newRunOpen) => set({ newRunOpen }),
   // One dialog at a time: two swapping places in one go fight over focus.
@@ -71,47 +75,22 @@ export const useApp = create<AppState>((set, get) => ({
     }),
   refreshOverview: async () => set({ overview: await api.overview(), overviewLoaded: true }),
   refreshSession: async () => set({ preflight: await api.refreshSession() }),
+  refreshMcp: async () => set({ mcp: (await api.mcpOverview()).status }),
   setLanguage: async (language) => {
     await i18next.changeLanguage(language);
     await api.languageSet(language);
-    await syncMenu();
   },
 }));
-
-const MENU_KEYS = [
-  "about",
-  "settings",
-  "hide",
-  "hideOthers",
-  "showAll",
-  "quit",
-  "edit",
-  "undo",
-  "redo",
-  "cut",
-  "copy",
-  "paste",
-  "selectAll",
-  "window",
-  "minimize",
-  "zoom",
-  "close",
-];
-
-/** The native menu takes its labels from the translations, so it follows the language. */
-async function syncMenu() {
-  await api.menuSet(Object.fromEntries(MENU_KEYS.map((key) => [key, i18next.t(`menu.${key}`)])));
-}
 
 /** Loads what the app needs and starts listening to the backend. */
 export async function startApp() {
   const saved = await api.languageGet().catch(() => null);
   await i18next.changeLanguage(saved === "es" || saved === "en" ? saved : systemLanguage());
-  await syncMenu().catch(() => undefined);
 
-  const { refreshOverview } = useApp.getState();
+  const { refreshOverview, refreshMcp } = useApp.getState();
   void refreshOverview();
   void api.preflight().then((preflight) => useApp.setState({ preflight }));
+  void refreshMcp().catch(() => undefined);
 
   // Steps can report many changes a second. One refresh per burst is enough.
   let pending = false;
@@ -124,6 +103,6 @@ export async function startApp() {
       useApp.setState((state) => ({ revision: state.revision + 1 }));
     }, 150);
   });
+  await listen("keel://mcp-changed", () => void refreshMcp().catch(() => undefined));
   await listen("keel://quit-requested", () => useApp.setState({ quitOpen: true }));
-  await listen("keel://open-settings", () => useApp.setState({ view: { name: "settings" } }));
 }

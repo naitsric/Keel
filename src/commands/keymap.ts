@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { tinykeys } from "tinykeys";
+import { noteKeyboardRun } from "../menu/nativeMenu";
 import { keymapHeld } from "./keymapHold";
 import { executeCommand, focusContext, pickCommand, useCommands, type Command, type FocusContext } from "./registry";
 
@@ -65,6 +66,7 @@ export function useKeymap(onDoubleShift: () => void) {
           event.preventDefault();
           if (resolved.action === "suppress") return;
           event.stopPropagation();
+          noteKeyboardRun(resolved.command.id);
           executeCommand(resolved.command.id);
         },
       ]),

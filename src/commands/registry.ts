@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { useApp } from "../lib/store";
+import { keymapHeld } from "./keymapHold";
 
 /**
  * The page a key means something on: ⌘N is New task on the board and New run everywhere else. One
@@ -8,7 +9,7 @@ import { useApp } from "../lib/store";
 export type FocusContext = "run" | "board";
 
 /**
- * An action the keymap and the palette can run, with no extra wiring, and later the native menu.
+ * An action the keymap and the palette can run, with no extra wiring, and the native menu too.
  *
  * Plain Enter runs whatever is registered, so what decides or spends never is: approving, rejecting,
  * answering the rework limit, retrying, resuming, abandoning, the Brain's accept, reject and retire,
@@ -25,7 +26,7 @@ export interface Command {
   keybinding?: string;
   /** A second key for the same thing, that leaves text fields alone: there ⌘↑ moves the caret. */
   keybindingOutsideFields?: string;
-  /** Shown in the palette but handled elsewhere, like ⌘, which the native menu takes first. */
+  /** Shown in the palette but handled elsewhere, like ⌘, which the native menu takes first. See menuModel.ts. */
   displayKey?: string;
   /**
    * Limits the keybinding to this page. Commands may share a binding: see {@link pickCommand}. The
@@ -79,4 +80,13 @@ export function executeCommand(id: string): void {
   const command = useCommands.getState().commands[id];
   if (!command || !isEnabled(command)) return;
   void Promise.resolve(command.run()).catch((e) => console.error(`command ${id} failed`, e));
+}
+
+/**
+ * For what's clicked rather than pressed. The bars stay clickable during a board's keyboard drag,
+ * and a dialog opened then would drop the card with the first Space typed in it, starting its run.
+ * So a hold stops clicks as it stops keys.
+ */
+export function runUnlessHeld(id: string): void {
+  if (!keymapHeld()) executeCommand(id);
 }
