@@ -85,7 +85,9 @@ echo "gh $* [token:${{GH_TOKEN:+set}}]" >> "{log}/gh.log"
 case "$1 $2" in
 "auth status") echo '{{"hosts":{{"github.com":[{{"login":"alice","active":false,"state":"success","scopes":"repo, read:org, gist, admin:org"}},{{"login":"bob","active":true,"state":"success","scopes":"repo"}}]}}}}'; exit 0;;
 "auth token") echo "{TOKEN}"; exit 0;;
-"repo view") echo '{{"defaultBranchRef":{{"name":"main"}},"viewerPermission":"WRITE","isPrivate":true}}'; exit 0;;
+"repo view")
+  if [ -f "{flags}/repo-hidden" ]; then echo "GraphQL: Could not resolve to a Repository with the name 'acme/app'. (repository)" >&2; exit 1; fi
+  echo '{{"defaultBranchRef":{{"name":"main"}},"viewerPermission":"WRITE","isPrivate":true}}'; exit 0;;
 "api repos/acme/app/branches/main") echo false; exit 0;;
 "issue list") echo '[{{"number":7,"title":"Broken","author":{{"login":"carol"}},"url":"https://github.com/acme/app/issues/7","body":"It breaks"}}]'; exit 0;;
 "pr create")
@@ -589,7 +591,10 @@ fn a_workflow_that_cannot_deliver_is_refused_before_any_agent_runs() {
 #[test]
 fn github_status_shows_accounts_permission_and_excess_scopes_without_switching() {
     let w = world();
-    let status = w.engine.github_status(&w.project_id).unwrap();
+    let status = w
+        .engine
+        .github_status(&w.project_id, Some("alice"))
+        .unwrap();
     assert_eq!(status.repo.as_deref(), Some("acme/app"));
     assert_eq!(status.accounts.len(), 2);
     assert!(status.accounts.iter().any(|a| a.login == "bob" && a.active));
@@ -598,6 +603,48 @@ fn github_status_shows_accounts_permission_and_excess_scopes_without_switching()
     assert_eq!(info.default_branch, "main");
     assert_eq!(info.default_branch_protected, Some(false));
     assert!(!w.log("gh.log").contains("auth switch"));
+}
+
+#[test]
+fn github_status_checks_the_chosen_account_before_it_is_saved() {
+    let w = world();
+    let status = w.engine.github_status(&w.project_id, Some("bob")).unwrap();
+    assert_eq!(status.info.unwrap().permission, "WRITE");
+    let gh = w.log("gh.log");
+    assert!(gh.contains("auth token --user bob"), "{gh}");
+    assert!(!gh.contains("auth token --user alice"), "{gh}");
+    assert!(!gh.contains("auth switch"), "{gh}");
+    let nobody = w.engine.github_status(&w.project_id, None).unwrap();
+    assert!(nobody.info.is_none());
+    assert_eq!(nobody.accounts.len(), 2);
+}
+
+#[test]
+fn github_status_says_when_an_account_cannot_see_the_repo() {
+    let w = world();
+    w.flag("repo-hidden");
+    let status = w
+        .engine
+        .github_status(&w.project_id, Some("alice"))
+        .unwrap();
+    assert!(status.info.is_none());
+    assert_eq!(status.accounts.len(), 2);
+    match status.error {
+        Some(Reason::DeliveryFailed { kind, .. }) => assert_eq!(kind, "noPermission"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn github_status_never_asks_for_the_token_of_an_account_gh_does_not_have() {
+    let w = world();
+    let status = w
+        .engine
+        .github_status(&w.project_id, Some("--hostname=evil.example"))
+        .unwrap();
+    assert!(status.info.is_none());
+    assert!(status.error.is_none());
+    assert!(!w.log("gh.log").contains("auth token"));
 }
 
 #[test]

@@ -30,7 +30,7 @@ fn main() {
         .update_project(
             &project.id,
             &ProjectSettings {
-                github_account: Some(account),
+                github_account: Some(account.clone()),
                 setup_command: None,
                 check_command: Some("python3 test_calc.py".into()),
                 allowed_domains: vec![],
@@ -40,7 +40,7 @@ fn main() {
             },
         )
         .unwrap();
-    let status = engine.github_status(&project.id).unwrap();
+    let status = engine.github_status(&project.id, Some(&account)).unwrap();
     println!(
         "accounts: {:?}",
         status

@@ -222,9 +222,15 @@ fn project_update(
 }
 
 #[tauri::command(async)]
-fn github_status(state: State<'_, AppState>, project_id: String) -> CommandResult<GithubStatus> {
+fn github_status(
+    state: State<'_, AppState>,
+    project_id: String,
+    account: Option<String>,
+) -> CommandResult<GithubStatus> {
     state.ready.wait();
-    Ok(state.engine.github_status(&project_id)?)
+    Ok(state
+        .engine
+        .github_status(&project_id, account.as_deref())?)
 }
 
 #[tauri::command(async)]
