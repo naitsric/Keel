@@ -253,9 +253,14 @@ describe("safety", () => {
       act(() => move.focus());
       tapShift();
       tapShift();
+      // A row that stays on the board, so the button is still there to press.
+      type("Go to Board");
+      await settle();
       pressEnter();
       await settle();
       expect(paletteOpen()).toBe(false);
+      expect(view().name).toBe("board");
+      expect(move.isConnected).toBe(true);
       expect(document.activeElement).not.toBe(move);
       pressEnter();
       await settle();
