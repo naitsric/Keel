@@ -730,5 +730,14 @@
     "moreOptions": "More options are in Settings.",
     "later": "Later",
     "save": "Save"
+  },
+  "remove": {
+    "title": "Remove {{name}} from Keel?",
+    "does": "It leaves your project lists, and nothing can start on it, from here or from an assistant. Its cards stay where they are, and none of them start.",
+    "doesNot": "Nothing is deleted. Your folder isn't touched. Its runs stay on Home as history, and its audit record and Brain stay in Keel.",
+    "comeBack": "To bring it back with all of that, add the same folder again. Any cards it has in Todo start then, because you asked for them.",
+    "cancel": "Cancel",
+    "confirm": "Remove from Keel",
+    "openRun": "Open that run"
   }
 }

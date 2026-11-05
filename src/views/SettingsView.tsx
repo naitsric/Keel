@@ -9,6 +9,7 @@ import { useApp } from "../lib/store";
 import { Button, Card, Field, inputClass, Segmented } from "../ui/primitives";
 import { AddProjectButton, useAddProject } from "./AddProject";
 import { McpCard } from "./McpCard";
+import { RemoveProjectDialog } from "./RemoveProjectDialog";
 import { TopBar } from "./TopBar";
 
 const lines = (text: string) =>
@@ -72,6 +73,7 @@ export const projectCardKey = (project: Project) => [project.id, project.githubA
 function ProjectSettingsCard({ project, saved, onSaved }: { project: Project; saved: boolean; onSaved: () => void }) {
   const { t, i18n } = useTranslation();
   const refreshOverview = useApp((s) => s.refreshOverview);
+  const [removing, setRemoving] = useState(false);
   const [account, setAccount] = useState(project.githubAccount ?? NONE);
   const [setup, setSetup] = useState(project.setupCommand ?? "");
   const [check, setCheck] = useState(project.checkCommand ?? "");
@@ -301,7 +303,11 @@ function ProjectSettingsCard({ project, saved, onSaved }: { project: Project; sa
           {t("settings.save")}
         </Button>
         {saved && <span className="text-[12px] text-success">{t("settings.saved")}</span>}
+        <Button variant="ghost" className="ml-auto" onClick={() => setRemoving(true)}>
+          {t("remove.confirm")}
+        </Button>
       </div>
+      <RemoveProjectDialog project={project} open={removing} onOpenChange={setRemoving} />
     </Card>
   );
 }

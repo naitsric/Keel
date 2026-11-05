@@ -730,5 +730,14 @@
     "moreOptions": "Hay más opciones en Ajustes.",
     "later": "Después",
     "save": "Guardar"
+  },
+  "remove": {
+    "title": "¿Quitar {{name}} de Keel?",
+    "does": "Sale de tus listas de proyectos y nada puede arrancar en él, ni desde aquí ni desde un asistente. Sus tarjetas se quedan donde están, y ninguna arranca.",
+    "doesNot": "No se borra nada. Tu carpeta no se toca. Sus ejecuciones siguen en Inicio como historial, y su registro de auditoría y su Brain siguen en Keel.",
+    "comeBack": "Para traerlo de vuelta con todo eso, agrega la misma carpeta. Las tarjetas que tenga en Todo arrancan entonces, porque tú las pediste.",
+    "cancel": "Cancelar",
+    "confirm": "Quitar de Keel",
+    "openRun": "Abrir esa ejecución"
   }
 }

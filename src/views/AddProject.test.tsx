@@ -12,6 +12,7 @@ import { NewRunDialog } from "./NewRunDialog";
 import { Onboarding } from "./Onboarding";
 import { ProjectSetupDialog } from "./ProjectSetupDialog";
 import { ProjectsRow } from "./ProjectsRow";
+import { RemoveProjectDialog } from "./RemoveProjectDialog";
 import { SettingsView } from "./SettingsView";
 import { WorkflowsView } from "./WorkflowsView";
 
@@ -385,6 +386,62 @@ describe("adding a project", () => {
       await show(<SettingsView />, [{ ...READY, defaultWorkflow: "builtin:full" }]);
       await click(i18next.t("settings.save"));
       expect(called("project_update")).toHaveLength(1);
+    });
+  });
+
+  describe("removing", () => {
+    it("says what it does and doesn't do, and does nothing until confirmed", async () => {
+      await show(<SettingsView />, [READY]);
+      await click(i18next.t("remove.confirm"));
+      expect(page()).toContain("Remove ready from Keel?");
+      expect(page()).toContain(i18next.t("remove.doesNot"));
+      expect(page()).toContain("Your folder isn't touched");
+      expect(page()).toContain("Any cards it has in Todo start then");
+      expect(called("project_remove")).toEqual([]);
+      await click(i18next.t("remove.cancel"));
+      expect(called("project_remove")).toEqual([]);
+      expect(page()).toContain(READY.path);
+    });
+
+    it("removes it from the list once confirmed", async () => {
+      await show(<SettingsView />, [READY]);
+      await click(i18next.t("remove.confirm"));
+      const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+      await act(async () => [...dialog.querySelectorAll("button")].find((b) => b.textContent === i18next.t("remove.confirm"))?.click());
+      await settle();
+      expect(called("project_remove")[0].args).toEqual({ projectId: "ready" });
+      expect(useApp.getState().overview.projects).toEqual([]);
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(page()).toContain(i18next.t("settings.noProjects"));
+    });
+
+    it("says why it's refused, with a way to the run", async () => {
+      refuse = { code: "blocked", reason: { code: "projectHasOpenRuns", count: 2, runId: "r9", title: "Fix the calendar" }, detail: null };
+      await show(<RemoveProjectDialog project={READY} open onOpenChange={() => undefined} />, [READY]);
+      const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+      await act(async () => [...dialog.querySelectorAll("button")].find((b) => b.textContent === i18next.t("remove.confirm"))?.click());
+      await settle();
+      expect(document.querySelector('[role="alert"]')?.textContent).toContain("“Fix the calendar” and 1 more");
+      await click(i18next.t("remove.openRun"));
+      expect(useApp.getState().view).toEqual({ name: "run", runId: "r9" });
+    });
+
+    it("has no way to a run that doesn't exist yet", async () => {
+      refuse = { code: "blocked", reason: { code: "projectHasOpenRuns", count: 1, runId: "", title: "A card" }, detail: null };
+      await show(<RemoveProjectDialog project={READY} open onOpenChange={() => undefined} />, [READY]);
+      const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
+      await act(async () => [...dialog.querySelectorAll("button")].find((b) => b.textContent === i18next.t("remove.confirm"))?.click());
+      await settle();
+      expect(document.querySelector('[role="alert"]')?.textContent).toContain("A card");
+      expect(buttons(i18next.t("remove.openRun"))).toHaveLength(0);
+    });
+
+    it("keeps the runs on Home when no projects are left", async () => {
+      useApp.setState({ overview: { ...useApp.getState().overview, runs: [{ id: "r1", title: "An old run", projectName: "gone", stepId: "builder", attemptId: "a", attemptNumber: 1, state: "succeeded", reason: null, model: "m", turns: 1, startedAt: "2026-11-05T10:00:00Z", finishedAt: "2026-11-05T10:01:00Z", lastActivityAt: null, startedBy: null, prUrl: null, projectId: "p" }] } });
+      await show(<Home />, []);
+      expect(page()).toContain("An old run");
+      expect(page()).toContain(i18next.t("onboarding.title"));
+      useApp.setState({ overview: { ...useApp.getState().overview, runs: [] } });
     });
   });
 });
