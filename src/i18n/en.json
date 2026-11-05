@@ -548,8 +548,6 @@
     "prompt": "What it does",
     "promptHint": "You can use {{tokens}}, where spec is a step's name.",
     "command": "Command",
-    "moveUp": "Move up",
-    "moveDown": "Move down",
     "moveEarlier": "Move earlier",
     "moveLater": "Move later",
     "members": "Steps in this group",

@@ -548,8 +548,6 @@
     "prompt": "Qué hace",
     "promptHint": "Puedes usar {{tokens}}, donde spec es el nombre de un paso.",
     "command": "Comando",
-    "moveUp": "Subir",
-    "moveDown": "Bajar",
     "moveEarlier": "Mover antes",
     "moveLater": "Mover después",
     "members": "Pasos de este grupo",
