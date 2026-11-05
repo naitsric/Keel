@@ -57,6 +57,8 @@ export interface Flow<T extends FlowAttempt = Attempt> {
   live: boolean;
 }
 
+const SETTLED: NodeState[] = ["succeeded", "skipped"];
+
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 const SINGLE_KINDS = ["agent", "setup", "check", "approval", "deliver"];
 
@@ -112,7 +114,8 @@ export function flowOf<T extends FlowAttempt = Attempt>(steps: WorkflowStep[], a
       attempts: found,
       attempt,
       round: attempt?.round ?? 0,
-      outdated: attempt !== null && stage >= reruns && attempt.round < round,
+      // Only for what finished fine: anything under way or waiting has to say so, whatever the round.
+      outdated: attempt !== null && SETTLED.includes(attempt.state) && stage >= reruns && attempt.round < round,
     };
   };
 
@@ -175,15 +178,15 @@ export function pathOfKey(key: string): StepPath | null {
 }
 
 // Fixed sizes, so that the connectors are worked out rather than measured from the page.
-const NODE_W = 148;
-const MINOR_W = 120;
+const NODE_W = 132;
+const MINOR_W = 112;
 const LIVE_H = 62;
 const COMPACT_H = 42;
 const EDIT_H = 42;
 const MEMBER_GAP = 6;
 const LABEL_H = 20;
 const ADD_MEMBER_H = 26;
-const RUN_GAP = 30;
+const RUN_GAP = 24;
 const EDIT_GAP = 44;
 const END_GAP = 26;
 const EXTRAS_GAP = 36;
@@ -243,7 +246,6 @@ export interface FlowLayout<T extends FlowAttempt> {
   items: FlowItem[];
 }
 
-const SETTLED: NodeState[] = ["succeeded", "skipped"];
 const settled = <T extends FlowAttempt>(node: FlowNode<T>) => SETTLED.includes(node.state) && !node.outdated;
 
 const leaving = (x: number, y: number, mid: number, cy: number) => {

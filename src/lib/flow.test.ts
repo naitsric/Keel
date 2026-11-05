@@ -155,6 +155,14 @@ describe("a step that ran before the run went back", () => {
     expect(nodeWithKey(flowOf(FULL, roundOne), "1")).toMatchObject({ outdated: false });
   });
 
+  it("never hides something under way or waiting for the person, whatever round it's from", () => {
+    const states: AttemptState[] = ["queued", "preparing", "running", "stalled", "waitingApproval", "blocked", "failed", "interrupted", "stopped", "rejected", "abandoned"];
+    for (const state of states) {
+      const node = nodeWithKey(flowOf(FULL, [attempt("human", state, { kind: "approval" }), attempt("builder", "running", { round: 1, number: 2 })], 1), "5");
+      expect(node, state).toMatchObject({ state, outdated: false });
+    }
+  });
+
   it("marks nothing in a workflow that can't go back", () => {
     const steps = [agent("a"), agent("b")];
     const flow2 = flowOf(steps, [attempt("a", "succeeded"), attempt("b", "running", { round: 1 })]);
@@ -432,8 +440,8 @@ describe("the layout", () => {
     expect(rework.labelY).toBeLessThan(layout.height);
     const approverNode = layout.nodes.find((n) => n.node.id === "approver");
     const builderNode = layout.nodes.find((n) => n.node.id === "builder");
-    expect(rework.d.startsWith(`M ${(approverNode?.x ?? 0) + 74}`)).toBe(true);
-    expect(rework.head).toContain(`${(builderNode?.x ?? 0) + 74} `);
+    expect(rework.d.startsWith(`M ${(approverNode?.x ?? 0) + (approverNode?.w ?? 0) / 2}`)).toBe(true);
+    expect(rework.head).toContain(`${(builderNode?.x ?? 0) + (builderNode?.w ?? 0) / 2} `);
   });
 
   it("gives each way back its own lane", () => {
@@ -464,7 +472,17 @@ describe("the layout", () => {
   it("grows with the steps, so a long workflow scrolls instead of squeezing", () => {
     const many = Array.from({ length: 20 }, (_, i) => agent(`step-${i}`));
     expect(layoutFlow(flowOf(many)).width).toBeGreaterThan(900);
-    expect(layoutFlow(flowOf(many)).nodes.every((n) => n.w === 148)).toBe(true);
+    const widths = new Set(layoutFlow(flowOf(many)).nodes.map((n) => n.w));
+    expect(widths.size).toBe(1);
+    expect(widths).toEqual(new Set(layoutFlow(flowOf(many.slice(0, 1))).nodes.map((n) => n.w)));
+  });
+
+  it("fits the full built-in workflow on a common window, without scrolling", () => {
+    const setup: WorkflowStep = { type: "setup", id: "setup", run: "x" };
+    const reviews = group("reviews", "security", "ux", "ui", "code");
+    const full = [setup, agent("spec"), agent("builder"), { type: "check", id: "check", run: "x" } as WorkflowStep, reviews, approver("approver", "builder"), { type: "approval", id: "human" } as WorkflowStep, { type: "deliver", id: "pr" } as WorkflowStep, agent("learn", "sonnet", { kind: "learner" })];
+    // A 1440 wide window, less the page's and the card's padding.
+    expect(layoutFlow(flowOf(full)).width).toBeLessThanOrEqual(1440 - 2 * 20 - 2 * 12 - 2);
   });
 
   describe("in the editor", () => {

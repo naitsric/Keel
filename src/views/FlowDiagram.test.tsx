@@ -308,11 +308,11 @@ describe("the flow diagram", () => {
 
     it("shows a long name and model whole on hover, not breaking the node", () => {
       const long = "a-step-with-a-very-long-name-that-goes-on-and-on-and-on";
-      show(flowOf([{ type: "agent", ...spec(long, "claude-with-an-equally-long-model-name") }], []));
+      show(flowOf([{ type: "agent", ...spec(long, "claude-with-an-equally-long-model-name") }, { type: "agent", ...spec("x") }], []));
       const button = node(long);
       expect(button.title).toContain(long);
       expect(button.title).toContain("claude-with-an-equally-long-model-name");
-      expect(button.style.width).toBe("148px");
+      expect(button.style.width).toBe(node("x").style.width);
       expect(button.querySelectorAll(".truncate").length).toBeGreaterThan(0);
     });
 

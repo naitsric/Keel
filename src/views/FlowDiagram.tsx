@@ -84,7 +84,8 @@ function NodeButton<T extends FlowAttempt>({ placed, live, selected, tabbable, p
   const { t } = useTranslation();
   const { node, compact } = placed;
   const description = describeNode(t, node, live, problem);
-  const round = roundText(t, node);
+  const round = live ? roundText(t, node) : null;
+  const chip = round && <span className="shrink-0 text-[10.5px] font-medium text-muted">{round}</span>;
   const sub = node.model ?? t(KIND_LABELS[node.kind]);
   return (
     <button
@@ -110,23 +111,23 @@ function NodeButton<T extends FlowAttempt>({ placed, live, selected, tabbable, p
       <span className="flex min-w-0 items-center gap-1.5">
         <StepIcon node={node} />
         <span className={cx("min-w-0 flex-1 truncate font-medium", node.minor ? "text-[11.5px] text-muted" : "text-[12.5px]")}>{node.id || t("flow.unnamed")}</span>
+        {compact && chip}
         {problem && <AlertTriangle size={12} className="shrink-0 text-danger" />}
       </span>
       {!compact && (
         <span className="flex min-w-0 items-baseline justify-between gap-1.5">
           <span className={cx("min-w-0 truncate text-[11px] text-subtle", node.model && "font-mono")}>{sub}</span>
-          {live && round && <span className="shrink-0 text-[10.5px] font-medium text-warning">{round}</span>}
+          {chip}
         </span>
       )}
       {live && (
         // StateBadge pulses whatever is under way, and it can't know the person asked for less motion here.
-        <span className="flex min-w-0 items-baseline justify-between gap-1.5 overflow-hidden motion-reduce:[&_*]:animate-none">
+        <span className="flex min-w-0 items-baseline overflow-hidden motion-reduce:[&_*]:animate-none">
           {node.state === "pending" || node.outdated ? (
             <span className="min-w-0 truncate text-[11.5px] text-subtle">{node.outdated ? t("flow.lastRan", { number: node.round + 1 }) : t("run.pending")}</span>
           ) : (
             <StateBadge state={node.state} label={t(`states.${node.state}`)} />
           )}
-          {compact && round && <span className="shrink-0 text-[10.5px] font-medium text-warning">{round}</span>}
         </span>
       )}
     </button>
