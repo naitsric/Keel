@@ -3,7 +3,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import en from "../i18n/en.json";
 import es from "../i18n/es.json";
-import type { View } from "../lib/store";
+import { useApp, type View } from "../lib/store";
 import { KEYS } from "./keys";
 import { useCommands, type Command } from "./registry";
 import { answers, button, callsTo, calls, hideApp, note, paletteOpen, paletteRow, paletteRows, pressEnter, pressKey, pressMod, row, settle, showApp, tapShift, type, view } from "./testApp";
@@ -354,6 +354,16 @@ describe("safety", () => {
       expect(button(APPROVE)?.disabled).toBe(false);
     });
 
+    it("is off when the palette opens from the top bar's field too", async () => {
+      await showApp(RUNS, { name: "run", runId: WAITING });
+      await settle(800);
+      expect(button(APPROVE)?.disabled).toBe(false);
+      act(() => button("Search⇧⇧")?.click());
+      await settle(0);
+      expect(paletteOpen()).toBe(true);
+      expect(button(APPROVE)?.disabled).toBe(true);
+    });
+
     it("goes off with the window even while the card is open, as before", async () => {
       await showApp(RUNS, { name: "run", runId: WAITING });
       await settle(800);
@@ -402,6 +412,27 @@ describe("safety", () => {
       pressMod("n", "KeyN");
       await settle(0);
       expect(document.querySelector("form")).not.toBeNull();
+      expect(callsTo("card_move")).toEqual([]);
+    });
+
+    it("a board drag holds clicks on the top bar too, so nothing opens that typing would drop the card from", async () => {
+      await showApp(RUNS, { name: "board" });
+      const card = document.querySelector<HTMLElement>("[data-card]") as HTMLElement;
+      act(() => card.focus());
+      pressKey(" ", "Space");
+      await settle(0);
+      for (const clickable of document.querySelectorAll<HTMLElement>("header button")) act(() => clickable.click());
+      await settle(0);
+      expect(paletteOpen()).toBe(false);
+      expect(document.querySelector("form")).toBeNull();
+      expect(useApp.getState().newRunOpen).toBe(false);
+      expect(view().name).toBe("board");
+
+      pressKey("Escape", "Escape", {}, document.body);
+      await settle(0);
+      act(() => button("Search⇧⇧")?.click());
+      await settle(0);
+      expect(paletteOpen()).toBe(true);
       expect(callsTo("card_move")).toEqual([]);
     });
   });

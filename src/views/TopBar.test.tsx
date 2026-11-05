@@ -1,6 +1,7 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { hideApp, row, settle, showApp, view } from "../commands/testApp";
+import { useSearchEverywhere } from "../commands/SearchEverywhere";
+import { hideApp, note, paletteOpen, pressKey, row, settle, showApp, view } from "../commands/testApp";
 import i18next from "../i18n";
 import { useApp, type View } from "../lib/store";
 
@@ -120,10 +121,56 @@ describe("the top bar", () => {
     expect(header().className).toContain("pl-[var(--traffic-lights-inset)]");
   });
 
+  describe("the search field", () => {
+    const field = () => headerButton("Search") as HTMLButtonElement;
+
+    it("is a button that looks like a field, and shows ⇧⇧", async () => {
+      await showApp(RUNS);
+      expect(field().tagName).toBe("BUTTON");
+      expect(field().textContent).toBe("Search⇧⇧");
+      expect(header().querySelector("input")).toBeNull();
+    });
+
+    it("opens the palette on everything, empty, from any page", async () => {
+      for (const at of [{ name: "home" }, { name: "board" }, { name: "workflows" }, { name: "brain" }, { name: "settings" }, { name: "run", runId: "r1" }] as View[]) {
+        await showApp(RUNS, at);
+        await click(field());
+        expect(paletteOpen()).toBe(true);
+        expect(useSearchEverywhere.getState()).toMatchObject({ scope: "all", query: "" });
+        expect(view()).toEqual(at);
+        await hideApp();
+      }
+      await showApp(RUNS);
+    });
+
+    it("leaves focus alone when clicked, so Esc comes back to the note", async () => {
+      await showApp([row("r1", "waitingApproval")], { name: "run", runId: "r1" });
+      const down = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+      act(() => void field().dispatchEvent(down));
+      expect(down.defaultPrevented).toBe(true);
+      expect(document.activeElement).toBe(note());
+      await click(field());
+      expect(paletteOpen()).toBe(true);
+      pressKey("Escape", "Escape", {}, document.body);
+      await settle();
+      expect(paletteOpen()).toBe(false);
+      expect(document.activeElement).toBe(note());
+    });
+
+    it("says Buscar in Spanish", async () => {
+      await showApp(RUNS);
+      await act(() => i18next.changeLanguage("es"));
+      expect(field()).toBeUndefined();
+      expect(headerButton("Buscar")?.textContent).toBe("Buscar⇧⇧");
+      await act(() => i18next.changeLanguage("en"));
+    });
+  });
+
   describe("with nothing to go to yet", () => {
     it("has no pages on the welcome screen, and keeps Settings", async () => {
       await showApp([], { name: "home" }, []);
       expect(nav()).toBeNull();
+      expect(headerButton("Search")).toBeUndefined();
       expect(headerButton("New run")).toBeUndefined();
       expect(settings()).not.toBeNull();
       expect(document.body.textContent).toContain(i18next.t("onboarding.title"));

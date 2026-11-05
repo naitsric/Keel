@@ -1,9 +1,9 @@
-import { ArrowLeft, Plus, Settings } from "lucide-react";
+import { ArrowLeft, Plus, Search, Settings } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { KEYS, withKey } from "../commands/keys";
 import { runUnlessHeld } from "../commands/registry";
 import { useApp, type View } from "../lib/store";
-import { Button, cx } from "../ui/primitives";
+import { Button, cx, Kbd } from "../ui/primitives";
 
 const PAGES = [
   { page: "home", label: "app.runs", command: "navigate.runs", key: KEYS.runs },
@@ -58,6 +58,23 @@ export function TopBar() {
             </Button>
           ))}
         </nav>
+      )}
+      <div data-tauri-drag-region className="min-w-0 flex-1" />
+      {!welcome && (
+        <button
+          type="button"
+          title={withKey(t("palette.label"), KEYS.searchEverywhere)}
+          // A click leaves focus where it was, so Esc comes back to it, as with ⇧⇧.
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => runUnlessHeld("search.everywhere")}
+          className="flex h-6 w-[clamp(120px,20vw,320px)] shrink-0 items-center gap-2 rounded-md border border-border bg-inset px-2 text-[12px] text-subtle transition-colors hover:border-border-strong hover:text-muted"
+        >
+          <Search size={13} className="shrink-0" />
+          <span className="min-w-0 truncate">{t("palette.label")}</span>
+          <span className="ml-auto shrink-0">
+            <Kbd binding={KEYS.searchEverywhere} />
+          </span>
+        </button>
       )}
       <div data-tauri-drag-region className="min-w-0 flex-1" />
       {view.name === "home" && !noProjects && (

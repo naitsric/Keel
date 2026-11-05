@@ -418,7 +418,7 @@ describe("the keys", () => {
     it("say the key", async () => {
       await showApp(RUNS);
       const titles = [...document.querySelectorAll("header button")].map((b) => b.getAttribute("title"));
-      expect(titles).toEqual(["Runs  ⌘1", "Board  ⌘2", "Workflows  ⌘3", "Brain  ⌘4", "New run  ⌘N", "Settings  ⌘,"]);
+      expect(titles).toEqual(["Runs  ⌘1", "Board  ⌘2", "Workflows  ⌘3", "Brain  ⌘4", "Search  ⇧⇧", "New run  ⌘N", "Settings  ⌘,"]);
     });
 
     it("say the key for Back too", async () => {
