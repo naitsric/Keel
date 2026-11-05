@@ -405,7 +405,7 @@
     "close": "Cerrar ventana"
   },
   "deliveryKinds": {
-    "notSignedIn": "Esta cuenta de GitHub no tiene sesión. Corre `gh auth login` e inténtalo de nuevo.",
+    "notSignedIn": "Esta cuenta de GitHub no tiene sesión. Conéctala en Ajustes e inténtalo de nuevo.",
     "noPermission": "Esta cuenta de GitHub no puede escribir en el repo. Dale acceso o elige otra.",
     "sso": "Tu organización exige SSO para este token. Autorízalo con `gh auth refresh` e inténtalo de nuevo.",
     "repoRules": "Las reglas del repo rechazaron este push.",
