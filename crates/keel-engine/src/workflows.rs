@@ -191,6 +191,17 @@ pub fn files_changed(attempts: &[Attempt]) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Whether a pull request is what comes right after a step. The step that proposes notes runs after
+/// everything else and pushes nothing, so it doesn't count.
+pub fn delivery_is_next(steps: &[WorkflowStep], step_id: &str) -> bool {
+    let next = steps
+        .iter()
+        .skip_while(|step| step.id() != step_id)
+        .skip(1)
+        .find(|step| !matches!(step, WorkflowStep::Agent(spec) if spec.role == StepRole::Learner));
+    matches!(next, Some(WorkflowStep::Deliver { .. }))
+}
+
 /// Whether a step limited to some paths has anything to look at.
 pub fn paths_match(paths: &[String], changed: &[String]) -> bool {
     if paths.is_empty() {
@@ -510,6 +521,29 @@ mod tests {
 
     fn worker(id: &str, tools: ToolProfile) -> StepSpec {
         agent(id, "opus", tools, StepRole::Worker, &[], "do it")
+    }
+
+    #[test]
+    fn delivery_is_next_only_right_after_the_step_not_later_or_never() {
+        let human = || WorkflowStep::Approval { id: "h".into() };
+        let pr = || WorkflowStep::Deliver { id: "pr".into() };
+        let builder = || WorkflowStep::Agent(worker("b", ToolProfile::Build));
+        let learner = || {
+            WorkflowStep::Agent(agent(
+                "l",
+                "opus",
+                ToolProfile::ReadOnly,
+                StepRole::Learner,
+                &[],
+                "learn",
+            ))
+        };
+        assert!(delivery_is_next(&[builder(), human(), pr()], "h"));
+        assert!(delivery_is_next(&[human(), pr(), learner()], "h"));
+        assert!(!delivery_is_next(&[human(), builder(), pr()], "h"));
+        assert!(!delivery_is_next(&[builder(), human()], "h"));
+        assert!(!delivery_is_next(&[builder(), human(), learner()], "h"));
+        assert!(!delivery_is_next(&[human(), pr()], "missing"));
     }
 
     #[test]

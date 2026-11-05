@@ -203,8 +203,9 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
 const SHOWN_FILES = 5;
 
 /**
- * What's being decided, in one place, so nobody has to scroll to find out. Rejecting is the easy
- * path: it has the focus, Enter never approves, and approve arms after a moment.
+ * What's being decided, in one place, so nobody has to scroll to find out. Rejecting takes a reason,
+ * so the focus starts on the note, where Enter only adds a line. Enter never approves, and approve
+ * arms after a moment.
  */
 export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck, onShowChanges, onError }: { attempt: Attempt; run: Run; attempts: Attempt[]; files: string[]; commands: CommandRun[]; rawCheck: RawCheck; onShowChanges: () => void; onError: (message: string) => void }) {
   const { t } = useTranslation();
@@ -326,15 +327,16 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
         <>
           <div className="mt-2 border-t border-border pt-3">
             <Field label={t("run.approvalNote")} hint={delivers ? `${t("run.approvalNoteHint")} ${t("run.approvalNotePrHint")}` : t("run.approvalNoteHint")}>
-              <textarea rows={2} value={note} onChange={(e) => setNote(e.target.value)} className={`${inputClass} resize-y`} />
+              <textarea autoFocus rows={2} value={note} onChange={(e) => setNote(e.target.value)} className={`${inputClass} resize-y`} />
             </Field>
           </div>
           <div className="mt-3 grid grid-cols-2 gap-4">
             <div>
-              <Button autoFocus disabled={busy} onClick={() => answer(false)}>
+              <Button disabled={busy || !note.trim()} onClick={() => answer(false)}>
                 {t("run.reject")}
               </Button>
               <p className="mt-1 text-[11.5px] text-muted">{t("run.approvalRejectHint")}</p>
+              {!note.trim() && <p className="mt-0.5 text-[11.5px] text-muted">{t("run.approvalRejectNeedsReason")}</p>}
             </div>
             <div>
               <Button

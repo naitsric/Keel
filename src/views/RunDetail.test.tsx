@@ -33,6 +33,13 @@ describe("the approval card", () => {
   const button = (text: string) => [...document.querySelectorAll("button")].find((b) => b.textContent === text);
   const press = (text: string) => act(() => button(text)?.click());
   const page = () => document.body.textContent ?? "";
+  const write = (text: string) => {
+    const textarea = document.querySelector("textarea") as HTMLTextAreaElement;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, text);
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
 
   beforeEach(async () => {
     vi.useFakeTimers();
@@ -54,12 +61,34 @@ describe("the approval card", () => {
     vi.useRealTimers();
   });
 
-  it("starts on rejecting, and only lets you approve after a moment", () => {
+  it("starts on the note, and only lets you approve after a moment", () => {
     show([builder(["calc.py"]), human], ["calc.py"]);
-    expect(document.activeElement).toBe(button("Reject"));
+    expect(document.activeElement).toBe(document.querySelector("textarea"));
     expect(button("Approve and open a draft")?.disabled).toBe(true);
     act(() => vi.advanceTimersByTime(800));
     expect(button("Approve and open a draft")?.disabled).toBe(false);
+  });
+
+  it("won't reject without a reason, and blank doesn't count as one", () => {
+    show([builder(["calc.py"]), human], ["calc.py"]);
+    expect(button("Reject")?.disabled).toBe(true);
+    expect(page()).toContain("Say why above first");
+    write("  \n ");
+    expect(button("Reject")?.disabled).toBe(true);
+    press("Reject");
+    expect(answers).toEqual([]);
+    write("Use the retry helper.");
+    expect(button("Reject")?.disabled).toBe(false);
+    expect(page()).not.toContain("Say why above first");
+    press("Reject");
+    expect(answers).toEqual([{ attemptId: "human", approve: false, text: "Use the retry helper." }]);
+  });
+
+  it("approves with no note", () => {
+    show([builder(["calc.py"]), human], ["calc.py"]);
+    act(() => vi.advanceTimersByTime(800));
+    press("Approve and open a draft");
+    expect(answers).toEqual([{ attemptId: "human", approve: true, text: "" }]);
   });
 
   it("never approves on Enter", () => {
@@ -127,6 +156,7 @@ describe("the approval card", () => {
     show([human], [], workflow);
     act(() => vi.advanceTimersByTime(800));
     expect(page()).not.toContain("The agent changed nothing");
+    expect(button("Reject")?.disabled).toBe(true);
     press("Approve and continue");
     expect(answers).toEqual([{ attemptId: "human", approve: true, text: "" }]);
   });
@@ -144,14 +174,11 @@ describe("the approval card", () => {
     expect(page()).toContain("Choose which GitHub account this project uses.");
   });
 
-  it("sends the note with the answer", () => {
+  it("sends a note with an approval too", () => {
     show([builder(["calc.py"]), human], ["calc.py"]);
-    const textarea = document.querySelector("textarea") as HTMLTextAreaElement;
-    act(() => {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, "Use the retry helper.");
-      textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    });
-    press("Reject");
-    expect(answers).toEqual([{ attemptId: "human", approve: false, text: "Use the retry helper." }]);
+    act(() => vi.advanceTimersByTime(800));
+    write("Keep changes small.");
+    press("Approve and open a draft");
+    expect(answers).toEqual([{ attemptId: "human", approve: true, text: "Keep changes small." }]);
   });
 });

@@ -491,12 +491,21 @@ impl Engine {
     }
 
     /// Answers an approval step. The text, if any, becomes a decision later runs of this project
-    /// follow. Rejecting ends the run; approving lets it continue.
+    /// follow. Rejecting ends the run and takes a reason; approving lets it continue.
     pub fn answer_approval(&self, attempt_id: &str, approve: bool, text: &str) -> Result<()> {
         let store = &self.inner.store;
         let attempt = store.attempt(attempt_id)?;
         if attempt.state != AttemptState::WaitingApproval.as_str() {
             return Err(Error::InvalidState);
+        }
+        if !approve && text.trim().is_empty() {
+            let steps: Vec<WorkflowStep> =
+                serde_json::from_value(store.run(&attempt.run_id)?.workflow).unwrap_or_default();
+            let files = workflows::files_changed(&store.attempts_of_run(&attempt.run_id)?);
+            // With no change and delivery next there's nothing to reject, only a run to close.
+            if !files.is_empty() || !workflows::delivery_is_next(&steps, &attempt.step_id) {
+                return Err(Error::Blocked(Reason::RejectionNeedsReason));
+            }
         }
         let answer = if approve { "approve" } else { "reject" };
         let project_id = store.project_of_run(&attempt.run_id)?;

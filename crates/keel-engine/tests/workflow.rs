@@ -511,12 +511,47 @@ fn answering_twice_is_refused() {
     let w = world();
     let run = w.start(None);
     let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
-    w.engine.answer_approval(&approval.id, false, "").unwrap();
+    w.engine
+        .answer_approval(&approval.id, false, "Not this way")
+        .unwrap();
     assert!(matches!(
         w.engine.answer_approval(&approval.id, true, ""),
         Err(Error::InvalidState)
     ));
     assert!(w.step(&run, "pull-request").is_none());
+}
+
+#[test]
+fn rejecting_a_change_takes_a_reason_and_approving_does_not() {
+    let w = world();
+    let run = w.start(None);
+    let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
+    for blank in ["", "  \n\t "] {
+        assert!(matches!(
+            w.engine.answer_approval(&approval.id, false, blank),
+            Err(Error::Blocked(Reason::RejectionNeedsReason))
+        ));
+    }
+    // Refused means nothing happened: it still waits, and can still be answered.
+    assert_eq!(w.step(&run, "approval").unwrap().state, "waitingApproval");
+    assert!(w.store.run(&run).unwrap().finished_at.is_none());
+    assert!(w.engine.decisions(&w.project_id).unwrap().is_empty());
+
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    assert_eq!(w.wait_run_finished(&run).pr_number, Some(12));
+}
+
+#[test]
+fn a_run_that_changed_nothing_closes_without_a_reason() {
+    let w = world();
+    w.flag("no-change");
+    let run = w.start(None);
+    let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, false, "").unwrap();
+    assert_eq!(w.step(&run, "approval").unwrap().state, "rejected");
+    assert!(w.store.run(&run).unwrap().finished_at.is_some());
+    assert!(w.step(&run, "pull-request").is_none());
+    assert!(w.engine.decisions(&w.project_id).unwrap().is_empty());
 }
 
 #[test]
