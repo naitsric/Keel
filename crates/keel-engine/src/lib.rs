@@ -336,8 +336,13 @@ impl Engine {
 
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<Project> {
         services::validate(&settings.services, &settings.env).map_err(Error::Blocked)?;
+        let before = self.inner.store.project(id)?.github_account;
         self.inner.store.update_project(id, settings)?;
-        Ok(self.inner.store.project(id)?)
+        let project = self.inner.store.project(id)?;
+        if project.github_account != before {
+            self.inner.compare_map_with_github(&project)?;
+        }
+        Ok(project)
     }
 
     /// The accounts signed in to `gh`. Never changes the active one.

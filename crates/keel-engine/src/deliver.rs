@@ -63,6 +63,33 @@ impl Inner {
         Ok(info.default_branch)
     }
 
+    /// A project's first map comes from its folder, because it has no account yet. With one, runs
+    /// start from GitHub, and that can be different code. Bringing it into the mirror is what
+    /// marks the lines it changed as out of date. In the background, since the first fetch of a
+    /// large repo takes a while. If it fails, the warning is missing and the next run says why.
+    pub(crate) fn compare_map_with_github(self: &Arc<Self>, project: &Project) -> Result<()> {
+        let (Some(account), Some(repo)) = (&project.github_account, &project.github_repo) else {
+            return Ok(());
+        };
+        let has_map = self
+            .store
+            .brain_notes(&project.id)?
+            .iter()
+            .any(|note| note.kind == "map" && note.state == "active");
+        let git = locked(&self.tools).git.clone();
+        let (true, Some(git)) = (has_map, git) else {
+            return Ok(());
+        };
+        let inner = self.clone();
+        let (id, account, repo) = (project.id.clone(), account.clone(), repo.clone());
+        std::thread::spawn(move || {
+            let _creating = locked(&inner.creating_workspace);
+            let mirror = inner.mirror(&id);
+            let _ = inner.update_mirror_from_github(&Git::new(git), &mirror, &account, &repo);
+        });
+        Ok(())
+    }
+
     pub(crate) fn deliver(self: &Arc<Self>, attempt: &Attempt) {
         let _ = self
             .store
