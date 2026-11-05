@@ -686,7 +686,7 @@ fn a_step_named_setup_does_not_clash_with_the_projects_own() {
     w.engine.update_project(&w.project_id, &settings).unwrap();
     let run = w.start(vec![WorkflowStep::Agent(spec(
         "setup",
-        ToolProfile::ReadOnly,
+        ToolProfile::Build,
         StepRole::Worker,
         &[],
         "ANYTHING",

@@ -7,7 +7,9 @@
     "back": "Volver",
     "refresh": "Comprobar de nuevo",
     "error": "Algo salió mal: {{detail}}",
-    "workflows": "Workflows"
+    "workflows": "Workflows",
+    "brain": "Brain",
+    "brainProposals": "{{count}} propuestas esperando"
   },
   "session": {
     "checking": "Comprobando tu sesión de Claude Code…",
@@ -92,7 +94,8 @@
     "reworkLimit": "El aprobador lo devolvió {{rounds}} veces y sigue sin quedar conforme. Ahora decides tú.",
     "noMatchingPaths": "No cambió nada de lo que cubre ({{paths}}).",
     "invalidWorkflow": "Este workflow no puede correr.",
-    "snapshotFailed": "El paso terminó, pero Keel no pudo leer lo que cambió, así que no cuenta como hecho."
+    "snapshotFailed": "El paso terminó, pero Keel no pudo leer lo que cambió, así que no cuenta como hecho.",
+    "brainFull": "El Brain está lleno. Retira algo primero, y luego acepta esto."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
@@ -143,7 +146,8 @@
     "needsGithub": "Este workflow necesita una cuenta de GitHub para el proyecto.",
     "openSettings": "Abrir Ajustes",
     "workflowSingleOption": "Solo un paso",
-    "editWorkflows": "Editar workflows"
+    "editWorkflows": "Editar workflows",
+    "mapStarted": "Keel está leyendo este proyecto para escribir su mapa, con Sonnet. Puedes verlo en Inicio y en el Brain."
   },
   "run": {
     "attemptTitle": "Intento {{number}}",
@@ -214,7 +218,12 @@
     "anotherRound": "Una ronda más",
     "toMyApproval": "Pasarlo a mi aprobación",
     "changesTitle": "Todo lo que cambió esta ejecución",
-    "decideReworkLimit": "Elige arriba: una ronda más, tu aprobación o dejarlo."
+    "decideReworkLimit": "Elige arriba: una ronda más, tu aprobación o dejarlo.",
+    "proposalsTitle": "Lo que esta ejecución propone para el Brain",
+    "proposalsHint": "Si aceptas algo, todos los agentes de este proyecto lo reciben de ahora en adelante.",
+    "openBrain": "Abrir el Brain",
+    "mapWritten": "Escribió un mapa de {{count}} líneas.",
+    "decideMap": "Nada. Léelo en el Brain y retira cualquier línea que esté mal."
   },
   "tabs": {
     "activity": "Actividad",
@@ -259,7 +268,13 @@
     "rework": "Devuelto para la ronda {{round}}",
     "reworkLimit": "Llegó al límite de rondas",
     "reworkLimitAnswerRound": "Pediste otra ronda",
-    "reworkLimitAnswerApproval": "Lo pasaste a tu aprobación"
+    "reworkLimitAnswerApproval": "Lo pasaste a tu aprobación",
+    "brainMap": "Mapa escrito: {{kept}} líneas guardadas, {{dropped}} descartadas por no citar archivos reales",
+    "brainProposals": "Propuesto para el Brain: {{count}}",
+    "brainNote_active": "Aceptaste: {{text}}",
+    "brainNote_dismissed": "Descartaste: {{text}}",
+    "brainNote_retired": "Retiraste: {{text}}",
+    "brainFailed": "No se pudo guardar esto en el Brain: {{error}}"
   },
   "commands": {
     "empty": "No corrió ningún comando.",
@@ -297,7 +312,8 @@
     "settings": "Reglas del sandbox",
     "systemPrompt": "Instrucciones agregadas",
     "command": "Comando",
-    "none": "—"
+    "none": "—",
+    "brainReceived": "Del Brain recibió {{notes}} notas y {{decisions}} decisiones. {{leftOut}} notas no cupieron."
   },
   "settings": {
     "title": "Ajustes",
@@ -329,10 +345,6 @@
     "readPathsHint": "Una por línea, como ~/.cargo. Tu carpeta personal queda oculta en lo demás.",
     "save": "Guardar",
     "saved": "Guardado",
-    "decisions": "Decisiones",
-    "decisionsHint": "Lo que dijiste en una aprobación. Los agentes de este proyecto las siguen.",
-    "decisionsEmpty": "Todavía no hay decisiones.",
-    "retire": "Retirar",
     "services": "Servicios",
     "servicesHint": "Lo que necesitan los comandos de este proyecto, como una base de pruebas. Keel los corre fuera del sandbox mientras un paso los usa, y los comandos llegan a ellos solo por un socket Unix.",
     "servicesEmpty": "Sin servicios.",
@@ -410,7 +422,9 @@
     "tooManyRounds": "«{{step}}» puede devolver el trabajo 5 veces como máximo.",
     "emptyGroup": "El grupo «{{step}}» no tiene pasos.",
     "noCommand": "Escribe el comando de «{{step}}».",
-    "deliverNeedsApproval": "«{{step}}» abre un pull request, así que una persona tiene que aprobar en un paso anterior."
+    "deliverNeedsApproval": "«{{step}}» abre un pull request, así que una persona tiene que aprobar en un paso anterior.",
+    "learnerNotLast": "«{{step}}» propone lo que enseñó la ejecución, así que tiene que ser el último paso.",
+    "groupRole": "«{{step}}» no puede ir en un grupo. Solo pueden los pasos que hacen o revisan el trabajo."
   },
   "workflows": {
     "title": "Workflows",
@@ -454,6 +468,40 @@
     "saveCopy": "Guardar una copia",
     "saved": "Guardado",
     "delete": "Eliminar",
-    "newName": "Mi workflow"
+    "newName": "Mi workflow",
+    "roleLearner": "Propone aprendizajes"
+  },
+  "brain": {
+    "title": "Brain",
+    "subtitle": "Lo que Keel sabe de cada proyecto. Se queda en este Mac, y todos los agentes lo reciben.",
+    "project": "Proyecto",
+    "noProjects": "Primero agrega un proyecto, al lanzar una ejecución.",
+    "usage": "{{used}} KB de {{limit}} KB",
+    "overLimit": "No cabe todo, así que algunas notas no están llegando a los agentes.",
+    "evidence": "Evidencia",
+    "accept": "Aceptar",
+    "dismiss": "Descartar",
+    "retire": "Retirar",
+    "stale": "Desactualizada: lo que cita cambió desde entonces.",
+    "leftOut": "No cabe, así que los agentes no la reciben.",
+    "proposals": "Propuestas",
+    "proposalsHint": "Lo que aprendieron ejecuciones anteriores. Nada entra si no lo aceptas.",
+    "map": "Mapa",
+    "mapHint": "Lo escribió un agente a partir del código. Cada línea dice de qué archivos y commit sale.",
+    "mapRunning": "Un agente está leyendo el proyecto.",
+    "mapRunningLink": "Ver qué está haciendo",
+    "mapEmpty": "Todavía no hay mapa.",
+    "mapGenerate": "Escribir el mapa",
+    "mapRegenerate": "Escribirlo de nuevo",
+    "learnings": "Aprendido",
+    "learningsHint": "Las propuestas que aceptaste.",
+    "learningsEmpty": "Nada todavía.",
+    "decisions": "Decisiones",
+    "decisionsHint": "Lo que dijiste al aprobar o rechazar. Van primero, y los agentes las siguen.",
+    "decisionsEmpty": "Todavía no hay decisiones.",
+    "prompt": "Lo que recibirá el próximo agente",
+    "promptHint": "El texto exacto. La auditoría de cada paso guarda lo que recibió ese paso.",
+    "staleCount_one": "1 línea puede estar desactualizada. Escribirlo de nuevo reemplaza todo el mapa.",
+    "staleCount_other": "{{count}} líneas pueden estar desactualizadas. Escribirlo de nuevo reemplaza todo el mapa."
   }
 }

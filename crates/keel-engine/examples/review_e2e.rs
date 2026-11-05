@@ -51,6 +51,37 @@ fn main() {
         )
         .unwrap();
 
+    // The map first, as when a project is added.
+    let map_run = engine.generate_map(&project.id, "sonnet", "es").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(300);
+    while store.run(&map_run).unwrap().finished_at.is_none() {
+        let attempt = store.attempts_of_run(&map_run).unwrap().remove(0);
+        if ["failed", "blocked", "stopped", "interrupted"].contains(&attempt.state.as_str()) {
+            panic!("the map stopped: {} {:?}", attempt.state, attempt.reason);
+        }
+        assert!(Instant::now() < deadline, "the map timed out");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    println!("--- the map");
+    let map_attempt = store.attempts_of_run(&map_run).unwrap().remove(0);
+    println!(
+        "model: {:?}  cost: {:?}",
+        map_attempt.model_actual, map_attempt.cost_usd
+    );
+    for note in engine.brain(&project.id).unwrap().map {
+        println!(
+            "- {}  {:?} @{}",
+            note.note.text,
+            note.note.paths,
+            note.note
+                .commit_sha
+                .as_deref()
+                .unwrap_or("")
+                .get(..7)
+                .unwrap_or("")
+        );
+    }
+
     let mut steps = engine.workflows(&project.id, "es").unwrap().remove(0).steps;
     let choose = |spec: &mut StepSpec| {
         spec.model = model_for(&spec.id).to_owned();
@@ -77,7 +108,7 @@ fn main() {
         })
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(580);
+    let deadline = Instant::now() + Duration::from_secs(480);
     let mut approved = false;
     loop {
         let attempts = store.attempts_of_run(&run).unwrap();
@@ -140,6 +171,25 @@ fn main() {
         "round: {}  branch: {:?}  PR: {:?}",
         finished.round, finished.branch, finished.pr_url
     );
+    let builder = store
+        .attempts_of_run(&run)
+        .unwrap()
+        .into_iter()
+        .find(|a| a.step_id == "builder")
+        .unwrap();
+    println!(
+        "the builder got from the Brain: {}",
+        builder.system_prompt_sources
+    );
+    println!("--- proposals for the Brain");
+    for note in engine.proposals_of_run(&run).unwrap() {
+        println!(
+            "- {}\n  evidence: {}\n  paths: {:?}",
+            note.text,
+            note.evidence.unwrap_or_default(),
+            note.paths
+        );
+    }
     println!(
         "--- the diff of the whole run\n{}",
         engine.run_diff(&run).unwrap()

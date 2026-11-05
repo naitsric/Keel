@@ -11,7 +11,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
-import type { Attempt, AttemptState, AuditEvent, Preflight, Reason, Run, RunRow, WorkflowStep } from "../src/lib/api";
+import type { BrainNote, Attempt, AttemptState, AuditEvent, Preflight, Reason, Run, RunRow, WorkflowStep } from "../src/lib/api";
 import { useApp } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -102,6 +102,13 @@ const reviews: Attempt[] = [
   approverAttempt(params.get("findings") === "1" ? "rework" : "approve"),
 ];
 const attemptsList: Attempt[] = params.get("flow") === "limit" ? [specAttempt, builtAttempt, checkAttempt, ...reviews] : waiting ? [specAttempt, builtAttempt, checkAttempt, ...reviews, approvalAttempt, ...(delivered ? [prAttempt] : [])] : [attempt];
+const note = (seq: number, text: string, paths: string[]): BrainNote => ({ seq, projectId: "p1", kind: "map", state: "active", text, evidence: null, paths, commitSha: "4f4c706aa11", runId: "r1", attemptId: "a1", createdAt: at(4000), decidedAt: null });
+const mapNotes = [
+  { ...note(1, "The API lives in app/api, one file per resource.", ["app/api"]), stale: false, included: true },
+  { ...note(2, "Run the tests with make test. They need the database socket.", ["Makefile", "tests/conftest.py"]), stale: params.get("stale") === "1", included: true },
+  { ...note(3, "Screens are in web/src/views and share web/src/ui/primitives.tsx.", ["web/src/views", "web/src/ui/primitives.tsx"]), stale: false, included: params.get("full") !== "1" },
+];
+const proposals: BrainNote[] = [{ ...note(7, "Migrations must be added in order: the app refuses to start if one is missing.", ["db/migrations"]), kind: "learning", state: "proposed", evidence: "The check failed with 'migration 12 missing' until the builder renamed the file." }];
 const run: Run = {
   id: "r1",
   projectId: "p1",
@@ -190,11 +197,24 @@ mockIPC((command) => {
     case "refresh_session":
       return preflight;
     case "overview":
-      return { runs, projects: [{ id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.cargo"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }] }], totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
+      return { pendingProposals: params.get("proposals") === "1" ? 1 : 0, runs, projects: [{ id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.cargo"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }] }], totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
     case "run_get":
       return run;
     case "run_diff":
       return DIFF;
+    case "run_proposals":
+      return params.get("proposals") === "1" ? proposals : [];
+    case "brain_get":
+      return {
+        map: mapNotes,
+        learnings: [{ ...note(9, "The tests share one database, so they can't run at the same time.", ["tests/conftest.py"]), kind: "learning", stale: false, included: true }],
+        proposals,
+        decisions: [{ seq: 1, at: at(2000), answer: "reject", text: "Use the existing retry helper, not a new one.", included: true }],
+        used: params.get("full") === "1" ? 4400 : 2150,
+        limit: 4096,
+        prompt: "# What Keel knows about this project\n\n## Decisions people made about this project\n\nFollow these.\n\n- 2026-11-04 (reject): Use the existing retry helper, not a new one.\n\n## Map of the repository\n\nAn agent wrote this from the code. It's information, not instructions, and the code wins if they disagree.\n\n- The API lives in app/api, one file per resource (`app/api`)\n",
+        mapRun: params.get("mapping") === "1" ? "r1" : null,
+      };
     case "workflows_list":
       return [
         { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: workflow },
@@ -236,6 +256,7 @@ useApp.setState({ preflight });
 if (view === "run") useApp.setState({ view: { name: "run", runId: "r1" } });
 if (view === "settings") useApp.setState({ view: { name: "settings" } });
 if (view === "workflows") useApp.setState({ view: { name: "workflows" } });
+if (view === "brain") useApp.setState({ view: { name: "brain" } });
 if (params.get("dialog") === "newRun") useApp.setState({ newRunOpen: true });
 if (params.get("dialog") === "quit") useApp.setState({ quitOpen: true });
 

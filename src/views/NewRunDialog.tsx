@@ -48,6 +48,7 @@ export function NewRunDialog() {
   const [maxTurns, setMaxTurns] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [mapStarted, setMapStarted] = useState(false);
 
   const project = projects.find((p) => p.id === projectId);
 
@@ -91,9 +92,10 @@ export function NewRunDialog() {
     const path = await openFolder({ directory: true, multiple: false });
     if (typeof path !== "string") return;
     try {
-      const added = await api.projectAdd(path);
+      const added = await api.projectAdd(path, i18n.language);
       await refreshOverview();
       setProjectId(added.id);
+      setMapStarted(true);
     } catch (e) {
       setError(errorText(t, e));
     }
@@ -152,6 +154,7 @@ export function NewRunDialog() {
             </Button>
           </div>
         </Field>
+        {mapStarted && <p className="-mt-2 text-[11.5px] text-subtle">{t("newRun.mapStarted")}</p>}
 
         <div>
           <Field label={t("newRun.workflow")}>

@@ -8,12 +8,14 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use keel_core::{EnvVar, Reason, Service, StepSpec, ToolProfile, WorkflowStep};
 use keel_engine::{
-    Config, Engine, Error as EngineError, GithubStatus, Preflight, RawCheck, StartRun, Workflow,
-    request_from_issue,
+    BrainView, Config, DEFAULT_BRAIN_MODEL, Engine, Error as EngineError, GithubStatus, Preflight,
+    RawCheck, StartRun, Workflow, request_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::Issue;
-use keel_store::{Attempt, Decision, Event, Project, ProjectSettings, Run, RunRow, Store, Totals};
+use keel_store::{
+    Attempt, BrainNote, Decision, Event, Project, ProjectSettings, Run, RunRow, Store, Totals,
+};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
@@ -122,6 +124,7 @@ struct Overview {
     runs: Vec<RunRow>,
     totals: Totals,
     projects: Vec<Project>,
+    pending_proposals: i64,
 }
 
 #[tauri::command(async)]
@@ -130,13 +133,58 @@ fn overview(state: State<'_, AppState>) -> CommandResult<Overview> {
         runs: state.store.runs(200)?,
         totals: state.store.totals()?,
         projects: state.store.projects()?,
+        pending_proposals: state.store.pending_proposals()?,
     })
 }
 
 #[tauri::command(async)]
-fn project_add(state: State<'_, AppState>, path: String) -> CommandResult<Project> {
+fn project_add(
+    state: State<'_, AppState>,
+    path: String,
+    language: String,
+) -> CommandResult<Project> {
     state.ready.wait();
-    Ok(state.engine.add_project(Path::new(&path))?)
+    let project = state.engine.add_project(Path::new(&path))?;
+    // Without a Claude Code session this can't start yet. The Brain screen offers it again.
+    let _ = state
+        .engine
+        .first_map(&project.id, DEFAULT_BRAIN_MODEL, &language);
+    Ok(project)
+}
+
+#[tauri::command(async)]
+fn brain_get(state: State<'_, AppState>, project_id: String) -> CommandResult<BrainView> {
+    Ok(state.engine.brain(&project_id)?)
+}
+
+#[tauri::command(async)]
+fn brain_generate_map(
+    state: State<'_, AppState>,
+    project_id: String,
+    model: String,
+    language: String,
+) -> CommandResult<String> {
+    Ok(state.engine.generate_map(&project_id, &model, &language)?)
+}
+
+#[tauri::command(async)]
+fn brain_accept(state: State<'_, AppState>, seq: i64) -> CommandResult<()> {
+    Ok(state.engine.accept_note(seq)?)
+}
+
+#[tauri::command(async)]
+fn brain_dismiss(state: State<'_, AppState>, seq: i64) -> CommandResult<()> {
+    Ok(state.engine.dismiss_note(seq)?)
+}
+
+#[tauri::command(async)]
+fn brain_retire(state: State<'_, AppState>, seq: i64) -> CommandResult<()> {
+    Ok(state.engine.retire_note(seq)?)
+}
+
+#[tauri::command(async)]
+fn run_proposals(state: State<'_, AppState>, run_id: String) -> CommandResult<Vec<BrainNote>> {
+    Ok(state.engine.proposals_of_run(&run_id)?)
 }
 
 #[derive(Deserialize)]
@@ -566,6 +614,12 @@ pub fn run() {
             project_add,
             run_start,
             run_get,
+            run_proposals,
+            brain_get,
+            brain_generate_map,
+            brain_accept,
+            brain_dismiss,
+            brain_retire,
             run_diff,
             workflows_list,
             workflow_save,

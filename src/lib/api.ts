@@ -109,7 +109,42 @@ export interface Decision {
   text: string;
 }
 
-export type StepRole = { kind: "worker" } | { kind: "reviewer" } | { kind: "approver"; reworkTo: string; maxRounds: number };
+export type StepRole = { kind: "worker" } | { kind: "reviewer" } | { kind: "approver"; reworkTo: string; maxRounds: number } | { kind: "mapper" } | { kind: "learner" };
+
+export interface BrainNote {
+  seq: number;
+  projectId: string;
+  kind: "map" | "learning";
+  state: "proposed" | "active" | "dismissed" | "retired" | "replaced";
+  text: string;
+  evidence: string | null;
+  paths: string[];
+  commitSha: string | null;
+  runId: string;
+  attemptId: string;
+  createdAt: string;
+  decidedAt: string | null;
+}
+
+export interface NoteView extends BrainNote {
+  stale: boolean;
+  included: boolean;
+}
+
+export interface DecisionView extends Decision {
+  included: boolean;
+}
+
+export interface BrainView {
+  map: NoteView[];
+  learnings: NoteView[];
+  proposals: BrainNote[];
+  decisions: DecisionView[];
+  used: number;
+  limit: number;
+  prompt: string;
+  mapRun: string | null;
+}
 
 export interface StepSpec {
   id: string;
@@ -206,6 +241,7 @@ export interface Overview {
   runs: RunRow[];
   totals: Totals;
   projects: Project[];
+  pendingProposals: number;
 }
 
 export interface Attempt {
@@ -213,9 +249,9 @@ export interface Attempt {
   runId: string;
   stepId: string;
   kind: "agent" | "setup" | "check" | "approval" | "deliver";
-  role: "worker" | "reviewer" | "approver";
+  role: "worker" | "reviewer" | "approver" | "mapper" | "learner";
   round: number;
-  output: (Verdict & Decision_) | null;
+  output: (Verdict & Decision_ & { lines?: unknown[] }) | null;
   runFiles: string[] | null;
   exitCode: number | null;
   number: number;
@@ -278,7 +314,13 @@ export const api = {
   preflight: () => invoke<Preflight>("preflight"),
   refreshSession: () => invoke<Preflight>("refresh_session"),
   overview: () => invoke<Overview>("overview"),
-  projectAdd: (path: string) => invoke<Project>("project_add", { path }),
+  projectAdd: (path: string, language: string) => invoke<Project>("project_add", { path, language }),
+  brainGet: (projectId: string) => invoke<BrainView>("brain_get", { projectId }),
+  brainGenerateMap: (projectId: string, model: string, language: string) => invoke<string>("brain_generate_map", { projectId, model, language }),
+  brainAccept: (seq: number) => invoke<void>("brain_accept", { seq }),
+  brainDismiss: (seq: number) => invoke<void>("brain_dismiss", { seq }),
+  brainRetire: (seq: number) => invoke<void>("brain_retire", { seq }),
+  runProposals: (runId: string) => invoke<BrainNote[]>("run_proposals", { runId }),
   runStart: (request: RunRequest) => invoke<string>("run_start", { request }),
   runGet: (runId: string) => invoke<Run>("run_get", { runId }),
   runDiff: (runId: string) => invoke<string>("run_diff", { runId }),

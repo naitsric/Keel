@@ -103,6 +103,14 @@ describe("a run with several steps", () => {
     expect(focusAttempt([a("code", "failed"), a("code", "succeeded")])?.state).toBe("succeeded");
   });
 
+  it("isn't about a proposal step that failed, unless it's still working", () => {
+    const delivered = { stepId: "pr", state: "succeeded", role: "worker" };
+    expect(focusAttempt([delivered, { stepId: "learn", state: "failed", role: "learner" }])).toBe(delivered);
+    expect(focusAttempt([delivered, { stepId: "learn", state: "running", role: "learner" }])?.stepId).toBe("learn");
+    const alone = { stepId: "learn", state: "failed", role: "learner" };
+    expect(focusAttempt([alone])).toBe(alone);
+  });
+
   it("opens up parallel groups", () => {
     expect(flatSteps([{ type: "agent", id: "a" }, { type: "parallel", id: "g", steps: [{ id: "b" }, { id: "c" }] }]).map((s) => s.id)).toEqual(["a", "b", "c"]);
   });

@@ -16,7 +16,7 @@ use serde_json::json;
 
 use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
-use crate::{Error, Inner, Result, locked, prompts, workflows};
+use crate::{Error, Inner, Result, brain, locked, prompts, workflows};
 
 /// Tool output kept in the database. The raw file always has all of it.
 const EVENT_TEXT_LIMIT: usize = 64 * 1024;
@@ -44,8 +44,9 @@ pub(crate) struct Monitor {
     root_pid: Option<i32>,
     child: Option<Child>,
     tail: Tail,
-    /// A reviewer or approver that ends without its structured answer didn't do its job.
+    /// A step that was asked for a structured answer and ends without it didn't do its job.
     requires_output: bool,
+    role: String,
     /// Why this attempt must end blocked, once decided.
     block: Option<Reason>,
     result: Option<ResultEvent>,
@@ -75,6 +76,7 @@ impl Monitor {
             child,
             tail,
             requires_output: attempt.role != "worker",
+            role: attempt.role.clone(),
             block: None,
             result: None,
             services: None,
@@ -348,9 +350,14 @@ impl Inner {
         let stem = format!("{}-{}", attempt.step_id, attempt.number);
         let settings_file = dir.join(format!("{stem}.settings.json"));
         std::fs::write(&settings_file, attempt.settings.to_string())?;
-        let decisions = store.decisions(project_id)?;
+        // A map should come from the code, not from an earlier map.
+        let brain = if spec.role == keel_core::StepRole::Mapper {
+            brain::Block::default()
+        } else {
+            self.brain_block(project_id)?
+        };
         let (system_prompt, sources) =
-            prompts::system_prompt(&workspace, &attempt.language, spec.tools, &decisions);
+            prompts::system_prompt(&workspace, &attempt.language, spec.tools, &brain);
         let system_prompt_file = dir.join(format!("{stem}.system.md"));
         std::fs::write(&system_prompt_file, &system_prompt)?;
         let prompt_file = dir.join(format!("{stem}.prompt.txt"));
@@ -1007,7 +1014,17 @@ impl Inner {
         );
         locked(&self.controls).remove(&m.attempt_id);
         self.changed(&m.run_id);
-        if state == AttemptState::Succeeded {
+        if state == AttemptState::Succeeded
+            && let Ok(attempt) = store.attempt(&m.attempt_id)
+            && let Err(error) = self.record_brain_output(&attempt)
+        {
+            let _ = store.append_event(
+                &m.attempt_id,
+                "brainFailed",
+                &json!({ "error": error.to_string() }),
+            );
+        }
+        if state == AttemptState::Succeeded || m.role == "learner" {
             let _ = self.advance(&m.run_id);
         }
     }

@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "./lib/api";
 import { useApp } from "./lib/store";
 import { Button, Modal } from "./ui/primitives";
+import { BrainPage } from "./views/BrainPage";
 import { Home } from "./views/Home";
 import { NewRunDialog } from "./views/NewRunDialog";
 import { RunDetail } from "./views/RunDetail";
@@ -35,6 +36,7 @@ export default function App() {
       {view.name === "run" && <RunDetail key={view.runId} runId={view.runId} />}
       {view.name === "settings" && <SettingsView />}
       {view.name === "workflows" && <WorkflowsView />}
+      {view.name === "brain" && <BrainPage />}
       <NewRunDialog />
       <QuitDialog />
     </div>

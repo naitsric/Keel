@@ -162,6 +162,28 @@ const MIGRATIONS: &[&str] = &[
     create trigger attempt_round_fixed before update of round, role on attempt
     begin select raise(abort, 'attempt facts are fixed once it starts'); end;
 "#,
+    r#"
+    create table brain_note (
+        seq integer primary key autoincrement,
+        project_id text not null references project (id),
+        kind text not null,
+        state text not null,
+        text text not null,
+        evidence text,
+        paths text not null,
+        commit_sha text,
+        run_id text not null references run (id),
+        attempt_id text not null,
+        created_at text not null,
+        decided_at text
+    );
+    create index brain_note_by_project on brain_note (project_id, seq);
+    create trigger brain_note_facts_fixed
+    before update of project_id, kind, text, evidence, paths, commit_sha, run_id, attempt_id, created_at on brain_note
+    begin select raise(abort, 'brain notes are never rewritten'); end;
+    create trigger brain_note_no_delete before delete on brain_note
+    begin select raise(abort, 'brain notes are never deleted'); end;
+"#,
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -267,6 +289,56 @@ fn run_from(r: &Row) -> rusqlite::Result<Run> {
         created_at: r.get(11)?,
         finished_at: r.get(12)?,
         round: r.get(13)?,
+    })
+}
+
+/// Something the Brain knows or could know. `kind` is `map` or `learning`. `state` is `proposed`,
+/// `active`, `dismissed`, `retired` or `replaced`, and only the state ever changes.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrainNote {
+    pub seq: i64,
+    pub project_id: String,
+    pub kind: String,
+    pub state: String,
+    pub text: String,
+    pub evidence: Option<String>,
+    pub paths: Vec<String>,
+    pub commit_sha: Option<String>,
+    pub run_id: String,
+    pub attempt_id: String,
+    pub created_at: String,
+    pub decided_at: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NewBrainNote<'a> {
+    pub project_id: &'a str,
+    pub kind: &'a str,
+    pub state: &'a str,
+    pub text: &'a str,
+    pub evidence: Option<&'a str>,
+    pub paths: &'a [String],
+    pub commit_sha: Option<&'a str>,
+    pub run_id: &'a str,
+    pub attempt_id: &'a str,
+}
+
+fn brain_note_from(r: &rusqlite::Row) -> rusqlite::Result<BrainNote> {
+    let paths: String = r.get("paths")?;
+    Ok(BrainNote {
+        seq: r.get("seq")?,
+        project_id: r.get("project_id")?,
+        kind: r.get("kind")?,
+        state: r.get("state")?,
+        text: r.get("text")?,
+        evidence: r.get("evidence")?,
+        paths: serde_json::from_str(&paths).unwrap_or_default(),
+        commit_sha: r.get("commit_sha")?,
+        run_id: r.get("run_id")?,
+        attempt_id: r.get("attempt_id")?,
+        created_at: r.get("created_at")?,
+        decided_at: r.get("decided_at")?,
     })
 }
 
@@ -674,6 +746,84 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    pub fn add_brain_note(&self, note: &NewBrainNote) -> Result<i64> {
+        let conn = self.lock();
+        conn.execute(
+            "insert into brain_note (project_id, kind, state, text, evidence, paths, commit_sha, run_id, attempt_id, created_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                note.project_id,
+                note.kind,
+                note.state,
+                note.text,
+                note.evidence,
+                serde_json::to_string(note.paths).unwrap_or_else(|_| "[]".to_owned()),
+                note.commit_sha,
+                note.run_id,
+                note.attempt_id,
+                now()
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    /// A project's notes still in play, oldest first: the active ones and the proposals.
+    pub fn brain_notes(&self, project_id: &str) -> Result<Vec<BrainNote>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select * from brain_note where project_id = ?1 and state in ('active', 'proposed') order by seq",
+        )?;
+        let rows = stmt.query_map([project_id], brain_note_from)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn brain_note(&self, seq: i64) -> Result<BrainNote> {
+        self.lock()
+            .query_row(
+                "select * from brain_note where seq = ?1",
+                [seq],
+                brain_note_from,
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("brain note {seq}")))
+    }
+
+    pub fn proposals_of_run(&self, run_id: &str) -> Result<Vec<BrainNote>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select * from brain_note where run_id = ?1 and state = 'proposed' order by seq",
+        )?;
+        let rows = stmt.query_map([run_id], brain_note_from)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn set_brain_note_state(&self, seq: i64, state: &str) -> Result<()> {
+        self.lock().execute(
+            "update brain_note set state = ?2, decided_at = ?3 where seq = ?1",
+            params![seq, state, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Proposals waiting for a person, across all projects.
+    pub fn pending_proposals(&self) -> Result<i64> {
+        Ok(self.lock().query_row(
+            "select count(*) from brain_note where state = 'proposed'",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Whether anything has ever tried to map this project.
+    pub fn has_map_attempt(&self, project_id: &str) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "select exists (select 1 from attempt a join run r on r.id = a.run_id
+                            where r.project_id = ?1 and a.role = 'mapper')",
+            [project_id],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn retire_decision(&self, seq: i64) -> Result<()> {
         self.lock()
             .execute("update decision set retired = 1 where seq = ?1", [seq])?;
@@ -812,7 +962,8 @@ impl Store {
                 select b.rowid from attempt b where b.run_id = r.id
                   and not exists (select 1 from attempt later
                                   where later.run_id = b.run_id and later.step_id = b.step_id and later.rowid > b.rowid)
-                order by case when b.state in ('stalled', 'blocked', 'waitingApproval', 'interrupted', 'failed', 'stopped', 'rejected', 'abandoned') then 0
+                order by case when b.role = 'learner' and b.state not in ('queued', 'preparing', 'running') then 3
+                              when b.state in ('stalled', 'blocked', 'waitingApproval', 'interrupted', 'failed', 'stopped', 'rejected', 'abandoned') then 0
                               when b.state in ('queued', 'preparing', 'running') then 1 else 2 end,
                          b.rowid desc
                 limit 1)
@@ -1005,6 +1156,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 drop table brain_note;
                  drop trigger attempt_round_fixed;
                  alter table run drop column round;
                  alter table attempt drop column round;
@@ -1025,6 +1177,98 @@ mod tests {
         assert_eq!(attempts[0].output, None);
         assert_eq!(store.run(&run_row).unwrap().round, 0);
         assert_eq!(store.runs(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn brain_notes_can_change_state_but_never_what_they_say() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let paths = vec!["a.py".to_owned()];
+        let seq = store
+            .add_brain_note(&NewBrainNote {
+                project_id: "p",
+                kind: "learning",
+                state: "proposed",
+                text: "the db needs a socket",
+                evidence: Some("the check failed without it"),
+                paths: &paths,
+                commit_sha: Some("abc"),
+                run_id: "r",
+                attempt_id: "a",
+            })
+            .unwrap();
+        assert_eq!(store.pending_proposals().unwrap(), 1);
+        assert_eq!(store.proposals_of_run("r").unwrap().len(), 1);
+
+        store.set_brain_note_state(seq, "active").unwrap();
+        let note = store.brain_note(seq).unwrap();
+        assert_eq!(note.state, "active");
+        assert!(note.decided_at.is_some());
+        assert_eq!(note.paths, paths);
+        assert_eq!(store.pending_proposals().unwrap(), 0);
+
+        store.set_brain_note_state(seq, "retired").unwrap();
+        assert!(
+            store.brain_notes("p").unwrap().is_empty(),
+            "retired notes leave play"
+        );
+        assert_eq!(
+            store.brain_note(seq).unwrap().text,
+            "the db needs a socket",
+            "but stay on record"
+        );
+
+        let conn = store.lock();
+        assert!(
+            conn.execute("update brain_note set text = 'x' where seq = ?1", [seq])
+                .is_err()
+        );
+        assert!(
+            conn.execute("delete from brain_note where seq = ?1", [seq])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_failed_proposal_step_is_not_what_the_home_table_shows() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store.set_state("a", AttemptState::Succeeded, None).unwrap();
+        let mut learner = NewAttempt {
+            id: "l".into(),
+            run_id: "r".into(),
+            step_id: "learnings".into(),
+            kind: "agent".into(),
+            role: "learner".into(),
+            round: 0,
+            number: 1,
+            state: AttemptState::Failed,
+            model_requested: "haiku".into(),
+            effort: None,
+            tools: "readOnly".into(),
+            max_turns: None,
+            max_budget_usd: None,
+            language: "en".into(),
+            prompt: String::new(),
+            system_prompt_sources: "[]".into(),
+            settings: "{}".into(),
+            session_id: "s".into(),
+            resumed_from: None,
+            workspace: "/w".into(),
+            raw_path: "/w.jsonl".into(),
+            started_at: now(),
+        };
+        store.add_attempt(&learner).unwrap();
+        assert_eq!(store.runs(10).unwrap()[0].state, "succeeded");
+        learner.id = "l2".into();
+        learner.step_id = "other".into();
+        learner.state = AttemptState::Running;
+        store.add_attempt(&learner).unwrap();
+        assert_eq!(
+            store.runs(10).unwrap()[0].state,
+            "running",
+            "while it works, it does show"
+        );
     }
 
     #[test]

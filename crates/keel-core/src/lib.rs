@@ -54,6 +54,10 @@ pub enum StepRole {
     /// Checks the reviewers' findings and decides. Sending work back reruns everything from
     /// `rework_to`, at most `max_rounds` times. Then a person decides.
     Approver { rework_to: String, max_rounds: u32 },
+    /// Reads the repo and writes the project's map for the Brain.
+    Mapper,
+    /// Says what this run taught. Nothing it proposes reaches an agent until a person accepts it.
+    Learner,
 }
 
 impl StepRole {
@@ -62,6 +66,8 @@ impl StepRole {
             Self::Worker => "worker",
             Self::Reviewer => "reviewer",
             Self::Approver { .. } => "approver",
+            Self::Mapper => "mapper",
+            Self::Learner => "learner",
         }
     }
 
@@ -310,6 +316,11 @@ pub enum Reason {
     },
     SetupFailed {
         exit_code: Option<i32>,
+    },
+    /// Accepting this would go over what the Brain can send. Something has to be retired first.
+    BrainFull {
+        used: usize,
+        limit: usize,
     },
     /// The step ended, but Keel couldn't read what it changed.
     SnapshotFailed,

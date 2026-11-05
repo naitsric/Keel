@@ -96,13 +96,16 @@ const NEEDS_A_PERSON = ["waitingApproval", "stalled", "blocked", "interrupted", 
 const WORKING = ["running", "preparing", "queued"];
 
 /** The step the run is about right now: whatever needs a person, then whatever is working. */
-export function focusAttempt<T extends { stepId: string; state: string }>(attempts: T[]): T | undefined {
+export function focusAttempt<T extends { stepId: string; state: string; role?: string }>(attempts: T[]): T | undefined {
   const current = latestOfEachStep(attempts);
-  for (const group of [NEEDS_A_PERSON, WORKING]) {
-    const found = [...current].reverse().find((a) => group.includes(a.state));
+  const asks = (a: T) => NEEDS_A_PERSON.includes(a.state) && a.role !== "learner";
+  const works = (a: T) => WORKING.includes(a.state);
+  for (const applies of [asks, works]) {
+    const found = [...current].reverse().find(applies);
     if (found) return found;
   }
-  return attempts[attempts.length - 1];
+  // Proposals are a bonus: if they failed, the run is still about what came before them.
+  return [...attempts].reverse().find((a) => a.role !== "learner") ?? attempts[attempts.length - 1];
 }
 
 /** Steps of a workflow with parallel groups opened up, in order. */

@@ -397,6 +397,20 @@ impl Git {
         )
     }
 
+    /// What's different between a commit and what the project has now. The mirror is Keel's own,
+    /// so this doesn't need the sandbox.
+    pub fn changed_in_mirror(&self, mirror: &Path, commit: &str) -> Result<Vec<String>, GitError> {
+        let base = format!("refs/heads/{BASE_REF}");
+        Ok(self
+            .run(
+                mirror,
+                &["diff", "--no-ext-diff", "--name-only", commit, &base],
+            )?
+            .lines()
+            .map(str::to_owned)
+            .collect())
+    }
+
     /// The files the run has changed since `base`, as the pull request will list them.
     pub fn files_since(&self, workspace: &Path, base: &str) -> Result<Vec<String>, GitError> {
         let range = format!("{base}..HEAD");

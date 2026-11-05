@@ -3,7 +3,7 @@ import { create } from "zustand";
 import i18next, { type Language, systemLanguage } from "../i18n";
 import { api, type Overview, type Preflight } from "./api";
 
-export type View = { name: "home" } | { name: "run"; runId: string } | { name: "settings" } | { name: "workflows" };
+export type View = { name: "home" } | { name: "run"; runId: string } | { name: "settings" } | { name: "workflows" } | { name: "brain" };
 
 interface AppState {
   view: View;
@@ -24,7 +24,7 @@ interface AppState {
 export const useApp = create<AppState>((set) => ({
   view: { name: "home" },
   preflight: null,
-  overview: { runs: [], projects: [], totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } },
+  overview: { runs: [], projects: [], pendingProposals: 0, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } },
   newRunOpen: false,
   quitOpen: false,
   revision: 0,
