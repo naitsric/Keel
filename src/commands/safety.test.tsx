@@ -123,7 +123,7 @@ describe("safety", () => {
     });
 
     it("binds nothing the native menu takes first, or main.tsx blocks", async () => {
-      // src-tauri/src/menu.rs: Quit, Hide, Hide Others, Close, Minimize, Settings, and the Edit menu.
+      // The system's items in src/menu/menuModel.ts: Quit, Hide, Hide Others, Close, Minimize, and the Edit menu. And Settings.
       const MENU = ["$mod+KeyQ", "$mod+KeyH", "$mod+Alt+KeyH", "$mod+KeyW", "$mod+KeyM", "$mod+Comma", "$mod+KeyZ", "$mod+Shift+KeyZ", "$mod+KeyX", "$mod+KeyC", "$mod+KeyV", "$mod+KeyA"];
       // src/main.tsx: reload and zoom.
       const BLOCKED = ["$mod+KeyR", "$mod+Equal", "$mod+Shift+Equal", "$mod+Minus", "$mod+Digit0"];

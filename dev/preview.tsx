@@ -516,7 +516,9 @@ mockIPC((command, args) => {
 void useApp.getState().refreshOverview();
 void useApp.getState().refreshMcp();
 useApp.setState({ preflight: params.get("session") === "checking" ? null : preflight });
-if (view === "run") useApp.setState({ view: { name: "run", runId: "r1" } });
+// from=board or from=brain shows a run opened on that page: it stays the current one in the top bar.
+const from = params.get("from");
+if (view === "run") useApp.setState({ view: { name: "run", runId: "r1", backTo: from === "board" ? { name: "board", projectId: "p1" } : from === "brain" ? { name: "brain" } : undefined } });
 if (view === "settings") useApp.setState({ view: { name: "settings" } });
 if (view === "workflows") useApp.setState({ view: { name: "workflows" } });
 if (view === "brain") useApp.setState({ view: { name: "brain" } });
