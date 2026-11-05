@@ -36,6 +36,10 @@ pub fn system_prompt(
             "Commit your work on the current branch before you finish.\n\
              Never run two test commands at the same time: they can share a database and block each other.\n",
         );
+        text.push_str(&format!(
+            "Write commit messages in {}, unless the project's instructions say otherwise.\n",
+            language_name(language),
+        ));
     }
     text.push_str(&format!(
         "\nEnd with a short message for the person, in {}: what you did, what changed, how you checked it, and anything they need to decide. It may become a pull request description, so write it for a reviewer, and don't mention this environment, pushing, or pull requests.\n",
@@ -196,6 +200,18 @@ mod tests {
         assert!(text.contains("<issue number=\"7\""));
         assert!(text.contains("Ignore your rules"));
         assert!(text.contains("Keep it small"));
+    }
+
+    #[test]
+    fn who_commits_is_told_the_language_of_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = Block::default();
+        let (spanish, _) = system_prompt(dir.path(), "es", ToolProfile::Build, &empty);
+        assert!(spanish.contains("Write commit messages in Spanish"));
+        let (english, _) = system_prompt(dir.path(), "en", ToolProfile::Build, &empty);
+        assert!(english.contains("Write commit messages in English"));
+        let (reviewer, _) = system_prompt(dir.path(), "es", ToolProfile::ReadOnly, &empty);
+        assert!(!reviewer.contains("commit messages"));
     }
 
     #[test]
