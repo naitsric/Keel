@@ -7,6 +7,7 @@ import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, Field, inputClass, Segmented } from "../ui/primitives";
+import { AddProjectButton, useAddProject } from "./AddProject";
 import { McpCard } from "./McpCard";
 import { TopBar } from "./TopBar";
 
@@ -62,7 +63,13 @@ function ServiceRow({ service, onChange, onRemove }: { service: Service; onChang
   );
 }
 
-function ProjectSettingsCard({ project }: { project: Project }) {
+/**
+ * The card reads its values only as it mounts, so it has to start over when the setup dialog changes
+ * them, or its next Save would put the old ones back.
+ */
+export const projectCardKey = (project: Project) => [project.id, project.githubAccount, project.githubRepo, project.setupCommand, project.checkCommand].join("\0");
+
+function ProjectSettingsCard({ project, saved, onSaved }: { project: Project; saved: boolean; onSaved: () => void }) {
   const { t, i18n } = useTranslation();
   const refreshOverview = useApp((s) => s.refreshOverview);
   const [account, setAccount] = useState(project.githubAccount ?? NONE);
@@ -75,7 +82,6 @@ function ProjectSettingsCard({ project }: { project: Project }) {
   const [workflow, setWorkflow] = useState(project.defaultWorkflow ?? FULL_WORKFLOW);
   const [workflows, setWorkflows] = useState<Workflow[] | null>(null);
   const [status, setStatus] = useState<GithubStatus | null>(null);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
@@ -145,8 +151,7 @@ function ProjectSettingsCard({ project }: { project: Project }) {
         defaultWorkflow: workflow === FULL_WORKFLOW ? null : workflow,
       });
       await refreshOverview();
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
+      onSaved();
       load();
     } catch (e) {
       setError(errorText(t, e));
@@ -297,7 +302,6 @@ function ProjectSettingsCard({ project }: { project: Project }) {
         </Button>
         {saved && <span className="text-[12px] text-success">{t("settings.saved")}</span>}
       </div>
-
     </Card>
   );
 }
@@ -342,6 +346,13 @@ export function SettingsView() {
   const { t, i18n } = useTranslation();
   const setLanguage = useApp((s) => s.setLanguage);
   const projects = useApp((s) => s.overview.projects);
+  const { add, error, busy } = useAddProject();
+  // Out here because saving can start a card over.
+  const [savedId, setSavedId] = useState<string | null>(null);
+  const showSaved = (id: string) => {
+    setSavedId(id);
+    setTimeout(() => setSavedId((current) => (current === id ? null : current)), 2000);
+  };
   return (
     <>
       <TopBar back />
@@ -363,10 +374,18 @@ export function SettingsView() {
           </Card>
           <MaxAgentsCard />
           <McpCard />
-          <h2 className="pt-1 text-[14px] font-semibold">{t("settings.projects")}</h2>
+          <div className="flex items-center justify-between gap-2 pt-1">
+            <h2 className="text-[14px] font-semibold">{t("settings.projects")}</h2>
+            <AddProjectButton add={add} busy={busy} />
+          </div>
+          {error && (
+            <p role="alert" className="text-[12px] text-danger">
+              {error}
+            </p>
+          )}
           {projects.length === 0 && <p className="text-[12.5px] text-subtle">{t("settings.noProjects")}</p>}
           {projects.map((project) => (
-            <ProjectSettingsCard key={project.id} project={project} />
+            <ProjectSettingsCard key={projectCardKey(project)} project={project} saved={savedId === project.id} onSaved={() => showSaved(project.id)} />
           ))}
         </div>
       </main>

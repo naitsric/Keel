@@ -6,6 +6,7 @@ import { BoardView } from "./views/BoardView";
 import { BrainPage } from "./views/BrainPage";
 import { Home } from "./views/Home";
 import { NewRunDialog } from "./views/NewRunDialog";
+import { ProjectSetupDialog } from "./views/ProjectSetupDialog";
 import { RunDetail } from "./views/RunDetail";
 import { SettingsView } from "./views/SettingsView";
 import { WorkflowsView } from "./views/WorkflowsView";
@@ -40,6 +41,7 @@ export default function App() {
       {view.name === "brain" && <BrainPage />}
       {view.name === "board" && <BoardView initialProjectId={view.projectId} />}
       <NewRunDialog />
+      <ProjectSetupDialog />
       <QuitDialog />
     </div>
   );

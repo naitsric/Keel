@@ -6,6 +6,7 @@ import { formatDateTime, formatNumber } from "../lib/format";
 import { errorText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass } from "../ui/primitives";
+import { AddProject } from "./AddProject";
 import { ModelField } from "./ModelField";
 import { TopBar } from "./TopBar";
 
@@ -100,13 +101,14 @@ export function BrainPage() {
   const revision = useApp((s) => s.revision);
   const refreshOverview = useApp((s) => s.refreshOverview);
   const navigate = useApp((s) => s.navigate);
-  const [projectId, setProjectId] = useState("");
+  const wanted = useApp((s) => s.brainProjectId);
+  const [projectId, setProjectId] = useState(wanted ?? "");
   const [brain, setBrain] = useState<BrainView | null>(null);
   const [model, setModel] = useState("sonnet");
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!projectId && projects.length > 0) setProjectId(projects[0].id);
+    if (projects.length > 0 && !projects.some((p) => p.id === projectId)) setProjectId(projects[0].id);
   }, [projects, projectId]);
 
   const load = useCallback(async () => {
@@ -138,7 +140,10 @@ export function BrainPage() {
         <h1 className="text-[18px] font-semibold">{t("brain.title")}</h1>
         <p className="mt-0.5 text-[12.5px] text-muted">{t("brain.subtitle")}</p>
         {projects.length === 0 ? (
-          <p className="mt-4 text-[12.5px] text-subtle">{t("brain.noProjects")}</p>
+          <div className="mt-4">
+            <p className="text-[12.5px] text-subtle">{t("brain.noProjects")}</p>
+            <AddProject className="mt-2" variant="primary" />
+          </div>
         ) : (
           <div className="mt-4 max-w-3xl space-y-4">
             <div className="flex flex-wrap items-end gap-4">

@@ -17,7 +17,7 @@ describe("the session's warning on the home page", () => {
 
   const show = (auth: Partial<AuthStatus>) => {
     const preflight = { auth: { loggedIn: true, email: "you@example.com", ...auth }, ignoredEnv: [], blocker: null, version: null } as unknown as Preflight;
-    useApp.setState({ preflight, overviewLoaded: true, overview: { ...useApp.getState().overview, projects: [{ id: "p1" } as Project] } });
+    useApp.setState({ preflight, overviewLoaded: true, overview: { ...useApp.getState().overview, projects: [{ id: "p1", checkCommand: "make test" } as Project] } });
     act(() => root.render(<Home />));
   };
   const warning = () => [...document.querySelectorAll(".text-warning")].map((node) => node.textContent).join("");

@@ -903,6 +903,42 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_can_be_read_back_from_a_whole_project() {
+        // The setup dialog sends the project with only what changed replaced.
+        let mut sent = serde_json::to_value(Project {
+            id: "p1".into(),
+            name: "demo".into(),
+            path: "/Users/you/demo".into(),
+            created_at: "2026-11-05T10:00:00Z".into(),
+            github_account: None,
+            github_repo: Some("acme/app".into()),
+            setup_command: None,
+            check_command: None,
+            allowed_domains: vec!["pypi.org".into()],
+            allowed_read: vec!["~/.nvm".into()],
+            services: vec![Service::Bridge {
+                name: "db".into(),
+                port: 5432,
+                socket: None,
+            }],
+            env: vec![EnvVar {
+                name: "DB".into(),
+                value: SECRET.into(),
+            }],
+            default_workflow: Some("mine".into()),
+        })
+        .unwrap();
+        sent["checkCommand"] = json!("pnpm test");
+        let settings: ProjectSettingsInput = serde_json::from_value(sent).unwrap();
+        assert_eq!(settings.check_command.as_deref(), Some("pnpm test"));
+        assert_eq!(settings.allowed_domains, ["pypi.org"]);
+        assert_eq!(settings.allowed_read, ["~/.nvm"]);
+        assert_eq!(settings.services.len(), 1);
+        assert_eq!(settings.env[0].value, SECRET);
+        assert_eq!(settings.default_workflow.as_deref(), Some("mine"));
+    }
+
+    #[test]
     fn an_error_hides_what_it_quotes() {
         let error = CommandError::from(EngineError::Blocked(Reason::DeliveryFailed {
             kind: "other".into(),
