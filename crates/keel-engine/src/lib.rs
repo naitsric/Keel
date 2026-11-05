@@ -73,8 +73,6 @@ pub struct Config {
     /// How many agents work at once, until a person chooses a number. Theirs is in the store.
     pub max_agents: usize,
     pub keep_awake: bool,
-    /// How long `claude` gets to answer each question about the session.
-    pub session_check_limit: Duration,
     /// Where git reaches GitHub. Tests point this at local repos.
     pub github_git_base: String,
 }
@@ -90,7 +88,6 @@ impl Config {
             stop_grace: Duration::from_secs(10),
             max_agents: 2,
             keep_awake: true,
-            session_check_limit: auth::CHECK_LIMIT,
             github_git_base: "https://github.com".to_owned(),
         }
     }
@@ -277,13 +274,15 @@ impl Engine {
 
     pub fn preflight(&self) -> Preflight {
         let tools = locked(&self.inner.tools).clone();
-        let check = tools
+        let version_text = tools
             .claude
             .as_deref()
-            .map(|c| auth::check_session(c, &tools.path_env, self.inner.config.session_check_limit))
-            .unwrap_or_default();
-        let version = check.version.as_deref().map(auth::check_version);
-        let auth = check.auth;
+            .and_then(|c| auth::read_version(c, &tools.path_env));
+        let version = version_text.as_deref().map(auth::check_version);
+        let auth = tools
+            .claude
+            .as_deref()
+            .and_then(|c| AuthStatus::read(c, &tools.path_env));
         let blocker = if tools.claude.is_none() {
             Some(Reason::ClaudeMissing)
         } else if tools.git.is_none() {
@@ -298,8 +297,6 @@ impl Engine {
                 found: found.clone(),
                 below: below.clone(),
             })
-        } else if check.not_responding {
-            Some(Reason::ClaudeNotResponding)
         } else if !auth.as_ref().is_some_and(|a| a.logged_in) {
             Some(Reason::ClaudeLoggedOut)
         } else {

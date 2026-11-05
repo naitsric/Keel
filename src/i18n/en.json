@@ -67,7 +67,6 @@
     "claudeMissing": "Claude Code isn't installed, or Keel can't find it.",
     "gitMissing": "Git isn't installed, or Keel can't find it.",
     "claudeLoggedOut": "You aren't signed in to Claude Code.",
-    "claudeNotResponding": "Claude Code isn't answering, so Keel can't check your session. It will keep trying.",
     "cliVersionTooOld": "Claude Code {{found}} is older than {{minimum}}, the oldest version Keel supports. Update it and try again.",
     "cliVersionUntested": "Claude Code {{found}} hasn't been tested with Keel, which supports versions below {{below}}. Runs are paused so the isolation can't silently change.",
     "unexpectedAuth": "This step wasn't using your subscription login ({{source}}), so Keel stopped it before it did any work.",

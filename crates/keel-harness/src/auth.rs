@@ -3,16 +3,10 @@
 
 use std::path::Path;
 use std::process::Command;
-use std::time::Duration;
 
 use serde::Serialize;
 
 use crate::command::clean_env;
-use crate::process::stdout_within;
-
-/// How long `claude` gets to say what it is and who's signed in. It normally takes a second or two,
-/// and nothing that depends on the answer should wait on it for good.
-pub const CHECK_LIMIT: Duration = Duration::from_secs(20);
 
 /// The oldest version M0 was run against.
 pub const MIN_VERSION: (u32, u32, u32) = (2, 1, 318);
@@ -35,10 +29,13 @@ pub struct AuthStatus {
 
 impl AuthStatus {
     pub fn read(claude: &Path, path_env: &str) -> Option<Self> {
-        match ask(claude, path_env, &["auth", "status", "--json"], CHECK_LIMIT) {
-            Answer::Said(text) => Self::parse(&text),
-            Answer::Failed | Answer::TimedOut => None,
-        }
+        let output = Command::new(claude)
+            .args(["auth", "status", "--json"])
+            .env_clear()
+            .envs(clean_env(path_env))
+            .output()
+            .ok()?;
+        Self::parse(&String::from_utf8_lossy(&output.stdout))
     }
 
     pub fn parse(text: &str) -> Option<Self> {
@@ -81,68 +78,13 @@ pub enum VersionCheck {
 }
 
 pub fn read_version(claude: &Path, path_env: &str) -> Option<String> {
-    match ask(claude, path_env, &["--version"], CHECK_LIMIT) {
-        Answer::Said(text) => Some(text.trim().to_owned()),
-        Answer::Failed | Answer::TimedOut => None,
-    }
-}
-
-enum Answer {
-    Said(String),
-    /// It couldn't even start.
-    Failed,
-    /// It started and didn't finish in time.
-    TimedOut,
-}
-
-fn ask(claude: &Path, path_env: &str, args: &[&str], limit: Duration) -> Answer {
-    let mut command = Command::new(claude);
-    command.args(args).env_clear().envs(clean_env(path_env));
-    match stdout_within(command, limit) {
-        Ok(Some(bytes)) => Answer::Said(String::from_utf8_lossy(&bytes).into_owned()),
-        Ok(None) => Answer::TimedOut,
-        Err(_) => Answer::Failed,
-    }
-}
-
-/// What `claude` says about itself, in one look.
-#[derive(Debug, Clone, Default)]
-pub struct SessionCheck {
-    pub version: Option<String>,
-    pub auth: Option<AuthStatus>,
-    /// It didn't answer in time, so `version` and `auth` say nothing about the session.
-    pub not_responding: bool,
-}
-
-/// `limit` applies to each question. If the first gets no answer the second isn't asked, since it
-/// would only wait the same way.
-pub fn check_session(claude: &Path, path_env: &str, limit: Duration) -> SessionCheck {
-    let version = match ask(claude, path_env, &["--version"], limit) {
-        Answer::Said(text) => Some(text.trim().to_owned()),
-        Answer::Failed => None,
-        Answer::TimedOut => {
-            return SessionCheck {
-                not_responding: true,
-                ..SessionCheck::default()
-            };
-        }
-    };
-    match ask(claude, path_env, &["auth", "status", "--json"], limit) {
-        Answer::Said(text) => SessionCheck {
-            version,
-            auth: AuthStatus::parse(&text),
-            not_responding: false,
-        },
-        Answer::Failed => SessionCheck {
-            version,
-            ..SessionCheck::default()
-        },
-        Answer::TimedOut => SessionCheck {
-            version,
-            auth: None,
-            not_responding: true,
-        },
-    }
+    let output = Command::new(claude)
+        .arg("--version")
+        .env_clear()
+        .envs(clean_env(path_env))
+        .output()
+        .ok()?;
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 fn parse_version(text: &str) -> Option<(u32, u32, u32)> {
@@ -198,62 +140,6 @@ mod tests {
             VersionCheck::Untested { .. }
         ));
         assert_eq!(check_version("garbage"), VersionCheck::Unknown);
-    }
-
-    fn fake_claude(dir: &Path, script: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-        let path = dir.join("claude");
-        std::fs::write(&path, format!("#!/bin/bash\n{script}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
-    }
-
-    const QUICK: Duration = Duration::from_millis(300);
-
-    #[test]
-    fn a_claude_that_answers_is_read_as_usual() {
-        let dir = tempfile::tempdir().unwrap();
-        let claude = fake_claude(
-            dir.path(),
-            r#"[ "$1" = "--version" ] && echo '2.1.318 (Claude Code)' || echo '{"loggedIn":true}'"#,
-        );
-        let check = check_session(&claude, "/usr/bin:/bin", Duration::from_secs(5));
-        assert_eq!(check.version.as_deref(), Some("2.1.318 (Claude Code)"));
-        assert!(check.auth.unwrap().logged_in);
-        assert!(!check.not_responding);
-    }
-
-    #[test]
-    fn a_claude_that_hangs_is_stopped_and_says_so() {
-        let dir = tempfile::tempdir().unwrap();
-        let claude = fake_claude(dir.path(), "exec sleep 60");
-        let started = std::time::Instant::now();
-        let check = check_session(&claude, "/usr/bin:/bin", QUICK);
-        assert!(check.not_responding);
-        assert!(check.version.is_none());
-        assert!(started.elapsed() < Duration::from_secs(5), "it asked once");
-    }
-
-    #[test]
-    fn a_session_check_that_hangs_keeps_the_version_and_says_so() {
-        let dir = tempfile::tempdir().unwrap();
-        let claude = fake_claude(
-            dir.path(),
-            r#"[ "$1" = "--version" ] && { echo '2.1.318 (Claude Code)'; exit 0; }; exec sleep 60"#,
-        );
-        // Long enough for the first question to get its answer on a busy machine.
-        let check = check_session(&claude, "/usr/bin:/bin", Duration::from_secs(2));
-        assert_eq!(check.version.as_deref(), Some("2.1.318 (Claude Code)"));
-        assert!(check.auth.is_none());
-        assert!(check.not_responding);
-    }
-
-    #[test]
-    fn a_claude_that_cannot_start_is_not_the_same_as_one_that_hangs() {
-        let check = check_session(Path::new("/nonexistent/claude"), "/usr/bin:/bin", QUICK);
-        assert!(!check.not_responding);
-        assert!(check.version.is_none());
-        assert!(check.auth.is_none());
     }
 
     #[test]
