@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use keel_core::{AttemptState, Reason, StepSpec, ToolProfile, WorkflowStep};
@@ -126,7 +127,9 @@ impl Inner {
             }
             let reason = if holds_project && slots.command_steps.contains(project_id) {
                 Some(Reason::WaitingForProject)
-            } else if counts_as_agent && slots.active.len() >= self.config.max_agents {
+            } else if counts_as_agent
+                && slots.active.len() >= self.max_agents.load(Ordering::SeqCst)
+            {
                 Some(Reason::WaitingForCapacity)
             } else {
                 None

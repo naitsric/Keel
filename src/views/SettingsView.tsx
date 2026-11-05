@@ -2,7 +2,7 @@ import { AlertTriangle } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Language } from "../i18n";
-import { api, type EnvVar, type GithubStatus, type Project, type Service } from "../lib/api";
+import { api, type EnvVar, type GithubStatus, type Project, type Service, type Workflow } from "../lib/api";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
@@ -17,6 +17,9 @@ const lines = (text: string) =>
     .filter(Boolean);
 
 const NONE = "__none__";
+// A project with no default workflow runs this one, so it's what the setting shows and saves as nothing.
+const FULL_WORKFLOW = "builtin:full";
+const AGENT_LIMITS = Array.from({ length: 10 }, (_, i) => String(i + 1));
 const ENV_EXAMPLE = "DB_HOST={{socketDir:db}}";
 
 /** Turns `NAME=value` lines into variables, or says which line isn't one. */
@@ -60,7 +63,7 @@ function ServiceRow({ service, onChange, onRemove }: { service: Service; onChang
 }
 
 function ProjectSettingsCard({ project }: { project: Project }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const refreshOverview = useApp((s) => s.refreshOverview);
   const [account, setAccount] = useState(project.githubAccount ?? NONE);
   const [setup, setSetup] = useState(project.setupCommand ?? "");
@@ -69,6 +72,8 @@ function ProjectSettingsCard({ project }: { project: Project }) {
   const [paths, setPaths] = useState(project.allowedRead.join("\n"));
   const [services, setServices] = useState<Service[]>(project.services);
   const [env, setEnv] = useState(project.env.map((v) => `${v.name}=${v.value}`).join("\n"));
+  const [workflow, setWorkflow] = useState(project.defaultWorkflow ?? FULL_WORKFLOW);
+  const [workflows, setWorkflows] = useState<Workflow[] | null>(null);
   const [status, setStatus] = useState<GithubStatus | null>(null);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -104,6 +109,13 @@ function ProjectSettingsCard({ project }: { project: Project }) {
     return () => window.removeEventListener("focus", load);
   }, [load]);
 
+  useEffect(() => {
+    api
+      .workflowsList(project.id, i18n.language)
+      .then(setWorkflows)
+      .catch((e) => setError(errorText(t, e)));
+  }, [project.id, i18n.language, t]);
+
   const openOnGithub = (url: string) => {
     setError(null);
     api.openGithubUrl(url).catch((e) => setError(errorText(t, e)));
@@ -130,6 +142,7 @@ function ProjectSettingsCard({ project }: { project: Project }) {
         allowedRead: lines(paths),
         services,
         env: parsed.env,
+        defaultWorkflow: workflow === FULL_WORKFLOW ? null : workflow,
       });
       await refreshOverview();
       setSaved(true);
@@ -144,6 +157,7 @@ function ProjectSettingsCard({ project }: { project: Project }) {
   const repo = status?.repo ?? null;
   const access = githubAccess(status);
   const needsAccess = selected !== null && (access === "none" || access === "readOnly");
+  const workflowGone = workflows !== null && !workflows.some((w) => w.id === workflow);
   return (
     <Card className="p-4">
       <h3 className="text-[14px] font-semibold">{project.name}</h3>
@@ -212,6 +226,25 @@ function ProjectSettingsCard({ project }: { project: Project }) {
       )}
 
       <div className="mt-4 space-y-3">
+        <div className="max-w-sm">
+          <Field label={t("settings.defaultWorkflow")} hint={t("settings.defaultWorkflowHint")}>
+            <select value={workflow} disabled={workflows === null} onChange={(e) => setWorkflow(e.target.value)} className={inputClass}>
+              {workflows === null && <option value={workflow}>{t("settings.githubChecking")}</option>}
+              {workflowGone && <option value={workflow}>{t("settings.defaultWorkflowGone")}</option>}
+              {workflows?.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          {workflowGone && (
+            <p className="mt-1 flex gap-1.5 text-[12px] text-warning">
+              <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+              {t("reasons.defaultWorkflowMissing")}
+            </p>
+          )}
+        </div>
         <Field label={t("settings.setupCommand")} hint={t("settings.setupCommandHint")}>
           <input value={setup} onChange={(e) => setSetup(e.target.value)} placeholder={t("settings.setupCommandPlaceholder")} className={`${inputClass} font-mono`} />
         </Field>
@@ -269,6 +302,42 @@ function ProjectSettingsCard({ project }: { project: Project }) {
   );
 }
 
+function MaxAgentsCard() {
+  const { t } = useTranslation();
+  const [value, setValue] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .maxAgentsGet()
+      .then((limit) => setValue(String(limit)))
+      .catch((e) => setError(errorText(t, e)));
+  }, [t]);
+
+  const change = (next: string) => {
+    const previous = value;
+    setValue(next);
+    setError(null);
+    api.maxAgentsSet(Number(next)).catch((e) => {
+      setValue(previous);
+      setError(errorText(t, e));
+    });
+  };
+
+  return (
+    <Card className="p-4">
+      <p className="text-[13px] font-medium">{t("settings.maxAgents")}</p>
+      <p className="mt-0.5 mb-3 text-[12px] text-muted">{t("settings.maxAgentsHint")}</p>
+      {value !== null && <Segmented<string> label={t("settings.maxAgents")} value={value} onChange={change} options={AGENT_LIMITS.map((limit) => ({ value: limit, label: limit }))} />}
+      {error && (
+        <p role="alert" className="mt-2 text-[12px] text-danger">
+          {error}
+        </p>
+      )}
+    </Card>
+  );
+}
+
 export function SettingsView() {
   const { t, i18n } = useTranslation();
   const setLanguage = useApp((s) => s.setLanguage);
@@ -292,6 +361,7 @@ export function SettingsView() {
               ]}
             />
           </Card>
+          <MaxAgentsCard />
           <McpCard />
           <h2 className="pt-1 text-[14px] font-semibold">{t("settings.projects")}</h2>
           {projects.length === 0 && <p className="text-[12.5px] text-subtle">{t("settings.noProjects")}</p>}

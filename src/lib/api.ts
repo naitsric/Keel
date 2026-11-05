@@ -67,6 +67,8 @@ export interface Project {
   allowedRead: string[];
   services: Service[];
   env: EnvVar[];
+  /** What a board card runs. Null means the full built-in workflow. */
+  defaultWorkflow: string | null;
 }
 
 export interface ProjectSettings {
@@ -77,6 +79,7 @@ export interface ProjectSettings {
   allowedRead: string[];
   services: Service[];
   env: EnvVar[];
+  defaultWorkflow: string | null;
 }
 
 export interface GithubAccount {
@@ -350,6 +353,39 @@ export interface RunRequest {
   language: string;
 }
 
+export type BoardColumn = "backlog" | "todo" | "inProgress" | "humanReview" | "done";
+
+export interface BoardCard {
+  id: string;
+  projectId: string;
+  title: string;
+  body: string;
+  issue: { number: number; title: string; author: string; url: string } | null;
+  column: BoardColumn;
+  position: number;
+  runId: string | null;
+  /** Of the latest attempt. Null if there's no run. */
+  runState: AttemptState | null;
+  /** Of the latest attempt. */
+  reason: Reason | null;
+  prUrl: string | null;
+  /** What the person wrote when rejecting. It may be empty. */
+  rejection: string | null;
+  startBlocked: Reason | null;
+  createdAt: string;
+}
+
+export interface Board {
+  /** Ordered by position within each column. */
+  cards: BoardCard[];
+  /** Runs working now, across the whole app. */
+  working: number;
+  maxAgents: number;
+  defaultWorkflow: string | null;
+  /** Why nothing starts from Todo right now: a Claude session problem, or a failure every run would hit. */
+  paused: Reason | null;
+}
+
 export const api = {
   preflight: () => invoke<Preflight>("preflight"),
   refreshSession: () => invoke<Preflight>("refresh_session"),
@@ -400,6 +436,14 @@ export const api = {
   revealRaw: (attemptId: string) => invoke<void>("reveal_raw", { attemptId }),
   appQuit: (stopRuns: boolean) => invoke<void>("app_quit", { stopRuns }),
   menuSet: (labels: Record<string, string>) => invoke<void>("menu_set", { labels }),
+  boardGet: (projectId: string) => invoke<Board>("board_get", { projectId }),
+  cardCreate: (projectId: string, title: string, body: string) => invoke<string>("card_create", { projectId, title, body }),
+  cardImportIssue: (projectId: string, issue: Issue) => invoke<string>("card_import_issue", { projectId, issue }),
+  cardUpdate: (cardId: string, title: string, body: string) => invoke<void>("card_update", { cardId, title, body }),
+  cardMove: (cardId: string, lane: "backlog" | "todo", index: number, language: string) => invoke<void>("card_move", { cardId, lane, index, language }),
+  cardDelete: (cardId: string) => invoke<void>("card_delete", { cardId }),
+  maxAgentsGet: () => invoke<number>("max_agents_get"),
+  maxAgentsSet: (value: number) => invoke<void>("max_agents_set", { value }),
 };
 
 export const ACTIVE_STATES: AttemptState[] = ["queued", "preparing", "running", "stalled"];

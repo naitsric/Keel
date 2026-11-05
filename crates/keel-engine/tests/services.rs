@@ -127,6 +127,7 @@ impl World {
                     allowed_read: vec![],
                     services,
                     env,
+                    default_workflow: None,
                 },
             )
             .unwrap();

@@ -79,6 +79,11 @@ pub fn render(template: &str, lookup: impl Fn(&str) -> Option<String>) -> String
     result
 }
 
+/// The name of a run that comes from an issue.
+pub fn title_from_issue(number: i64, title: &str) -> String {
+    format!("#{number} {title}")
+}
+
 /// An issue as an agent should see it: anyone may have written it, so it's data, not orders.
 pub fn request_from_issue(issue: &Issue, extra: &str) -> String {
     let mut text = format!(

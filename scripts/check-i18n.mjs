@@ -18,7 +18,9 @@ for (const key of esKeys) if (!enKeys.has(key)) problems.push(`missing in en.jso
 
 // Every reason the backend can return needs a sentence.
 const core = readFileSync(join(root, "crates/keel-core/src/lib.rs"), "utf8");
-const reasonEnum = core.slice(core.indexOf("pub enum Reason"));
+// Only up to its closing brace: other enums follow it in the file.
+const reasonStart = core.indexOf("pub enum Reason");
+const reasonEnum = core.slice(reasonStart, core.indexOf("\n}", reasonStart));
 for (const [, variant] of reasonEnum.matchAll(/^\s{4}([A-Z]\w+)\b/gm)) {
   const code = variant[0].toLowerCase() + variant.slice(1);
   if (!enKeys.has(`reasons.${code}`)) problems.push(`no translation for reason: ${code}`);

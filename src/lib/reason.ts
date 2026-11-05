@@ -45,9 +45,13 @@ export function errorText(t: TFunction, error: unknown): string {
   return t("errors.internal", { detail: e?.detail ?? String(error) });
 }
 
-/** A reason the user fixes by signing in. */
-/** A reason the user fixes in the project's settings. */
-export const needsProjectSettings = (reason: Reason | null | undefined) => reason?.code === "githubAccountMissing";
+const FIXED_IN_SETTINGS = ["githubAccountMissing", "noGithubRemote", "defaultWorkflowMissing"];
+const DELIVERY_FIXED_IN_SETTINGS = ["notSignedIn", "noPermission"];
 
+/** A reason the user fixes in the project's settings. */
+export const needsProjectSettings = (reason: Reason | null | undefined) =>
+  reason != null && (FIXED_IN_SETTINGS.includes(reason.code) || (reason.code === "deliveryFailed" && DELIVERY_FIXED_IN_SETTINGS.includes(reason.kind as string)));
+
+/** A reason the user fixes by signing in. */
 export const needsSignIn = (reason: Reason | null | undefined) =>
   reason?.code === "claudeLoggedOut" || reason?.code === "sessionRejected";
