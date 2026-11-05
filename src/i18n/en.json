@@ -405,7 +405,7 @@
     "close": "Close Window"
   },
   "deliveryKinds": {
-    "notSignedIn": "This GitHub account isn't signed in. Run `gh auth login`, then try again.",
+    "notSignedIn": "This GitHub account isn't signed in. Connect it in Settings, then try again.",
     "noPermission": "This GitHub account can't write to the repo. Give it access or choose another one.",
     "sso": "Your organization requires SSO for this token. Authorize it with `gh auth refresh`, then try again.",
     "repoRules": "The repo's rules refused this push.",

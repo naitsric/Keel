@@ -606,6 +606,72 @@ fn github_status_shows_accounts_permission_and_excess_scopes_without_switching()
 }
 
 #[test]
+fn choosing_an_account_compares_the_map_with_what_is_on_github() {
+    let w = world();
+    let account = |login: Option<&str>| keel_store::ProjectSettings {
+        github_account: login.map(str::to_owned),
+        ..Default::default()
+    };
+    let run = w.start(None);
+    let attempt = w.wait(&run, "approval", AttemptState::WaitingApproval);
+
+    // The map came while the project had no account.
+    w.engine
+        .update_project(&w.project_id, &account(None))
+        .unwrap();
+    let commit = git(&w.repo, &["rev-parse", "main"]);
+    let readme = vec!["README.md".to_owned()];
+    w.store
+        .add_brain_note(&keel_store::NewBrainNote {
+            project_id: &w.project_id,
+            kind: "map",
+            state: "active",
+            text: "The readme says what it is",
+            evidence: None,
+            paths: &readme,
+            commit_sha: Some(commit.trim()),
+            run_id: &run,
+            attempt_id: &attempt.id,
+        })
+        .unwrap();
+    assert!(!w.engine.brain(&w.project_id).unwrap().map[0].stale);
+
+    // Someone published a change since this clone last looked.
+    let other = w.dir.path().join("other");
+    git(
+        w.dir.path(),
+        &["clone", "-q", &w.remote.to_string_lossy(), "other"],
+    );
+    git(&other, &["config", "user.name", "Other"]);
+    git(&other, &["config", "user.email", "o@example.com"]);
+    std::fs::write(other.join("README.md"), "changed\n").unwrap();
+    git(&other, &["commit", "-qam", "change"]);
+    git(&other, &["push", "-q", "origin", "main"]);
+
+    w.engine
+        .update_project(&w.project_id, &account(Some("alice")))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !w.engine.brain(&w.project_id).unwrap().map[0].stale {
+        assert!(Instant::now() < deadline, "{}", w.log("gh.log"));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!w.log("gh.log").contains("auth switch"));
+}
+
+#[test]
+fn choosing_an_account_asks_github_nothing_without_a_map_to_compare() {
+    let w = world();
+    let settings = keel_store::ProjectSettings {
+        github_account: Some("bob".into()),
+        ..Default::default()
+    };
+    w.engine.update_project(&w.project_id, &settings).unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(!w.log("gh.log").contains("auth token"));
+}
+
+#[test]
 fn github_status_checks_the_chosen_account_before_it_is_saved() {
     let w = world();
     let status = w.engine.github_status(&w.project_id, Some("bob")).unwrap();
