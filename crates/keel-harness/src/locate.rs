@@ -26,7 +26,7 @@ impl Tools {
             .map(|p| std::env::split_paths(&p).collect())
             .unwrap_or_default();
         // Where these tools usually live, in case the shell gave us nothing.
-        for extra in [".local/bin", ".claude/local"] {
+        for extra in [".local/bin", ".claude/local", ".cargo/bin"] {
             dirs.push(home.join(extra));
         }
         for extra in [

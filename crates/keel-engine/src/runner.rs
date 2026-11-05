@@ -87,7 +87,10 @@ impl Monitor {
 
 /// Points the usual tools at a cache a sandboxed command can write to, since theirs live in the
 /// home folder. Copies rather than links, so a change in the workspace can't reach a cache.
-fn cache_env(cache: &std::path::Path) -> Vec<(String, String)> {
+/// Cargo and Go read what they downloaded from there when they build, and a check has no network
+/// and can't see the cache setup filled, so theirs stays in the run's own copy.
+fn cache_env(cache: &std::path::Path, workspace: &std::path::Path) -> Vec<(String, String)> {
+    let run_cache = workspace.join(RUN_CACHE).to_string_lossy().into_owned();
     let cache = cache.to_string_lossy().into_owned();
     vec![
         ("XDG_CACHE_HOME".to_owned(), cache.clone()),
@@ -95,6 +98,10 @@ fn cache_env(cache: &std::path::Path) -> Vec<(String, String)> {
         ("UV_LINK_MODE".to_owned(), "copy".to_owned()),
         ("PIP_CACHE_DIR".to_owned(), format!("{cache}/pip")),
         ("npm_config_cache".to_owned(), format!("{cache}/npm")),
+        ("CARGO_HOME".to_owned(), format!("{run_cache}/cargo")),
+        ("GOPATH".to_owned(), format!("{run_cache}/go")),
+        ("GOCACHE".to_owned(), format!("{cache}/go-build")),
+        ("GOTOOLCHAIN".to_owned(), "local".to_owned()),
     ]
 }
 
@@ -416,7 +423,7 @@ impl Inner {
         };
         let mut process_command = command.command(spec);
         if spec.tools == ToolProfile::Build {
-            process_command.envs(cache_env(&workspace.join(RUN_CACHE)));
+            process_command.envs(cache_env(&workspace.join(RUN_CACHE), &workspace));
         }
         process_command.envs(service_env);
         let child = process::spawn_step(process_command, &prompt_file, &raw_path, &stderr_path)?;
@@ -465,6 +472,11 @@ impl Inner {
                 workspace.join(RUN_CACHE),
             )
         };
+        let stem = format!("{}-{}", attempt.step_id, attempt.number);
+        let prompt_file = dir.join(format!("{stem}.stdin"));
+        let raw_path = PathBuf::from(&attempt.raw_path);
+        let stderr_path = dir.join(format!("{stem}.stderr.txt"));
+        let profile = settings::with_own_output(profile, &[&prompt_file, &raw_path, &stderr_path]);
 
         store.append_event(
             &attempt.id,
@@ -474,11 +486,7 @@ impl Inner {
         if self.stop_requested(&attempt.id) {
             return Ok(None);
         }
-        let stem = format!("{}-{}", attempt.step_id, attempt.number);
-        let prompt_file = dir.join(format!("{stem}.stdin"));
         std::fs::write(&prompt_file, "")?;
-        let raw_path = PathBuf::from(&attempt.raw_path);
-        let stderr_path = dir.join(format!("{stem}.stderr.txt"));
         let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
         command
             .args(["-p", &profile, "/bin/sh", "-c", command_text])
@@ -490,7 +498,9 @@ impl Inner {
                     .filter(|(name, _)| !name.starts_with("CLAUDE_") && !name.starts_with("BASH_")),
             );
         let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
-        command.envs(cache_env(&cache)).envs(service_env);
+        command
+            .envs(cache_env(&cache, &workspace))
+            .envs(service_env);
         let child = process::spawn_step(command, &prompt_file, &raw_path, &stderr_path)?;
         let mut monitor = self.track_process(attempt, child, project_id)?;
         monitor.services = service_set;
