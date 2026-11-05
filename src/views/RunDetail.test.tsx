@@ -26,6 +26,7 @@ const runWith = (workflow: unknown[]) => ({ id: "r1", projectId: "p1", branch: "
 describe("the approval card", () => {
   let root: Root;
   let answers: unknown[];
+  let addsSecret: boolean;
 
   const show = (attempts: Attempt[], files: string[], workflow: unknown[] = deliverNext, commands: CommandRun[] = []) => {
     act(() => root.render(<ApprovalCard attempt={human} run={runWith(workflow)} attempts={attempts} files={files} commands={commands} rawCheck="intact" onShowChanges={() => {}} onError={() => {}} />));
@@ -45,8 +46,10 @@ describe("the approval card", () => {
     vi.useFakeTimers();
     await i18next.changeLanguage("en");
     answers = [];
+    addsSecret = false;
     mockIPC((command, args) => {
       if (command === "approval_answer") answers.push(args);
+      if (command === "run_adds_secret") return addsSecret;
       return null;
     });
     useApp.setState({ overview: { ...useApp.getState().overview, projects: [{ id: "p1", githubRepo: "acme/app", githubAccount: "you-work" }] as never } });
@@ -97,6 +100,24 @@ describe("the approval card", () => {
     act(() => vi.advanceTimersByTime(800));
     act(() => void window.dispatchEvent(new Event("focus")));
     expect(button("Approve and open a draft")?.disabled).toBe(true);
+  });
+
+  it("warns when the change looks like it holds a secret, without blocking anything", async () => {
+    addsSecret = true;
+    show([builder(["calc.py"]), human], ["calc.py"]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800);
+    });
+    expect(page()).toContain("might hold a secret");
+    expect(button("Approve and open a draft")?.disabled).toBe(false);
+  });
+
+  it("says nothing about secrets when it finds none", async () => {
+    show([builder(["calc.py"]), human], ["calc.py"]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(800);
+    });
+    expect(page()).not.toContain("might hold a secret");
   });
 
   it("won't reject without a reason, and blank doesn't count as one", () => {

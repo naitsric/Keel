@@ -228,6 +228,8 @@
     "approvalReviewsOnlyRead": "Las revisiones solo leyeron el código. No lo corrieron.",
     "approvalSkipped": "{{names}}: omitidas, no cambió nada de lo que cubren",
     "workflowWarning": "Este cambio edita `.github/workflows`. Esos archivos pueden correr con los secretos del repo en cuanto se suba la rama. Léelos primero.",
+    "secretWarning": "Este cambio podría contener un secreto. Aquí solo se oculta: al aprobar, se sube con la rama. Revisa los cambios antes.",
+    "secretWarningLocal": "Este cambio podría contener un secreto. Aquí solo se oculta: sigue en el código de la ejecución. Revisa los cambios antes.",
     "checksPassed": "{{passed}} de {{total}} verificaciones pasaron.",
     "checkFailedSummary": "Una verificación falló, así que no siguió adelante.",
     "round": "Ronda {{number}}",

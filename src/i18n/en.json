@@ -228,6 +228,8 @@
     "approvalReviewsOnlyRead": "The reviews only read the code. They didn't run it.",
     "approvalSkipped": "{{names}}: skipped, nothing they cover changed",
     "workflowWarning": "This change edits `.github/workflows`. Those files can run with the repo's secrets as soon as the branch is pushed. Read them first.",
+    "secretWarning": "This change might hold a secret. Masking only hides it here: approving pushes it with the branch. Check the changes first.",
+    "secretWarningLocal": "This change might hold a secret. Masking only hides it here: it's still in the run's code. Check the changes first.",
     "checksPassed": "{{passed}} of {{total}} checks passed.",
     "checkFailedSummary": "A check failed, so this didn't go further.",
     "round": "Round {{number}}",
