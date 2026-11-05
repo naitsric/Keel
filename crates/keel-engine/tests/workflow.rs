@@ -441,7 +441,14 @@ fn rejecting_ends_the_run_and_the_reason_reaches_the_next_one() {
         "both agent steps of the next run get it"
     );
     let builder = w.step(&next, "builder").unwrap();
-    assert_eq!(builder.system_prompt_sources[0]["source"], "decisions");
+    assert_eq!(builder.system_prompt_sources[0]["source"], "brain");
+    assert_eq!(
+        builder.system_prompt_sources[0]["decisions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 #[test]

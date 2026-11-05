@@ -1,6 +1,7 @@
 //! Runs workflows. Everything happens inside the app process, without a daemon, but each agent
 //! is its own process writing to a file, so it outlives the app and can be picked up again.
 
+mod brain;
 mod deliver;
 mod git;
 mod prompts;
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
 pub use git::{Git, GitError, Snapshot};
 use keel_core::{AttemptState, Reason, StepRole, StepSpec, WorkflowStep};
 use keel_harness::auth::{self, AuthStatus, VersionCheck};
@@ -431,6 +433,12 @@ impl Engine {
             && !workflow
                 .iter()
                 .any(|s| matches!(s, WorkflowStep::Setup { .. }))
+            // Only a step that runs something needs what this installs.
+            && workflow.iter().any(|s| match s {
+                WorkflowStep::Agent(spec) => spec.tools == keel_core::ToolProfile::Build,
+                WorkflowStep::Check { .. } => true,
+                _ => false,
+            })
         {
             // A workflow can have a step of its own called that.
             let id = if workflows::find_step(&workflow, "setup").is_some() {
@@ -998,6 +1006,10 @@ impl Inner {
                     return Ok(());
                 };
                 if attempt.state != AttemptState::Succeeded.as_str() {
+                    // Proposals are a bonus. If they fail, everything before them still stands.
+                    if brain::optional_step_is_over(step, attempt) {
+                        continue;
+                    }
                     return Ok(());
                 }
                 if let WorkflowStep::Agent(StepSpec {

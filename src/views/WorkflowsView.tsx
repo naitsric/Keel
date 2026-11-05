@@ -40,7 +40,7 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
   const role = spec.role ?? { kind: "worker" };
   const setRole = (kind: StepRole["kind"]) => {
     if (kind === "approver") onChange({ ...spec, tools: "readOnly", role: { kind, reworkTo: earlier[earlier.length - 1] ?? "", maxRounds: 2 } });
-    else if (kind === "reviewer") onChange({ ...spec, tools: "readOnly", role: { kind } });
+    else if (kind === "reviewer" || kind === "learner" || kind === "mapper") onChange({ ...spec, tools: "readOnly", role: { kind } });
     else onChange({ ...spec, role: { kind } });
   };
   const judges = role.kind !== "worker";
@@ -73,6 +73,7 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
               { value: "worker", label: t("workflows.roleWorker") },
               { value: "reviewer", label: t("workflows.roleReviewer") },
               { value: "approver", label: t("workflows.roleApprover") },
+              { value: "learner", label: t("workflows.roleLearner") },
             ]}
           />
         </div>

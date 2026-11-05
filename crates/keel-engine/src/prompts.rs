@@ -5,12 +5,9 @@ use std::path::Path;
 
 use keel_core::{StepSpec, ToolProfile, WorkflowStep};
 use keel_harness::github::Issue;
-use keel_store::Decision;
 use serde_json::json;
 
-/// How much a project's decisions can take in every step's prompt. Past this, older ones stay
-/// on record but stop being sent.
-const DECISIONS_LIMIT: usize = 4 * 1024;
+use crate::brain::Block;
 
 fn language_name(code: &str) -> &'static str {
     if code.starts_with("es") {
@@ -21,12 +18,12 @@ fn language_name(code: &str) -> &'static str {
 }
 
 /// What every agent is told, plus what `--restricted` would otherwise leave out: the project's
-/// own instructions and what people have decided about it.
+/// own instructions and what Keel knows about the project.
 pub fn system_prompt(
     workspace: &Path,
     language: &str,
     tools: ToolProfile,
-    decisions: &[Decision],
+    brain: &Block,
 ) -> (String, serde_json::Value) {
     let mut text = String::from(
         "# Working inside Keel\n\n\
@@ -46,49 +43,14 @@ pub fn system_prompt(
     ));
 
     let mut sources = Vec::new();
-    let (block, included) = decisions_block(decisions);
-    if !block.is_empty() {
-        text.push_str(&block);
-        sources.push(json!({ "source": "decisions", "seqs": included, "total": decisions.len() }));
-    }
+    text.push_str(&brain.text);
+    sources.extend(brain.sources.clone());
     if let Ok(claude_md) = std::fs::read_to_string(workspace.join("CLAUDE.md")) {
         text.push_str("\n# Project instructions (CLAUDE.md)\n\n");
         text.push_str(&claude_md);
         sources.push(json!({ "source": "CLAUDE.md", "bytes": claude_md.len() }));
     }
     (text, json!(sources))
-}
-
-/// The newest decisions that fit. Written by people, so agents follow them over their own ideas.
-fn decisions_block(decisions: &[Decision]) -> (String, Vec<i64>) {
-    let mut lines = Vec::new();
-    let mut included = Vec::new();
-    let mut used = 0;
-    for decision in decisions.iter().filter(|d| !d.text.trim().is_empty()) {
-        let line = format!(
-            "- {} ({}): {}\n",
-            decision.at.get(..10).unwrap_or(&decision.at),
-            decision.answer,
-            decision.text.trim()
-        );
-        if used + line.len() > DECISIONS_LIMIT {
-            break;
-        }
-        used += line.len();
-        lines.push(line);
-        included.push(decision.seq);
-    }
-    if lines.is_empty() {
-        return (String::new(), included);
-    }
-    lines.reverse();
-    (
-        format!(
-            "\n# Decisions people made about this project\n\nFollow these.\n\n{}",
-            lines.concat()
-        ),
-        included,
-    )
 }
 
 /// Fills in `{{request}}`, `{{diff}}`, `{{rework}}` and `{{steps.<id>.output}}`. One pass only: text
@@ -190,19 +152,6 @@ pub fn full_workflow(
 mod tests {
     use super::*;
 
-    fn decision(seq: i64, answer: &str, text: &str) -> Decision {
-        Decision {
-            seq,
-            project_id: "p".into(),
-            run_id: "r".into(),
-            attempt_id: "a".into(),
-            at: "2026-11-04T10:00:00Z".into(),
-            answer: answer.into(),
-            text: text.into(),
-            retired: false,
-        }
-    }
-
     #[test]
     fn rendering_fills_values_once_and_leaves_the_rest() {
         let out = render(
@@ -250,30 +199,20 @@ mod tests {
     }
 
     #[test]
-    fn decisions_reach_every_step_newest_first_within_the_limit() {
+    fn the_brain_goes_in_the_system_prompt_and_on_the_record() {
         let dir = tempfile::tempdir().unwrap();
-        let (text, sources) = system_prompt(
-            dir.path(),
-            "en",
-            ToolProfile::ReadOnly,
-            &[
-                decision(2, "reject", "use the helper"),
-                decision(1, "approve", ""),
-            ],
-        );
-        assert!(text.contains("use the helper"));
-        assert_eq!(sources[0]["seqs"], json!([2]));
-
-        let long = "x".repeat(3000);
-        let many = [
-            decision(3, "reject", &long),
-            decision(2, "reject", &long),
-            decision(1, "reject", "old"),
-        ];
-        let (text, sources) = system_prompt(dir.path(), "en", ToolProfile::ReadOnly, &many);
-        assert_eq!(sources[0]["seqs"], json!([3]));
-        assert_eq!(sources[0]["total"], 3);
-        assert!(text.len() < 6000);
+        let brain = Block {
+            text: "\n# What Keel knows about this project\n".into(),
+            sources: Some(json!({ "source": "brain", "notes": [1] })),
+            ..Block::default()
+        };
+        let (text, sources) = system_prompt(dir.path(), "en", ToolProfile::ReadOnly, &brain);
+        assert!(text.contains("What Keel knows"));
+        assert_eq!(sources[0]["source"], "brain");
+        let (text, sources) =
+            system_prompt(dir.path(), "en", ToolProfile::ReadOnly, &Block::default());
+        assert!(!text.contains("What Keel knows"));
+        assert_eq!(sources, json!([]));
     }
 
     #[test]

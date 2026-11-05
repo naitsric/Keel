@@ -1,4 +1,4 @@
-import { ArrowLeft, ListChecks, Settings } from "lucide-react";
+import { ArrowLeft, Brain, ListChecks, Settings } from "lucide-react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { useApp } from "../lib/store";
@@ -8,6 +8,7 @@ import { Button } from "../ui/primitives";
 export function TopBar({ back, children }: { back?: boolean; children?: ReactNode }) {
   const { t } = useTranslation();
   const navigate = useApp((s) => s.navigate);
+  const proposals = useApp((s) => s.overview.pendingProposals);
   return (
     <header data-tauri-drag-region className="flex h-[38px] shrink-0 items-center gap-2 border-b border-border pr-3 pl-[var(--traffic-lights-inset)]">
       {back ? (
@@ -22,6 +23,15 @@ export function TopBar({ back, children }: { back?: boolean; children?: ReactNod
       )}
       <div data-tauri-drag-region className="flex-1" />
       {children}
+      <Button variant="ghost" onClick={() => navigate({ name: "brain" })}>
+        <Brain size={14} />
+        {t("app.brain")}
+        {proposals > 0 && (
+          <span aria-label={t("app.brainProposals", { count: proposals })} className="rounded-full bg-accent px-1.5 text-[10.5px] font-semibold text-accent-fg">
+            {proposals}
+          </span>
+        )}
+      </Button>
       <Button variant="ghost" onClick={() => navigate({ name: "workflows" })}>
         <ListChecks size={14} />
         {t("app.workflows")}

@@ -1,12 +1,13 @@
 import { AlertTriangle, Check, ExternalLink, FileDiff, GitPullRequest, Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck, type Run } from "../lib/api";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck, type Run } from "../lib/api";
 import { activityFrom, type ActivityItem, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, toolSummary, touchesWorkflows } from "../lib/audit";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
+import { ProposalRow } from "./BrainPage";
 import { TopBar } from "./TopBar";
 
 type Tab = "activity" | "commands" | "changes" | "prompt" | "details" | "output";
@@ -44,6 +45,8 @@ function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: 
   const { t } = useTranslation();
   const files = filesChangedBy(attempts);
   const explaining = explainingAttempts(attempts);
+  const navigate = useApp((s) => s.navigate);
+  const mapper = attempts.find((a) => a.role === "mapper" && a.output);
   const passed = commands.filter((c) => c.status === "ok").length;
   const checks = attempts.filter((a) => a.kind === "check");
   const latestChecks = checks.filter((a, i) => !checks.slice(i + 1).some((b) => b.stepId === a.stepId));
@@ -51,11 +54,19 @@ function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: 
   const anyActive = attempts.some((a) => isActive(a.state));
   // A step that's done says nothing about the run while others are still to come.
   const between = !run?.finishedAt && (current.state === "succeeded" || current.state === "skipped");
-  const decision = run?.prUrl ? "run.decideDelivered" : current.reason?.code === "reworkLimit" ? "run.decideReworkLimit" : between ? "run.decideActive" : DECISIONS[current.state];
+  const decision = mapper && current.state === "succeeded" ? "run.decideMap" : run?.prUrl ? "run.decideDelivered" : current.reason?.code === "reworkLimit" ? "run.decideReworkLimit" : between ? "run.decideActive" : DECISIONS[current.state];
   return (
     <Card className="grid gap-5 p-4 md:grid-cols-2">
       <SummaryBlock title={t("run.whatItDid")} note={explaining.length > 0 ? t("run.generated") : undefined}>
-        {explaining.length === 0 && <p className="selectable whitespace-pre-wrap">{(anyActive ? t("run.noResultYet") : current.state === "succeeded" ? t("run.noResult") : t("run.noResultEnded"))}</p>}
+        {mapper && (
+          <>
+            <p>{t("run.mapWritten", { count: mapper.output?.lines?.length ?? 0 })}</p>
+            <Button variant="ghost" className="mt-1 -ml-2" onClick={() => navigate({ name: "brain" })}>
+              {t("run.openBrain")}
+            </Button>
+          </>
+        )}
+        {!mapper && explaining.length === 0 && <p className="selectable whitespace-pre-wrap">{(anyActive ? t("run.noResultYet") : current.state === "succeeded" ? t("run.noResult") : t("run.noResultEnded"))}</p>}
         {explaining.map((attempt) => (
           <div key={attempt.id} className="mb-3 last:mb-0">
             {attempt.round > 0 && <p className="mb-1 text-[12px] font-medium text-warning">{t("run.round", { number: attempt.round + 1 })}</p>}
@@ -317,6 +328,14 @@ function ActivityEntry({ item }: { item: ActivityItem }) {
       return line(t("activity.recovered"), "text-subtle");
     case "snapshotFailed":
       return line(t("activity.snapshotFailed", { error: data.error }), "text-danger");
+    case "brainMap":
+      return line(t("activity.brainMap", { kept: data.kept, dropped: data.dropped }), data.dropped > 0 ? "text-warning" : undefined);
+    case "brainProposals":
+      return line(t("activity.brainProposals", { count: data.count }));
+    case "brainNote":
+      return line(t(`activity.brainNote_${data.state}`, { text: data.text }));
+    case "brainFailed":
+      return line(t("activity.brainFailed", { error: data.error }), "text-danger");
     default:
       return null;
   }
@@ -396,6 +415,48 @@ function DiffView({ diff }: { diff: string }) {
         </div>
       ))}
     </pre>
+  );
+}
+
+/** What this run proposes for the Brain. Nothing goes in until a person says so. */
+function ProposalsCard({ runId, revision }: { runId: string; revision: number }) {
+  const { t } = useTranslation();
+  const refreshOverview = useApp((s) => s.refreshOverview);
+  const navigate = useApp((s) => s.navigate);
+  const [proposals, setProposals] = useState<BrainNote[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const load = useCallback(() => {
+    void api.runProposals(runId).then(setProposals);
+  }, [runId]);
+  useEffect(load, [load, revision]);
+  if (proposals.length === 0) return null;
+  return (
+    <Card className="p-4">
+      <h2 className="text-[13px] font-semibold">{t("run.proposalsTitle")}</h2>
+      <p className="mt-0.5 mb-2.5 text-[12px] text-muted">{t("run.proposalsHint")}</p>
+      {error && (
+        <p role="alert" className="mb-2 flex flex-wrap items-center gap-2 text-[12.5px] text-warning">
+          {error}
+          <Button variant="ghost" onClick={() => navigate({ name: "brain" })}>
+            {t("run.openBrain")}
+          </Button>
+        </p>
+      )}
+      <ul className="space-y-2">
+        {proposals.map((note) => (
+          <ProposalRow
+            key={note.seq}
+            note={note}
+            onDone={() => {
+              setError(null);
+              load();
+              void refreshOverview();
+            }}
+            onError={setError}
+          />
+        ))}
+      </ul>
+    </Card>
   );
 }
 
@@ -488,6 +549,7 @@ function Detail({ label, children }: { label: string; children: React.ReactNode 
 function DetailsTab({ attempt, events }: { attempt: Attempt; events: AuditEvent[] }) {
   const { t } = useTranslation();
   const started = events.find((e) => e.kind === "started")?.data;
+  const brainSource = (started?.systemPromptSources ?? []).find((source: { source: string }) => source.source === "brain");
   const num = (value: number | null) => (value == null ? null : formatNumber(value));
   const source = attempt.apiKeySource === "none" ? t("details.authSubscription") : attempt.apiKeySource;
   return (
@@ -530,6 +592,7 @@ function DetailsTab({ attempt, events }: { attempt: Attempt; events: AuditEvent[
       {started?.systemPrompt && (
         <div>
           <h3 className="text-[12px] font-semibold text-muted">{t("details.systemPrompt")}</h3>
+          {brainSource && <p className="mt-1 text-[12px] text-muted">{t("details.brainReceived", { notes: brainSource.notes.length, decisions: brainSource.decisions.length, leftOut: brainSource.leftOut })}</p>}
           <pre className="mt-1.5 max-h-72 overflow-auto rounded bg-inset p-2 font-mono text-[11.5px] whitespace-pre-wrap">{started.systemPrompt}</pre>
         </div>
       )}
@@ -632,6 +695,7 @@ export function RunDetail({ runId }: { runId: string }) {
         <Actions attempt={latest} files={files} onError={setError} />
         <Summary run={run} attempts={attempts} current={latest} commands={allCommands} rawCheck={rawCheck} onShowChanges={() => void api.runDiff(runId).then(setRunDiff)} />
         <ReviewsCard attempts={attempts} round={run?.round ?? 0} />
+        <ProposalsCard runId={runId} revision={revision} />
         <Modal open={runDiff !== null} onOpenChange={(open) => !open && setRunDiff(null)} title={t("run.changesTitle")} className="w-[900px]">
           {runDiff ? <DiffView diff={runDiff} /> : <p className="text-[12.5px] text-subtle">{t("changes.empty")}</p>}
         </Modal>

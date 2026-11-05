@@ -7,9 +7,19 @@ what each step did, and keeps an audit record you can check. A person always dec
 **Status: early, macOS only.** Keel takes a request from the app or a GitHub issue through a spec
 writer, a builder and a check, then has reviewers look at the change at the same time. An approver
 can send the work back, at most twice, and every review runs again. Then a person approves, and
-Keel opens a draft pull request. You can edit each project's workflows in the app. The rest of the
-per-project Brain is on the way. See the [M0 report](docs/m0-report.md) for what's behind the
-isolation.
+Keel opens a draft pull request. You can edit each project's workflows in the app. See the
+[M0 report](docs/m0-report.md) for what's behind the isolation.
+
+## The Brain
+
+Each project has a small Brain, kept in the app on this Mac, and every agent gets it. It holds at
+most about 4 KB, so when it's full, adding something means retiring something.
+
+- **Map:** an agent writes it from the code when you add the project. Each line cites files and a
+  commit, and it's marked out of date when those files change.
+- **Decisions:** what you say when approving or rejecting a change. Agents follow these first.
+- **Learned:** at the end of a run, an agent can propose up to 3 things it learned, with evidence.
+  They only go in if you accept them.
 
 ## How it isolates agents
 

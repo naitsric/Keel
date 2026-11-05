@@ -2,8 +2,7 @@ import { AlertTriangle } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Language } from "../i18n";
-import { api, type Decision, type EnvVar, type GithubStatus, type Project, type Service } from "../lib/api";
-import { formatDateTime } from "../lib/format";
+import { api, type EnvVar, type GithubStatus, type Project, type Service } from "../lib/api";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, Field, inputClass, Segmented } from "../ui/primitives";
@@ -69,13 +68,11 @@ function ProjectSettingsCard({ project }: { project: Project }) {
   const [services, setServices] = useState<Service[]>(project.services);
   const [env, setEnv] = useState(project.env.map((v) => `${v.name}=${v.value}`).join("\n"));
   const [status, setStatus] = useState<GithubStatus | null>(null);
-  const [decisions, setDecisions] = useState<Decision[]>([]);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(() => {
     api.githubStatus(project.id).then(setStatus).catch((e) => setError(errorText(t, e)));
-    api.decisionsList(project.id).then(setDecisions).catch((e) => setError(errorText(t, e)));
   }, [project.id, t]);
 
   useEffect(load, [load]);
@@ -104,11 +101,6 @@ function ProjectSettingsCard({ project }: { project: Project }) {
     } catch (e) {
       setError(errorText(t, e));
     }
-  };
-
-  const retire = async (seq: number) => {
-    await api.decisionRetire(seq);
-    load();
   };
 
   const info = status?.info;
@@ -207,27 +199,6 @@ function ProjectSettingsCard({ project }: { project: Project }) {
         {saved && <span className="text-[12px] text-success">{t("settings.saved")}</span>}
       </div>
 
-      <h4 className="mt-5 text-[12.5px] font-semibold">{t("settings.decisions")}</h4>
-      <p className="mt-0.5 text-[12px] text-muted">{t("settings.decisionsHint")}</p>
-      {decisions.filter((d) => d.text).length === 0 ? (
-        <p className="mt-2 text-[12px] text-subtle">{t("settings.decisionsEmpty")}</p>
-      ) : (
-        <ul className="mt-2 space-y-1.5">
-          {decisions
-            .filter((d) => d.text)
-            .map((decision) => (
-              <li key={decision.seq} className="flex items-start gap-3 rounded-md border border-border p-2.5">
-                <div className="min-w-0 flex-1">
-                  <p className="selectable text-[12.5px]">{decision.text}</p>
-                  <p className="mt-0.5 text-[11px] text-subtle">{formatDateTime(decision.at)}</p>
-                </div>
-                <Button variant="ghost" onClick={() => void retire(decision.seq)}>
-                  {t("settings.retire")}
-                </Button>
-              </li>
-            ))}
-        </ul>
-      )}
     </Card>
   );
 }

@@ -11,7 +11,7 @@ use keel_store::Attempt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::prompts;
+use crate::{brain, prompts};
 
 /// How much of a diff goes into a prompt. A reviewer can still read any file it wants.
 const DIFF_LIMIT: usize = 200 * 1024;
@@ -25,6 +25,8 @@ pub fn schema_for(role: &StepRole) -> Option<&'static str> {
         StepRole::Worker => None,
         StepRole::Reviewer => Some(VERDICT_SCHEMA),
         StepRole::Approver { .. } => Some(DECISION_SCHEMA),
+        StepRole::Mapper => Some(brain::MAP_SCHEMA),
+        StepRole::Learner => Some(brain::LEARNINGS_SCHEMA),
     }
 }
 
@@ -88,11 +90,15 @@ pub fn validate(steps: &[WorkflowStep]) -> Result<(), Reason> {
     };
     let mut approval_seen = false;
     let mut earlier: Vec<&str> = Vec::new();
-    for step in steps {
+    for (index, step) in steps.iter().enumerate() {
         remember(step.id())?;
         match step {
             WorkflowStep::Agent(spec) => {
                 check_agent(spec)?;
+                // It's about what the run did, so it has to come once the run has done it.
+                if spec.role == StepRole::Learner && index + 1 != steps.len() {
+                    return Err(problem("learnerNotLast", &spec.id));
+                }
                 if let StepRole::Approver {
                     rework_to,
                     max_rounds,
@@ -113,6 +119,10 @@ pub fn validate(steps: &[WorkflowStep]) -> Result<(), Reason> {
                 for spec in group {
                     remember(&spec.id)?;
                     check_agent(spec)?;
+                    // The rest act on what the whole run has done, so they can't run alongside it.
+                    if !matches!(spec.role, StepRole::Worker | StepRole::Reviewer) {
+                        return Err(problem("groupRole", &spec.id));
+                    }
                     // They share one workspace, so only read-only agents can run at once.
                     if spec.tools != ToolProfile::ReadOnly {
                         return Err(problem("parallelMustReadOnly", &spec.id));
@@ -385,6 +395,16 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
         id: "pull-request".into(),
     });
 
+    let learnings = if es { "aprendizajes" } else { "learnings" };
+    let learner = |reviewers: &[&str]| {
+        WorkflowStep::Agent(brain::learner_step(
+            learnings, language, "sonnet", reviewers,
+        ))
+    };
+    full.push(learner(&[security, "ux", "ui", code]));
+    let mut simple = simple;
+    simple.push(learner(&[]));
+
     vec![
         Workflow {
             id: "builtin:full".into(),
@@ -516,7 +536,8 @@ mod tests {
                 "reviews",
                 "aprobador",
                 "humano",
-                "pull-request"
+                "pull-request",
+                "aprendizajes"
             ]
         );
         let WorkflowStep::Parallel { steps: group, .. } = &full.steps[3] else {
@@ -618,6 +639,35 @@ mod tests {
             validate(&[WorkflowStep::Agent(judge)]),
             Err(problem("reviewerMustReadOnly", "a"))
         );
+    }
+
+    #[test]
+    fn steps_that_look_at_the_whole_run_cannot_run_in_a_group_or_too_early() {
+        let mut approver = worker("a", ToolProfile::ReadOnly);
+        approver.role = StepRole::Approver {
+            rework_to: "x".into(),
+            max_rounds: 1,
+        };
+        let mut learner = worker("b", ToolProfile::ReadOnly);
+        learner.role = StepRole::Learner;
+        for spec in [approver, learner.clone()] {
+            let id = spec.id.clone();
+            let steps = vec![WorkflowStep::Parallel {
+                id: "g".into(),
+                steps: vec![spec],
+            }];
+            assert_eq!(validate(&steps), Err(problem("groupRole", &id)));
+        }
+        let early = vec![
+            WorkflowStep::Agent(learner.clone()),
+            WorkflowStep::Approval { id: "h".into() },
+        ];
+        assert_eq!(validate(&early), Err(problem("learnerNotLast", "b")));
+        let last = vec![
+            WorkflowStep::Approval { id: "h".into() },
+            WorkflowStep::Agent(learner),
+        ];
+        assert_eq!(validate(&last), Ok(()));
     }
 
     #[test]

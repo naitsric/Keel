@@ -7,7 +7,9 @@
     "back": "Back",
     "refresh": "Check again",
     "error": "Something went wrong: {{detail}}",
-    "workflows": "Workflows"
+    "workflows": "Workflows",
+    "brain": "Brain",
+    "brainProposals": "{{count}} proposals waiting"
   },
   "session": {
     "checking": "Checking your Claude Code session…",
@@ -92,7 +94,8 @@
     "reworkLimit": "The approver sent this back {{rounds}} times and still isn't satisfied. It's your call now.",
     "noMatchingPaths": "Nothing it covers changed ({{paths}}).",
     "invalidWorkflow": "This workflow can't run.",
-    "snapshotFailed": "The step ended, but Keel couldn't read what it changed, so it doesn't count as done."
+    "snapshotFailed": "The step ended, but Keel couldn't read what it changed, so it doesn't count as done.",
+    "brainFull": "The Brain is full. Retire something first, and then accept this."
   },
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",
@@ -143,7 +146,8 @@
     "needsGithub": "This workflow needs a GitHub account for the project.",
     "openSettings": "Open Settings",
     "workflowSingleOption": "One step only",
-    "editWorkflows": "Edit workflows"
+    "editWorkflows": "Edit workflows",
+    "mapStarted": "Keel is reading this project to write its map, with Sonnet. You can see it on Home and in the Brain."
   },
   "run": {
     "attemptTitle": "Attempt {{number}}",
@@ -214,7 +218,12 @@
     "anotherRound": "One more round",
     "toMyApproval": "Send it to my approval",
     "changesTitle": "Everything this run changed",
-    "decideReworkLimit": "Choose above: one more round, your approval, or leave it."
+    "decideReworkLimit": "Choose above: one more round, your approval, or leave it.",
+    "proposalsTitle": "What this run proposes for the Brain",
+    "proposalsHint": "If you accept one, every agent on this project gets it from now on.",
+    "openBrain": "Open the Brain",
+    "mapWritten": "It wrote a map with {{count}} lines.",
+    "decideMap": "Nothing. Read it in the Brain, and retire any line that's wrong."
   },
   "tabs": {
     "activity": "Activity",
@@ -259,7 +268,13 @@
     "rework": "Sent back for round {{round}}",
     "reworkLimit": "Reached the limit of rounds",
     "reworkLimitAnswerRound": "You asked for another round",
-    "reworkLimitAnswerApproval": "You sent it on to your approval"
+    "reworkLimitAnswerApproval": "You sent it on to your approval",
+    "brainMap": "Map written: {{kept}} lines kept, {{dropped}} dropped for not citing real files",
+    "brainProposals": "Proposed for the Brain: {{count}}",
+    "brainNote_active": "You accepted: {{text}}",
+    "brainNote_dismissed": "You dismissed: {{text}}",
+    "brainNote_retired": "You retired: {{text}}",
+    "brainFailed": "Couldn't save this in the Brain: {{error}}"
   },
   "commands": {
     "empty": "No commands ran.",
@@ -297,7 +312,8 @@
     "settings": "Sandbox rules",
     "systemPrompt": "Added instructions",
     "command": "Command",
-    "none": "—"
+    "none": "—",
+    "brainReceived": "From the Brain, it got {{notes}} notes and {{decisions}} decisions. {{leftOut}} notes didn't fit."
   },
   "settings": {
     "title": "Settings",
@@ -329,10 +345,6 @@
     "readPathsHint": "One per line, such as ~/.cargo. Your home folder is hidden otherwise.",
     "save": "Save",
     "saved": "Saved",
-    "decisions": "Decisions",
-    "decisionsHint": "What you said at an approval. Agents in this project follow these.",
-    "decisionsEmpty": "No decisions yet.",
-    "retire": "Retire",
     "services": "Services",
     "servicesHint": "What this project's commands need, such as a test database. Keel runs them outside the sandbox while a step uses them, and commands reach them only through a Unix socket.",
     "servicesEmpty": "No services.",
@@ -410,7 +422,9 @@
     "tooManyRounds": "“{{step}}” can send work back 5 times at most.",
     "emptyGroup": "The group “{{step}}” has no steps.",
     "noCommand": "Write the command for “{{step}}”.",
-    "deliverNeedsApproval": "“{{step}}” opens a pull request, so a person has to approve in a step before it."
+    "deliverNeedsApproval": "“{{step}}” opens a pull request, so a person has to approve in a step before it.",
+    "learnerNotLast": "“{{step}}” proposes what the run taught, so it has to be the last step.",
+    "groupRole": "“{{step}}” can't run in a group. Only steps that do the work or review it can."
   },
   "workflows": {
     "title": "Workflows",
@@ -454,6 +468,40 @@
     "saveCopy": "Save a copy",
     "saved": "Saved",
     "delete": "Delete",
-    "newName": "My workflow"
+    "newName": "My workflow",
+    "roleLearner": "Proposes learnings"
+  },
+  "brain": {
+    "title": "Brain",
+    "subtitle": "What Keel knows about each project. It stays on this Mac, and every agent gets it.",
+    "project": "Project",
+    "noProjects": "Add a project first, when you start a run.",
+    "usage": "{{used}} KB of {{limit}} KB",
+    "overLimit": "Not everything fits, so some notes aren't reaching the agents.",
+    "evidence": "Evidence",
+    "accept": "Accept",
+    "dismiss": "Dismiss",
+    "retire": "Retire",
+    "stale": "Out of date: what it cites has changed since then.",
+    "leftOut": "Doesn't fit, so agents aren't getting it.",
+    "proposals": "Proposals",
+    "proposalsHint": "What earlier runs learned. Nothing goes in unless you accept it.",
+    "map": "Map",
+    "mapHint": "An agent wrote this from the code. Each line says which files and commit it comes from.",
+    "mapRunning": "An agent is reading the project.",
+    "mapRunningLink": "See what it's doing",
+    "mapEmpty": "There's no map yet.",
+    "mapGenerate": "Write the map",
+    "mapRegenerate": "Write it again",
+    "learnings": "Learned",
+    "learningsHint": "Proposals you accepted.",
+    "learningsEmpty": "Nothing yet.",
+    "decisions": "Decisions",
+    "decisionsHint": "What you said when approving or rejecting. These come first, and agents follow them.",
+    "decisionsEmpty": "No decisions yet.",
+    "prompt": "What the next agent will get",
+    "promptHint": "The exact text. Each step's audit record has what that step got.",
+    "staleCount_one": "1 line may be out of date. Writing it again replaces the whole map.",
+    "staleCount_other": "{{count}} lines may be out of date. Writing it again replaces the whole map."
   }
 }
