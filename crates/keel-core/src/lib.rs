@@ -274,6 +274,8 @@ pub enum Reason {
     ClaudeMissing,
     GitMissing,
     ClaudeLoggedOut,
+    /// `claude` started but didn't say who's signed in, so Keel doesn't know.
+    ClaudeNotResponding,
     CliVersionTooOld {
         found: String,
         minimum: String,
@@ -395,6 +397,7 @@ impl Reason {
             Self::ClaudeMissing
             | Self::GitMissing
             | Self::ClaudeLoggedOut
+            | Self::ClaudeNotResponding
             | Self::CliVersionTooOld { .. }
             | Self::CliVersionUntested { .. } => false,
             // Starting refuses this itself, and those cards go to the backlog, where they can be
@@ -668,6 +671,7 @@ mod tests {
                 false,
             ),
             (Reason::DefaultWorkflowMissing, false),
+            (Reason::ClaudeNotResponding, false),
         ]
     }
 
@@ -708,6 +712,7 @@ mod tests {
             Reason::ServiceFailed { .. } => 31,
             Reason::InvalidSetting { .. } => 32,
             Reason::DefaultWorkflowMissing => 33,
+            Reason::ClaudeNotResponding => 34,
         }
     }
 
@@ -721,7 +726,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=33).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=34).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]

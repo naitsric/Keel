@@ -68,6 +68,7 @@ case "$1" in
 auth)
   echo auth >> "@LOG@/auth.log"
   if [ -f "@FLAGS@/slow-auth" ]; then sleep 1.5; fi
+  if [ -f "@FLAGS@/hung-auth" ]; then sleep 60; fi
   if [ -f "@FLAGS@/logged-out" ]; then echo '{"loggedIn":false}'; exit 0; fi
   echo '{"loggedIn":true,"subscriptionType":"max","email":"a@example.com"}'; exit 0;;
 esac
@@ -662,6 +663,29 @@ fn an_issue_is_imported_once_and_starts_as_the_new_run_dialog_would_start_it() {
         1,
         "the card is a copy: nothing looks at the issue again"
     );
+}
+
+// A `claude` that stops answering about the session must not stop the board in silence.
+
+#[test]
+fn a_claude_that_stops_answering_pauses_the_board_and_says_why() {
+    let w = world_with(|config| config.session_check_limit = Duration::from_millis(300));
+    w.use_one_step();
+    w.flag("hung-auth");
+    let preflight = w.engine.preflight();
+    assert_eq!(preflight.blocker, Some(Reason::ClaudeNotResponding));
+
+    w.engine.start_board();
+    let card = w.queued("Waits for the session");
+    w.wait_paused(Some(Reason::ClaudeNotResponding));
+    assert_eq!(w.card(&card).column, BoardColumn::Todo);
+    assert!(w.store.runs(10).unwrap().is_empty());
+
+    // Once it answers again, the card goes.
+    w.unflag("hung-auth");
+    w.engine.board_tick().unwrap();
+    w.wait_paused(None);
+    w.wait_column(&card, BoardColumn::Done);
 }
 
 // A run started from outside the board, as an assistant does over MCP, is on the board too.

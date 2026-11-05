@@ -7,6 +7,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 
@@ -104,6 +106,41 @@ pub fn signal_group(pid: i32, signal: i32) -> bool {
 
 pub fn signal_process(pid: i32, signal: i32) -> bool {
     pid > 1 && unsafe { libc::kill(pid, signal) == 0 }
+}
+
+/// What a command printed, if it finished within `limit`. If it didn't, it and whatever it started
+/// are killed and this is `None`.
+pub fn stdout_within(mut command: Command, limit: Duration) -> io::Result<Option<Vec<u8>>> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let mut child = command.spawn()?;
+    let mut pipe = child.stdout.take();
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        if let Some(pipe) = pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut bytes);
+        }
+        let _ = sender.send(bytes);
+    });
+    let deadline = Instant::now() + limit;
+    while child.try_wait()?.is_none() {
+        if Instant::now() >= deadline {
+            signal_group(child.id() as i32, SIGKILL);
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // Something it left behind could hold the pipe open, and that's no reason to keep waiting.
+    Ok(Some(
+        receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_default(),
+    ))
 }
 
 pub const SIGINT: i32 = libc::SIGINT;
