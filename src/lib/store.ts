@@ -24,6 +24,8 @@ interface AppState {
   /** The project the Brain page opens on, when something sent the person there for it. */
   brainProjectId: string | null;
   quitOpen: boolean;
+  /** Notes on approvals not answered yet, per attempt, so leaving the page doesn't drop them. */
+  approvalDrafts: Record<string, string>;
   /** Bumps whenever the backend reports a change, so open views can refetch. */
   revision: number;
   navigate: (view: View) => void;
@@ -31,6 +33,7 @@ interface AppState {
   openProjectSetup: (request: ProjectSetupRequest) => void;
   closeProjectSetup: () => void;
   setQuitOpen: (open: boolean) => void;
+  setApprovalDraft: (attemptId: string, text: string) => void;
   refreshOverview: () => Promise<void>;
   refreshSession: () => Promise<void>;
   setLanguage: (language: Language) => Promise<void>;
@@ -45,6 +48,7 @@ export const useApp = create<AppState>((set, get) => ({
   projectSetup: null,
   brainProjectId: null,
   quitOpen: false,
+  approvalDrafts: {},
   revision: 0,
   navigate: (view) => set({ view }),
   setNewRunOpen: (newRunOpen) => set({ newRunOpen }),
@@ -59,6 +63,12 @@ export const useApp = create<AppState>((set, get) => ({
     if (back) setTimeout(() => set({ newRunOpen: true }));
   },
   setQuitOpen: (quitOpen) => set({ quitOpen }),
+  setApprovalDraft: (attemptId, text) =>
+    set((s) => {
+      const approvalDrafts = { ...s.approvalDrafts, [attemptId]: text };
+      if (!text) delete approvalDrafts[attemptId];
+      return { approvalDrafts };
+    }),
   refreshOverview: async () => set({ overview: await api.overview(), overviewLoaded: true }),
   refreshSession: async () => set({ preflight: await api.refreshSession() }),
   setLanguage: async (language) => {
