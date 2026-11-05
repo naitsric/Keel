@@ -9,7 +9,8 @@
     "error": "Something went wrong: {{detail}}",
     "workflows": "Workflows",
     "brain": "Brain",
-    "brainProposals": "{{count}} proposals waiting"
+    "brainProposals": "{{count}} proposals waiting",
+    "board": "Board"
   },
   "session": {
     "checking": "Checking your Claude Code session…",
@@ -97,7 +98,8 @@
     "noMatchingPaths": "Nothing it covers changed ({{paths}}).",
     "invalidWorkflow": "This workflow can't run.",
     "snapshotFailed": "The step ended, but Keel couldn't read what it changed, so it doesn't count as done.",
-    "brainFull": "The Brain is full. Retire something first, and then accept this."
+    "brainFull": "The Brain is full. Retire something first, and then accept this.",
+    "defaultWorkflowMissing": "The workflow this project uses by default no longer exists. Choose another one in Settings."
   },
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",
@@ -405,7 +407,12 @@
     "envInvalid": "This line needs the form NAME=value: “{{line}}”.",
     "setupCommand": "Setup command",
     "setupCommandHint": "Installs what the project needs, once per run, before any agent. It can reach the internet, but not your home folder or anything else on this Mac. Your repo's own scripts may run here.",
-    "setupCommandPlaceholder": "uv sync --frozen"
+    "setupCommandPlaceholder": "uv sync --frozen",
+    "maxAgents": "Agents at a time",
+    "maxAgentsHint": "Applies to the whole app, not to each project. More agents use your Claude plan faster.",
+    "defaultWorkflow": "Default workflow",
+    "defaultWorkflowHint": "What a card on the board runs when you move it to Todo.",
+    "defaultWorkflowGone": "A workflow that no longer exists"
   },
   "quit": {
     "title": "There are steps running",
@@ -545,6 +552,91 @@
     "promptHint": "The exact text, with known secrets hidden here. Each step's audit record has what that step got.",
     "staleCount_one": "1 line may be out of date. Writing it again replaces the whole map.",
     "staleCount_other": "{{count}} lines may be out of date. Writing it again replaces the whole map."
+  },
+  "board": {
+    "title": "Board",
+    "project": "Project",
+    "noProjects": "Add a project first, when you start a run.",
+    "empty": "This project's board is empty. Create a task or import a GitHub issue, then move it to Todo to start it.",
+    "working": "Working now, across all projects: {{working}} of {{maxAgents}}.",
+    "waiting": "The limit is reached, so cards in Todo wait and start in order as room frees up.",
+    "paused": "Todo is paused, so nothing starts until this is fixed.",
+    "pausedLimit": "Todo is paused because you reached your plan's usage limit. It starts again when the limit resets. You can also open the blocked card in Human Review, in this project or another, and choose what to do.",
+    "pausedLimitUntil": "Todo is paused because you reached your plan's usage limit. It starts again when the limit resets ({{date}}). You can also open the blocked card in Human Review, in this project or another, and choose what to do.",
+    "columns": {
+      "backlog": "Backlog",
+      "todo": "Todo",
+      "inProgress": "In Progress",
+      "humanReview": "Human Review",
+      "done": "Done"
+    },
+    "columnEmpty": {
+      "backlog": "Nothing here. Create a task or import an issue.",
+      "todo": "Drag a card here and Keel starts it by itself.",
+      "inProgress": "Nothing is being worked on.",
+      "humanReview": "Nothing needs you right now.",
+      "done": "Nothing has finished yet."
+    },
+    "locked": "Keel moves the cards in this column.",
+    "refused": "Cards can't be dropped here. Keel moves them by itself.",
+    "newTask": "New task",
+    "importIssue": "Import issue",
+    "moveTo": {
+      "backlog": "Move to Backlog",
+      "todo": "Move to Todo"
+    },
+    "edit": "Edit",
+    "delete": "Delete",
+    "openPr": "Open pull request",
+    "dismiss": "Dismiss",
+    "labels": {
+      "waitingApproval": "Needs your approval",
+      "failed": "Failed",
+      "blocked": "Blocked",
+      "stalled": "Looks stuck",
+      "interrupted": "Interrupted",
+      "stopped": "Stopped",
+      "rejected": "Rejected",
+      "abandoned": "Abandoned",
+      "couldNotStart": "Couldn't start"
+    },
+    "needed": {
+      "waitingApproval": "Open it to approve or reject.",
+      "failed": "Open it to try again or leave it.",
+      "blocked": "Open it to see what's in the way.",
+      "stalled": "Open it and choose what to do.",
+      "interrupted": "Open it to continue, start over or leave it.",
+      "stopped": "Open it to try again or leave it."
+    },
+    "moveFailed": "“{{title}}” stayed where it was. {{reason}}",
+    "cardBusy": "Keel already started this card, so it can't change now.",
+    "task": {
+      "newTitle": "New task",
+      "editTitle": "Edit task",
+      "title": "Title",
+      "description": "Description (optional)",
+      "create": "Create",
+      "save": "Save"
+    },
+    "deleteTitle": "Delete this card?",
+    "deleteBody": "“{{title}}” leaves the board. Nothing changes on GitHub, and any run it had stays in your history.",
+    "import": {
+      "title": "Import a GitHub issue",
+      "hint": "Importing only adds it to this board. Nothing changes on GitHub, and later changes to the issue don't reach the card.",
+      "import": "Import",
+      "imported": "Imported",
+      "noRemote": "This project's repo isn't on GitHub, so it has no issues to import.",
+      "noAccount": "To see this repo's issues, choose which GitHub account this project uses.",
+      "close": "Close"
+    },
+    "drag": {
+      "help": "Press Space to pick up this card. Move it with the arrow keys and press Space to drop it. Escape cancels.",
+      "role": "movable card",
+      "picked": "Picked up {{title}}.",
+      "over": "Over {{column}}.",
+      "dropped": "Dropped {{title}}.",
+      "cancelled": "Move cancelled. {{title}} stayed where it was."
+    }
   },
   "onboarding": {
     "title": "Welcome to Keel",

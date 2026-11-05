@@ -8,12 +8,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use keel_core::{
-    EnvVar, Masked, Reason, Service, StepSpec, ToolProfile, WorkflowStep, mask_secrets,
+    CardLane, EnvVar, Masked, Reason, Service, StepSpec, ToolProfile, WorkflowStep, mask_secrets,
     serialize_masked,
 };
 use keel_engine::{
-    BrainView, Config, DEFAULT_BRAIN_MODEL, Engine, Error as EngineError, GithubStatus, Preflight,
-    RawCheck, StartRun, Workflow, request_from_issue,
+    Board, BrainView, Config, DEFAULT_BRAIN_MODEL, Engine, Error as EngineError, GithubStatus,
+    Preflight, RawCheck, StartRun, Workflow, request_from_issue, title_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
@@ -208,6 +208,7 @@ struct ProjectSettingsInput {
     allowed_read: Vec<String>,
     services: Vec<Service>,
     env: Vec<EnvVar>,
+    default_workflow: Option<String>,
 }
 
 #[tauri::command(async)]
@@ -228,6 +229,7 @@ fn project_update(
             allowed_read: settings.allowed_read,
             services: settings.services,
             env: settings.env,
+            default_workflow: clean(settings.default_workflow),
         },
     )?)
 }
@@ -306,14 +308,12 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
     let title = request
         .issue
         .as_ref()
-        .map(|issue| format!("#{} {}", issue.number, issue.title));
+        .map(|issue| title_from_issue(issue.number, &issue.title));
     let workflow = match request.workflow {
         WorkflowChoice::Saved { workflow_id } => {
             state
                 .engine
-                .workflows(&request.project_id, &request.language)?
-                .into_iter()
-                .find(|w| w.id == workflow_id)
+                .workflow(&request.project_id, &workflow_id, &request.language)?
                 .ok_or(CommandError {
                     code: "invalidState",
                     reason: None,
@@ -352,6 +352,67 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
 }
 
 /// Not masked: the editor saves back what it gets, which would overwrite the real commands.
+#[tauri::command(async)]
+fn board_get(state: State<'_, AppState>, project_id: String) -> CommandResult<Board> {
+    Ok(state.engine.board(&project_id)?)
+}
+
+#[tauri::command(async)]
+fn card_create(
+    state: State<'_, AppState>,
+    project_id: String,
+    title: String,
+    body: String,
+) -> CommandResult<String> {
+    Ok(state.engine.card_create(&project_id, &title, &body)?)
+}
+
+#[tauri::command(async)]
+fn card_import_issue(
+    state: State<'_, AppState>,
+    project_id: String,
+    issue: Issue,
+) -> CommandResult<String> {
+    Ok(state.engine.card_import_issue(&project_id, &issue)?)
+}
+
+#[tauri::command(async)]
+fn card_update(
+    state: State<'_, AppState>,
+    card_id: String,
+    title: String,
+    body: String,
+) -> CommandResult<()> {
+    Ok(state.engine.card_update(&card_id, &title, &body)?)
+}
+
+#[tauri::command(async)]
+fn card_move(
+    state: State<'_, AppState>,
+    card_id: String,
+    lane: CardLane,
+    index: usize,
+    language: String,
+) -> CommandResult<()> {
+    state.ready.wait();
+    Ok(state.engine.card_move(&card_id, lane, index, &language)?)
+}
+
+#[tauri::command(async)]
+fn card_delete(state: State<'_, AppState>, card_id: String) -> CommandResult<()> {
+    Ok(state.engine.card_delete(&card_id)?)
+}
+
+#[tauri::command(async)]
+fn max_agents_get(state: State<'_, AppState>) -> usize {
+    state.engine.max_agents()
+}
+
+#[tauri::command(async)]
+fn max_agents_set(state: State<'_, AppState>, value: usize) -> CommandResult<()> {
+    Ok(state.engine.set_max_agents(value)?)
+}
+
 #[tauri::command(async)]
 fn workflows_list(
     state: State<'_, AppState>,
@@ -616,16 +677,10 @@ fn app_quit(
     state: State<'_, AppState>,
     stop_runs: bool,
 ) -> CommandResult<()> {
-    if stop_runs {
-        for attempt in state.store.active_attempts()? {
-            let _ = state.engine.stop(&attempt.id);
-        }
-        // Gives the agents a moment to record how they ended.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
-        while state.engine.active_count()? > 0 && std::time::Instant::now() < deadline {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
+    // Gives the agents a moment to record how they ended.
+    state
+        .engine
+        .shut_down(stop_runs, std::time::Duration::from_secs(12));
     state.quit_allowed.store(true, Ordering::SeqCst);
     app.exit(0);
     Ok(())
@@ -633,7 +688,7 @@ fn app_quit(
 
 fn wants_confirmation(app: &tauri::AppHandle) -> bool {
     let state = app.state::<AppState>();
-    !state.quit_allowed.load(Ordering::SeqCst) && state.engine.active_count().unwrap_or(0) > 0
+    !state.quit_allowed.load(Ordering::SeqCst) && state.engine.must_ask_before_quitting()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -687,6 +742,8 @@ pub fn run() {
                     engine.set_tools(tools);
                     // Reconnects to steps that outlived the last session.
                     let _ = engine.recover();
+                    // After that, so a run that's still going counts before anything new starts.
+                    engine.start_board();
                     ready.set();
                     let _ = handle.emit(CHANGED_EVENT, "");
                     // After the tools are known, so no client ever finds Keel half ready.
@@ -723,6 +780,14 @@ pub fn run() {
             brain_dismiss,
             brain_retire,
             run_diff,
+            board_get,
+            card_create,
+            card_import_issue,
+            card_update,
+            card_move,
+            card_delete,
+            max_agents_get,
+            max_agents_set,
             workflows_list,
             workflow_save,
             workflow_delete,
@@ -759,6 +824,9 @@ pub fn run() {
 
     app.run(|handle, event| {
         if let RunEvent::ExitRequested { api, .. } = event
+            // With no window left there's nobody to ask. Anything running carries on, as when a
+            // person chooses that, and Keel reconnects on reopening.
+            && !handle.webview_windows().is_empty()
             && wants_confirmation(handle)
         {
             api.prevent_exit();
@@ -820,6 +888,59 @@ mod tests {
     }
 
     #[test]
+    fn the_board_masks_what_was_said_and_not_what_the_edit_dialog_saves_back() {
+        use keel_engine::{BoardCard, BoardIssue};
+
+        let said = format!("API_KEY={SECRET}");
+        let failed = Reason::PrepareFailed {
+            detail: said.clone(),
+        };
+        let board = Board {
+            cards: vec![BoardCard {
+                id: "c1".into(),
+                project_id: "p1".into(),
+                title: said.clone(),
+                body: said.clone(),
+                issue: Some(BoardIssue {
+                    number: 7,
+                    title: said.clone(),
+                    author: "someone".into(),
+                    url: "https://github.com/acme/app/issues/7".into(),
+                }),
+                column: keel_core::BoardColumn::HumanReview,
+                position: 0,
+                run_id: Some("r1".into()),
+                run_state: None,
+                reason: Some(failed.clone()),
+                pr_url: None,
+                rejection: Some(said.clone()),
+                start_blocked: Some(failed.clone()),
+                created_at: "2026-11-05T10:00:00Z".into(),
+            }],
+            working: 0,
+            max_agents: 2,
+            default_workflow: None,
+            paused: Some(failed),
+        };
+        let shown = serde_json::to_value(&board).unwrap();
+        let card = &shown["cards"][0];
+        for quoted in [
+            &card["issue"]["title"],
+            &card["reason"]["detail"],
+            &card["rejection"],
+            &card["startBlocked"]["detail"],
+            &shown["paused"]["detail"],
+        ] {
+            let quoted = quoted.as_str().unwrap();
+            assert!(!quoted.contains(SECRET), "{quoted}");
+            assert!(quoted.contains(keel_core::MASK), "{quoted}");
+        }
+        assert_eq!(card["issue"]["number"], 7);
+        assert_eq!(card["title"], said.as_str());
+        assert_eq!(card["body"], said.as_str());
+    }
+
+    #[test]
     fn the_overview_masks_runs_and_not_the_settings_that_get_saved_back() {
         let overview = Overview {
             runs: Masked(vec![row(&format!("Use API_KEY={SECRET} to test"))]),
@@ -840,6 +961,7 @@ mod tests {
                     name: "API_KEY".into(),
                     value: SECRET.into(),
                 }],
+                default_workflow: None,
             }],
             pending_proposals: 0,
         };

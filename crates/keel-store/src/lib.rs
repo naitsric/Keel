@@ -7,7 +7,7 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use keel_core::{AttemptState, EnvVar, Reason, Service};
+use keel_core::{AttemptState, BoardColumn, CardLane, EnvVar, Reason, Service, card_column};
 pub use rusqlite::types as rusqlite_value;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
@@ -217,7 +217,42 @@ const MIGRATIONS: &[&str] = &[
     create trigger mcp_client_no_delete before delete on mcp_client
     begin select raise(abort, 'mcp clients are revoked, not deleted'); end;
 "#,
+    // 8: Cards on the board, and the workflow they start with.
+    r#"
+    create table card (
+        id text primary key,
+        project_id text not null references project (id),
+        title text not null,
+        body text not null default '',
+        issue text,
+        issue_number integer,
+        lane text not null,
+        position integer not null,
+        language text,
+        todo_at text,
+        run_id text references run (id),
+        start_blocked text,
+        created_at text not null
+    );
+    create index card_by_project on card (project_id, lane, position);
+    create unique index card_issue_once on card (project_id, issue_number) where issue_number is not null;
+    alter table project add column default_workflow text;
+"#,
 ];
+
+/// The attempt that says where a run stands, for a query that calls its run `r`. Of each step's
+/// latest attempt: how the run was ended, then whatever needs a person, then what's running, then
+/// the newest. The newest alone isn't enough: in a group that runs at once, the last one to start
+/// can succeed while another failed. A proposal step that's over never decides.
+const ATTEMPT_THAT_MATTERS: &str = "select b.rowid from attempt b where b.run_id = r.id
+    and not exists (select 1 from attempt later
+                    where later.run_id = b.run_id and later.step_id = b.step_id and later.rowid > b.rowid)
+    order by case when b.role = 'learner' and b.state not in ('queued', 'preparing', 'running', 'stalled') then 4
+                  when b.state in ('rejected', 'abandoned') then 0
+                  when b.state in ('stalled', 'blocked', 'waitingApproval', 'interrupted', 'failed', 'stopped') then 1
+                  when b.state in ('queued', 'preparing', 'running') then 2 else 3 end,
+             b.rowid desc
+    limit 1";
 
 /// An assistant allowed to reach Keel over MCP. Its token's hash is never read back.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -292,6 +327,8 @@ pub struct Project {
     pub allowed_read: Vec<String>,
     pub services: Vec<Service>,
     pub env: Vec<EnvVar>,
+    /// The workflow its cards start with. `None` means the full one.
+    pub default_workflow: Option<String>,
 }
 
 /// What a person can change about a project.
@@ -304,9 +341,10 @@ pub struct ProjectSettings {
     pub allowed_read: Vec<String>,
     pub services: Vec<Service>,
     pub env: Vec<EnvVar>,
+    pub default_workflow: Option<String>,
 }
 
-const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command";
+const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow";
 
 fn project_from(r: &Row) -> rusqlite::Result<Project> {
     let list = |text: String| serde_json::from_str(&text).unwrap_or_default();
@@ -323,6 +361,7 @@ fn project_from(r: &Row) -> rusqlite::Result<Project> {
         services: serde_json::from_str(&r.get::<_, String>(9)?).unwrap_or_default(),
         env: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
         setup_command: r.get(11)?,
+        default_workflow: r.get(12)?,
     })
 }
 
@@ -572,6 +611,151 @@ pub struct Totals {
     pub cost_usd: f64,
 }
 
+/// A card on the board, with what its column depends on. The issue is a copy taken on import.
+#[derive(Debug, Clone)]
+pub struct Card {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub body: String,
+    pub issue: Option<serde_json::Value>,
+    pub issue_number: Option<i64>,
+    pub lane: CardLane,
+    pub position: i64,
+    pub language: Option<String>,
+    pub todo_at: Option<String>,
+    pub run_id: Option<String>,
+    pub start_blocked: Option<serde_json::Value>,
+    pub created_at: String,
+    pub run_started_at: Option<String>,
+    pub run_finished_at: Option<String>,
+    /// Where its run stands, and why. See `ATTEMPT_THAT_MATTERS`.
+    pub run_state: Option<AttemptState>,
+    pub run_reason: Option<serde_json::Value>,
+    pub pr_url: Option<String>,
+    /// What the person wrote when rejecting it. Empty if they wrote nothing.
+    pub rejection: Option<String>,
+}
+
+impl Card {
+    pub fn column(&self) -> BoardColumn {
+        card_column(self.lane, self.run_finished_at.is_some(), self.run_state)
+    }
+
+    /// Whether a person can still move or change it. Once Keel has it, it's out of their hands.
+    fn is_waiting(&self) -> bool {
+        matches!(self.column(), BoardColumn::Backlog | BoardColumn::Todo)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct NewCard {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub body: String,
+    pub issue: Option<String>,
+    pub issue_number: Option<i64>,
+}
+
+fn card_from(r: &Row) -> rusqlite::Result<Card> {
+    let lane: String = r.get("lane")?;
+    let state: Option<String> = r.get("attempt_state")?;
+    let run_state = state.as_deref().and_then(AttemptState::parse);
+    let rejection: Option<String> = r.get("rejection")?;
+    Ok(Card {
+        id: r.get("id")?,
+        project_id: r.get("project_id")?,
+        title: r.get("title")?,
+        body: r.get("body")?,
+        issue: json_col(r, "issue")?,
+        issue_number: r.get("issue_number")?,
+        lane: CardLane::parse(&lane).unwrap_or(CardLane::Backlog),
+        position: r.get("position")?,
+        language: r.get("language")?,
+        todo_at: r.get("todo_at")?,
+        run_id: r.get("run_id")?,
+        start_blocked: json_col(r, "start_blocked")?,
+        created_at: r.get("created_at")?,
+        run_started_at: r.get("run_started_at")?,
+        run_finished_at: r.get("run_finished_at")?,
+        run_state,
+        run_reason: json_col(r, "attempt_reason")?,
+        pr_url: r.get("run_pr_url")?,
+        // A rejection with nothing written leaves no decision, and is still a rejection.
+        rejection: (run_state == Some(AttemptState::Rejected))
+            .then(|| rejection.unwrap_or_default()),
+    })
+}
+
+/// Cards matching a filter, by position.
+fn read_cards<P: rusqlite::Params>(
+    conn: &Connection,
+    filter: &str,
+    params: P,
+) -> rusqlite::Result<Vec<Card>> {
+    let mut stmt = conn.prepare(&format!(
+        "select c.*, r.created_at as run_started_at, r.finished_at as run_finished_at, r.pr_url as run_pr_url,
+                a.state as attempt_state, a.reason as attempt_reason,
+                (select d.text from decision d where d.attempt_id = a.id and d.answer = 'reject'
+                 order by d.seq desc limit 1) as rejection
+         from card c
+         left join run r on r.id = c.run_id
+         left join attempt a on a.rowid = ({ATTEMPT_THAT_MATTERS})
+         where {filter}
+         order by c.position, c.created_at, c.id"
+    ))?;
+    let rows = stmt.query_map(params, card_from)?;
+    rows.collect()
+}
+
+fn read_card(conn: &Connection, id: &str) -> Result<Card> {
+    read_cards(conn, "c.id = ?1", [id])?
+        .pop()
+        .ok_or_else(|| Error::NotFound(format!("card {id}")))
+}
+
+/// How a person reads each column. Backlog and Todo are theirs to arrange, so they stay by position.
+/// In Progress and Human Review go oldest first, as what's waited longest, and Done has the latest
+/// on top. A card that has only just been taken has no run yet, and is the newest of its column.
+fn board_order(a: &Card, b: &Card) -> std::cmp::Ordering {
+    let started = |c: &Card| (c.run_started_at.is_none(), c.run_started_at.clone());
+    a.column().cmp(&b.column()).then_with(|| match a.column() {
+        BoardColumn::Backlog | BoardColumn::Todo => std::cmp::Ordering::Equal,
+        BoardColumn::InProgress | BoardColumn::HumanReview => started(a).cmp(&started(b)),
+        BoardColumn::Done => b.run_finished_at.cmp(&a.run_finished_at),
+    })
+}
+
+/// One past the last card showing in the backlog, which includes rejected ones still on their run.
+fn bottom_of_backlog(conn: &Connection, project_id: &str) -> rusqlite::Result<i64> {
+    Ok(read_cards(conn, "c.project_id = ?1", [project_id])?
+        .iter()
+        .filter(|c| c.column() == BoardColumn::Backlog)
+        .map(|c| c.position + 1)
+        .max()
+        .unwrap_or(0))
+}
+
+fn insert_run(conn: &Connection, run: &NewRun) -> rusqlite::Result<()> {
+    conn.execute(
+        "insert into run (id, project_id, title, request, workflow, language, source_issue, created_at)
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![run.id, run.project_id, run.title, run.request, run.workflow, run.language, run.source_issue, now()],
+    )?;
+    Ok(())
+}
+
+fn renumber(conn: &Connection, ids: &[&str]) -> rusqlite::Result<()> {
+    for (position, id) in ids.iter().enumerate() {
+        conn.execute(
+            "update card set position = ?2 where id = ?1",
+            params![id, position as i64],
+        )?;
+    }
+    Ok(())
+}
+
 pub struct Store {
     conn: Mutex<Connection>,
 }
@@ -816,8 +1000,8 @@ impl Store {
 
     pub fn add_project(&self, project: &Project) -> Result<()> {
         self.lock().execute(
-            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 project.id,
                 project.name,
@@ -831,6 +1015,7 @@ impl Store {
                 serde_json::to_string(&project.services).unwrap_or_default(),
                 serde_json::to_string(&project.env).unwrap_or_default(),
                 project.setup_command,
+                project.default_workflow,
             ],
         )?;
         Ok(())
@@ -838,7 +1023,7 @@ impl Store {
 
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<()> {
         self.lock().execute(
-            "update project set github_account = ?2, check_command = ?3, allowed_domains = ?4, allowed_read = ?5, services = ?6, env = ?7, setup_command = ?8 where id = ?1",
+            "update project set github_account = ?2, check_command = ?3, allowed_domains = ?4, allowed_read = ?5, services = ?6, env = ?7, setup_command = ?8, default_workflow = ?9 where id = ?1",
             params![
                 id,
                 settings.github_account,
@@ -848,6 +1033,7 @@ impl Store {
                 serde_json::to_string(&settings.services).unwrap_or_default(),
                 serde_json::to_string(&settings.env).unwrap_or_default(),
                 settings.setup_command,
+                settings.default_workflow,
             ],
         )?;
         Ok(())
@@ -885,11 +1071,24 @@ impl Store {
     }
 
     pub fn add_run(&self, run: &NewRun) -> Result<()> {
-        self.lock().execute(
-            "insert into run (id, project_id, title, request, workflow, language, source_issue, created_at)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![run.id, run.project_id, run.title, run.request, run.workflow, run.language, run.source_issue, now()],
+        Ok(insert_run(&self.lock(), run)?)
+    }
+
+    /// Adds the run of a card that was just taken from Todo, and links them in one go. If the app
+    /// dies, there's either a card with no run, which goes back to Todo, or both together, never a
+    /// run that nothing points at while its card starts another.
+    pub fn add_run_for_card(&self, run: &NewRun, card_id: &str) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        insert_run(&tx, run)?;
+        let linked = tx.execute(
+            "update card set run_id = ?2 where id = ?1 and lane = 'started' and run_id is null",
+            params![card_id, run.id],
         )?;
+        if linked != 1 {
+            return Err(Error::NotFound(format!("card {card_id} waiting for a run")));
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1181,24 +1380,15 @@ impl Store {
     /// Runs, newest first, each with its latest attempt.
     pub fn runs(&self, limit: i64) -> Result<Vec<RunRow>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare(&format!(
             "select r.id, r.title, r.project_id, p.name as project_name, a.step_id, a.id as attempt_id, a.number,
                     a.state, a.reason, coalesce(a.model_actual, a.model_requested) as model, a.turns,
                     a.started_at, a.finished_at, a.last_activity_at, r.pr_url, r.started_by
              from run r
              join project p on p.id = r.project_id
-             join attempt a on a.run_id = r.id
-              and a.rowid = (
-                select b.rowid from attempt b where b.run_id = r.id
-                  and not exists (select 1 from attempt later
-                                  where later.run_id = b.run_id and later.step_id = b.step_id and later.rowid > b.rowid)
-                order by case when b.role = 'learner' and b.state not in ('queued', 'preparing', 'running') then 3
-                              when b.state in ('stalled', 'blocked', 'waitingApproval', 'interrupted', 'failed', 'stopped', 'rejected', 'abandoned') then 0
-                              when b.state in ('queued', 'preparing', 'running') then 1 else 2 end,
-                         b.rowid desc
-                limit 1)
-             order by r.created_at desc limit ?1",
-        )?;
+             join attempt a on a.run_id = r.id and a.rowid = ({ATTEMPT_THAT_MATTERS})
+             order by r.created_at desc limit ?1"
+        ))?;
         let rows = stmt.query_map([limit], |r| {
             Ok(RunRow {
                 id: r.get(0)?,
@@ -1220,6 +1410,231 @@ impl Store {
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Adds a card at the bottom of the backlog. An issue that's already on the board isn't added
+    /// again, and the id that comes back is the existing card's.
+    pub fn add_card(&self, card: &NewCard) -> Result<String> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        tx.execute(
+            "insert or ignore into card (id, project_id, title, body, issue, issue_number, lane, position, created_at)
+             values (?1, ?2, ?3, ?4, ?5, ?6, 'backlog', ?7, ?8)",
+            params![
+                card.id,
+                card.project_id,
+                card.title,
+                card.body,
+                card.issue,
+                card.issue_number,
+                bottom_of_backlog(&tx, &card.project_id)?,
+                now()
+            ],
+        )?;
+        let id = match card.issue_number {
+            Some(number) => tx.query_row(
+                "select id from card where project_id = ?1 and issue_number = ?2",
+                params![card.project_id, number],
+                |r| r.get(0),
+            )?,
+            None => card.id.clone(),
+        };
+        tx.commit()?;
+        Ok(id)
+    }
+
+    pub fn card(&self, id: &str) -> Result<Card> {
+        read_card(&self.lock(), id)
+    }
+
+    /// A project's cards, in the order the board shows them.
+    pub fn cards(&self, project_id: &str) -> Result<Vec<Card>> {
+        let mut cards = read_cards(&self.lock(), "c.project_id = ?1", [project_id])?;
+        // Stable, so that what compares equal stays by position.
+        cards.sort_by(board_order);
+        Ok(cards)
+    }
+
+    /// Changes what a card says, if a person can still change it. `false` if not.
+    pub fn update_card(&self, id: &str, title: &str, body: &str) -> Result<bool> {
+        let conn = self.lock();
+        if !read_card(&conn, id)?.is_waiting() {
+            return Ok(false);
+        }
+        conn.execute(
+            "update card set title = ?2, body = ?3 where id = ?1",
+            params![id, title, body],
+        )?;
+        Ok(true)
+    }
+
+    /// Removes a card, unless Keel or a person still has work to do on it. `false` if so. Its run
+    /// stays in history.
+    pub fn delete_card(&self, id: &str) -> Result<bool> {
+        let conn = self.lock();
+        if matches!(
+            read_card(&conn, id)?.column(),
+            BoardColumn::InProgress | BoardColumn::HumanReview
+        ) {
+            return Ok(false);
+        }
+        conn.execute("delete from card where id = ?1", [id])?;
+        Ok(true)
+    }
+
+    /// Moves a card to a place in Backlog or Todo and renumbers both. `false`, with nothing
+    /// changed, if the card isn't in one of them, which is also how this loses the race against
+    /// the scheduler taking it. Reordering a rejected card leaves it attached to its run.
+    pub fn move_card(
+        &self,
+        id: &str,
+        lane: CardLane,
+        index: usize,
+        language: &str,
+    ) -> Result<bool> {
+        let to = match lane {
+            CardLane::Backlog => BoardColumn::Backlog,
+            CardLane::Todo => BoardColumn::Todo,
+            CardLane::Started => return Ok(false),
+        };
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let card = read_card(&tx, id)?;
+        if !card.is_waiting() {
+            return Ok(false);
+        }
+        let from = card.column();
+        let others = read_cards(
+            &tx,
+            "c.project_id = ?1 and c.id != ?2",
+            [&card.project_id, id],
+        )?;
+        let column = |wanted: BoardColumn| -> Vec<&str> {
+            others
+                .iter()
+                .filter(|c| c.column() == wanted)
+                .map(|c| c.id.as_str())
+                .collect()
+        };
+        if from != to {
+            if to == BoardColumn::Todo {
+                // A new run replaces the old one, which stays in history.
+                tx.execute(
+                    "update card set lane = 'todo', language = ?2, todo_at = ?3, run_id = null, start_blocked = null where id = ?1",
+                    params![id, language, now()],
+                )?;
+            } else {
+                tx.execute(
+                    "update card set lane = 'backlog', language = null, todo_at = null where id = ?1",
+                    [id],
+                )?;
+            }
+            renumber(&tx, &column(from))?;
+        }
+        let mut destination = column(to);
+        destination.insert(index.min(destination.len()), id);
+        renumber(&tx, &destination)?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn has_todo_cards(&self) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "select exists (select 1 from card where lane = 'todo')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Takes the card to start next out of Todo, and returns it as it is at that moment: the top
+    /// one of each project's Todo, and of those, whichever has waited longest. After this nobody
+    /// can drag it away or edit it, and it can't start twice.
+    pub fn claim_next_todo_card(&self) -> Result<Option<Card>> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let tops = read_cards(
+            &tx,
+            "c.lane = 'todo' and not exists (
+                select 1 from card o where o.project_id = c.project_id and o.lane = 'todo'
+                  and (o.position, o.created_at, o.id) < (c.position, c.created_at, c.id))",
+            [],
+        )?;
+        let Some(mut card) = tops
+            .into_iter()
+            .min_by(|a, b| (&a.todo_at, &a.id).cmp(&(&b.todo_at, &b.id)))
+        else {
+            return Ok(None);
+        };
+        tx.execute(
+            "update card set lane = 'started', run_id = null, start_blocked = null where id = ?1",
+            [&card.id],
+        )?;
+        tx.commit()?;
+        card.lane = CardLane::Started;
+        card.start_blocked = None;
+        Ok(Some(card))
+    }
+
+    /// Hands a card that couldn't start back to the person, at the bottom of the backlog.
+    pub fn card_start_failed(&self, id: &str, reason: &Reason) -> Result<()> {
+        let conn = self.lock();
+        let bottom = bottom_of_backlog(&conn, &read_card(&conn, id)?.project_id)?;
+        conn.execute(
+            "update card set lane = 'backlog', run_id = null, language = null, todo_at = null, start_blocked = ?2, position = ?3
+             where id = ?1",
+            params![id, serde_json::to_string(reason).unwrap_or_default(), bottom],
+        )?;
+        Ok(())
+    }
+
+    /// Puts back in Todo any card taken from it by an app that died before starting its run.
+    pub fn release_claimed_cards(&self) -> Result<()> {
+        self.lock().execute(
+            "update card set lane = 'todo' where lane = 'started' and run_id is null",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// Runs holding a place right now, across the whole app, however they started. That's an open
+    /// run with anything active, whatever else it's waiting for: a stalled agent or a reviewer still
+    /// going keep their agent slots, so the board can't give their places away. It's also one with
+    /// no attempt yet, or between two steps: the next step is on its way, and nothing should take
+    /// its place in the moment before it's recorded.
+    pub fn working_runs(&self) -> Result<usize> {
+        let count: i64 = self.lock().query_row(
+            &format!(
+                "select count(*) from run r
+                 where r.finished_at is null
+                   and (exists (select 1 from attempt x where x.run_id = r.id
+                                  and x.state in ('queued', 'preparing', 'running', 'stalled'))
+                        or coalesce((select a.state from attempt a where a.rowid = ({ATTEMPT_THAT_MATTERS})), 'none')
+                           in ('none', 'succeeded', 'skipped'))"
+            ),
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(count as usize)
+    }
+
+    /// Why open runs are blocked right now, newest first. A step that has been tried again is no
+    /// longer blocked on what it was.
+    pub fn blocked_reasons(&self) -> Result<Vec<Reason>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select a.reason from attempt a
+             join run r on r.id = a.run_id
+             where a.state = 'blocked' and r.finished_at is null
+               and not exists (select 1 from attempt later
+                               where later.run_id = a.run_id and later.step_id = a.step_id and later.rowid > a.rowid)
+             order by a.rowid desc",
+        )?;
+        let reasons = stmt.query_map([], |r| r.get::<_, Option<String>>(0))?;
+        let mut found = Vec::new();
+        for reason in reasons {
+            found.extend(reason?.and_then(|text| serde_json::from_str(&text).ok()));
+        }
+        Ok(found)
     }
 
     pub fn totals(&self) -> Result<Totals> {
@@ -1274,6 +1689,7 @@ mod tests {
                 allowed_read: vec![],
                 services: vec![],
                 env: vec![],
+                default_workflow: None,
             })
             .unwrap();
         store
@@ -1387,6 +1803,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 drop table card;
+                 alter table project drop column default_workflow;
                  drop table mcp_call;
                  drop table mcp_client;
                  alter table run drop column started_by;
@@ -1634,10 +2052,12 @@ mod tests {
                         name: "DB".into(),
                         value: "{{socket:db}}".into(),
                     }],
+                    default_workflow: Some("builtin:simple".into()),
                 },
             )
             .unwrap();
         let project = store.project("p").unwrap();
+        assert_eq!(project.default_workflow.as_deref(), Some("builtin:simple"));
         assert_eq!(project.github_account.as_deref(), Some("octo"));
         assert_eq!(project.setup_command.as_deref(), Some("uv sync"));
         assert_eq!(project.check_command.as_deref(), Some("make test"));
@@ -1645,6 +2065,809 @@ mod tests {
         assert_eq!(project.allowed_read, ["~/.cargo"]);
         assert_eq!(project.services[0].name(), "db");
         assert_eq!(project.env[0].name, "DB");
+    }
+
+    fn card(store: &Store, id: &str) -> String {
+        store
+            .add_card(&NewCard {
+                id: id.into(),
+                project_id: "p".into(),
+                title: id.into(),
+                body: String::new(),
+                issue: None,
+                issue_number: None,
+            })
+            .unwrap()
+    }
+
+    /// The ids in a column, in the order the board shows them, with their positions.
+    fn column(store: &Store, wanted: BoardColumn) -> Vec<(String, i64)> {
+        store
+            .cards("p")
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.column() == wanted)
+            .map(|c| (c.id, c.position))
+            .collect()
+    }
+
+    fn ids(store: &Store, wanted: BoardColumn) -> Vec<String> {
+        column(store, wanted)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect()
+    }
+
+    fn new_attempt(id: &str, run: &str, step: &str, state: AttemptState) -> NewAttempt {
+        NewAttempt {
+            id: id.into(),
+            run_id: run.into(),
+            step_id: step.into(),
+            kind: "agent".into(),
+            role: "worker".into(),
+            round: 0,
+            number: 1,
+            state,
+            model_requested: "haiku".into(),
+            effort: None,
+            tools: "readOnly".into(),
+            max_turns: None,
+            max_budget_usd: None,
+            language: "en".into(),
+            prompt: String::new(),
+            system_prompt_sources: "[]".into(),
+            settings: "{}".into(),
+            session_id: id.into(),
+            resumed_from: None,
+            workspace: "/w".into(),
+            raw_path: "/w.jsonl".into(),
+            started_at: now(),
+        }
+    }
+
+    fn claim(store: &Store) -> Option<String> {
+        store.claim_next_todo_card().unwrap().map(|c| c.id)
+    }
+
+    /// A card that went through Todo and has this run, the seeded one, with its only attempt in `state`.
+    fn started(store: &Store, id: &str, state: AttemptState, finished: bool) {
+        card(store, id);
+        assert!(store.move_card(id, CardLane::Todo, 0, "es").unwrap());
+        assert_eq!(claim(store).as_deref(), Some(id));
+        store
+            .lock()
+            .execute("update card set run_id = 'r' where id = ?1", [id])
+            .unwrap();
+        store.set_state("a", state, None).unwrap();
+        if finished {
+            store
+                .patch_run("r", &[("finished_at", Value::Text(now()))])
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn the_board_arrives_on_a_database_people_already_have() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        // Exactly what the last release left: every migration before the board, and real rows.
+        let before_the_board = MIGRATIONS.len() - 1;
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..before_the_board] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.pragma_update(None, "user_version", before_the_board as i64)
+                .unwrap();
+            conn.execute_batch(
+                "insert into setting (key, value) values ('language', 'es');
+                 insert into project (id, name, path, created_at, github_account)
+                     values ('p', 'demo', '/demo', 'then', 'octo');
+                 insert into run (id, project_id, title, created_at) values ('r', 'p', 'old', 'then');",
+            )
+            .unwrap();
+            assert!(
+                conn.execute("select * from card", []).is_err(),
+                "no board yet"
+            );
+        }
+
+        let store = Store::open(&path).unwrap();
+        let version: i64 = store
+            .lock()
+            .query_row("pragma user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, MIGRATIONS.len() as i64);
+        assert_eq!(store.setting("language").unwrap().as_deref(), Some("es"));
+        let project = store.project("p").unwrap();
+        assert_eq!(project.github_account.as_deref(), Some("octo"));
+        assert_eq!(project.default_workflow, None);
+        assert_eq!(store.run("r").unwrap().title, "old");
+        assert!(store.cards("p").unwrap().is_empty());
+
+        // It works from here, and opening again changes nothing.
+        card(&store, "new");
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(ids(&store, BoardColumn::Backlog), ["new"]);
+    }
+
+    #[test]
+    fn an_issue_imported_twice_is_one_card() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let issue = |id: &str, project: &str, title: &str| NewCard {
+            id: id.into(),
+            project_id: project.into(),
+            title: title.into(),
+            body: String::new(),
+            issue: Some(r#"{"number":7}"#.into()),
+            issue_number: Some(7),
+        };
+        let first = store.add_card(&issue("one", "p", "Broken")).unwrap();
+        assert_eq!(first, "one");
+        let again = store.add_card(&issue("two", "p", "Renamed")).unwrap();
+        assert_eq!(again, "one", "the id of the card that's already there");
+        let cards = store.cards("p").unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].title, "Broken", "and the first copy stands");
+
+        // The same number in another repo is another issue, and tasks have no number at all.
+        store
+            .add_project(&Project {
+                id: "q".into(),
+                name: "other".into(),
+                path: "/other".into(),
+                created_at: now(),
+                github_account: None,
+                github_repo: None,
+                setup_command: None,
+                check_command: None,
+                allowed_domains: vec![],
+                allowed_read: vec![],
+                services: vec![],
+                env: vec![],
+                default_workflow: None,
+            })
+            .unwrap();
+        assert_eq!(
+            store.add_card(&issue("three", "q", "Other")).unwrap(),
+            "three"
+        );
+        card(&store, "task-a");
+        card(&store, "task-b");
+        assert_eq!(store.cards("p").unwrap().len(), 3);
+    }
+
+    #[test]
+    fn moving_renumbers_both_columns() {
+        let (_dir, store) = store();
+        seeded(&store);
+        for id in ["a", "b", "c", "d"] {
+            card(&store, id);
+        }
+        assert_eq!(
+            column(&store, BoardColumn::Backlog),
+            [
+                ("a".into(), 0),
+                ("b".into(), 1),
+                ("c".into(), 2),
+                ("d".into(), 3)
+            ]
+        );
+
+        // Within a column.
+        assert!(store.move_card("d", CardLane::Backlog, 0, "en").unwrap());
+        assert_eq!(ids(&store, BoardColumn::Backlog), ["d", "a", "b", "c"]);
+
+        // To another, which closes the gap it left.
+        assert!(store.move_card("a", CardLane::Todo, 0, "es").unwrap());
+        assert_eq!(
+            column(&store, BoardColumn::Backlog),
+            [("d".into(), 0), ("b".into(), 1), ("c".into(), 2)]
+        );
+        assert_eq!(column(&store, BoardColumn::Todo), [("a".into(), 0)]);
+
+        // Into the middle, and past the end.
+        assert!(store.move_card("b", CardLane::Todo, 99, "en").unwrap());
+        assert!(store.move_card("c", CardLane::Todo, 1, "en").unwrap());
+        assert_eq!(
+            column(&store, BoardColumn::Todo),
+            [("a".into(), 0), ("c".into(), 1), ("b".into(), 2)]
+        );
+    }
+
+    #[test]
+    fn entering_todo_keeps_the_language_and_the_time_and_reordering_there_keeps_them_too() {
+        let (_dir, store) = store();
+        seeded(&store);
+        card(&store, "a");
+        card(&store, "b");
+        store
+            .card_start_failed("a", &Reason::GithubAccountMissing)
+            .unwrap();
+        assert!(store.card("a").unwrap().start_blocked.is_some());
+
+        assert!(store.move_card("a", CardLane::Todo, 0, "es").unwrap());
+        let entered = store.card("a").unwrap();
+        assert_eq!(entered.language.as_deref(), Some("es"));
+        assert!(entered.todo_at.is_some());
+        assert_eq!(entered.start_blocked, None, "it's being tried again");
+
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(store.move_card("b", CardLane::Todo, 0, "en").unwrap());
+        assert!(store.move_card("a", CardLane::Todo, 0, "en").unwrap());
+        let reordered = store.card("a").unwrap();
+        assert_eq!(reordered.language.as_deref(), Some("es"));
+        assert_eq!(reordered.todo_at, entered.todo_at, "it didn't enter again");
+
+        assert!(store.move_card("a", CardLane::Backlog, 0, "en").unwrap());
+        let back = store.card("a").unwrap();
+        assert_eq!(back.lane, CardLane::Backlog);
+        assert_eq!((back.language, back.todo_at), (None, None));
+    }
+
+    #[test]
+    fn a_card_keel_has_cannot_be_moved_changed_or_deleted() {
+        for (state, finished, wanted) in [
+            (AttemptState::Queued, false, BoardColumn::InProgress),
+            (AttemptState::Running, false, BoardColumn::InProgress),
+            (
+                AttemptState::WaitingApproval,
+                false,
+                BoardColumn::HumanReview,
+            ),
+            (AttemptState::Failed, false, BoardColumn::HumanReview),
+            (AttemptState::Interrupted, false, BoardColumn::HumanReview),
+        ] {
+            let (_dir, store) = store();
+            seeded(&store);
+            started(&store, "c", state, finished);
+            let before = store.card("c").unwrap();
+            assert_eq!(before.column(), wanted, "{state:?}");
+            for lane in [CardLane::Backlog, CardLane::Todo, CardLane::Started] {
+                assert!(!store.move_card("c", lane, 0, "en").unwrap(), "{state:?}");
+            }
+            assert!(!store.update_card("c", "other", "other").unwrap());
+            assert!(!store.delete_card("c").unwrap());
+            let after = store.card("c").unwrap();
+            assert_eq!(after.lane, before.lane);
+            assert_eq!(after.run_id.as_deref(), Some("r"));
+            assert_eq!(after.title, "c");
+        }
+    }
+
+    #[test]
+    fn a_done_card_cannot_move_but_can_be_cleared_away_and_its_run_stays() {
+        let (_dir, store) = store();
+        seeded(&store);
+        started(&store, "c", AttemptState::Succeeded, true);
+        assert_eq!(store.card("c").unwrap().column(), BoardColumn::Done);
+        assert!(!store.move_card("c", CardLane::Todo, 0, "en").unwrap());
+        assert!(!store.update_card("c", "other", "").unwrap());
+        assert!(store.delete_card("c").unwrap());
+        assert!(store.cards("p").unwrap().is_empty());
+        assert_eq!(store.run("r").unwrap().id, "r");
+    }
+
+    #[test]
+    fn a_card_that_was_just_taken_from_todo_cannot_be_dragged() {
+        let (_dir, store) = store();
+        seeded(&store);
+        card(&store, "c");
+        assert!(store.move_card("c", CardLane::Todo, 0, "en").unwrap());
+        assert_eq!(claim(&store).as_deref(), Some("c"));
+        assert_eq!(store.card("c").unwrap().column(), BoardColumn::InProgress);
+        assert!(!store.move_card("c", CardLane::Backlog, 0, "en").unwrap());
+        assert!(!store.update_card("c", "other", "").unwrap());
+        assert_eq!(claim(&store), None, "and it can't start twice");
+    }
+
+    #[test]
+    fn a_rejected_card_shows_in_the_backlog_and_keeps_its_run_until_it_goes_again() {
+        let (_dir, store) = store();
+        seeded(&store);
+        card(&store, "other");
+        started(&store, "c", AttemptState::Rejected, true);
+        store
+            .add_decision("p", "r", "a", "reject", "not like this")
+            .unwrap();
+        let rejected = store.card("c").unwrap();
+        assert_eq!(rejected.column(), BoardColumn::Backlog);
+        assert_eq!(rejected.rejection.as_deref(), Some("not like this"));
+
+        // Dragging it around the backlog counts the same as any card there, and leaves it attached.
+        assert_eq!(ids(&store, BoardColumn::Backlog).len(), 2);
+        assert!(store.move_card("c", CardLane::Backlog, 0, "en").unwrap());
+        assert_eq!(ids(&store, BoardColumn::Backlog), ["c", "other"]);
+        assert!(
+            store
+                .move_card("other", CardLane::Backlog, 0, "en")
+                .unwrap()
+        );
+        assert_eq!(ids(&store, BoardColumn::Backlog), ["other", "c"]);
+        let moved = store.card("c").unwrap();
+        assert_eq!(moved.lane, CardLane::Started);
+        assert_eq!(moved.run_id.as_deref(), Some("r"));
+        assert_eq!(moved.rejection.as_deref(), Some("not like this"));
+
+        // Sending it again replaces the old run, which stays in history.
+        assert!(store.move_card("c", CardLane::Todo, 0, "es").unwrap());
+        let again = store.card("c").unwrap();
+        assert_eq!(again.column(), BoardColumn::Todo);
+        assert_eq!(
+            (again.run_id, again.run_state, again.rejection),
+            (None, None, None)
+        );
+        assert_eq!(store.run("r").unwrap().id, "r");
+    }
+
+    #[test]
+    fn rejecting_without_writing_anything_is_still_a_rejection() {
+        let (_dir, store) = store();
+        seeded(&store);
+        started(&store, "c", AttemptState::Rejected, true);
+        assert_eq!(store.card("c").unwrap().rejection.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn an_abandoned_card_shows_in_the_backlog_with_no_rejection() {
+        let (_dir, store) = store();
+        seeded(&store);
+        started(&store, "c", AttemptState::Abandoned, true);
+        let abandoned = store.card("c").unwrap();
+        assert_eq!(abandoned.column(), BoardColumn::Backlog);
+        assert_eq!(abandoned.run_state, Some(AttemptState::Abandoned));
+        assert_eq!(abandoned.rejection, None);
+    }
+
+    #[test]
+    fn a_card_follows_the_step_that_matters_not_the_newest_attempt() {
+        let (_dir, store) = store();
+        seeded(&store);
+        started(&store, "c", AttemptState::Failed, false);
+        // Reviews run at once: the first failed, and the one that started last went fine.
+        store
+            .add_attempt(&new_attempt("later", "r", "ux", AttemptState::Succeeded))
+            .unwrap();
+        let card = store.card("c").unwrap();
+        assert_eq!(card.run_state, Some(AttemptState::Failed));
+        assert_eq!(card.column(), BoardColumn::HumanReview);
+        assert_eq!(store.working_runs().unwrap(), 0);
+
+        // Abandoning one of them ends the run, wherever the other one stands.
+        store.set_state("a", AttemptState::Abandoned, None).unwrap();
+        store
+            .set_state("later", AttemptState::Failed, None)
+            .unwrap();
+        store
+            .patch_run("r", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        assert_eq!(store.card("c").unwrap().column(), BoardColumn::Backlog);
+    }
+
+    #[test]
+    fn a_finished_proposal_step_never_decides_but_a_stalled_one_needs_a_person() {
+        let (_dir, store) = store();
+        seeded(&store);
+        started(&store, "c", AttemptState::Succeeded, false);
+        let mut learner = new_attempt("l", "r", "learnings", AttemptState::Failed);
+        learner.role = "learner".into();
+        store.add_attempt(&learner).unwrap();
+        assert_eq!(
+            store.card("c").unwrap().run_state,
+            Some(AttemptState::Succeeded)
+        );
+        store.set_state("l", AttemptState::Stalled, None).unwrap();
+        assert_eq!(store.card("c").unwrap().column(), BoardColumn::HumanReview);
+    }
+
+    #[test]
+    fn working_counts_every_open_run_holding_a_place_and_nothing_else() {
+        let (_dir, store) = store();
+        seeded(&store);
+        for (state, working) in [
+            (AttemptState::Queued, 1),
+            (AttemptState::Preparing, 1),
+            (AttemptState::Running, 1),
+            // Its agent still has its slot, even though a person is being asked to look.
+            (AttemptState::Stalled, 1),
+            // Between two steps: the next one is on its way.
+            (AttemptState::Succeeded, 1),
+            (AttemptState::Skipped, 1),
+            (AttemptState::WaitingApproval, 0),
+            (AttemptState::Blocked, 0),
+            (AttemptState::Failed, 0),
+            (AttemptState::Stopped, 0),
+            (AttemptState::Interrupted, 0),
+            (AttemptState::Rejected, 0),
+            (AttemptState::Abandoned, 0),
+        ] {
+            store.set_state("a", state, None).unwrap();
+            assert_eq!(store.working_runs().unwrap(), working, "{state:?}");
+        }
+        store.set_state("a", AttemptState::Running, None).unwrap();
+        store
+            .patch_run("r", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        assert_eq!(
+            store.working_runs().unwrap(),
+            0,
+            "a finished run isn't working"
+        );
+    }
+
+    #[test]
+    fn a_run_with_something_still_active_holds_its_place_whatever_else_it_waits_for() {
+        let (_dir, store) = store();
+        seeded(&store);
+        // A review failed while another still runs: the card shows in Human Review, and the other
+        // agent still has its slot.
+        store.set_state("a", AttemptState::Failed, None).unwrap();
+        store
+            .add_attempt(&new_attempt("b", "r", "code", AttemptState::Running))
+            .unwrap();
+        assert_eq!(store.working_runs().unwrap(), 1);
+        store.set_state("b", AttemptState::Succeeded, None).unwrap();
+        assert_eq!(store.working_runs().unwrap(), 0, "now it's only waiting");
+
+        // Tried again: the failure is history, and the run is moving.
+        let mut retried = new_attempt("c", "r", "builder", AttemptState::Running);
+        retried.number = 2;
+        store.add_attempt(&retried).unwrap();
+        assert_eq!(store.working_runs().unwrap(), 1);
+        store.set_state("c", AttemptState::Succeeded, None).unwrap();
+        assert_eq!(store.working_runs().unwrap(), 1, "and between two steps");
+    }
+
+    #[test]
+    fn a_run_with_no_attempt_yet_holds_a_place() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store.set_state("a", AttemptState::Failed, None).unwrap();
+        assert_eq!(store.working_runs().unwrap(), 0);
+        store
+            .add_run(&NewRun {
+                id: "new".into(),
+                project_id: "p".into(),
+                title: "t".into(),
+                request: "t".into(),
+                workflow: "[]".into(),
+                language: "en".into(),
+                source_issue: None,
+            })
+            .unwrap();
+        assert_eq!(store.working_runs().unwrap(), 1);
+    }
+
+    #[test]
+    fn a_run_and_its_card_are_linked_together_or_not_at_all() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let run = |id: &str| NewRun {
+            id: id.into(),
+            project_id: "p".into(),
+            title: "t".into(),
+            request: "t".into(),
+            workflow: "[]".into(),
+            language: "en".into(),
+            source_issue: None,
+        };
+        card(&store, "c");
+        assert!(store.move_card("c", CardLane::Todo, 0, "en").unwrap());
+
+        // Not taken from Todo, so there's nothing to link it to, and no run comes of it.
+        assert!(store.add_run_for_card(&run("early"), "c").is_err());
+        assert!(matches!(store.run("early"), Err(Error::NotFound(_))));
+        assert!(store.add_run_for_card(&run("gone"), "no-card").is_err());
+        assert!(matches!(store.run("gone"), Err(Error::NotFound(_))));
+
+        assert_eq!(claim(&store).as_deref(), Some("c"));
+        store.add_run_for_card(&run("linked"), "c").unwrap();
+        assert_eq!(store.card("c").unwrap().run_id.as_deref(), Some("linked"));
+        assert_eq!(store.run("linked").unwrap().id, "linked");
+
+        // Only one, ever.
+        assert!(store.add_run_for_card(&run("second"), "c").is_err());
+        assert!(matches!(store.run("second"), Err(Error::NotFound(_))));
+        assert_eq!(store.card("c").unwrap().run_id.as_deref(), Some("linked"));
+        store.release_claimed_cards().unwrap();
+        assert_eq!(store.card("c").unwrap().lane, CardLane::Started, "it stays");
+    }
+
+    #[test]
+    fn claiming_returns_the_card_as_it_is_at_that_moment() {
+        let (_dir, store) = store();
+        seeded(&store);
+        card(&store, "first");
+        card(&store, "second");
+        assert!(store.move_card("first", CardLane::Todo, 0, "es").unwrap());
+        assert!(store.move_card("second", CardLane::Todo, 1, "en").unwrap());
+
+        // Changes made up to the last moment count, both which card and what it says.
+        assert!(store.update_card("second", "second", "Edited").unwrap());
+        assert!(store.move_card("second", CardLane::Todo, 0, "en").unwrap());
+        let claimed = store.claim_next_todo_card().unwrap().unwrap();
+        assert_eq!(claimed.id, "second");
+        assert_eq!(claimed.body, "Edited");
+        assert_eq!(claimed.language.as_deref(), Some("en"));
+        assert_eq!(claimed.lane, CardLane::Started);
+        assert!(store.has_todo_cards().unwrap(), "the other one still waits");
+    }
+
+    #[test]
+    fn each_column_reads_the_way_a_person_reads_it() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let set = |sql: &str| {
+            store.lock().execute_batch(sql).unwrap();
+        };
+        // A run per card, started and finished out of step with each other and with creation order.
+        let started_card = |id: &str, started_at: &str, finished_at: Option<&str>, state: &str| {
+            card(&store, id);
+            assert!(store.move_card(id, CardLane::Todo, 0, "en").unwrap());
+            assert_eq!(claim(&store).as_deref(), Some(id));
+            let run = format!("run-{id}");
+            store
+                .add_run_for_card(
+                    &NewRun {
+                        id: run.clone(),
+                        project_id: "p".into(),
+                        title: id.into(),
+                        request: id.into(),
+                        workflow: "[]".into(),
+                        language: "en".into(),
+                        source_issue: None,
+                    },
+                    id,
+                )
+                .unwrap();
+            store
+                .add_attempt(&new_attempt(
+                    &format!("attempt-{id}"),
+                    &run,
+                    "step",
+                    AttemptState::parse(state).unwrap(),
+                ))
+                .unwrap();
+            set(&format!(
+                "update run set created_at = '{started_at}', finished_at = {} where id = '{run}';",
+                finished_at.map_or("null".to_owned(), |t| format!("'{t}'")),
+            ));
+        };
+        started_card("done-old", "2026-01-01", Some("2026-01-05"), "succeeded");
+        started_card("done-new", "2026-01-02", Some("2026-01-09"), "succeeded");
+        started_card("done-mid", "2026-01-03", Some("2026-01-07"), "failed");
+        started_card("work-late", "2026-02-03", None, "running");
+        started_card("work-early", "2026-02-01", None, "queued");
+        started_card("work-mid", "2026-02-02", None, "preparing");
+        started_card("ask-late", "2026-03-03", None, "failed");
+        started_card("ask-early", "2026-03-01", None, "waitingApproval");
+        started_card("ask-mid", "2026-03-02", None, "blocked");
+        card(&store, "back-a");
+        card(&store, "back-b");
+        card(&store, "todo-a");
+        card(&store, "todo-b");
+        assert!(store.move_card("todo-a", CardLane::Todo, 0, "en").unwrap());
+        assert!(store.move_card("todo-b", CardLane::Todo, 0, "en").unwrap());
+        assert!(
+            store
+                .move_card("back-b", CardLane::Backlog, 0, "en")
+                .unwrap()
+        );
+
+        let titles: Vec<String> = store
+            .cards("p")
+            .unwrap()
+            .into_iter()
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(
+            titles,
+            [
+                "back-b",
+                "back-a",
+                "todo-b",
+                "todo-a",
+                "work-early",
+                "work-mid",
+                "work-late",
+                "ask-early",
+                "ask-mid",
+                "ask-late",
+                "done-new",
+                "done-mid",
+                "done-old",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_card_just_taken_with_no_run_yet_is_the_newest_of_in_progress() {
+        let (_dir, store) = store();
+        seeded(&store);
+        started(&store, "has-a-run", AttemptState::Running, false);
+        card(&store, "taken");
+        assert!(store.move_card("taken", CardLane::Todo, 0, "en").unwrap());
+        assert_eq!(claim(&store).as_deref(), Some("taken"));
+        assert_eq!(ids(&store, BoardColumn::InProgress), ["has-a-run", "taken"]);
+    }
+
+    #[test]
+    fn the_bottom_of_the_backlog_counts_the_rejected_cards_showing_there() {
+        let (_dir, store) = store();
+        seeded(&store);
+        card(&store, "a");
+        card(&store, "b");
+        started(&store, "rejected", AttemptState::Rejected, true);
+        // Dragged below the others, where a person put it.
+        assert!(
+            store
+                .move_card("rejected", CardLane::Backlog, 2, "en")
+                .unwrap()
+        );
+        assert_eq!(ids(&store, BoardColumn::Backlog), ["a", "b", "rejected"]);
+
+        // Counting only the lane would put these level with it, and above it by age.
+        card(&store, "z-new");
+        assert_eq!(
+            ids(&store, BoardColumn::Backlog),
+            ["a", "b", "rejected", "z-new"]
+        );
+
+        card(&store, "todo");
+        assert!(store.move_card("todo", CardLane::Todo, 0, "en").unwrap());
+        assert_eq!(claim(&store).as_deref(), Some("todo"));
+        store
+            .card_start_failed("todo", &Reason::GithubAccountMissing)
+            .unwrap();
+        assert_eq!(
+            ids(&store, BoardColumn::Backlog),
+            ["a", "b", "rejected", "z-new", "todo"]
+        );
+    }
+
+    #[test]
+    fn blocked_reasons_are_the_ones_of_open_runs_that_nobody_has_tried_again() {
+        let (_dir, store) = store();
+        seeded(&store);
+        assert_eq!(store.blocked_reasons().unwrap(), vec![]);
+        let limit = Reason::RateLimited { resets_at: None };
+        store
+            .set_state("a", AttemptState::Blocked, Some(&limit))
+            .unwrap();
+        assert_eq!(store.blocked_reasons().unwrap(), vec![limit.clone()]);
+
+        // A later block in another step of the run comes first.
+        let lost = Reason::SessionRejected {
+            detail: "gone".into(),
+        };
+        store
+            .add_attempt(&new_attempt("b", "r", "other", AttemptState::Blocked))
+            .unwrap();
+        store
+            .set_state("b", AttemptState::Blocked, Some(&lost))
+            .unwrap();
+        assert_eq!(
+            store.blocked_reasons().unwrap(),
+            vec![lost.clone(), limit.clone()]
+        );
+
+        // Trying a step again puts its block behind it, while it runs and however it ends.
+        let mut retried = new_attempt("c", "r", "builder", AttemptState::Running);
+        retried.number = 2;
+        store.add_attempt(&retried).unwrap();
+        assert_eq!(store.blocked_reasons().unwrap(), vec![lost.clone()]);
+
+        // Leaving the run does too.
+        store
+            .patch_run("r", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        assert_eq!(store.blocked_reasons().unwrap(), vec![]);
+    }
+
+    #[test]
+    fn the_next_card_is_the_longest_waiting_of_each_projects_top_card() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_project(&Project {
+                id: "q".into(),
+                name: "other".into(),
+                path: "/other".into(),
+                created_at: now(),
+                github_account: None,
+                github_repo: None,
+                setup_command: None,
+                check_command: None,
+                allowed_domains: vec![],
+                allowed_read: vec![],
+                services: vec![],
+                env: vec![],
+                default_workflow: None,
+            })
+            .unwrap();
+        let pause = || std::thread::sleep(std::time::Duration::from_millis(5));
+        let queue = |id: &str, project: &str, index: usize| {
+            store
+                .add_card(&NewCard {
+                    id: id.into(),
+                    project_id: project.into(),
+                    title: id.into(),
+                    body: String::new(),
+                    issue: None,
+                    issue_number: None,
+                })
+                .unwrap();
+            assert!(store.move_card(id, CardLane::Todo, index, "en").unwrap());
+            pause();
+        };
+        assert_eq!(claim(&store), None);
+        queue("p-oldest", "p", 0);
+        queue("q-middle", "q", 0);
+        // This one is the newest of all, and it's on top of its project.
+        queue("p-top", "p", 0);
+
+        // `p-oldest` has waited longest but isn't first in line in its project.
+        assert_eq!(claim(&store).as_deref(), Some("q-middle"));
+        assert_eq!(claim(&store).as_deref(), Some("p-top"));
+        assert_eq!(claim(&store).as_deref(), Some("p-oldest"));
+        assert_eq!(claim(&store), None);
+    }
+
+    #[test]
+    fn a_card_that_could_not_start_goes_to_the_bottom_of_the_backlog_and_says_why() {
+        let (_dir, store) = store();
+        seeded(&store);
+        card(&store, "first");
+        card(&store, "c");
+        assert!(store.move_card("c", CardLane::Todo, 0, "es").unwrap());
+        assert_eq!(claim(&store).as_deref(), Some("c"));
+        card(&store, "second");
+        store
+            .card_start_failed("c", &Reason::DefaultWorkflowMissing)
+            .unwrap();
+        assert_eq!(ids(&store, BoardColumn::Backlog), ["first", "second", "c"]);
+        let card = store.card("c").unwrap();
+        assert_eq!(card.lane, CardLane::Backlog);
+        assert_eq!(card.todo_at, None);
+        assert_eq!(
+            serde_json::from_value::<Reason>(card.start_blocked.unwrap()).unwrap(),
+            Reason::DefaultWorkflowMissing
+        );
+        assert!(!store.has_todo_cards().unwrap());
+    }
+
+    #[test]
+    fn a_card_left_taken_by_an_app_that_died_goes_back_to_todo() {
+        let (_dir, store) = store();
+        seeded(&store);
+        started(&store, "has-a-run", AttemptState::Running, false);
+        card(&store, "taken");
+        assert!(store.move_card("taken", CardLane::Todo, 0, "es").unwrap());
+        assert_eq!(claim(&store).as_deref(), Some("taken"));
+        store.release_claimed_cards().unwrap();
+        let taken = store.card("taken").unwrap();
+        assert_eq!(taken.column(), BoardColumn::Todo);
+        assert_eq!(taken.language.as_deref(), Some("es"));
+        assert_eq!(store.card("has-a-run").unwrap().lane, CardLane::Started);
+    }
+
+    #[test]
+    fn deleting_a_card_keel_has_not_taken_works_and_a_missing_one_says_so() {
+        let (_dir, store) = store();
+        seeded(&store);
+        card(&store, "in-backlog");
+        card(&store, "in-todo");
+        assert!(store.move_card("in-todo", CardLane::Todo, 0, "en").unwrap());
+        assert!(store.delete_card("in-backlog").unwrap());
+        assert!(store.delete_card("in-todo").unwrap());
+        assert!(store.cards("p").unwrap().is_empty());
+        assert!(matches!(store.delete_card("gone"), Err(Error::NotFound(_))));
+        assert!(matches!(
+            store.move_card("gone", CardLane::Todo, 0, "en"),
+            Err(Error::NotFound(_))
+        ));
     }
 
     #[test]

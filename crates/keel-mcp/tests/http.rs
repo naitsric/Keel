@@ -8,7 +8,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use keel_core::{AttemptState, MASK, StepSpec, ToolProfile, WorkflowStep};
+use keel_core::{AttemptState, BoardColumn, CardLane, MASK, StepSpec, ToolProfile, WorkflowStep};
 use keel_engine::{Config, Engine, Workflow};
 use keel_harness::Tools;
 use keel_mcp::{MAX_OPEN_RUNS, MCP_PATH, McpServer, StartError};
@@ -72,6 +72,7 @@ tools=""; prev=""
 for a in "$@"; do [ "$prev" = "--tools" ] && tools="$a"; prev="$a"; done
 list=$(printf '%s' "$tools" | sed 's/,/","/g')
 echo "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake\",\"tools\":[\"$list\"],\"apiKeySource\":\"none\"}"
+while [ -f "$(dirname "$0")/hold" ]; do sleep 0.02; done
 echo work >> fixed.txt
 git add -A && git commit -qm "fix"
 echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Fixed it.\",\"num_turns\":1,\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":10,\"output_tokens\":2},\"modelUsage\":{\"claude-fake\":{}}}"
@@ -368,6 +369,60 @@ async fn a_run_it_starts_shows_who_started_it_and_waits_for_the_person() {
         }
     }
     assert_eq!(finished["state"], "finished", "{finished}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_run_it_starts_counts_as_working_and_the_board_never_holds_it_back() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let hold = w._dir.path().join("bin/hold");
+    std::fs::write(&hold, "").unwrap();
+    w.engine.set_max_agents(1).unwrap();
+    w.engine
+        .update_project(
+            &w.project_id,
+            &keel_store::ProjectSettings {
+                default_workflow: Some(w.workflow_id.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let working = || w.engine.board(&w.project_id).unwrap().working;
+
+    ok(&call(&client, "start_run", w.start_args("First")).await);
+    assert_eq!(working(), 1, "it takes up the only place");
+
+    // A card waits for that place, and has to go on waiting.
+    let card = w.engine.card_create(&w.project_id, "Waits", "").unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    w.engine.start_board();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let column = || {
+        w.engine
+            .board(&w.project_id)
+            .unwrap()
+            .cards
+            .into_iter()
+            .find(|c| c.id == card)
+            .unwrap()
+            .column
+    };
+    assert_eq!(column(), BoardColumn::Todo);
+
+    // With no room on the board, the client is still let through.
+    ok(&call(&client, "start_run", w.start_args("Second")).await);
+    assert_eq!(working(), 2);
+    assert_eq!(column(), BoardColumn::Todo);
+
+    std::fs::remove_file(&hold).unwrap();
+    for _ in 0..400 {
+        if column() == BoardColumn::HumanReview {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(column(), BoardColumn::HumanReview, "and then the card goes");
     client.cancel().await.unwrap();
 }
 

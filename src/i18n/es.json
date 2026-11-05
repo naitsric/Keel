@@ -9,7 +9,8 @@
     "error": "Algo salió mal: {{detail}}",
     "workflows": "Workflows",
     "brain": "Brain",
-    "brainProposals": "{{count}} propuestas esperando"
+    "brainProposals": "{{count}} propuestas esperando",
+    "board": "Tablero"
   },
   "session": {
     "checking": "Comprobando tu sesión de Claude Code…",
@@ -97,7 +98,8 @@
     "noMatchingPaths": "No cambió nada de lo que cubre ({{paths}}).",
     "invalidWorkflow": "Este workflow no puede correr.",
     "snapshotFailed": "El paso terminó, pero Keel no pudo leer lo que cambió, así que no cuenta como hecho.",
-    "brainFull": "El Brain está lleno. Retira algo primero, y luego acepta esto."
+    "brainFull": "El Brain está lleno. Retira algo primero, y luego acepta esto.",
+    "defaultWorkflowMissing": "El workflow que este proyecto usa por defecto ya no existe. Elige otro en Ajustes."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
@@ -405,7 +407,12 @@
     "envInvalid": "Esta línea debe tener la forma NOMBRE=valor: «{{line}}».",
     "setupCommand": "Comando de preparación",
     "setupCommandHint": "Instala lo que necesita el proyecto, una vez por ejecución, antes de cualquier agente. Puede llegar a internet, pero no a tu carpeta personal ni a nada más de este Mac. Aquí pueden correr scripts de tu repo.",
-    "setupCommandPlaceholder": "uv sync --frozen"
+    "setupCommandPlaceholder": "uv sync --frozen",
+    "maxAgents": "Agentes a la vez",
+    "maxAgentsHint": "Aplica a toda la app, no a cada proyecto. Con más agentes, tu plan de Claude se gasta más rápido.",
+    "defaultWorkflow": "Workflow por defecto",
+    "defaultWorkflowHint": "Lo que ejecuta una tarjeta del tablero cuando la mueves a Por hacer.",
+    "defaultWorkflowGone": "Un workflow que ya no existe"
   },
   "quit": {
     "title": "Hay pasos en curso",
@@ -545,6 +552,91 @@
     "promptHint": "El texto exacto, aquí con los secretos conocidos ocultos. La auditoría de cada paso guarda lo que recibió ese paso.",
     "staleCount_one": "1 línea puede estar desactualizada. Escribirlo de nuevo reemplaza todo el mapa.",
     "staleCount_other": "{{count}} líneas pueden estar desactualizadas. Escribirlo de nuevo reemplaza todo el mapa."
+  },
+  "board": {
+    "title": "Tablero",
+    "project": "Proyecto",
+    "noProjects": "Primero agrega un proyecto, al lanzar una ejecución.",
+    "empty": "El tablero de este proyecto está vacío. Crea una tarea o importa un issue de GitHub, y muévela a Por hacer para que empiece.",
+    "working": "Trabajando ahora, en todos los proyectos: {{working}} de {{maxAgents}}.",
+    "waiting": "Se llegó al límite, así que las tarjetas en Por hacer esperan y empiezan en orden a medida que se libera un cupo.",
+    "paused": "Por hacer está en pausa, así que nada empieza hasta que esto se resuelva.",
+    "pausedLimit": "Por hacer está en pausa porque llegaste al límite de uso de tu plan. Vuelve a empezar cuando el límite se renueve. También puedes abrir la tarjeta bloqueada en Revisión humana, en este proyecto o en otro, y elegir qué hacer.",
+    "pausedLimitUntil": "Por hacer está en pausa porque llegaste al límite de uso de tu plan. Vuelve a empezar cuando el límite se renueve ({{date}}). También puedes abrir la tarjeta bloqueada en Revisión humana, en este proyecto o en otro, y elegir qué hacer.",
+    "columns": {
+      "backlog": "Backlog",
+      "todo": "Por hacer",
+      "inProgress": "En curso",
+      "humanReview": "Revisión humana",
+      "done": "Terminado"
+    },
+    "columnEmpty": {
+      "backlog": "No hay nada. Crea una tarea o importa un issue.",
+      "todo": "Arrastra una tarjeta aquí y Keel la empieza solo.",
+      "inProgress": "No se está trabajando en nada.",
+      "humanReview": "Nada te necesita por ahora.",
+      "done": "Todavía no ha terminado nada."
+    },
+    "locked": "Keel mueve las tarjetas de esta columna.",
+    "refused": "Aquí no se pueden soltar tarjetas. Keel las mueve solo.",
+    "newTask": "Nueva tarea",
+    "importIssue": "Importar issue",
+    "moveTo": {
+      "backlog": "Mover a Backlog",
+      "todo": "Mover a Por hacer"
+    },
+    "edit": "Editar",
+    "delete": "Eliminar",
+    "openPr": "Abrir pull request",
+    "dismiss": "Cerrar",
+    "labels": {
+      "waitingApproval": "Falta tu aprobación",
+      "failed": "Falló",
+      "blocked": "Bloqueada",
+      "stalled": "Parece atascada",
+      "interrupted": "Interrumpida",
+      "stopped": "Detenida",
+      "rejected": "Rechazada",
+      "abandoned": "Abandonada",
+      "couldNotStart": "No pudo empezar"
+    },
+    "needed": {
+      "waitingApproval": "Ábrela para aprobar o rechazar.",
+      "failed": "Ábrela para intentarlo de nuevo o dejarla.",
+      "blocked": "Ábrela para ver qué la está frenando.",
+      "stalled": "Ábrela y elige qué hacer.",
+      "interrupted": "Ábrela para continuar, empezar de nuevo o dejarla.",
+      "stopped": "Ábrela para intentarlo de nuevo o dejarla."
+    },
+    "moveFailed": "«{{title}}» se quedó donde estaba. {{reason}}",
+    "cardBusy": "Keel ya empezó esta tarjeta, así que no se puede cambiar por ahora.",
+    "task": {
+      "newTitle": "Nueva tarea",
+      "editTitle": "Editar tarea",
+      "title": "Título",
+      "description": "Descripción (opcional)",
+      "create": "Crear",
+      "save": "Guardar"
+    },
+    "deleteTitle": "¿Eliminar esta tarjeta?",
+    "deleteBody": "«{{title}}» sale del tablero. En GitHub no cambia nada, y si tuvo una ejecución, sigue en tu historial.",
+    "import": {
+      "title": "Importar un issue de GitHub",
+      "hint": "Importar solo lo agrega a este tablero. En GitHub no cambia nada, y lo que luego cambie en el issue no llega a la tarjeta.",
+      "import": "Importar",
+      "imported": "Importado",
+      "noRemote": "El repo de este proyecto no está en GitHub, así que no tiene issues para importar.",
+      "noAccount": "Para ver los issues de este repo, elige qué cuenta de GitHub usa este proyecto.",
+      "close": "Cerrar"
+    },
+    "drag": {
+      "help": "Presiona Espacio para tomar esta tarjeta. Muévela con las flechas y presiona Espacio para soltarla. Escape cancela.",
+      "role": "tarjeta movible",
+      "picked": "Tomaste {{title}}.",
+      "over": "Sobre {{column}}.",
+      "dropped": "Soltaste {{title}}.",
+      "cancelled": "Movimiento cancelado. {{title}} se quedó donde estaba."
+    }
   },
   "onboarding": {
     "title": "Te damos la bienvenida a Keel",

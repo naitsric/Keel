@@ -3,7 +3,7 @@ import { create } from "zustand";
 import i18next, { type Language, systemLanguage } from "../i18n";
 import { api, type Overview, type Preflight } from "./api";
 
-export type View = { name: "home" } | { name: "run"; runId: string } | { name: "settings" } | { name: "workflows" } | { name: "brain" };
+export type View = { name: "home" } | { name: "run"; runId: string; backTo?: View } | { name: "settings" } | { name: "workflows" } | { name: "brain" } | { name: "board"; projectId?: string };
 
 interface AppState {
   view: View;

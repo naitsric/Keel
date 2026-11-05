@@ -2,6 +2,7 @@ import { useTranslation } from "react-i18next";
 import { api } from "./lib/api";
 import { useApp } from "./lib/store";
 import { Button, Modal } from "./ui/primitives";
+import { BoardView } from "./views/BoardView";
 import { BrainPage } from "./views/BrainPage";
 import { Home } from "./views/Home";
 import { NewRunDialog } from "./views/NewRunDialog";
@@ -33,10 +34,11 @@ export default function App() {
   return (
     <div className="flex h-full flex-col">
       {view.name === "home" && <Home />}
-      {view.name === "run" && <RunDetail key={view.runId} runId={view.runId} />}
+      {view.name === "run" && <RunDetail key={view.runId} runId={view.runId} backTo={view.backTo} />}
       {view.name === "settings" && <SettingsView />}
       {view.name === "workflows" && <WorkflowsView />}
       {view.name === "brain" && <BrainPage />}
+      {view.name === "board" && <BoardView initialProjectId={view.projectId} />}
       <NewRunDialog />
       <QuitDialog />
     </div>

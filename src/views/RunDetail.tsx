@@ -5,7 +5,7 @@ import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, 
 import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "../lib/audit";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
-import { useApp } from "../lib/store";
+import { useApp, type View } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
 import { ProposalRow } from "./BrainPage";
 import { TopBar } from "./TopBar";
@@ -854,7 +854,7 @@ function worstRawCheck(checks: RawCheck[]): RawCheck {
   return checks.length > 0 ? "intact" : "pending";
 }
 
-export function RunDetail({ runId }: { runId: string }) {
+export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
   const { t } = useTranslation();
   const revision = useApp((s) => s.revision);
   const [run, setRun] = useState<Run | null>(null);
@@ -905,7 +905,7 @@ export function RunDetail({ runId }: { runId: string }) {
   const files = useMemo(() => filesChangedBy(attempts), [attempts]);
 
   if (!attempt || !latest || !run) {
-    return <TopBar back />;
+    return <TopBar back={backTo ?? true} />;
   }
 
   // A step can have run several times. The list shows each attempt, then what's still ahead.
@@ -916,7 +916,7 @@ export function RunDetail({ runId }: { runId: string }) {
 
   return (
     <>
-      <TopBar back />
+      <TopBar back={backTo ?? true} />
       <main className="flex-1 space-y-4 overflow-y-auto p-5">
         <div className="flex items-start gap-3">
           <div className="min-w-0 flex-1">

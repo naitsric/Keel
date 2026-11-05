@@ -1,7 +1,7 @@
 import { Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { RunRow } from "../lib/api";
+import type { Reason, RunRow } from "../lib/api";
 import { isActive } from "../lib/api";
 import { elapsedMs, formatCost, formatDateTime, formatDuration, formatNumber, formatRelative } from "../lib/format";
 import { needsSignIn, reasonText } from "../lib/reason";
@@ -12,10 +12,24 @@ import { Button, Card, StateBadge } from "../ui/primitives";
 import { Onboarding } from "./Onboarding";
 import { TopBar } from "./TopBar";
 
+/** Why runs can't start, and the way out. `text` replaces the reason's sentence, for a screen with more to say. */
+export function BlockerNotice({ blocker, text }: { blocker: Reason; text?: string }) {
+  const { t } = useTranslation();
+  const refresh = useApp((s) => s.refreshSession);
+  return (
+    <div role="alert" className="flex flex-wrap items-center gap-2 rounded-md border border-border-strong bg-inset px-3 py-2 text-[12.5px] text-warning">
+      <span className="flex-1">{text ?? reasonText(t, blocker)}</span>
+      {needsSignIn(blocker) && <Button onClick={() => void api.openClaudeLogin()}>{t("session.signIn")}</Button>}
+      <Button variant="ghost" onClick={() => void refresh()}>
+        {t("app.refresh")}
+      </Button>
+    </div>
+  );
+}
+
 function SessionBar() {
   const { t } = useTranslation();
   const preflight = useApp((s) => s.preflight);
-  const refresh = useApp((s) => s.refreshSession);
   if (!preflight) {
     return <p className="text-[12px] text-subtle">{t("session.checking")}</p>;
   }
@@ -30,15 +44,7 @@ function SessionBar() {
       </div>
       {expiry && <p className="text-[12px] text-warning">{t(expiry === "soon" ? "session.expiresSoon" : "session.expired", { date: formatDateTime(auth?.expiresAt as string) })}</p>}
       {ignoredEnv.length > 0 && <p className="text-[12px] text-warning">{t("session.ignoredEnv", { names: ignoredEnv.join(", ") })}</p>}
-      {blocker && (
-        <div role="alert" className="flex flex-wrap items-center gap-2 rounded-md border border-border-strong bg-inset px-3 py-2 text-[12.5px] text-warning">
-          <span className="flex-1">{reasonText(t, blocker)}</span>
-          {needsSignIn(blocker) && <Button onClick={() => void api.openClaudeLogin()}>{t("session.signIn")}</Button>}
-          <Button variant="ghost" onClick={() => void refresh()}>
-            {t("app.refresh")}
-          </Button>
-        </div>
-      )}
+      {blocker && <BlockerNotice blocker={blocker} />}
     </div>
   );
 }

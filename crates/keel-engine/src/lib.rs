@@ -1,6 +1,7 @@
 //! Runs workflows. Everything happens inside the app process, without a daemon, but each agent
 //! is its own process writing to a file, so it outlives the app and can be picked up again.
 
+mod board;
 mod brain;
 mod deliver;
 mod git;
@@ -11,9 +12,11 @@ mod workflows;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+pub use board::{Board, BoardCard, BoardIssue};
 pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
 pub use git::{Git, GitError, Snapshot};
 use keel_core::{AttemptState, Reason, StepRole, StepSpec, WorkflowStep};
@@ -67,6 +70,7 @@ pub struct Config {
     pub snooze: Duration,
     /// Time to answer SIGINT before Keel escalates.
     pub stop_grace: Duration,
+    /// How many agents work at once, until a person chooses a number. Theirs is in the store.
     pub max_agents: usize,
     pub keep_awake: bool,
     /// Where git reaches GitHub. Tests point this at local repos.
@@ -116,7 +120,7 @@ impl StartRun {
     }
 }
 
-pub use prompts::request_from_issue;
+pub use prompts::{request_from_issue, title_from_issue};
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -178,6 +182,14 @@ struct Inner {
     config: Config,
     tools: Mutex<Tools>,
     on_change: Box<dyn Fn(&str) + Send + Sync>,
+    /// Gets the scheduler to look at the board. See `board::Wake`.
+    board_wake: Arc<board::Wake>,
+    /// Whether the app is on its way out. Held from taking a card until its run has its first step,
+    /// so whoever sets this knows that anything underway has finished and can be seen.
+    board_stopped: Mutex<bool>,
+    /// Why cards aren't starting, as of the scheduler's last look.
+    board_paused: Mutex<Option<Reason>>,
+    max_agents: AtomicUsize,
     slots: Mutex<Slots>,
     slot_freed: Condvar,
     controls: Mutex<HashMap<String, Control>>,
@@ -227,12 +239,24 @@ impl Engine {
         tools: Tools,
         on_change: impl Fn(&str) + Send + Sync + 'static,
     ) -> Self {
+        let max_agents = board::stored_max_agents(&store).unwrap_or(config.max_agents);
+        let board_wake = Arc::new(board::Wake::default());
+        let wake = board_wake.clone();
         Self {
             inner: Arc::new(Inner {
                 store,
                 config,
                 tools: Mutex::new(tools),
-                on_change: Box::new(on_change),
+                // This runs synchronously, per stream batch, sometimes holding `advancing` or
+                // `slots`. All it may do for the board is leave a note for the scheduler's thread.
+                on_change: Box::new(move |run_id| {
+                    wake.notify();
+                    on_change(run_id);
+                }),
+                board_wake,
+                board_stopped: Mutex::new(false),
+                board_paused: Mutex::new(None),
+                max_agents: AtomicUsize::new(max_agents),
                 slots: Mutex::default(),
                 slot_freed: Condvar::new(),
                 controls: Mutex::default(),
@@ -244,6 +268,8 @@ impl Engine {
 
     pub fn set_tools(&self, tools: Tools) {
         *locked(&self.inner.tools) = tools;
+        // Cards wait in Todo while the session can't work.
+        self.inner.board_wake.notify();
     }
 
     pub fn preflight(&self) -> Preflight {
@@ -329,6 +355,7 @@ impl Engine {
             allowed_read: Vec::new(),
             services: Vec::new(),
             env: Vec::new(),
+            default_workflow: None,
         };
         self.inner.store.add_project(&project)?;
         Ok(project)
@@ -421,10 +448,14 @@ impl Engine {
         if let Some(reason) = self.preflight().blocker {
             return Err(Error::Blocked(reason));
         }
-        workflows::validate(&request.workflow).map_err(Error::Blocked)?;
-        let project = self.inner.store.project(&request.project_id)?;
-        if request
-            .workflow
+        self.start_run_in_session(request, None)
+    }
+
+    /// Whether a project could run a workflow, leaving aside the session. Run before it starts, and
+    /// when a card asks to.
+    fn check_can_run(&self, project: &Project, workflow: &[WorkflowStep]) -> Result<()> {
+        workflows::validate(workflow).map_err(Error::Blocked)?;
+        if workflow
             .iter()
             .any(|s| matches!(s, WorkflowStep::Deliver { .. }))
         {
@@ -436,6 +467,14 @@ impl Engine {
             }
             self.gh().map_err(|_| Error::Blocked(Reason::GhMissing))?;
         }
+        Ok(())
+    }
+
+    /// `start_run`, for a caller that has already looked at the session. A run for a card is linked
+    /// to it from the moment it exists.
+    fn start_run_in_session(&self, request: StartRun, card: Option<&str>) -> Result<String> {
+        let project = self.inner.store.project(&request.project_id)?;
+        self.check_can_run(&project, &request.workflow)?;
         // Preparation always comes first, and from what's published, before any agent touches it.
         let mut workflow = request.workflow;
         if let Some(run) = project
@@ -468,7 +507,7 @@ impl Engine {
             );
         }
         let run_id = new_id();
-        self.inner.store.add_run(&NewRun {
+        let run = NewRun {
             id: run_id.clone(),
             project_id: project.id,
             title: request.title.unwrap_or_else(|| title_from(&request.request)),
@@ -478,11 +517,27 @@ impl Engine {
             source_issue: request.source_issue.as_ref().map(|issue| {
                 json!({ "number": issue.number, "title": issue.title, "author": issue.author, "url": issue.url }).to_string()
             }),
-        })?;
-        std::fs::create_dir_all(self.inner.run_dir(&run_id))?;
-        restrict_dir(&self.inner.run_dir(&run_id));
-        self.inner.advance(&run_id)?;
+        };
+        match card {
+            Some(card) => self.inner.store.add_run_for_card(&run, card)?,
+            None => self.inner.store.add_run(&run)?,
+        }
+        if let Err(error) = self.begin_run(&run_id) {
+            // Whoever asked hears that it failed. Left open with nothing recorded, it would hold a
+            // place on the board, and the next launch would start it after all.
+            let store = &self.inner.store;
+            if store.attempts_of_run(&run_id).is_ok_and(|a| a.is_empty()) {
+                let _ = store.patch_run(&run_id, &[("finished_at", Value::Text(now()))]);
+            }
+            return Err(error);
+        }
         Ok(run_id)
+    }
+
+    fn begin_run(&self, run_id: &str) -> Result<()> {
+        std::fs::create_dir_all(self.inner.run_dir(run_id))?;
+        restrict_dir(&self.inner.run_dir(run_id));
+        self.inner.advance(run_id)
     }
 
     /// Tells the app to look at this run again, for a change made outside the engine.
@@ -678,6 +733,7 @@ impl Engine {
     /// Run once at startup. Reconnects to steps that outlived the app, closes out the rest, and
     /// continues any run that stopped between two steps. Approvals simply keep waiting.
     pub fn recover(&self) -> Result<()> {
+        self.inner.store.release_claimed_cards()?;
         for attempt in self.inner.store.active_attempts()? {
             self.inner.recover_attempt(&attempt)?;
         }
@@ -757,6 +813,19 @@ impl Engine {
             &self.inner.mirror(project_id).with_file_name("workflows"),
         )?);
         Ok(all)
+    }
+
+    /// One of the workflows a project can use, in this language.
+    pub fn workflow(
+        &self,
+        project_id: &str,
+        workflow_id: &str,
+        language: &str,
+    ) -> Result<Option<Workflow>> {
+        Ok(self
+            .workflows(project_id, language)?
+            .into_iter()
+            .find(|w| w.id == workflow_id))
     }
 
     pub fn save_workflow(&self, project_id: &str, workflow: &Workflow) -> Result<Workflow> {

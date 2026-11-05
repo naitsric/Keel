@@ -11,7 +11,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
-import type { BrainNote, Attempt, AttemptState, AuditEvent, Preflight, Reason, Run, RunRow, WorkflowStep } from "../src/lib/api";
+import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, Project, Reason, Run, RunRow, WorkflowStep } from "../src/lib/api";
 import { useApp } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -234,14 +234,80 @@ const mcpOverview = () => {
   };
 };
 
+let defaultWorkflow: string | null = params.get("defaultWorkflow");
+const demoProject: Project = { id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.cargo"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }], defaultWorkflow };
+// A second project on the board, with one card, to try the selector and coming back from a run.
+const otherProject: Project = { ...demoProject, id: "p2", name: "payments", path: "/Users/you/payments", services: [], env: [], defaultWorkflow: null };
+const projects = view === "board" ? [demoProject, otherProject] : [demoProject];
+
+const PR = "https://github.com/acme/app/pull/12";
+const issueOf = (number: number, title: string) => ({ number, title, author: "someone", url: `https://github.com/acme/app/issues/${number}` });
+const boardCard = (id: string, title: string, column: BoardColumn, extra: Partial<BoardCard> = {}): BoardCard => ({ id, projectId: "p1", title, body: "", issue: null, column, position: 0, runId: null, runState: null, reason: null, prUrl: null, rejection: null, startBlocked: null, createdAt: at(100), ...extra });
+const inRun = (runState: AttemptState, reason: Reason | null = null) => ({ runId: "r1", runState, reason });
+let boardCards: BoardCard[] =
+  params.get("cards") === "none"
+    ? []
+    : [
+        boardCard("c1", "Add a dark mode to the invoices page", "backlog", { body: "It should follow the system setting." }),
+        boardCard("c2", "The add function in calc.py is wrong", "backlog", { issue: issueOf(7, "The add function in calc.py is wrong") }),
+        boardCard("c3", "Export the report as a CSV", "backlog", { startBlocked: { code: "githubAccountMissing" } }),
+        boardCard("c4", "Rename the billing module", "backlog", { startBlocked: { code: "defaultWorkflowMissing" } }),
+        boardCard("c5", "Move the cron jobs to the queue", "backlog", { ...inRun("rejected"), rejection: "Use the existing retry helper, not a new one." }),
+        boardCard("c6", "Update the onboarding copy", "backlog", { ...inRun("rejected"), rejection: "" }),
+        boardCard("c7", "Try a new charts library", "backlog", inRun("abandoned")),
+        boardCard("c8", "Log failed sign-ins", "todo"),
+        boardCard("c9", "Fix the time zone in the weekly email", "todo", { issue: issueOf(21, "Fix the time zone in the weekly email") }),
+        boardCard("c10", "Paginate the orders list", "todo"),
+        boardCard("c11", "Add a retry to the payment webhook", "inProgress", inRun("running")),
+        boardCard("c12", "Review the login form", "inProgress", inRun("queued", { code: "waitingForCapacity" })),
+        boardCard("c13", "Clean up the old feature flags", "inProgress", { runId: "r1" }),
+        boardCard("c14", "Holiday repeated in 2030", "humanReview", { ...inRun("waitingApproval"), issue: issueOf(9, "Holiday repeated in 2030") }),
+        boardCard("c15", "Speed up the search index", "humanReview", inRun("failed", { code: "checkFailed", exitCode: 1 })),
+        boardCard("c16", "Remove the legacy API routes", "humanReview", inRun("blocked", { code: "reworkLimit", rounds: 2 })),
+        boardCard("c17", "Upgrade the database driver", "humanReview", inRun("stalled", REASONS.stalled ?? null)),
+        boardCard("c18", "Add tests to the importer", "humanReview", inRun("interrupted", { code: "agentLost" })),
+        boardCard("c19", "Split the settings page", "humanReview", inRun("stopped")),
+        boardCard("c20", "Show the invoice number on the receipt", "done", { ...inRun("succeeded"), prUrl: PR }),
+        boardCard("c21", "Write the map of the project", "done", inRun("succeeded")),
+        boardCard("c22", "Rotate the payments key", "done", { ...inRun("succeeded"), projectId: "p2", prUrl: PR }),
+      ];
+// ?paused=rateLimited, or any other reason's code. ?paused=rateLimited&resets=none has no known time.
+// ?paused=none with ?session=out is a session that was bad at startup and isn't any more.
+const boardPaused = (): Reason | null => {
+  const paused = params.get("paused");
+  if (paused === "none") return null;
+  if (paused === "rateLimited") return { code: paused, resetsAt: params.get("resets") === "none" ? null : Math.floor(Date.now() / 1000) + 3 * 3600 };
+  return paused ? { code: paused } : preflight.blocker;
+};
+let maxAgents = 2;
+const issues: Issue[] = [
+  { ...issueOf(7, "The add function in calc.py is wrong"), body: "b" },
+  { ...issueOf(9, "Holiday repeated in 2030"), body: "b" },
+  { ...issueOf(30, "The dashboard takes ten seconds to load"), body: "b" },
+  { ...issueOf(31, "Typo in the password reset email"), body: "b" },
+];
+const blockedBy = (code: string) => ({ code: "blocked", reason: { code }, detail: null });
+
+// Same as the backend: the card lands at that index of the lane, and the rest close up around it.
+function moveBoardCard(cardId: string, lane: "backlog" | "todo", index: number) {
+  const card = boardCards.find((c) => c.id === cardId);
+  if (!card) return;
+  const rest = boardCards.filter((c) => c.id !== cardId);
+  const inLane = rest.filter((c) => c.column === lane);
+  const moved = { ...card, column: lane, runId: lane === "todo" ? null : card.runId, runState: lane === "todo" ? null : card.runState, reason: lane === "todo" ? null : card.reason, rejection: lane === "todo" ? null : card.rejection, startBlocked: lane === "todo" ? null : card.startBlocked };
+  inLane.splice(index, 0, moved);
+  boardCards = [...rest.filter((c) => c.column !== lane), ...inLane];
+}
+
 mockWindows("main");
 mockIPC((command, args) => {
   switch (command) {
     case "preflight":
     case "refresh_session":
-      return preflight;
+      // A new object each time, as the real answer is.
+      return { ...preflight };
     case "overview":
-      return params.get("empty") === "1" ? { pendingProposals: 0, runs: [], projects: [], totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: params.get("proposals") === "1" ? 1 : 0, runs, projects: [{ id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.cargo"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }] }], totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
+      return params.get("empty") === "1" ? { pendingProposals: 0, runs: [], projects: [], totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: params.get("proposals") === "1" ? 1 : 0, runs, projects: projects.map((p) => (p.id === "p1" ? { ...p, defaultWorkflow } : p)), totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
     case "mcp_overview":
     case "mcp_settings_save":
     case "mcp_connect_claude":
@@ -298,10 +364,51 @@ mockIPC((command, args) => {
     case "decisions_list":
       return [{ seq: 1, at: at(2000), answer: "reject", text: "Use the existing retry helper, not a new one." }];
     case "issues_list":
-      return [
-        { number: 7, title: "The add function in calc.py is wrong", author: "someone", url: "u", body: "b" },
-        { number: 9, title: "Holiday repeated in 2030", author: "other", url: "u", body: "b" },
-      ];
+      // ?issues=none, ?issues=account or ?issues=repo for the states without a list.
+      if (params.get("issues") === "account") throw blockedBy("githubAccountMissing");
+      if (params.get("issues") === "repo") throw blockedBy("noGithubRemote");
+      return params.get("issues") === "none" ? [] : issues;
+    case "board_get": {
+      const { projectId } = args as { projectId: string };
+      return { cards: boardCards.filter((c) => c.projectId === projectId), working: Number(params.get("working") ?? 2), maxAgents, defaultWorkflow, paused: boardPaused() };
+    }
+    case "card_create": {
+      const { projectId, title, body } = args as { projectId: string; title: string; body: string };
+      const id = `new-${Date.now()}`;
+      boardCards = [...boardCards, boardCard(id, title, "backlog", { projectId, body })];
+      return id;
+    }
+    case "card_import_issue": {
+      const { projectId, issue } = args as { projectId: string; issue: Issue };
+      const existing = boardCards.find((c) => c.projectId === projectId && c.issue?.number === issue.number);
+      if (existing) return existing.id;
+      const id = `issue-${issue.number}`;
+      boardCards = [...boardCards, boardCard(id, issue.title, "backlog", { projectId, issue: issueOf(issue.number, issue.title) })];
+      return id;
+    }
+    case "card_update": {
+      const { cardId, title, body } = args as { cardId: string; title: string; body: string };
+      boardCards = boardCards.map((c) => (c.id === cardId ? { ...c, title, body } : c));
+      return null;
+    }
+    case "card_move": {
+      // ?boardError=1 makes every move fail, as a project with no GitHub account would.
+      if (params.get("boardError") === "1") throw blockedBy("githubAccountMissing");
+      const { cardId, lane, index } = args as { cardId: string; lane: "backlog" | "todo"; index: number };
+      moveBoardCard(cardId, lane, index);
+      return null;
+    }
+    case "card_delete":
+      boardCards = boardCards.filter((c) => c.id !== (args as { cardId: string }).cardId);
+      return null;
+    case "max_agents_get":
+      return maxAgents;
+    case "max_agents_set":
+      maxAgents = (args as { value: number }).value;
+      return null;
+    case "project_update":
+      defaultWorkflow = (args as { settings: { defaultWorkflow: string | null } }).settings.defaultWorkflow;
+      return null;
     case "attempt_events":
       // Only one step has a log, or the run's commands would count once per step.
       return (args as { attemptId?: string } | undefined)?.attemptId === attempt.id ? events : [];
@@ -320,6 +427,7 @@ if (view === "run") useApp.setState({ view: { name: "run", runId: "r1" } });
 if (view === "settings") useApp.setState({ view: { name: "settings" } });
 if (view === "workflows") useApp.setState({ view: { name: "workflows" } });
 if (view === "brain") useApp.setState({ view: { name: "brain" } });
+if (view === "board") useApp.setState({ view: { name: "board" } });
 if (params.get("dialog") === "newRun") useApp.setState({ newRunOpen: true });
 if (params.get("dialog") === "quit") useApp.setState({ quitOpen: true });
 

@@ -47,6 +47,7 @@ fn main() {
                 allowed_read: vec![],
                 services: vec![],
                 env: vec![],
+                default_workflow: None,
             },
         )
         .unwrap();

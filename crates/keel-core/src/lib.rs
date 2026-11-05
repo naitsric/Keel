@@ -367,4 +367,377 @@ pub enum Reason {
         field: String,
         value: String,
     },
+    /// The workflow a project starts its cards with no longer exists.
+    DefaultWorkflowMissing,
+}
+
+impl Reason {
+    /// Whether a run blocked on this means any other card would end up the same way, so that
+    /// starting more would only spend the queue. `now` is in seconds, like `resets_at`. A failure
+    /// that belongs to one run or one project answers no: other cards can still get through.
+    ///
+    /// There's deliberately no catch-all, so a new reason has to be decided here.
+    pub fn stops_every_card(&self, now: i64) -> bool {
+        match self {
+            // The usage is the account's, whichever project is asking.
+            Self::RateLimited { resets_at } => resets_at.is_none_or(|at| at > now),
+            // The session itself. The preflight can't see these: it reads what's on this Mac, which
+            // can say signed in while the server refuses it.
+            Self::SessionRejected { .. } => true,
+            // Keel locks each launch down to its login and its exact tools, so getting anything else
+            // comes from the CLI or the machine, not from this run.
+            Self::UnexpectedAuth { .. } | Self::UnexpectedTools { .. } => true,
+            // A lost GitHub session stops every run at preparation. The other kinds are about one
+            // repo or one push.
+            Self::DeliveryFailed { kind, .. } => kind == "notSignedIn",
+            // Shared too, but the preflight looks at these live and lifts by itself once they're
+            // fixed. An old attempt saying so must not outlast the fix.
+            Self::ClaudeMissing
+            | Self::GitMissing
+            | Self::ClaudeLoggedOut
+            | Self::CliVersionTooOld { .. }
+            | Self::CliVersionUntested { .. } => false,
+            // Starting refuses this itself, and those cards go to the backlog, where they can be
+            // dragged again. It also only matters to workflows that deliver.
+            Self::GhMissing => false,
+            // One project: the next card of another project is fine.
+            Self::NoGithubRemote
+            | Self::GithubAccountMissing
+            | Self::ServiceFailed { .. }
+            | Self::InvalidSetting { .. }
+            | Self::InvalidWorkflow { .. }
+            | Self::DefaultWorkflowMissing => false,
+            // One run.
+            Self::Stalled { .. }
+            | Self::WaitingForProject
+            | Self::WaitingForCapacity
+            | Self::ResultError { .. }
+            | Self::ExitedWithoutResult { .. }
+            | Self::PrepareFailed { .. }
+            | Self::AgentLost
+            | Self::CheckFailed { .. }
+            | Self::SetupFailed { .. }
+            | Self::BrainFull { .. }
+            | Self::SnapshotFailed
+            | Self::NoStructuredOutput
+            | Self::ReworkLimit { .. }
+            | Self::NoMatchingPaths { .. }
+            | Self::NothingToDeliver
+            | Self::RejectionNeedsReason
+            | Self::UnsafeBranch { .. } => false,
+        }
+    }
+}
+
+/// Where a card is kept. A started card's column comes from its run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CardLane {
+    Backlog,
+    Todo,
+    Started,
+}
+
+impl CardLane {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Backlog => "backlog",
+            Self::Todo => "todo",
+            Self::Started => "started",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "backlog" => Some(Self::Backlog),
+            "todo" => Some(Self::Todo),
+            "started" => Some(Self::Started),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BoardColumn {
+    Backlog,
+    Todo,
+    InProgress,
+    HumanReview,
+    Done,
+}
+
+/// The column a card shows in. `state` is where its run stands, and is `None` until the run has
+/// an attempt. A card that has just been taken from Todo has no run yet, and is already working.
+///
+/// A run left open at a rejected or abandoned attempt won't move again: `advance` waits at anything
+/// that didn't succeed. That takes a sibling's retry, or the app dying in the middle of ending the
+/// run. A person has to look at it, and it mustn't hold a place in the queue forever.
+pub fn card_column(lane: CardLane, run_finished: bool, state: Option<AttemptState>) -> BoardColumn {
+    use AttemptState::{
+        Abandoned, Blocked, Failed, Interrupted, Rejected, Stalled, Stopped, WaitingApproval,
+    };
+    match lane {
+        CardLane::Backlog => BoardColumn::Backlog,
+        CardLane::Todo => BoardColumn::Todo,
+        CardLane::Started => match (run_finished, state) {
+            (true, Some(Rejected | Abandoned)) => BoardColumn::Backlog,
+            (true, _) => BoardColumn::Done,
+            (
+                false,
+                Some(
+                    WaitingApproval | Blocked | Stalled | Failed | Stopped | Interrupted | Rejected
+                    | Abandoned,
+                ),
+            ) => BoardColumn::HumanReview,
+            (false, _) => BoardColumn::InProgress,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use AttemptState::*;
+    use BoardColumn::{Backlog as InBacklog, Done, HumanReview, InProgress, Todo as InTodo};
+
+    /// Every state, with the run open and then finished.
+    const STARTED: [(AttemptState, BoardColumn, BoardColumn); 13] = [
+        (Queued, InProgress, Done),
+        (Preparing, InProgress, Done),
+        (Running, InProgress, Done),
+        (Stalled, HumanReview, Done),
+        (Succeeded, InProgress, Done),
+        (Failed, HumanReview, Done),
+        (Stopped, HumanReview, Done),
+        (Interrupted, HumanReview, Done),
+        (Blocked, HumanReview, Done),
+        (WaitingApproval, HumanReview, Done),
+        (Rejected, HumanReview, InBacklog),
+        (Skipped, InProgress, Done),
+        (Abandoned, HumanReview, InBacklog),
+    ];
+
+    #[test]
+    fn a_started_card_follows_its_run() {
+        for (state, open, finished) in STARTED {
+            assert_eq!(
+                card_column(CardLane::Started, false, Some(state)),
+                open,
+                "{state:?} with the run open"
+            );
+            assert_eq!(
+                card_column(CardLane::Started, true, Some(state)),
+                finished,
+                "{state:?} with the run finished"
+            );
+        }
+    }
+
+    #[test]
+    fn the_table_above_has_every_state() {
+        let states: Vec<&str> = STARTED.iter().map(|(s, _, _)| s.as_str()).collect();
+        for state in &states {
+            let parsed = AttemptState::parse(state).unwrap();
+            // Adding a state stops this compiling until it's in the table.
+            match parsed {
+                Queued | Preparing | Running | Stalled | Succeeded | Failed | Stopped
+                | Interrupted | Blocked | WaitingApproval | Rejected | Skipped | Abandoned => {}
+            }
+        }
+        let mut unique = states.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), STARTED.len());
+    }
+
+    #[test]
+    fn a_started_card_without_a_run_or_an_attempt_is_working() {
+        assert_eq!(card_column(CardLane::Started, false, None), InProgress);
+        assert_eq!(card_column(CardLane::Started, true, None), Done);
+    }
+
+    #[test]
+    fn a_card_that_has_not_started_ignores_any_old_run() {
+        for state in [None, Some(Running), Some(Failed), Some(Rejected)] {
+            for finished in [false, true] {
+                assert_eq!(card_column(CardLane::Backlog, finished, state), InBacklog);
+                assert_eq!(card_column(CardLane::Todo, finished, state), InTodo);
+            }
+        }
+    }
+
+    fn delivery(kind: &str) -> Reason {
+        Reason::DeliveryFailed {
+            kind: kind.into(),
+            detail: String::new(),
+        }
+    }
+
+    /// Every reason, with whether it stops every card. `NOW` is well before the reset below.
+    fn stopping_table() -> Vec<(Reason, bool)> {
+        let text = String::new;
+        vec![
+            (Reason::ClaudeMissing, false),
+            (Reason::GitMissing, false),
+            (Reason::ClaudeLoggedOut, false),
+            (
+                Reason::CliVersionTooOld {
+                    found: text(),
+                    minimum: text(),
+                },
+                false,
+            ),
+            (
+                Reason::CliVersionUntested {
+                    found: text(),
+                    below: text(),
+                },
+                false,
+            ),
+            (Reason::UnexpectedAuth { source: text() }, true),
+            (
+                Reason::UnexpectedTools {
+                    expected: vec![],
+                    found: vec![],
+                },
+                true,
+            ),
+            (Reason::SessionRejected { detail: text() }, true),
+            (Reason::RateLimited { resets_at: None }, true),
+            (
+                Reason::Stalled {
+                    command: None,
+                    pid: None,
+                    minutes: 1,
+                    cpu_percent: 0.0,
+                },
+                false,
+            ),
+            (Reason::WaitingForProject, false),
+            (Reason::WaitingForCapacity, false),
+            (
+                Reason::ResultError {
+                    subtype: text(),
+                    detail: text(),
+                },
+                false,
+            ),
+            (Reason::ExitedWithoutResult { exit_code: None }, false),
+            (Reason::PrepareFailed { detail: text() }, false),
+            (Reason::AgentLost, false),
+            (Reason::CheckFailed { exit_code: None }, false),
+            (Reason::SetupFailed { exit_code: None }, false),
+            (Reason::BrainFull { used: 1, limit: 1 }, false),
+            (Reason::SnapshotFailed, false),
+            (Reason::NoStructuredOutput, false),
+            (Reason::ReworkLimit { rounds: 1 }, false),
+            (Reason::NoMatchingPaths { paths: vec![] }, false),
+            (
+                Reason::InvalidWorkflow {
+                    problem: text(),
+                    step: text(),
+                },
+                false,
+            ),
+            (Reason::NoGithubRemote, false),
+            (Reason::GithubAccountMissing, false),
+            (Reason::GhMissing, false),
+            (delivery("notSignedIn"), true),
+            (delivery("noPermission"), false),
+            (delivery("sso"), false),
+            (delivery("repoRules"), false),
+            (delivery("signedCommits"), false),
+            (delivery("workflowScope"), false),
+            (delivery("other"), false),
+            (Reason::NothingToDeliver, false),
+            (Reason::RejectionNeedsReason, false),
+            (Reason::UnsafeBranch { branch: text() }, false),
+            (
+                Reason::ServiceFailed {
+                    name: text(),
+                    detail: text(),
+                },
+                false,
+            ),
+            (
+                Reason::InvalidSetting {
+                    field: text(),
+                    value: text(),
+                },
+                false,
+            ),
+            (Reason::DefaultWorkflowMissing, false),
+        ]
+    }
+
+    /// Its place in the table. Adding a reason stops this compiling until it has a row.
+    fn stopping_row(reason: &Reason) -> usize {
+        match reason {
+            Reason::ClaudeMissing => 0,
+            Reason::GitMissing => 1,
+            Reason::ClaudeLoggedOut => 2,
+            Reason::CliVersionTooOld { .. } => 3,
+            Reason::CliVersionUntested { .. } => 4,
+            Reason::UnexpectedAuth { .. } => 5,
+            Reason::UnexpectedTools { .. } => 6,
+            Reason::SessionRejected { .. } => 7,
+            Reason::RateLimited { .. } => 8,
+            Reason::Stalled { .. } => 9,
+            Reason::WaitingForProject => 10,
+            Reason::WaitingForCapacity => 11,
+            Reason::ResultError { .. } => 12,
+            Reason::ExitedWithoutResult { .. } => 13,
+            Reason::PrepareFailed { .. } => 14,
+            Reason::AgentLost => 15,
+            Reason::CheckFailed { .. } => 16,
+            Reason::SetupFailed { .. } => 17,
+            Reason::BrainFull { .. } => 18,
+            Reason::SnapshotFailed => 19,
+            Reason::NoStructuredOutput => 20,
+            Reason::ReworkLimit { .. } => 21,
+            Reason::NoMatchingPaths { .. } => 22,
+            Reason::InvalidWorkflow { .. } => 23,
+            Reason::NoGithubRemote => 24,
+            Reason::GithubAccountMissing => 25,
+            Reason::GhMissing => 26,
+            Reason::DeliveryFailed { .. } => 27,
+            Reason::NothingToDeliver => 28,
+            Reason::RejectionNeedsReason => 29,
+            Reason::UnsafeBranch { .. } => 30,
+            Reason::ServiceFailed { .. } => 31,
+            Reason::InvalidSetting { .. } => 32,
+            Reason::DefaultWorkflowMissing => 33,
+        }
+    }
+
+    #[test]
+    fn every_reason_has_decided_whether_it_stops_every_card() {
+        const NOW: i64 = 1_000;
+        let table = stopping_table();
+        for (reason, stops) in &table {
+            assert_eq!(reason.stops_every_card(NOW), *stops, "{reason:?}");
+        }
+        let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        assert_eq!(rows, (0..=33).collect::<Vec<_>>(), "a row for each reason");
+    }
+
+    #[test]
+    fn a_usage_limit_with_a_known_reset_stops_cards_until_then() {
+        let limit = |resets_at| Reason::RateLimited { resets_at };
+        assert!(limit(None).stops_every_card(1_000), "nobody knows when");
+        assert!(limit(Some(1_001)).stops_every_card(1_000));
+        assert!(!limit(Some(1_000)).stops_every_card(1_000));
+        assert!(!limit(Some(999)).stops_every_card(1_000));
+    }
+
+    #[test]
+    fn a_lane_reads_back_as_itself() {
+        for lane in [CardLane::Backlog, CardLane::Todo, CardLane::Started] {
+            assert_eq!(CardLane::parse(lane.as_str()), Some(lane));
+        }
+        assert_eq!(CardLane::parse("inProgress"), None);
+    }
 }
