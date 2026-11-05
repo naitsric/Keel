@@ -103,11 +103,17 @@ fn note_line(note: &BrainNote, stale: bool) -> String {
     }
 }
 
+/// Says who said it and about what. A bare "(reject): keep a docstring" reads as a person rejecting
+/// the docstring, and a real agent did the opposite of what was asked because of it.
 fn decision_line(decision: &Decision) -> String {
+    let about = if decision.answer == "reject" {
+        "rejected a change and said"
+    } else {
+        "approved a change and said"
+    };
     format!(
-        "- {} ({}): {}\n",
+        "- On {}, a person {about}: {}\n",
         decision.at.get(..10).unwrap_or(&decision.at),
-        decision.answer,
         decision.text.trim()
     )
 }
@@ -163,7 +169,7 @@ pub fn block(decisions: &[Decision], notes: &[BrainNote], stale: &HashSet<i64>) 
     }
     let mut text = String::from("\n# What Keel knows about this project\n");
     if !decision_lines.is_empty() {
-        text.push_str("\n## Decisions people made about this project\n\nFollow these.\n\n");
+        text.push_str("\n## Decisions people made about this project\n\nWhat they said is what they want, also when they said it while rejecting a change. Follow it.\n\n");
         text.push_str(&decision_lines.concat());
     }
     if !learned.is_empty() {
@@ -609,6 +615,22 @@ mod tests {
             text: text.into(),
             retired: false,
         }
+    }
+
+    #[test]
+    fn a_rejection_reason_reads_as_what_the_person_wants() {
+        let mut rejected = decision(1, "Keep a docstring on average");
+        rejected.answer = "reject".into();
+        let text = block(
+            &[rejected, decision(2, "Keep it small")],
+            &[],
+            &HashSet::new(),
+        )
+        .text;
+        assert!(text.contains("a person rejected a change and said: Keep a docstring on average"));
+        assert!(text.contains("a person approved a change and said: Keep it small"));
+        assert!(text.contains("also when they said it while rejecting a change"));
+        assert!(!text.contains("(reject)"));
     }
 
     #[test]
