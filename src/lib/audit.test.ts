@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuditEvent } from "./api";
-import { accountsOf, activityFrom, approvalOutcome, commandsFrom, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, approvalOutcome, commandsFrom, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, stillGoing, toolSummary, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -205,5 +205,35 @@ describe("a run with several steps", () => {
     expect(focusAttempt([delivered, { stepId: "learn", state: "running", role: "learner" }])?.stepId).toBe("learn");
     const alone = { stepId: "learn", state: "failed", role: "learner" };
     expect(focusAttempt([alone])).toBe(alone);
+  });
+});
+
+describe("stillGoing", () => {
+  const open = { finishedAt: null };
+
+  it("is true while something works, between two steps, and through a stall", () => {
+    expect(stillGoing(open, [{ stepId: "a", state: "running" }])).toBe(true);
+    expect(stillGoing(open, [{ stepId: "a", state: "succeeded" }])).toBe(true);
+    expect(stillGoing(open, [{ stepId: "a", state: "stalled" }])).toBe(true);
+  });
+
+  it("is false once a person has to answer, or the run ended", () => {
+    for (const state of ["waitingApproval", "blocked", "interrupted", "failed", "stopped", "rejected"]) {
+      expect(stillGoing(open, [{ stepId: "a", state }])).toBe(false);
+    }
+    expect(stillGoing({ finishedAt: "2026-01-01T00:00:00Z" }, [{ stepId: "a", state: "running" }])).toBe(false);
+  });
+
+  it("looks at each step's latest attempt, so a retry that's running counts as going", () => {
+    expect(stillGoing(open, [{ stepId: "a", state: "failed" }, { stepId: "a", state: "running" }])).toBe(true);
+  });
+
+  it("isn't held by a reviewer's sibling finishing, but is by one that fails", () => {
+    expect(stillGoing(open, [{ stepId: "a", state: "succeeded" }, { stepId: "b", state: "running" }])).toBe(true);
+    expect(stillGoing(open, [{ stepId: "a", state: "failed" }, { stepId: "b", state: "running" }])).toBe(false);
+  });
+
+  it("doesn't count proposals that failed: they're a bonus", () => {
+    expect(stillGoing(open, [{ stepId: "learn", state: "failed", role: "learner" }])).toBe(true);
   });
 });

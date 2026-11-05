@@ -148,6 +148,15 @@ export function latestOfEachStep<T extends { stepId: string }>(attempts: T[]): T
 const NEEDS_A_PERSON = ["waitingApproval", "stalled", "blocked", "interrupted", "failed", "stopped", "rejected"];
 const WORKING = ["running", "preparing", "queued"];
 
+/**
+ * Still moving on its own: nothing ended it and nothing holds it until a person answers.
+ * Between two steps nothing is working yet, and a stalled step can wake up by itself: neither should rearrange a page.
+ */
+export function stillGoing(run: { finishedAt: string | null }, attempts: { stepId: string; state: string; role?: string }[]): boolean {
+  if (run.finishedAt) return false;
+  return !latestOfEachStep(attempts).some((a) => a.state !== "stalled" && a.role !== "learner" && NEEDS_A_PERSON.includes(a.state));
+}
+
 /** The step the run is about right now: whatever needs a person, then whatever is working. */
 export function focusAttempt<T extends { stepId: string; state: string; role?: string }>(attempts: T[]): T | undefined {
   const current = latestOfEachStep(attempts);

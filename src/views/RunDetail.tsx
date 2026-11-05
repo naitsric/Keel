@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck, type Run } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows, stillGoing } from "../lib/audit";
 import { attemptChoices, type FlowNode, flowOf, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
@@ -986,6 +986,14 @@ export function RunDetail({ runId }: { runId: string }) {
   const shownTab: Tab = kindTabs.includes(tab) ? tab : kindTabs[0];
   // Of the attempt on show, which may be an earlier one than the node's own.
   const shownModel = attempt?.kind === "agent" ? (attempt.modelActual ?? attempt.modelRequested) : shownNode?.model;
+  // While it runs there's little to say yet, so the flow comes first. The summary moves, not the flow, so the flow keeps its focus and scroll.
+  const going = stillGoing(run, attempts);
+  const outcome = (
+    <>
+      <Summary run={run} attempts={attempts} current={latest} commands={allCommands} rawCheck={rawCheck} onShowChanges={showChanges} />
+      <ReviewsCard attempts={attempts} round={run.round} />
+    </>
+  );
 
   return (
     <>
@@ -1020,8 +1028,7 @@ export function RunDetail({ runId }: { runId: string }) {
         ) : (
           <>
             <Actions attempt={latest} onError={setError} />
-            <Summary run={run} attempts={attempts} current={latest} commands={allCommands} rawCheck={rawCheck} onShowChanges={showChanges} />
-            <ReviewsCard attempts={attempts} round={run.round} />
+            {!going && outcome}
           </>
         )}
         <ProposalsCard runId={runId} revision={revision} />
@@ -1076,6 +1083,7 @@ export function RunDetail({ runId }: { runId: string }) {
             <p className="text-[12.5px] text-subtle">{t("flow.notStarted")}</p>
           )}
         </Card>
+        {going && outcome}
       </main>
     </>
   );

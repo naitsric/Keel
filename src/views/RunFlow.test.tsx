@@ -187,6 +187,61 @@ describe("the run page's flow", () => {
     });
   });
 
+  describe("what comes first", () => {
+    const summary = () => [...document.querySelectorAll("*")].find((e) => e.children.length === 0 && e.textContent === "What it did") as Element;
+    const flowIsFirst = () => Boolean(node("spec").compareDocumentPosition(summary()) & Node.DOCUMENT_POSITION_FOLLOWING);
+
+    it("is the flow and its detail while the run is going", async () => {
+      attempts = [...built(), attempt("check", "running", { kind: "check", tools: "check" })];
+      await open();
+      expect(flowIsFirst()).toBe(true);
+    });
+
+    it("stays the flow between two steps, and while a step is stalled", async () => {
+      attempts = built();
+      await open();
+      expect(flowIsFirst()).toBe(true);
+      await update([...built(), attempt("check", "stalled", { kind: "check", tools: "check" })]);
+      expect(flowIsFirst()).toBe(true);
+    });
+
+    it("is what happened, once the run ended or needs the person", async () => {
+      attempts = built();
+      await open();
+      for (const state of ["failed", "blocked", "stopped", "interrupted"] as AttemptState[]) {
+        await update(built());
+        expect(flowIsFirst()).toBe(true);
+        await update([...built(), attempt("check", state, { kind: "check", tools: "check" })]);
+        expect(flowIsFirst()).toBe(false);
+      }
+      await update(built());
+      expect(flowIsFirst()).toBe(true);
+      run = { ...run, finishedAt: "2026-01-01T00:10:00Z" };
+      await update();
+      expect(flowIsFirst()).toBe(false);
+    });
+
+    it("is the approval card when it asks, with the flow right below", async () => {
+      attempts = [...built(), human()];
+      await open();
+      expect(note()?.compareDocumentPosition(node("human")) ?? 0).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+      // The card says what it did itself. The summary would say it twice.
+      expect(page().split("What it did").length - 1).toBe(1);
+    });
+
+    it("doesn't take the flow away from whoever is on it when the run ends", async () => {
+      attempts = [...built(), attempt("check", "running", { kind: "check", tools: "check" })];
+      await open();
+      const before = node("builder");
+      act(() => before.focus());
+      run = { ...run, finishedAt: "2026-01-01T00:10:00Z" };
+      await update([...built(), attempt("check", "succeeded", { kind: "check", tools: "check" })]);
+      expect(node("builder")).toBe(before);
+      expect(document.activeElement).toBe(before);
+      expect(flowIsFirst()).toBe(false);
+    });
+  });
+
   describe("nothing about an attempt becomes unreachable", () => {
     const rounds = () => {
       const first = attempt("builder", "succeeded", { prompt: "Round one prompt" });
