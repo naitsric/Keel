@@ -27,10 +27,13 @@ describe("the approval card", () => {
   let root: Root;
   let answers: unknown[];
   let addsSecret: boolean;
+  let answerFails: boolean;
 
-  const show = (attempts: Attempt[], files: string[], workflow: unknown[] = deliverNext, commands: CommandRun[] = []) => {
-    act(() => root.render(<ApprovalCard attempt={human} run={runWith(workflow)} attempts={attempts} files={files} commands={commands} rawCheck="intact" onShowChanges={() => {}} onError={() => {}} />));
+  const show = (attempts: Attempt[], files: string[], workflow: unknown[] = deliverNext, commands: CommandRun[] = [], asked: Attempt = human) => {
+    act(() => root.render(<ApprovalCard attempt={asked} run={runWith(workflow)} attempts={attempts} files={files} commands={commands} rawCheck="intact" onShowChanges={() => {}} onError={() => {}} />));
   };
+  const textarea = () => document.querySelector("textarea") as HTMLTextAreaElement;
+  const settle = () => act(() => vi.advanceTimersByTimeAsync(0));
   const button = (text: string) => [...document.querySelectorAll("button")].find((b) => b.textContent === text);
   const press = (text: string) => act(() => button(text)?.click());
   const page = () => document.body.textContent ?? "";
@@ -47,12 +50,16 @@ describe("the approval card", () => {
     await i18next.changeLanguage("en");
     answers = [];
     addsSecret = false;
+    answerFails = false;
     mockIPC((command, args) => {
-      if (command === "approval_answer") answers.push(args);
+      if (command === "approval_answer") {
+        if (answerFails) throw { code: "invalidState", reason: null, detail: null };
+        answers.push(args);
+      }
       if (command === "run_adds_secret") return addsSecret;
       return null;
     });
-    useApp.setState({ overview: { ...useApp.getState().overview, projects: [{ id: "p1", githubRepo: "acme/app", githubAccount: "you-work" }] as never } });
+    useApp.setState({ approvalDrafts: {}, overview: { ...useApp.getState().overview, projects: [{ id: "p1", githubRepo: "acme/app", githubAccount: "you-work" }] as never } });
     const container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -149,6 +156,67 @@ describe("the approval card", () => {
     act(() => button("Approve and open a draft")?.dispatchEvent(enter));
     expect(enter.defaultPrevented).toBe(true);
     expect(answers).toEqual([]);
+  });
+
+  it("never rejects on Enter either", () => {
+    show([builder(["calc.py"]), human], ["calc.py"]);
+    write("Use the retry helper.");
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    act(() => button("Reject")?.dispatchEvent(enter));
+    expect(enter.defaultPrevented).toBe(true);
+  });
+
+  it("never closes an empty run on Enter, though the focus starts on that button", () => {
+    show([builder([], "I changed nothing."), human], []);
+    expect(document.activeElement).toBe(button("Close this run"));
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    act(() => button("Close this run")?.dispatchEvent(enter));
+    expect(enter.defaultPrevented).toBe(true);
+  });
+
+  describe("the note", () => {
+    const leave = () => act(() => root.render(null));
+
+    it("survives leaving the page and coming back", () => {
+      show([builder(["calc.py"]), human], ["calc.py"]);
+      write("Use the retry helper.");
+      leave();
+      show([builder(["calc.py"]), human], ["calc.py"]);
+      expect(textarea().value).toBe("Use the retry helper.");
+      expect(button("Reject")?.disabled).toBe(false);
+    });
+
+    it("belongs to its attempt", () => {
+      show([builder(["calc.py"]), human], ["calc.py"]);
+      write("Use the retry helper.");
+      leave();
+      const other = { ...human, id: "other" };
+      show([builder(["calc.py"]), other], ["calc.py"], deliverNext, [], other);
+      expect(textarea().value).toBe("");
+      expect(button("Reject")?.disabled).toBe(true);
+    });
+
+    it("is gone once the attempt is answered", async () => {
+      show([builder(["calc.py"]), human], ["calc.py"]);
+      write("Use the retry helper.");
+      press("Reject");
+      await settle();
+      expect(answers).toEqual([{ attemptId: "human", approve: false, text: "Use the retry helper." }]);
+      expect(useApp.getState().approvalDrafts).toEqual({});
+      // The card is still there until the backend reports the change, and it doesn't blink empty.
+      expect(textarea().value).toBe("Use the retry helper.");
+    });
+
+    it("stays when answering fails, ready to try again", async () => {
+      answerFails = true;
+      show([builder(["calc.py"]), human], ["calc.py"]);
+      write("Use the retry helper.");
+      press("Reject");
+      await settle();
+      expect(useApp.getState().approvalDrafts).toEqual({ human: "Use the retry helper." });
+      expect(textarea().value).toBe("Use the retry helper.");
+      expect(button("Reject")?.disabled).toBe(false);
+    });
   });
 
   it("says what's being approved and where it goes", () => {

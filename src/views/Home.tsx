@@ -1,6 +1,7 @@
 import { Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { KEYS, withKey } from "../commands/keys";
 import type { Reason, RunRow } from "../lib/api";
 import { isActive } from "../lib/api";
 import { elapsedMs, formatCost, formatDateTime, formatDuration, formatNumber, formatRelative } from "../lib/format";
@@ -127,7 +128,7 @@ export function Home() {
     <>
       <TopBar>
         {!isNew && (
-          <Button variant="primary" onClick={() => setNewRunOpen(true)}>
+          <Button variant="primary" title={withKey(t("app.newRun"), KEYS.newRun)} onClick={() => setNewRunOpen(true)}>
             <Plus size={14} />
             {t("app.newRun")}
           </Button>

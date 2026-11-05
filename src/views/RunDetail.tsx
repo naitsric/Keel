@@ -1,6 +1,8 @@
 import { AlertTriangle, Check, ExternalLink, FileDiff, GitPullRequest, Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useRunCommands } from "../commands/pageCommands";
+import { useSearchEverywhere } from "../commands/SearchEverywhere";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck, type Run } from "../lib/api";
 import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, flatSteps, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows } from "../lib/audit";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -202,15 +204,24 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
 
 const SHOWN_FILES = 5;
 
+/** Enter is what opens a run from the palette, so a second one must not answer it. A click or Space does. */
+const ignoreEnter = (e: React.KeyboardEvent) => {
+  if (e.key === "Enter") e.preventDefault();
+};
+
 /**
  * What's being decided, in one place, so nobody has to scroll to find out. Rejecting takes a reason,
- * so the focus starts on the note, where Enter only adds a line. Enter never approves, and approve
+ * so the focus starts on the note, where Enter only adds a line. Enter never answers, and approve
  * arms after a moment.
  */
 export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck, onShowChanges, onError }: { attempt: Attempt; run: Run; attempts: Attempt[]; files: string[]; commands: CommandRun[]; rawCheck: RawCheck; onShowChanges: () => void; onError: (message: string) => void }) {
   const { t } = useTranslation();
   const project = useApp((s) => s.overview.projects.find((p) => p.id === run.projectId));
-  const [note, setNote] = useState("");
+  const draft = useApp((s) => s.approvalDrafts[attempt.id] ?? "");
+  const setDraft = useApp((s) => s.setApprovalDraft);
+  // What was sent stays on the card until the card goes, instead of blinking empty.
+  const [sent, setSent] = useState<string | null>(null);
+  const note = sent ?? draft;
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [reading, setReading] = useState<"explanation" | "reviews" | null>(null);
@@ -229,10 +240,15 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
     arm();
     window.addEventListener("focus", arm);
     window.addEventListener("blur", disarm);
+    // The palette's overlay covers the card, and a second click on it would land here once it's gone.
+    const unwatchPalette = useSearchEverywhere.subscribe((palette, before) => {
+      if (palette.open !== before.open) (palette.open ? disarm : arm)();
+    });
     return () => {
       clearTimeout(timer);
       window.removeEventListener("focus", arm);
       window.removeEventListener("blur", disarm);
+      unwatchPalette();
     };
   }, []);
   // Masking only hides a secret here. Approving would still push it with the branch.
@@ -251,10 +267,15 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   }, [run.id, changesSomething]);
   const answer = (approve: boolean) => {
     setBusy(true);
-    api.approvalAnswer(attempt.id, approve, note).catch((e) => {
-      setBusy(false);
-      onError(errorText(t, e));
-    });
+    setSent(note);
+    api.approvalAnswer(attempt.id, approve, note).then(
+      () => setDraft(attempt.id, ""),
+      (e) => {
+        setBusy(false);
+        setSent(null);
+        onError(errorText(t, e));
+      },
+    );
   };
 
   const outcome = approvalOutcome(run.workflow, attempt.stepId, files);
@@ -355,7 +376,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
       )}
       {empty ? (
         <div className="mt-3 border-t border-border pt-3">
-          <Button autoFocus variant="primary" disabled={busy} onClick={() => answer(false)}>
+          <Button autoFocus variant="primary" disabled={busy} onKeyDown={ignoreEnter} onClick={() => answer(false)}>
             {t("run.approvalClose")}
           </Button>
           <p className="mt-1 text-[11.5px] text-muted">{t("run.approvalCloseHint")}</p>
@@ -364,12 +385,12 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
         <>
           <div className="mt-2 border-t border-border pt-3">
             <Field label={t("run.approvalNote")} hint={delivers ? `${t("run.approvalNoteHint")} ${t("run.approvalNotePrHint")}` : t("run.approvalNoteHint")}>
-              <textarea autoFocus rows={2} value={note} onChange={(e) => setNote(e.target.value)} className={`${inputClass} resize-y`} />
+              <textarea autoFocus rows={2} value={note} onChange={(e) => setDraft(attempt.id, e.target.value)} className={`${inputClass} resize-y`} />
             </Field>
           </div>
           <div className="mt-3 grid grid-cols-2 gap-4">
             <div>
-              <Button disabled={busy || !note.trim()} onClick={() => answer(false)}>
+              <Button disabled={busy || !note.trim()} onKeyDown={ignoreEnter} onClick={() => answer(false)}>
                 {t("run.reject")}
               </Button>
               <p className="mt-1 text-[11.5px] text-muted">{t("run.approvalRejectHint")}</p>
@@ -379,9 +400,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
               <Button
                 variant="primary"
                 disabled={!armed || busy}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") e.preventDefault();
-                }}
+                onKeyDown={ignoreEnter}
                 onClick={() => answer(true)}
               >
                 {outcome === "delivers" && <GitPullRequest size={14} />}
@@ -923,6 +942,12 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
   const allCommands = useMemo(() => attempts.flatMap((a) => commandsFrom(eventsByAttempt[a.id] ?? [])), [attempts, eventsByAttempt]);
   const rawCheck = worstRawCheck(Object.values(rawChecks));
   const files = useMemo(() => filesChangedBy(attempts), [attempts]);
+  const showChanges = () => void api.runDiff(runId).then(setRunDiff);
+
+  useRunCommands({
+    showChanges: files.length > 0 ? showChanges : null,
+    stopStep: latest && isActive(latest.state) ? () => void api.attemptStop(latest.id).catch((e) => setError(errorText(t, e))) : null,
+  });
 
   if (!attempt || !latest || !run) {
     return <TopBar back={backTo ?? true} />;
@@ -932,7 +957,6 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
   const pending = flatSteps(run?.workflow ?? []).filter((step) => !attempts.some((a) => a.stepId === step.id));
   const kindTabs: Tab[] = attempt.state === "skipped" ? ["activity", "prompt"] : attempt.kind === "agent" ? ["activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
   const shownTab: Tab = kindTabs.includes(tab) ? tab : kindTabs[0];
-  const showChanges = () => void api.runDiff(runId).then(setRunDiff);
 
   return (
     <>
@@ -964,7 +988,7 @@ export function RunDetail({ runId, backTo }: { runId: string; backTo?: View }) {
           </p>
         )}
         {latest.state === "waitingApproval" ? (
-          <ApprovalCard attempt={latest} run={run} attempts={attempts} files={files} commands={allCommands} rawCheck={rawCheck} onShowChanges={showChanges} onError={setError} />
+          <ApprovalCard key={latest.id} attempt={latest} run={run} attempts={attempts} files={files} commands={allCommands} rawCheck={rawCheck} onShowChanges={showChanges} onError={setError} />
         ) : (
           <>
             <Actions attempt={latest} onError={setError} />
