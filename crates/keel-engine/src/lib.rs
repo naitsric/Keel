@@ -21,7 +21,7 @@ pub use board::{Board, BoardCard, BoardIssue};
 pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
 pub use detect::Guess;
 pub use git::{Git, GitError, Snapshot};
-use keel_core::{AttemptState, Reason, StepRole, StepSpec, WorkflowStep};
+use keel_core::{AttemptState, CardLane, Reason, StepRole, StepSpec, WorkflowStep};
 use keel_harness::auth::{self, AuthStatus, VersionCheck};
 use keel_harness::github::{self, Account, Gh, GhError, Issue, RepoInfo};
 use keel_harness::process::{self, SIGINT, SIGTERM};
@@ -421,7 +421,12 @@ impl Engine {
             } else {
                 AddOutcome::Existing
             };
-            return Ok((self.refresh_repo(&existing.id)?, outcome));
+            let project = self.refresh_repo(&existing.id)?;
+            if outcome == AddOutcome::Restored {
+                // Cards it had in Todo were asked to start, and the board should look again.
+                self.inner.changed("");
+            }
+            return Ok((project, outcome));
         }
         let name = root
             .file_name()
@@ -530,8 +535,9 @@ impl Engine {
         )
     }
 
-    /// Hides a project from Keel. Deletes nothing, here or in its folder. Not while a run of its
-    /// hasn't finished, since that run would go on with no project anyone can see.
+    /// Hides a project from Keel. Deletes nothing, here or in its folder, and its cards stay where
+    /// they are, starting nothing until it's added again. Not while a run of its hasn't finished,
+    /// since that run would go on with no project anyone can see.
     pub fn remove_project(&self, id: &str) -> Result<()> {
         let store = &self.inner.store;
         store.project(id)?;
@@ -539,11 +545,23 @@ impl Engine {
             return Ok(());
         }
         let open = store.open_runs_of_project(id)?;
-        match open.first() {
-            Some(run) => Err(Error::Blocked(Reason::ProjectHasOpenRuns {
+        if let Some(run) = open.first() {
+            return Err(Error::Blocked(Reason::ProjectHasOpenRuns {
                 count: open.len(),
                 run_id: run.id.clone(),
                 title: run.title.clone(),
+            }));
+        }
+        // A card being started right now has no run to point at yet.
+        let starting = store
+            .cards(id)?
+            .into_iter()
+            .find(|card| card.lane == CardLane::Started && card.run_id.is_none());
+        match starting {
+            Some(card) => Err(Error::Blocked(Reason::ProjectHasOpenRuns {
+                count: 1,
+                run_id: String::new(),
+                title: card.title,
             })),
             None => Ok(()),
         }

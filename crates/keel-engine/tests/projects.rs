@@ -7,8 +7,8 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use keel_core::{Reason, WorkflowStep};
-use keel_engine::{AddOutcome, Config, Engine, Error, MapStart, StartRun};
+use keel_core::{BoardColumn, CardLane, Reason, WorkflowStep};
+use keel_engine::{AddOutcome, Config, Engine, Error, MapStart, StartRun, Workflow};
 use keel_harness::Tools;
 use keel_store::{Attempt, NewBrainNote, ProjectSettings, Store};
 
@@ -691,4 +691,167 @@ fn a_new_project_at_another_path_is_another_project() {
     assert_ne!(added.project.id, id);
     assert!(w.store.project_is_removed(&id).unwrap());
     assert_eq!(w.store.projects().unwrap().len(), 1);
+}
+
+/// Cards that start something quick, by way of a check, so no model is involved.
+fn with_cards(w: &World, id: &str, steps: Vec<WorkflowStep>) {
+    let workflow = w
+        .engine
+        .save_workflow(
+            id,
+            &Workflow {
+                id: String::new(),
+                name: "For cards".into(),
+                steps,
+                builtin: false,
+            },
+        )
+        .unwrap()
+        .id;
+    w.engine
+        .update_project(
+            id,
+            &ProjectSettings {
+                default_workflow: Some(workflow),
+                ..ProjectSettings::default()
+            },
+        )
+        .unwrap();
+}
+
+fn column(w: &World, card: &str) -> BoardColumn {
+    w.store.card(card).unwrap().column()
+}
+
+fn wait_column(w: &World, card: &str, wanted: BoardColumn) {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while column(w, card) != wanted {
+        assert!(
+            Instant::now() < deadline,
+            "{card} stayed in {:?}",
+            column(w, card)
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_removed_projects_cards_stay_and_start_nothing_until_it_comes_back() {
+    let w = world(true);
+    let id = w.add();
+    with_cards(&w, &id, vec![check("check", "echo card")]);
+    let waiting = w.engine.card_create(&id, "in the backlog", "").unwrap();
+    let asked = w.engine.card_create(&id, "asked to start", "").unwrap();
+    w.engine.card_move(&asked, CardLane::Todo, 0, "en").unwrap();
+
+    w.engine.remove_project(&id).unwrap();
+
+    w.engine.board_tick().unwrap();
+    assert!(!w.store.has_todo_cards().unwrap());
+    assert!(w.store.claim_next_todo_card().unwrap().is_none());
+    assert_eq!(column(&w, &asked), BoardColumn::Todo, "it stays asked for");
+    assert_eq!(column(&w, &waiting), BoardColumn::Backlog);
+    assert!(w.store.runs(10).unwrap().is_empty(), "nothing started");
+    assert_eq!(
+        blocked_reason(w.engine.card_move(&waiting, CardLane::Todo, 0, "en")),
+        Reason::ProjectRemoved,
+        "and nothing else can be asked to"
+    );
+
+    let added = w.engine.add_project_with_map(&w.repo, "en").unwrap();
+    assert_eq!(added.outcome, AddOutcome::Restored);
+    assert_eq!(column(&w, &asked), BoardColumn::Todo, "as they were");
+    assert_eq!(column(&w, &waiting), BoardColumn::Backlog);
+
+    w.engine.board_tick().unwrap();
+    wait_column(&w, &asked, BoardColumn::Done);
+    assert_eq!(column(&w, &waiting), BoardColumn::Backlog);
+    assert_eq!(w.store.runs(10).unwrap()[0].title, "asked to start");
+}
+
+#[test]
+fn coming_back_wakes_the_board_by_itself() {
+    let w = world(true);
+    let id = w.add();
+    with_cards(&w, &id, vec![check("check", "true")]);
+    let asked = w.engine.card_create(&id, "asked to start", "").unwrap();
+    w.engine.card_move(&asked, CardLane::Todo, 0, "en").unwrap();
+    w.engine.remove_project(&id).unwrap();
+    w.engine.start_board();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(column(&w, &asked), BoardColumn::Todo);
+
+    w.engine.add_project_with_map(&w.repo, "en").unwrap();
+    wait_column(&w, &asked, BoardColumn::Done);
+}
+
+#[test]
+fn another_projects_cards_keep_starting_while_one_is_removed() {
+    let w = world(true);
+    let gone = w.add();
+    with_cards(&w, &gone, vec![check("check", "true")]);
+    let other_repo = w.dir.path().join("other");
+    new_repo(&other_repo);
+    let other = w.engine.add_project(&other_repo).unwrap().id;
+    with_cards(&w, &other, vec![check("check", "true")]);
+
+    let held = w.engine.card_create(&gone, "held", "").unwrap();
+    let goes = w.engine.card_create(&other, "goes", "").unwrap();
+    w.engine.card_move(&held, CardLane::Todo, 0, "en").unwrap();
+    w.engine.card_move(&goes, CardLane::Todo, 0, "en").unwrap();
+    w.engine.remove_project(&gone).unwrap();
+
+    assert!(w.store.has_todo_cards().unwrap());
+    w.engine.board_tick().unwrap();
+    wait_column(&w, &goes, BoardColumn::Done);
+    assert_eq!(column(&w, &held), BoardColumn::Todo);
+}
+
+#[test]
+fn a_card_with_an_unfinished_run_stops_the_removal_like_any_run() {
+    let w = world(true);
+    let id = w.add();
+    with_cards(&w, &id, vec![WorkflowStep::Approval { id: "ask".into() }]);
+    let card = w.engine.card_create(&id, "the card", "").unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    w.engine.board_tick().unwrap();
+    wait_column(&w, &card, BoardColumn::HumanReview);
+
+    let run = w.store.card(&card).unwrap().run_id.unwrap();
+    assert_eq!(
+        blocked_reason(w.engine.remove_project(&id)),
+        Reason::ProjectHasOpenRuns {
+            count: 1,
+            run_id: run.clone(),
+            title: "the card".into(),
+        }
+    );
+    assert_eq!(w.store.projects().unwrap().len(), 1);
+
+    let attempt = w.store.attempts_of_run(&run).unwrap().pop().unwrap();
+    w.engine.answer_approval(&attempt.id, true, "").unwrap();
+    wait_column(&w, &card, BoardColumn::Done);
+    w.engine.remove_project(&id).unwrap();
+}
+
+#[test]
+fn a_card_being_started_right_now_also_stops_the_removal() {
+    let w = world(true);
+    let id = w.add();
+    with_cards(&w, &id, vec![check("check", "true")]);
+    let card = w.engine.card_create(&id, "the card", "").unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    assert_eq!(w.store.claim_next_todo_card().unwrap().unwrap().id, card);
+
+    assert_eq!(
+        blocked_reason(w.engine.remove_project(&id)),
+        Reason::ProjectHasOpenRuns {
+            count: 1,
+            run_id: String::new(),
+            title: "the card".into(),
+        }
+    );
+    w.store.release_claimed_cards().unwrap();
+    w.engine.remove_project(&id).unwrap();
+    assert_eq!(column(&w, &card), BoardColumn::Todo);
 }
