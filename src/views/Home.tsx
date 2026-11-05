@@ -18,7 +18,7 @@ export function BlockerNotice({ blocker, text }: { blocker: Reason; text?: strin
   const refresh = useApp((s) => s.refreshSession);
   return (
     <div role="alert" className="flex flex-wrap items-center gap-2 rounded-md border border-border-strong bg-inset px-3 py-2 text-[12.5px] text-warning">
-      <span className="flex-1">{text ?? reasonText(t, blocker)}</span>
+      <span className="selectable flex-1">{text ?? reasonText(t, blocker)}</span>
       {needsSignIn(blocker) && <Button onClick={() => void api.openClaudeLogin()}>{t("session.signIn")}</Button>}
       <Button variant="ghost" onClick={() => void refresh()}>
         {t("app.refresh")}

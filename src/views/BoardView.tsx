@@ -28,7 +28,7 @@ function NoticeBar({ notice, onDismiss }: { notice: BoardNotice; onDismiss?: () 
   const navigate = useApp((s) => s.navigate);
   return (
     <div role="alert" className="flex flex-wrap items-center gap-2 rounded-md border border-border-strong bg-inset px-3 py-2 text-[12.5px] text-warning">
-      <span className="min-w-0 flex-1">{notice.text}</span>
+      <span className="selectable min-w-0 flex-1">{notice.text}</span>
       {notice.settings && <Button onClick={() => navigate({ name: "settings" })}>{t("newRun.openSettings")}</Button>}
       {onDismiss && (
         <Button variant="ghost" aria-label={t("board.dismiss")} title={t("board.dismiss")} className="px-1.5" onClick={onDismiss}>

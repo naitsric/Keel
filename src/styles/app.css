@@ -77,10 +77,17 @@
   --color-diff-del: var(--diff-del);
 }
 
+/* A window, not a page: it doesn't scroll or bounce, and neither does the page inside it at its ends. */
 html,
 body,
 #root {
   height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+main {
+  overscroll-behavior: none;
 }
 
 body {
@@ -94,11 +101,31 @@ body {
   cursor: default;
 }
 
-/* Audit content is for reading and copying. */
+/* Audit content is for reading and copying. src/lib/contextMenu.ts keeps the browser's menu on these. */
 .selectable,
 textarea,
 input,
+[contenteditable],
 pre {
   user-select: text;
   cursor: auto;
+}
+
+/* In the base layer so a field's outline-none still wins: it shows focus with its border. */
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
+  }
+
+  /* A dialog takes focus itself when it has nothing else to give it to. */
+  [role="dialog"]:focus-visible {
+    outline: none;
+  }
+}
+
+/* Thin, like the native ones. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-strong) transparent;
 }
