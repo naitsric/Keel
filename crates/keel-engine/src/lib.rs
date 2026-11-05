@@ -543,13 +543,17 @@ impl Engine {
         if attempt.state != AttemptState::Stalled.as_str() {
             return Err(Error::InvalidState);
         }
-        locked(&self.inner.controls)
-            .entry(attempt_id.to_owned())
-            .or_default()
-            .snooze_until = Some(Instant::now() + self.inner.config.snooze);
-        self.inner
-            .store
-            .set_state(attempt_id, AttemptState::Running, None)?;
+        {
+            // See `check_stall`: the two have to happen together.
+            let mut controls = locked(&self.inner.controls);
+            controls
+                .entry(attempt_id.to_owned())
+                .or_default()
+                .snooze_until = Some(Instant::now() + self.inner.config.snooze);
+            self.inner
+                .store
+                .set_state(attempt_id, AttemptState::Running, None)?;
+        }
         self.inner.store.append_event(
             attempt_id,
             "waitLonger",
