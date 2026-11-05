@@ -21,7 +21,7 @@ function Item({ state, optional, title, detail, children }: { state: Readiness; 
       <div className="min-w-0 flex-1">
         <p className="text-[13px] font-medium">
           {title}
-          {optional && <span className="ml-2 text-[11.5px] font-normal text-subtle">{t("onboarding.optional")}</span>}
+          {optional && <span className="ml-2 text-[11.5px] font-normal text-subtle">{t("onboarding.neededForBuiltIn")}</span>}
         </p>
         <p className="selectable mt-0.5 text-[12px] text-muted">{detail}</p>
         {children && <div className="mt-2 flex flex-wrap gap-2">{children}</div>}

@@ -444,4 +444,12 @@ describe("adding a project", () => {
       useApp.setState({ overview: { ...useApp.getState().overview, runs: [] } });
     });
   });
+
+  it("the onboarding is truthful about GitHub", async () => {
+    await show(<Onboarding />, []);
+    expect(page()).not.toContain("optional");
+    expect(page()).toContain(i18next.t("onboarding.neededForBuiltIn"));
+    expect(i18next.t("onboarding.githubMissing")).toContain("only a single step or a custom workflow with no delivery can run");
+    expect(i18next.t("onboarding.githubSignedOut")).toContain("only a single step or a custom workflow with no delivery can run");
+  });
 });

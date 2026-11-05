@@ -7,7 +7,7 @@ export interface Onboarding {
   /** Why Claude Code can't be used, when that's about its version rather than installing it. */
   claudeProblem: Reason | null;
   git: Readiness;
-  /** Optional. Without it, Keel works but can't open pull requests. */
+  /** Not needed to start. Without it, only what doesn't deliver can run, and the built-in workflows all do. */
   github: Readiness;
   /** Whether a project can be added now. Only git is needed, but a map also needs Claude Code. */
   canAddProject: boolean;

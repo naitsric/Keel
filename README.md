@@ -61,7 +61,7 @@ You need:
 - macOS 13 or later, on Apple Silicon
 - [Claude Code](https://claude.com/product/claude-code), signed in
 - Git
-- [GitHub CLI](https://cli.github.com), signed in, to open pull requests
+- [GitHub CLI](https://cli.github.com), signed in. The built-in workflows end in a pull request, so they need it. Without it, only a single step or a custom workflow with no delivery can run.
 
 The first screen checks these and says how to get what's missing.
 

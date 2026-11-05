@@ -645,15 +645,15 @@
   "onboarding": {
     "title": "Welcome to Keel",
     "intro": "Keel runs Claude Code agents on private copies of your repos, step by step, and shows what each one did. A person always decides what ships.",
-    "optional": "optional",
+    "neededForBuiltIn": "the built-in workflows need it",
     "install": "How to install it",
     "claude": "Claude Code",
     "git": "Git",
     "gitReady": "Ready.",
     "github": "GitHub CLI",
     "githubReady": "Signed in as {{accounts}}. Each project picks its own account.",
-    "githubMissing": "Without it, work stays on this Mac. With it, Keel opens draft pull requests.",
-    "githubSignedOut": "It's installed, but nobody is signed in.",
+    "githubMissing": "The built-in workflows end in a draft pull request, so they won't start without it. Without it, only a single step or a custom workflow with no delivery can run.",
+    "githubSignedOut": "It's installed, but nobody is signed in. Without an account, only a single step or a custom workflow with no delivery can run.",
     "project": "Your first project",
     "projectHint": "Pick a folder with a git repo. Keel works on a copy and never changes yours. An agent will read it to write its map, using your Claude Code plan.",
     "checkAgain": "Check again"
