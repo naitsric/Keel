@@ -12,7 +12,7 @@ import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
 import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
-import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, Project, ProjectAdded, Reason, Run, RunRow, WorkflowStep } from "../src/lib/api";
+import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, Project, ProjectAdded, Reason, Run, RunRow, WorkflowStep, WorkflowDraft } from "../src/lib/api";
 import { useApp } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -131,6 +131,21 @@ const runWorkflow: WorkflowStep[] =
 // view=run, and flow=many also on view=workflows. width=900 is the narrowest the window gets.
 // node=<a step's name> selects it once the page has loaded, and saveProblem=noPrompt:builder makes
 // saving fail like that (with click=Save a copy to press it). Add theme=light to any of them.
+/** `draft=late` has work happening after the person's approval, which the review has to call out. */
+const draftsWaiting: WorkflowDraft[] = [
+  {
+    id: "d1",
+    projectId: "p1",
+    name: i18next.language === "es" ? "Arreglo con pruebas" : "Fix with tests",
+    proposedBy: "Claude Code",
+    createdAt: at(4),
+    steps:
+      params.get("draft") === "late"
+        ? [{ type: "approval", id: "human" }, { ...agentStep("builder", "sonnet", "build"), prompt: "{{request}}" }, { type: "check", id: "tests", run: "make test" }, { type: "deliver", id: "pull-request" }]
+        : [{ ...agentStep("builder", "sonnet", "build"), prompt: "{{request}}" }, { type: "check", id: "tests", run: "make test && make lint" }, { ...agentStep("review", "opus", "readOnly"), role: { kind: "reviewer" }, prompt: "Review this change:\n{{diff}}" }, { type: "approval", id: "human" }, { type: "deliver", id: "pull-request" }],
+  },
+  { id: "d2", projectId: "p2", name: i18next.language === "es" ? "Solo leer" : "Read only", proposedBy: "Claude Code", createdAt: at(90), steps: [{ ...agentStep("reader", "haiku", "readOnly"), prompt: "{{request}}" }] },
+];
 const learnerStep: WorkflowStep = { ...agentStep("learnings", "sonnet", "readOnly"), role: { kind: "learner" } };
 const setupStep: WorkflowStep = { type: "setup", id: "setup", run: "uv sync --frozen" };
 const fullWorkflow: WorkflowStep[] = [setupStep, ...workflow, learnerStep];
@@ -290,7 +305,7 @@ let defaultWorkflow: string | null = params.get("defaultWorkflow");
 const demoProject: Project = { id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: noCheck ? null : "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.nvm"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }], defaultWorkflow };
 // A second project on the board, with one card, to try the selector and coming back from a run.
 const otherProject: Project = { ...demoProject, id: "p2", name: "payments", path: "/Users/you/payments", services: [], env: [], defaultWorkflow: null };
-const projects = view === "board" || palette ? [demoProject, otherProject] : [demoProject];
+const projects = view === "board" || palette || params.get("drafts") === "1" ? [demoProject, otherProject] : [demoProject];
 
 // Adding a project. dialog=setup opens its dialog right away, and click=Add project… gets there the
 // long way. setup=pnpm|npm|yarn|uv|cargo|go|make|unknown is what the folder gives away.
@@ -417,7 +432,7 @@ mockIPC((command, args) => {
       // A new object each time, as the real answer is.
       return { ...preflight };
     case "overview":
-      return params.get("empty") === "1" ? { pendingProposals: 0, runs: params.get("history") === "1" ? runs : [], projects: listedProjects, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: params.get("proposals") === "1" ? 1 : 0, runs, projects: listedProjects.map((p) => (p.id === "p1" ? { ...p, defaultWorkflow } : p)), totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
+      return params.get("empty") === "1" ? { pendingProposals: 0, workflowDrafts: 0, runs: params.get("history") === "1" ? runs : [], projects: listedProjects, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: params.get("proposals") === "1" ? 1 : 0, workflowDrafts: params.get("drafts") === "1" ? draftsWaiting.length : 0, runs, projects: listedProjects.map((p) => (p.id === "p1" ? { ...p, defaultWorkflow } : p)), totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
     case "plugin:dialog|open":
       return params.get("picker") === "cancel" ? null : freshProject.path;
     case "project_add":
@@ -463,6 +478,9 @@ mockIPC((command, args) => {
         { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: [...workflow, learnerStep] },
         { id: "mine", name: i18next.language === "es" ? "Solo revisiones" : "Reviews only", builtin: false, steps: workflow.slice(3) },
       ];
+    case "workflow_drafts_list":
+      return params.get("drafts") === "1" ? draftsWaiting : [];
+    case "workflow_draft_save":
     case "workflow_save": {
       const problem = params.get("saveProblem")?.split(":");
       if (problem) throw { code: "blocked", reason: { code: "invalidWorkflow", problem: problem[0], step: problem[1] ?? "" }, detail: null };
@@ -594,6 +612,11 @@ if (flowNode) {
 const click = params.get("click");
 if (click) {
   setTimeout(() => [...document.querySelectorAll("button")].find((button) => button.textContent === click)?.click(), 1500);
+}
+/** For a button whose text changes, like one that says how long ago something happened. */
+const clickStart = params.get("clickStart");
+if (clickStart) {
+  setTimeout(() => [...document.querySelectorAll("button")].find((button) => button.textContent?.startsWith(clickStart))?.click(), 1500);
 }
 const then = params.get("then");
 if (then) {

@@ -63,6 +63,14 @@ describe("the top bar", () => {
     expect(headerButton("Brain")?.querySelector("span")?.getAttribute("aria-label")).toBe("2 proposals waiting");
   });
 
+  it("shows how many drafts wait, on Workflows", async () => {
+    await showApp(RUNS);
+    expect(headerButton("Workflows")?.textContent).toBe("Workflows");
+    act(() => useApp.setState({ overview: { ...useApp.getState().overview, workflowDrafts: 2 } }));
+    expect(headerButton("Workflows")?.textContent).toBe("Workflows2");
+    expect(headerButton("Workflows")?.querySelector("span")?.getAttribute("aria-label")).toBe("2 workflow drafts to review");
+  });
+
   it("is in Spanish too", async () => {
     await showApp(RUNS);
     await act(() => i18next.changeLanguage("es"));

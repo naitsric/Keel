@@ -11,7 +11,7 @@ use std::time::Duration;
 use keel_core::{AttemptState, BoardColumn, CardLane, MASK, StepSpec, ToolProfile, WorkflowStep};
 use keel_engine::{Config, Engine, Workflow};
 use keel_harness::Tools;
-use keel_mcp::{MAX_OPEN_RUNS, MCP_PATH, McpServer, StartError};
+use keel_mcp::{MAX_DRAFTS, MAX_OPEN_RUNS, MCP_PATH, McpServer, StartError};
 use keel_store::Store;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
 use rmcp::model::{CallToolRequestParams, CallToolResult};
@@ -22,8 +22,10 @@ use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value as Json, json};
 
 /// Everything a client can do. A new tool has to be added here on purpose: nothing that answers an
-/// approval, merges, changes settings or workflows, or lets anything into the Brain belongs here.
-const TOOLS: [&str; 10] = [
+/// approval, merges, changes settings or saved workflows, or lets anything into the Brain belongs
+/// here. draft_workflow is here because what it leaves can't run until the person saves it.
+const TOOLS: [&str; 11] = [
+    "draft_workflow",
     "get_brain",
     "get_run",
     "get_step",
@@ -233,11 +235,305 @@ async fn it_offers_these_tools_and_no_way_to_approve_anything() {
         "merge",
         "update_project",
         "save_workflow",
+        "save_workflow_draft",
         "accept_note",
     ] {
         let params = CallToolRequestParams::new(tool.to_owned());
         assert!(client.call_tool(params).await.is_err(), "{tool}");
     }
+    client.cancel().await.unwrap();
+}
+
+/// A workflow any reader would want: a builder, a check, the person, and a pull request.
+fn draft_args(project: &str) -> Json {
+    json!({
+        "project": project,
+        "name": "Proposed by a client",
+        "steps": [
+            { "type": "agent", "id": "builder", "model": "sonnet", "tools": "build", "prompt": "{{request}}", "effort": "high" },
+            { "type": "check", "id": "tests", "run": "make test" },
+            { "type": "parallel", "id": "reviews", "steps": [
+                { "id": "security", "model": "haiku", "prompt": "Review {{diff}}", "role": { "kind": "reviewer" } },
+            ] },
+            { "type": "agent", "id": "approver", "model": "opus", "prompt": "Decide", "role": { "kind": "approver", "reworkTo": "builder", "maxRounds": 2 } },
+            { "type": "approval", "id": "human" },
+            { "type": "deliver", "id": "pr" },
+        ],
+    })
+}
+
+#[tokio::test]
+async fn it_tells_a_model_how_to_write_a_draft() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == "draft_workflow")
+        .unwrap();
+    let schema = serde_json::to_string(&tool.input_schema).unwrap();
+    for word in [
+        "agent",
+        "check",
+        "parallel",
+        "approval",
+        "deliver",
+        "prompt",
+        "reworkTo",
+        "maxRounds",
+    ] {
+        assert!(schema.contains(word), "{word}: {schema}");
+    }
+    assert!(!schema.contains("setup"), "{schema}");
+    assert!(!schema.contains("mapper"), "{schema}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_draft_waits_for_the_person_and_nothing_can_run_it_until_they_save_it() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+
+    let draft = ok(&call(&client, "draft_workflow", draft_args("app")).await);
+    let draft_id = draft["draftId"].as_str().unwrap().to_owned();
+    assert_eq!(draft["state"], "waitingForPerson");
+    assert_eq!(draft["steps"].as_array().unwrap().len(), 6);
+    let record = w.store.mcp_calls(1).unwrap().remove(0);
+    assert_eq!(record.tool, "draft_workflow");
+    assert!(record.ok);
+    assert!(record.args.contains("make test"), "{}", record.args);
+
+    // It's on record who proposed it, and the agent's fields came through as sent.
+    let waiting = w.engine.workflow_drafts().unwrap();
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].proposed_by, "Claude Code");
+    assert_eq!(waiting[0].name, "Proposed by a client");
+    assert_eq!(waiting[0].project_id, w.project_id);
+    let WorkflowStep::Agent(builder) = &waiting[0].steps[0] else {
+        panic!("{:?}", waiting[0].steps[0]);
+    };
+    assert_eq!(builder.tools, ToolProfile::Build);
+    assert_eq!(builder.effort.as_deref(), Some("high"));
+    assert_eq!(builder.prompt, "{{request}}");
+
+    // Nothing that runs can see it: not a client, not the engine's list that everything goes through.
+    let refusal = refused(
+        &call(
+            &client,
+            "start_run",
+            json!({ "project": "app", "workflow": draft_id, "request": "Fix it" }),
+        )
+        .await,
+    );
+    assert!(refusal.contains("no workflow"), "{refusal}");
+    assert!(w.store.runs(10).unwrap().is_empty());
+    assert!(
+        !w.engine
+            .workflows(&w.project_id, "en")
+            .unwrap()
+            .iter()
+            .any(|workflow| workflow.id == draft_id || workflow.name == "Proposed by a client")
+    );
+    let listed = ok(&call(&client, "list_workflows", json!({ "project": "app" })).await);
+    assert_eq!(listed["drafts"][0]["id"], json!(draft_id));
+    assert_eq!(listed["drafts"][0]["proposedBy"], "Claude Code");
+    assert!(
+        !listed["workflows"]
+            .to_string()
+            .contains("Proposed by a client"),
+        "{listed}"
+    );
+
+    // The person saves what they see, which isn't necessarily what was proposed.
+    let mut edited = Workflow {
+        id: String::new(),
+        name: "Checked by me".into(),
+        builtin: false,
+        steps: waiting[0].steps.clone(),
+    };
+    edited.steps.remove(1);
+    edited.steps.pop();
+    let saved = w
+        .engine
+        .save_workflow_draft(&w.project_id, &draft_id, &edited)
+        .unwrap();
+    assert!(w.engine.workflow_drafts().unwrap().is_empty());
+    let listed = ok(&call(&client, "list_workflows", json!({ "project": "app" })).await);
+    assert_eq!(listed["drafts"], json!([]));
+    let names = listed["workflows"].to_string();
+    assert!(names.contains("Checked by me"), "{names}");
+    assert!(!names.contains("make test"), "{names}");
+    assert!(!names.contains("\"pr\""), "{names}");
+
+    // Now it's a workflow like any other, for the client too.
+    ok(&call(
+        &client,
+        "start_run",
+        json!({ "project": "app", "workflow": saved.id, "request": "Fix it" }),
+    )
+    .await);
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn saving_a_draft_never_replaces_a_workflow_the_person_has() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let draft = ok(&call(&client, "draft_workflow", draft_args("app")).await);
+    let draft_id = draft["draftId"].as_str().unwrap();
+    let before = w
+        .engine
+        .workflow(&w.project_id, &w.workflow_id, "en")
+        .unwrap()
+        .unwrap();
+
+    let steps = w.engine.workflow_drafts().unwrap().remove(0).steps;
+    let saved = w
+        .engine
+        .save_workflow_draft(
+            &w.project_id,
+            draft_id,
+            &Workflow {
+                id: w.workflow_id.clone(),
+                name: "Same id".into(),
+                builtin: false,
+                steps,
+            },
+        )
+        .unwrap();
+
+    assert_ne!(saved.id, w.workflow_id);
+    assert_eq!(
+        w.engine
+            .workflow(&w.project_id, &w.workflow_id, "en")
+            .unwrap()
+            .unwrap(),
+        before
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_draft_that_breaks_the_rules_is_refused_and_says_where() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let cases = [
+        (
+            json!([{ "type": "deliver", "id": "pr" }]),
+            "deliverNeedsApproval",
+            "pr",
+        ),
+        (json!([]), "empty", ""),
+        (
+            json!([{ "type": "agent", "id": "a", "model": "opus", "prompt": "" }]),
+            "noPrompt",
+            "a",
+        ),
+        (
+            json!([{ "type": "check", "id": "../../evil", "run": "x" }]),
+            "badId",
+            "../../evil",
+        ),
+        (
+            json!([{ "type": "agent", "id": "r", "model": "opus", "prompt": "p", "tools": "build", "role": { "kind": "reviewer" } }]),
+            "reviewerMustReadOnly",
+            "r",
+        ),
+        (
+            json!([{ "type": "parallel", "id": "g", "steps": [{ "id": "w", "model": "opus", "prompt": "p", "tools": "build" }] }]),
+            "parallelMustReadOnly",
+            "w",
+        ),
+    ];
+    for (steps, problem, step) in cases {
+        let args = json!({ "project": "app", "name": "Bad", "steps": steps });
+        let refusal = refused(&call(&client, "draft_workflow", args).await);
+        assert!(refusal.contains(problem), "{problem}: {refusal}");
+        assert!(refusal.contains(step), "{step}: {refusal}");
+    }
+    assert!(w.engine.workflow_drafts().unwrap().is_empty());
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_draft_can_only_ask_for_what_the_editor_offers() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let agent = json!({ "id": "a", "model": "opus", "prompt": "p" });
+    let with = |extra: Json| {
+        let mut step = agent.clone();
+        step["type"] = json!("agent");
+        for (key, value) in extra.as_object().unwrap() {
+            step[key] = value.clone();
+        }
+        json!({ "project": "app", "name": "Asks for too much", "steps": [step] })
+    };
+    let asks = [
+        // The one step with network.
+        json!({ "project": "app", "name": "Setup", "steps": [{ "type": "setup", "id": "s", "run": "curl x" }] }),
+        // What it writes goes into the Brain.
+        with(json!({ "role": { "kind": "mapper" } })),
+        // Goes to `claude` as an argument.
+        with(json!({ "model": "--dangerously-skip-permissions" })),
+        with(json!({ "effort": "--bare" })),
+        with(json!({ "maxTurns": 0 })),
+        with(json!({ "maxBudgetUsd": -1.0 })),
+        // What a workflow doesn't decide: saying nothing would let the client believe it did.
+        with(json!({ "allowedDomains": ["evil.example"] })),
+        json!({ "project": "app", "name": "Member", "steps": [{ "type": "parallel", "id": "g", "steps": [
+            { "id": "m", "model": "opus", "prompt": "p", "allowedDomains": ["evil.example"] },
+        ] }] }),
+        json!({ "project": "app", "name": "Id", "id": "builtin:full", "steps": [] }),
+        json!({ "project": "app", "name": "  ", "steps": [{ "type": "approval", "id": "h" }] }),
+        json!({ "project": "app", "name": "x".repeat(81), "steps": [{ "type": "approval", "id": "h" }] }),
+    ];
+    for args in asks {
+        let params = CallToolRequestParams::new("draft_workflow".to_owned())
+            .with_arguments(args.as_object().unwrap().clone());
+        let refused = match client.call_tool(params).await {
+            Ok(result) => result.is_error == Some(true),
+            Err(_) => true,
+        };
+        assert!(refused, "{args}");
+    }
+    assert!(w.engine.workflow_drafts().unwrap().is_empty());
+
+    // Those refusals were about what they asked for: the same without it goes through.
+    ok(&call(&client, "draft_workflow", with(json!({}))).await);
+    ok(&call(
+        &client,
+        "draft_workflow",
+        json!({ "project": "app", "name": "Member", "steps": [{ "type": "parallel", "id": "g", "steps": [
+            { "id": "m", "model": "opus", "prompt": "p" },
+        ] }] }),
+    )
+    .await);
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_client_that_may_only_read_cannot_propose_and_drafts_have_a_limit() {
+    let w = world().await;
+    let reader = w.client(&w.token(false)).await;
+    let refusal = refused(&call(&reader, "draft_workflow", draft_args("app")).await);
+    assert!(refusal.contains("may only read"), "{refusal}");
+    assert!(w.engine.workflow_drafts().unwrap().is_empty());
+    reader.cancel().await.unwrap();
+
+    let client = w.client(&w.token(true)).await;
+    for _ in 0..MAX_DRAFTS {
+        ok(&call(&client, "draft_workflow", draft_args("app")).await);
+    }
+    let refusal = refused(&call(&client, "draft_workflow", draft_args("app")).await);
+    assert!(refusal.contains("drafts waiting"), "{refusal}");
+    assert_eq!(w.engine.workflow_drafts().unwrap().len(), MAX_DRAFTS);
+
+    // Once the person deals with one, there's room again.
+    let oldest = w.engine.workflow_drafts().unwrap().pop().unwrap();
+    w.engine
+        .discard_workflow_draft(&w.project_id, &oldest.id)
+        .unwrap();
+    ok(&call(&client, "draft_workflow", draft_args("app")).await);
     client.cancel().await.unwrap();
 }
 

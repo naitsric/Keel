@@ -88,6 +88,8 @@ describe("adding a project", () => {
           return { project: listed.find((p) => p.id === args.projectId) ?? NEW, guess: { check: null, setup: null, from: [] } };
         case "github_status":
           return { repo: null, accounts: [], info: null, excessScopes: [], error: null };
+        case "workflow_drafts_list":
+          return [];
         case "workflows_list":
           return [WORKFLOW];
         case "brain_get":

@@ -1,8 +1,10 @@
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Bot, CheckCircle2, GitPullRequest, Layers, Plus, Trash2, UserCheck, Wrench } from "lucide-react";
-import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Bot, CheckCircle2, GitPullRequest, Layers, Plus, Trash2, TriangleAlert, UserCheck, Wrench } from "lucide-react";
+import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type CommandError, type StepRole, type StepSpec, type ToolProfile, type Workflow, type WorkflowStep } from "../lib/api";
+import { api, type CommandError, type StepRole, type StepSpec, type ToolProfile, type Workflow, type WorkflowDraft, type WorkflowStep } from "../lib/api";
+import { draftFacts } from "../lib/drafts";
 import { flowOf, pathKey, pathOfKey, problemKeys, type StepPath } from "../lib/flow";
+import { formatRelative } from "../lib/format";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Segmented } from "../ui/primitives";
@@ -313,12 +315,59 @@ function AddBar({ onPick, onCancel }: { onPick: (kind: "agent" | "parallel" | "c
   );
 }
 
+/** What saving this proposed workflow would let happen, from what's on screen, so it follows every edit. */
+function DraftReview({ draft, steps, project }: { draft: WorkflowDraft; steps: WorkflowStep[]; project: string }) {
+  const { t } = useTranslation();
+  const facts = draftFacts(steps);
+  const label = "text-[12px] font-medium text-muted";
+  return (
+    <Card aria-label={t("workflows.draftTitle", { client: draft.proposedBy, project })} className="space-y-2.5 border-accent p-3.5">
+      <div>
+        <h2 className="selectable text-[12.5px] font-semibold break-words">{t("workflows.draftTitle", { client: draft.proposedBy, project })}</h2>
+        <p className="mt-0.5 text-[12px] text-muted">{t("workflows.draftNote")}</p>
+      </div>
+      <dl className="space-y-2 text-[12.5px]">
+        <div>
+          <dt className={label}>{t("workflows.draftCommands")}</dt>
+          {facts.commands.length === 0 && <dd>{t("workflows.draftNoCommands")}</dd>}
+          {facts.commands.map((command) => (
+            <dd key={command.id} className="selectable font-mono text-[11.5px] break-words">
+              {command.run}
+            </dd>
+          ))}
+        </div>
+        <div>
+          <dt className={label}>{t("workflows.draftBuilders")}</dt>
+          <dd className={cx(facts.builders.length > 0 && "font-mono text-[11.5px] break-words")}>{facts.builders.length > 0 ? facts.builders.join(", ") : t("workflows.draftNoBuilders")}</dd>
+        </div>
+        <div>
+          <dt className={label}>{t("workflows.draftDelivery")}</dt>
+          <dd>{facts.delivers ? t("workflows.draftDelivers") : t("workflows.draftNoDelivery")}</dd>
+        </div>
+      </dl>
+      {facts.afterApproval.length > 0 && (
+        <p role="alert" className="flex gap-1.5 text-[12.5px] font-medium text-warning">
+          <TriangleAlert size={14} className="mt-0.5 shrink-0" />
+          <span className="min-w-0 break-words">{t("workflows.draftAfterApproval", { count: facts.afterApproval.length, steps: facts.afterApproval.join(", ") })}</span>
+        </p>
+      )}
+      <p className="text-[12px] text-muted">{t("workflows.draftPrompts")}</p>
+    </Card>
+  );
+}
+
 export function WorkflowsView() {
   const { t, i18n } = useTranslation();
   const projects = useApp((s) => s.overview.projects);
+  const revision = useApp((s) => s.revision);
   const [projectId, setProjectId] = useState("");
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
-  const [draft, setDraft] = useState<Workflow | null>(null);
+  const [editing, setEditing] = useState<Workflow | null>(null);
+  const [drafts, setDrafts] = useState<WorkflowDraft[]>([]);
+  // The proposed workflow in the editor. It isn't a workflow until it's saved, so it has no id there.
+  const [reviewing, setReviewing] = useState<WorkflowDraft | null>(null);
+  const openingDraft = useRef(false);
+  const saving = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   // By position, not name: names change with every key while they're being typed.
@@ -339,7 +388,13 @@ export function WorkflowsView() {
       if (!projectId) return;
       const list = await api.workflowsList(projectId, i18n.language);
       setWorkflows(list);
-      setDraft((current) => list.find((w) => w.id === (select ?? current?.id)) ?? list[0] ?? null);
+      // Opening a draft of another project changes the project too, and the draft is what stays open.
+      if (openingDraft.current) {
+        openingDraft.current = false;
+        return;
+      }
+      setReviewing(null);
+      setEditing((current) => list.find((w) => w.id === (select ?? current?.id)) ?? list[0] ?? null);
     },
     [projectId, i18n.language],
   );
@@ -348,17 +403,26 @@ export function WorkflowsView() {
     load().catch((e) => setError(errorText(t, e)));
   }, [load, t]);
 
-  const steps = draft?.steps ?? [];
+  const loadDrafts = useCallback(async () => setDrafts(await api.workflowDraftsList()), []);
+  // Only the list: one arriving never opens by itself or touches what's in the editor.
+  useEffect(() => {
+    loadDrafts().catch((e) => setError(errorText(t, e)));
+  }, [loadDrafts, revision, t]);
+
+  const steps = editing?.steps ?? [];
   const flow = useMemo(() => flowOf(steps), [steps]);
   const shown: StepPath | null = pathExists(steps, selected) ? selected : steps.length > 0 ? { stage: 0, member: null } : null;
 
   const save = async () => {
-    if (!draft) return;
+    // Saving a draft takes it away, so a double click would find it gone.
+    if (!editing || saving.current) return;
+    saving.current = true;
     setError(null);
     setProblem(null);
     try {
-      const result = await api.workflowSave(projectId, draft);
+      const result = reviewing ? await api.workflowDraftSave(reviewing.projectId, reviewing.id, editing) : await api.workflowSave(projectId, editing);
       await load(result.id);
+      if (reviewing) await loadDrafts();
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
@@ -370,6 +434,8 @@ export function WorkflowsView() {
       // Straight to the form that can fix it, unless that's where the person already is.
       const keys = problemKeys(flow, step);
       if (keys.length > 0 && !(shown && keys.includes(pathKey(shown)))) setSelected(pathOfKey(keys[0]));
+    } finally {
+      saving.current = false;
     }
   };
 
@@ -383,19 +449,41 @@ export function WorkflowsView() {
     setFormGeneration((generation) => generation + 1);
   };
   const open = (workflow: Workflow) => {
-    setDraft(workflow);
+    setEditing(workflow);
+    setReviewing(null);
     startOver();
+  };
+  const openDraft = (proposal: WorkflowDraft) => {
+    startOver();
+    setEditing({ id: "", name: proposal.name, steps: proposal.steps, builtin: false });
+    setReviewing(proposal);
+    if (proposal.projectId !== projectId) {
+      openingDraft.current = true;
+      setProjectId(proposal.projectId);
+    }
+  };
+  const discard = async () => {
+    if (!reviewing) return;
+    setError(null);
+    try {
+      await api.workflowDraftDiscard(reviewing.projectId, reviewing.id);
+      startOver();
+      await load();
+      await loadDrafts();
+    } catch (e) {
+      setError(errorText(t, e));
+    }
   };
 
   const remove = async () => {
-    if (!draft || draft.builtin) return;
-    await api.workflowDelete(projectId, draft.id);
+    if (!editing || editing.builtin) return;
+    await api.workflowDelete(projectId, editing.id);
     startOver();
     await load(workflows[0]?.id);
   };
 
   /** What's being typed into the form of the step on show. */
-  const changeSteps = (next: WorkflowStep[]) => draft && setDraft({ ...draft, steps: next });
+  const changeSteps = (next: WorkflowStep[]) => editing && setEditing({ ...editing, steps: next });
   const apply = (edit: StepsEdit) => {
     changeSteps(edit.steps);
     setSelected(edit.selected);
@@ -468,11 +556,28 @@ export function WorkflowsView() {
                   ))}
                 </select>
               </Field>
+              {drafts.length > 0 && (
+                <div>
+                  <h2 className="mb-1 text-[12px] font-medium text-muted">{t("workflows.draftsTitle")}</h2>
+                  <Card className="border-accent p-1.5">
+                    <ul className="space-y-0.5">
+                      {drafts.map((proposal) => (
+                        <li key={proposal.id}>
+                          <button type="button" onClick={() => openDraft(proposal)} className={cx("w-full rounded-md px-2 py-1.5 text-left text-[12.5px] break-words hover:bg-hover", reviewing?.id === proposal.id && "bg-active font-medium")}>
+                            {proposal.name}
+                            <span className="block text-[11px] font-normal text-subtle">{t("workflows.draftFrom", { client: proposal.proposedBy, when: formatRelative(proposal.createdAt), project: projects.find((p) => p.id === proposal.projectId)?.name ?? "" })}</span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </Card>
+                </div>
+              )}
               <Card className="p-1.5">
                 <ul className="space-y-0.5">
                   {workflows.map((w) => (
                     <li key={w.id}>
-                      <button type="button" onClick={() => open(w)} className={cx("w-full rounded-md px-2 py-1.5 text-left text-[12.5px] hover:bg-hover", draft?.id === w.id && "bg-active font-medium")}>
+                      <button type="button" onClick={() => open(w)} className={cx("w-full rounded-md px-2 py-1.5 text-left text-[12.5px] hover:bg-hover", editing?.id === w.id && "bg-active font-medium")}>
                         {w.name}
                         {w.builtin && <span className="block text-[11px] font-normal text-subtle">{t("workflows.builtin")}</span>}
                       </button>
@@ -485,25 +590,31 @@ export function WorkflowsView() {
                 {t("workflows.new")}
               </Button>
             </div>
-            {draft && (
+            {editing && (
               <div className="min-w-0 space-y-3">
                 <div className="flex flex-wrap items-end gap-2">
                   <div className="min-w-56 flex-1">
                     <Field label={t("workflows.name")}>
-                      <input value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} className={inputClass} />
+                      <input value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} className={inputClass} />
                     </Field>
                   </div>
                   <Button variant="primary" onClick={() => void save()}>
-                    {draft.builtin ? t("workflows.saveCopy") : t("workflows.save")}
+                    {editing.builtin ? t("workflows.saveCopy") : t("workflows.save")}
                   </Button>
-                  {!draft.builtin && draft.id && (
+                  {!editing.builtin && editing.id && (
                     <Button variant="danger" onClick={() => void remove()}>
                       {t("workflows.delete")}
                     </Button>
                   )}
+                  {reviewing && (
+                    <Button variant="danger" onClick={() => void discard()}>
+                      {t("workflows.draftDiscard")}
+                    </Button>
+                  )}
                   {saved && <span className="pb-1.5 text-[12px] text-success">{t("workflows.saved")}</span>}
                 </div>
-                {draft.builtin && <p className="text-[12px] text-subtle">{t("workflows.builtinNote")}</p>}
+                {editing.builtin && <p className="text-[12px] text-subtle">{t("workflows.builtinNote")}</p>}
+                {reviewing && <DraftReview draft={reviewing} steps={steps} project={projects.find((p) => p.id === reviewing.projectId)?.name ?? ""} />}
                 {error && (
                   <p role="alert" className="text-[12.5px] text-danger">
                     {error}

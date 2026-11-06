@@ -42,6 +42,23 @@ pub struct Workflow {
     pub builtin: bool,
 }
 
+/// A workflow an assistant proposed, waiting for a person. It's its own type in its own folder so
+/// that nothing that runs can reach it: it only becomes a [`Workflow`] when the person saves it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowDraft {
+    /// The file's name, which Keel picks, so a client can't aim at one that's already there.
+    #[serde(default)]
+    pub id: String,
+    /// The folder it's in.
+    #[serde(default)]
+    pub project_id: String,
+    pub name: String,
+    pub steps: Vec<WorkflowStep>,
+    pub proposed_by: String,
+    pub created_at: String,
+}
+
 fn problem(problem: &str, step: &str) -> Reason {
     Reason::InvalidWorkflow {
         problem: problem.to_owned(),
@@ -515,6 +532,46 @@ pub fn delete(dir: &Path, id: &str) -> io::Result<()> {
     std::fs::remove_file(safe_file(dir, id)?)
 }
 
+/// A project's drafts, newest first. One that no longer parses is left out, as in [`load_all`].
+pub fn load_drafts(dir: &Path, project_id: &str) -> io::Result<Vec<WorkflowDraft>> {
+    let mut found = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(found),
+        Err(e) => return Err(e),
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if let Ok(mut draft) = serde_yaml_ng::from_str::<WorkflowDraft>(&text) {
+            draft.id = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            draft.project_id = project_id.to_owned();
+            found.push(draft);
+        }
+    }
+    found.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(found)
+}
+
+pub fn save_draft(dir: &Path, draft: &WorkflowDraft) -> io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let text = serde_yaml_ng::to_string(draft).map_err(io::Error::other)?;
+    std::fs::write(safe_file(dir, &draft.id)?, text)
+}
+
+/// Whether this draft is still waiting.
+pub fn draft_exists(dir: &Path, id: &str) -> io::Result<bool> {
+    safe_file(dir, id)?.try_exists()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -807,6 +864,46 @@ mod tests {
         save(dir.path(), &builtin("en", None).remove(1)).unwrap();
         std::fs::write(dir.path().join("broken.yaml"), "not: [valid").unwrap();
         assert_eq!(load_all(dir.path()).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn drafts_come_back_newest_first_and_a_broken_file_takes_none_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let draft = |id: &str, created_at: &str| WorkflowDraft {
+            id: id.into(),
+            project_id: "ignored".into(),
+            name: id.into(),
+            steps: vec![WorkflowStep::Approval { id: "h".into() }],
+            proposed_by: "Claude Code".into(),
+            created_at: created_at.into(),
+        };
+        save_draft(dir.path(), &draft("old", "2026-11-05T10:00:00.000Z")).unwrap();
+        save_draft(dir.path(), &draft("new", "2026-11-06T10:00:00.000Z")).unwrap();
+        std::fs::write(dir.path().join("broken.yaml"), "not: [a draft").unwrap();
+
+        let found = load_drafts(dir.path(), "p1").unwrap();
+        let ids: Vec<&str> = found.iter().map(|draft| draft.id.as_str()).collect();
+        assert_eq!(ids, ["new", "old"]);
+        assert!(found.iter().all(|draft| draft.project_id == "p1"));
+
+        assert!(draft_exists(dir.path(), "new").unwrap());
+        delete(dir.path(), "new").unwrap();
+        assert!(!draft_exists(dir.path(), "new").unwrap());
+        assert_eq!(load_drafts(&dir.path().join("none"), "p1").unwrap(), []);
+    }
+
+    #[test]
+    fn a_draft_cannot_reach_outside_its_folder() {
+        let root = tempfile::tempdir().unwrap();
+        let drafts = root.path().join("workflow-drafts");
+        std::fs::create_dir(&drafts).unwrap();
+        let mine = root.path().join("workflows");
+        std::fs::create_dir(&mine).unwrap();
+        std::fs::write(mine.join("mine.yaml"), "name: Mine\nsteps: []\n").unwrap();
+
+        assert!(delete(&drafts, "../workflows/mine").is_err());
+        assert!(draft_exists(&drafts, "../workflows/mine").is_err());
+        assert!(mine.join("mine.yaml").exists());
     }
 
     #[test]

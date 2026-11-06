@@ -13,7 +13,8 @@ use keel_core::{
 };
 use keel_engine::{
     AddedProject, Board, BrainView, Config, Engine, Error as EngineError, GithubStatus, Preflight,
-    ProjectSetup, RawCheck, StartRun, Workflow, request_from_issue, title_from_issue,
+    ProjectSetup, RawCheck, StartRun, Workflow, WorkflowDraft, request_from_issue,
+    title_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
@@ -133,6 +134,7 @@ struct Overview {
     /// Not masked: Settings saves back what it gets, which would overwrite the real values.
     projects: Vec<Project>,
     pending_proposals: i64,
+    workflow_drafts: usize,
 }
 
 #[tauri::command(async)]
@@ -142,6 +144,11 @@ fn overview(state: State<'_, AppState>) -> CommandResult<Overview> {
         totals: state.store.totals()?,
         projects: state.store.projects()?,
         pending_proposals: state.store.pending_proposals()?,
+        // A folder that can't be read shouldn't take the home page down with it.
+        workflow_drafts: state
+            .engine
+            .workflow_drafts()
+            .map_or(0, |drafts| drafts.len()),
     })
 }
 
@@ -463,6 +470,35 @@ fn workflow_delete(
     workflow_id: String,
 ) -> CommandResult<()> {
     Ok(state.engine.delete_workflow(&project_id, &workflow_id)?)
+}
+
+/// Not masked, for the same reason as workflows: the editor saves back what it gets.
+#[tauri::command(async)]
+fn workflow_drafts_list(state: State<'_, AppState>) -> CommandResult<Vec<WorkflowDraft>> {
+    Ok(state.engine.workflow_drafts()?)
+}
+
+#[tauri::command(async)]
+fn workflow_draft_save(
+    state: State<'_, AppState>,
+    project_id: String,
+    draft_id: String,
+    workflow: Workflow,
+) -> CommandResult<Workflow> {
+    Ok(state
+        .engine
+        .save_workflow_draft(&project_id, &draft_id, &workflow)?)
+}
+
+#[tauri::command(async)]
+fn workflow_draft_discard(
+    state: State<'_, AppState>,
+    project_id: String,
+    draft_id: String,
+) -> CommandResult<()> {
+    Ok(state
+        .engine
+        .discard_workflow_draft(&project_id, &draft_id)?)
 }
 
 #[tauri::command(async)]
@@ -828,6 +864,9 @@ pub fn run() {
             workflows_list,
             workflow_save,
             workflow_delete,
+            workflow_drafts_list,
+            workflow_draft_save,
+            workflow_draft_discard,
             rework_limit_answer,
             run_attempts,
             project_update,
@@ -1037,6 +1076,7 @@ mod tests {
                 default_workflow: None,
             }],
             pending_proposals: 0,
+            workflow_drafts: 0,
         };
         let shown = serde_json::to_value(&overview).unwrap();
         assert_eq!(

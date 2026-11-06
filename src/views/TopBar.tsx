@@ -23,6 +23,7 @@ export function TopBar() {
   const { t } = useTranslation();
   const view = useApp((s) => s.view);
   const proposals = useApp((s) => s.overview.pendingProposals);
+  const drafts = useApp((s) => s.overview.workflowDrafts);
   const commands = useCommands((s) => s.commands);
   const noProjects = useApp((s) => s.overviewLoaded && s.overview.projects.length === 0);
   const noRuns = useApp((s) => s.overview.runs.length === 0);
@@ -58,6 +59,11 @@ export function TopBar() {
               {page === "brain" && proposals > 0 && (
                 <span aria-label={t("app.brainProposals", { count: proposals })} className="rounded-full bg-accent px-1.5 text-[10.5px] font-semibold text-accent-fg">
                   {proposals}
+                </span>
+              )}
+              {page === "workflows" && drafts > 0 && (
+                <span aria-label={t("app.workflowDrafts", { count: drafts })} className="rounded-full bg-accent px-1.5 text-[10.5px] font-semibold text-accent-fg">
+                  {drafts}
                 </span>
               )}
             </Button>

@@ -12,7 +12,9 @@
     "workflows": "Workflows",
     "brain": "Brain",
     "brainProposals": "{{count}} propuestas esperando",
-    "board": "Tablero"
+    "board": "Tablero",
+    "workflowDrafts_one": "{{count}} borrador de workflow por revisar",
+    "workflowDrafts_other": "{{count}} borradores de workflow por revisar"
   },
   "statusBar": {
     "running_one": "{{count}} en curso",
@@ -573,7 +575,22 @@
     "saved": "Guardado",
     "delete": "Eliminar",
     "newName": "Mi workflow",
-    "roleLearner": "Propone aprendizajes"
+    "roleLearner": "Propone aprendizajes",
+    "draftsTitle": "Borradores por revisar",
+    "draftFrom": "De {{client}}, {{when}}, para {{project}}",
+    "draftTitle": "{{client}} propuso esto para {{project}}",
+    "draftNote": "No puede correr hasta que lo guardes. Lo que se guarda es lo que ves aquí, con tus cambios, como un workflow nuevo.",
+    "draftPrompts": "Cada paso del diagrama tiene su prompt. Ábrelos antes de guardar.",
+    "draftCommands": "Comandos que corre",
+    "draftNoCommands": "Ninguno",
+    "draftBuilders": "Agentes que pueden cambiar archivos y correr comandos",
+    "draftNoBuilders": "Ninguno",
+    "draftDelivery": "Pull request",
+    "draftDelivers": "En borrador, después de tu aprobación",
+    "draftNoDelivery": "Ninguno",
+    "draftAfterApproval_one": "{{steps}} corre después de tu aprobación y antes del pull request. Lo que cambie se sube sin que lo veas. Para verlo antes, mueve tu aprobación después de ese paso.",
+    "draftAfterApproval_other": "{{steps}} corren después de tu aprobación y antes del pull request. Lo que cambien se sube sin que lo veas. Para verlo antes, mueve tu aprobación después de esos pasos.",
+    "draftDiscard": "Descartar"
   },
   "flow": {
     "groupLabel": "{{step}}, a la vez",
@@ -734,7 +751,7 @@
   "mcp": {
     "title": "Servidor MCP",
     "hint": "Deja que un asistente como Claude Code vea tus proyectos y lance ejecuciones en este Mac, y tú las ves aquí. Solo este Mac puede llegar a él, y está apagado hasta que lo enciendas.",
-    "limits": "No puede aprobar ni rechazar un paso, mergear, cambiar ajustes o workflows, ni aceptar nada en el Brain. Eso sigue siendo tuyo, aquí.",
+    "limits": "No puede aprobar ni rechazar un paso, mergear, cambiar ajustes, guardar un workflow ni aceptar nada en el Brain. Eso sigue siendo tuyo, aquí. Un workflow que proponga te espera en Workflows, y no puede correr hasta que lo guardes.",
     "off": "Apagado",
     "on": "Encendido",
     "port": "Puerto",
@@ -744,7 +761,7 @@
     "connectClaude": "Conectar Claude Code",
     "reconnectClaude": "Conectar Claude Code de nuevo",
     "connected": "Conectado. Las sesiones nuevas de Claude Code lo ven solas. En una que ya esté abierta, corre /mcp.",
-    "canRun": "Puede lanzar y detener ejecuciones",
+    "canRun": "Puede lanzar y detener ejecuciones, y proponer workflows",
     "clients": "Clientes",
     "noClients": "Todavía no hay clientes.",
     "lastSeen": "usado {{when}}",
