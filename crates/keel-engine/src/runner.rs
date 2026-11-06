@@ -1079,7 +1079,15 @@ impl Inner {
             );
         }
         if let Some(problems) = correction {
-            let _ = self.ask_for_correction(&m.attempt_id, &problems);
+            if let Err(error) = self.ask_for_correction(&m.attempt_id, &problems) {
+                // Nobody was told this finished, because the correction was meant to follow it.
+                let _ = store.append_event(
+                    &m.attempt_id,
+                    "correctionFailed",
+                    &json!({ "error": error.to_string() }),
+                );
+                self.changed(&m.run_id);
+            }
             return;
         }
         if state == AttemptState::Succeeded || m.role == "learner" {

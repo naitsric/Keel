@@ -13,6 +13,7 @@ use keel_core::{
 };
 use keel_engine::{Answer, AnswerChoice, Config, Engine, Error, StartRun, Workflow};
 use keel_harness::Tools;
+use keel_store::rusqlite_value::Value as Column;
 use keel_store::{Attempt, ProjectSettings, Store};
 use serde_json::{Value, json};
 
@@ -284,6 +285,7 @@ impl World {
                 language: "en".into(),
                 source_issue: None,
                 saved_workflow: None,
+                started_by: None,
             })
             .unwrap()
     }
@@ -495,6 +497,34 @@ fn using_the_recommended_options_runs_no_agent_and_keeps_what_it_wrote() {
         built.contains("- If `whole` is 0, what should happen? Show an error"),
         "{built}"
     );
+}
+
+#[test]
+fn an_answer_that_could_not_go_ahead_leaves_nothing_behind_and_can_be_given_again() {
+    let w = world();
+    w.answers(&[asking("Q1", "If it's 0, what then?"), good()]);
+    let run = w.start(no_approver());
+    let first = w.wait_for(&run, "spec", AttemptState::WaitingAnswers);
+    let workflow = w.store.run(&run).unwrap().workflow;
+    let answer = [remembered(option("Q1", "Return 0"))];
+
+    // With no such step in the run any more, the agent can't start.
+    w.store
+        .patch_run(&run, &[("workflow", Column::Text("[]".into()))])
+        .unwrap();
+    assert!(w.engine.answer_questions(&first.id, &answer).is_err());
+    let after = w.step(&run, "spec");
+    assert_eq!(after.state, "waitingAnswers");
+    assert!(after.output.unwrap().get("answered").is_none());
+    assert!(!w.kinds(&first.id).contains(&"answers".to_owned()));
+    assert!(w.engine.decisions(&w.project_id).unwrap().is_empty());
+
+    w.store
+        .patch_run(&run, &[("workflow", Column::Text(workflow.to_string()))])
+        .unwrap();
+    w.engine.answer_questions(&first.id, &answer).unwrap();
+    w.wait_for(&run, "builder", AttemptState::Succeeded);
+    assert_eq!(w.engine.decisions(&w.project_id).unwrap().len(), 1);
 }
 
 #[test]
@@ -1281,6 +1311,7 @@ fn the_results_count_who_stopped_to_ask_what_matched_and_what_was_sent_back() {
                 saved_workflow: Some(workflow.reference()),
                 language: "en".into(),
                 source_issue: None,
+                started_by: None,
             })
             .unwrap()
     };

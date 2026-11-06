@@ -196,6 +196,7 @@ impl World {
                 language: "en".into(),
                 source_issue: None,
                 saved_workflow: None,
+                started_by: None,
             })
             .unwrap()
     }
@@ -517,6 +518,7 @@ fn an_invalid_workflow_is_refused_before_anything_runs() {
             language: "en".into(),
             source_issue: None,
             saved_workflow: None,
+            started_by: None,
         })
         .unwrap_err();
     assert!(matches!(

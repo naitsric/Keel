@@ -460,7 +460,29 @@ impl Git {
                 &range,
             ],
         )?;
-        parse_numstat(&output)
+        let mut size = parse_numstat(&output)?;
+        let raw = self.run_in_workspace(
+            workspace,
+            &[
+                "--no-replace-objects",
+                "diff",
+                "--no-ext-diff",
+                "--no-renames",
+                "--no-relative",
+                "--ignore-submodules=none",
+                "--raw",
+                "--no-abbrev",
+                "-z",
+                &range,
+            ],
+        )?;
+        // git counts a submodule moving as two lines, whatever it brings in with it.
+        for path in submodules_in_raw(&raw) {
+            if !size.without_lines.contains(&path) {
+                size.without_lines.push(path);
+            }
+        }
+        Ok(size)
     }
 
     /// Whether a command left the workspace different, which a check shouldn't.
@@ -520,6 +542,20 @@ fn bounded_output(
         }
     }
     Ok((status.success(), stdout, stderr))
+}
+
+/// The submodules in `git diff --raw -z`, which goes `:mode mode sha sha status`, then the path.
+fn submodules_in_raw(output: &str) -> Vec<String> {
+    const SUBMODULE: &str = "160000";
+    let mut found = Vec::new();
+    let mut fields = output.split('\0');
+    while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
+        let mut modes = meta.trim_start_matches(':').split(' ');
+        if modes.next() == Some(SUBMODULE) || modes.next() == Some(SUBMODULE) {
+            found.push(path.to_owned());
+        }
+    }
+    found
 }
 
 /// `git diff --numstat -z`: added, deleted and the path, separated by tabs, with `-` for what it won't
@@ -700,6 +736,24 @@ mod tests {
         sh(&p.workspace, script);
         p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
         p.git.change_size(&p.workspace, &p.base).unwrap()
+    }
+
+    #[test]
+    fn a_submodule_moving_is_not_counted_as_two_lines() {
+        let p = poisoned("");
+        let head = p.git.head(&p.workspace).unwrap();
+        let size = size_after(
+            &p,
+            &format!(
+                "mkdir -p vendor/lib && git update-index --add --cacheinfo 160000,{head},vendor/lib && git commit -qm sub"
+            ),
+        );
+        assert_eq!(size.without_lines, ["vendor/lib"]);
+        assert_eq!(
+            submodules_in_raw(":100644 100644 aa bb M\0a.txt\0:000000 160000 00 cc A\0x/y\0"),
+            ["x/y"]
+        );
+        assert_eq!(submodules_in_raw(""), Vec::<String>::new());
     }
 
     #[test]

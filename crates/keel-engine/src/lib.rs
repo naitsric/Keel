@@ -129,6 +129,9 @@ pub struct StartRun {
     pub language: String,
     /// The issue this came from, kept as evidence of where the request started.
     pub source_issue: Option<Issue>,
+    /// The assistant that asked for this over MCP. Written with the run, because whether a change
+    /// can count as small depends on it.
+    pub started_by: Option<String>,
 }
 
 impl StartRun {
@@ -142,6 +145,7 @@ impl StartRun {
             saved_workflow: None,
             language,
             source_issue: None,
+            started_by: None,
         }
     }
 }
@@ -570,6 +574,7 @@ impl Engine {
                 language: language.to_owned(),
                 source_issue: None,
                 saved_workflow: None,
+                started_by: None,
             },
             None,
         )
@@ -769,6 +774,7 @@ impl Engine {
             }),
             workflow_id: request.saved_workflow.as_ref().map(|w| w.id.clone()),
             workflow_name: request.saved_workflow.map(|w| w.name),
+            started_by: request.started_by,
         };
         match card {
             Some(card) => self.inner.store.add_run_for_card(&run, card)?,
@@ -869,6 +875,45 @@ impl Engine {
         let every_one_matched = matched == given.len();
 
         let project_id = store.project_of_run(&attempt.run_id)?;
+        let keeping = |output: serde_json::Value| -> Result<()> {
+            let mut output = output;
+            output["answered"] = json!(given);
+            store.patch_attempt(attempt_id, &[("output", Value::Text(output.to_string()))])?;
+            Ok(())
+        };
+        if every_one_matched {
+            spec.take_recommended(specs::Taken::Person);
+            keeping(json!(spec))?;
+        } else {
+            // On the record before the agent starts, so it counts as a round when its result comes.
+            let before = attempt.output.clone().unwrap_or_else(|| json!({}));
+            keeping(before.clone())?;
+            let started = store
+                .run(&attempt.run_id)
+                .map_err(Error::from)
+                .and_then(|run| {
+                    let steps: Vec<WorkflowStep> =
+                        serde_json::from_value(run.workflow).unwrap_or_default();
+                    let step = workflows::find_step(&steps, &attempt.step_id)
+                        .ok_or(Error::InvalidState)?;
+                    let attempts = store.attempts_of_run(&attempt.run_id)?;
+                    self.inner.start_step(
+                        &attempt.run_id,
+                        &step,
+                        workflows::next_number(&attempts, &attempt.step_id),
+                        Some(Resume {
+                            session: attempt.session_id.clone(),
+                            from: attempt.id.clone(),
+                            prompt: Some(specs::answered_prompt(&given, &attempt.language)),
+                        }),
+                    )
+                });
+            if let Err(error) = started {
+                // Nothing went ahead, so nothing stays on the record, and it can be answered again.
+                store.patch_attempt(attempt_id, &[("output", Value::Text(before.to_string()))])?;
+                return Err(error);
+            }
+        }
         for answer in given.iter().filter(|answer| answer.remember) {
             let (question, text) = specs::decision_parts(answer);
             store.add_answered_decision(
@@ -884,34 +929,6 @@ impl Engine {
             "answers",
             &json!({ "answers": given, "total": given.len(), "recommended": matched }),
         )?;
-
-        let keeping = |output: serde_json::Value| -> Result<()> {
-            let mut output = output;
-            output["answered"] = json!(given);
-            store.patch_attempt(attempt_id, &[("output", Value::Text(output.to_string()))])?;
-            Ok(())
-        };
-        if every_one_matched {
-            spec.take_recommended(specs::Taken::Person);
-            keeping(json!(spec))?;
-        } else {
-            // On the record before the agent starts, so it counts as a round when its result comes.
-            keeping(attempt.output.clone().unwrap_or_else(|| json!({})))?;
-            let run = store.run(&attempt.run_id)?;
-            let steps: Vec<WorkflowStep> = serde_json::from_value(run.workflow).unwrap_or_default();
-            let step = workflows::find_step(&steps, &attempt.step_id).ok_or(Error::InvalidState)?;
-            let attempts = store.attempts_of_run(&attempt.run_id)?;
-            self.inner.start_step(
-                &attempt.run_id,
-                &step,
-                workflows::next_number(&attempts, &attempt.step_id),
-                Some(Resume {
-                    session: attempt.session_id.clone(),
-                    from: attempt.id.clone(),
-                    prompt: Some(specs::answered_prompt(&given, &attempt.language)),
-                }),
-            )?;
-        }
         store.set_state(attempt_id, AttemptState::Succeeded, None)?;
         store.append_event(
             attempt_id,
@@ -1115,9 +1132,14 @@ impl Engine {
         {
             return Err(Error::InvalidState);
         }
-        self.inner
+        // Approving doesn't wait for `advancing`, and one that lands first has to stand.
+        if !self
+            .inner
             .store
-            .set_state(attempt_id, AttemptState::Abandoned, None)?;
+            .change_state(attempt_id, state, AttemptState::Abandoned)?
+        {
+            return Err(Error::InvalidState);
+        }
         self.inner
             .store
             .append_event(attempt_id, "abandoned", &json!({}))?;
@@ -1755,6 +1777,17 @@ impl Inner {
             ]));
         }
         let project = self.store.project(&run.project_id)?;
+        let commands: Vec<String> = steps
+            .iter()
+            .filter_map(|step| match step {
+                WorkflowStep::Check { run, .. } | WorkflowStep::Setup { run, .. } => {
+                    Some(run.clone())
+                }
+                _ => None,
+            })
+            .chain(project.setup_command.clone())
+            .chain(project.check_command.clone())
+            .collect();
         Ok(sizing::decide(&sizing::Facts {
             steps,
             attempts,
@@ -1763,6 +1796,7 @@ impl Inner {
             account: project.github_account.as_deref(),
             started_by: run.started_by.as_deref(),
             sensitive: &project.sensitive_paths,
+            commands: &commands,
             change: self.change_of_run(&run.id, attempts),
         }))
     }

@@ -206,6 +206,7 @@ impl World {
                 language: "en".into(),
                 source_issue: None,
                 saved_workflow: None,
+                started_by: None,
             })
             .unwrap()
     }
@@ -677,6 +678,7 @@ fn a_workflow_that_cannot_deliver_is_refused_before_any_agent_runs() {
             language: "en".into(),
             source_issue: None,
             saved_workflow: None,
+            started_by: None,
         })
         .unwrap_err();
     assert!(matches!(
@@ -836,6 +838,7 @@ fn an_issue_is_imported_as_data_and_linked_from_the_pull_request() {
             language: "en".into(),
             source_issue: Some(issue),
             saved_workflow: None,
+            started_by: None,
         })
         .unwrap();
     let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);

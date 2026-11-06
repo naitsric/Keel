@@ -452,6 +452,8 @@ pub enum WhyNotSmall {
     /// What was asked was worked out as not small, or didn't say, or there's nothing structured
     /// that could say.
     SpecNotSmall,
+    /// Keel stopped asking and took a recommended option itself, so nobody really decided it.
+    KeelChoseAnAnswer,
     /// What was asked names these risks. Whatever they say counts, known or not.
     SpecNamesRisks { risks: Vec<String> },
     /// The workflow has no check, so nothing proves the change works.
@@ -501,6 +503,20 @@ pub enum SpecProblem {
         limit: usize,
     },
     NoCriteria,
+    CriterionNeedsText {
+        id: String,
+    },
+    QuestionNeedsText {
+        id: String,
+    },
+    TooManyChanges {
+        count: usize,
+        limit: usize,
+    },
+    TooManyLimits {
+        count: usize,
+        limit: usize,
+    },
     TooManyCriteria {
         count: usize,
         limit: usize,

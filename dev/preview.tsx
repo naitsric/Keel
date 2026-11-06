@@ -273,7 +273,8 @@ const WHY_MOVED_UP: Reason[] =
   params.get("why") === "all"
     ? [
         { code: "specNotSmall" },
-        { code: "specNamesRisks", risks: ["security", "irreversibleData", "sharedContracts", "concurrency", "environment", "noRegressionTest", "somethingNew"] },
+        { code: "specNamesRisks", risks: ["security", "money", "personalData", "irreversibleData", "sharedContracts", "concurrency", "environment", "noRegressionTest", "somethingNew"] },
+        { code: "keelChoseAnAnswer" },
         { code: "noCheck" },
         { code: "checkNotPassed" },
         { code: "issueFromSomeoneElse", author: "someone" },

@@ -11,7 +11,7 @@ export interface SizeDecision {
 }
 
 /** The engine's closed list. Anything else an agent wrote still counts as a risk, and is called one. */
-const KNOWN_RISKS = ["security", "irreversibleData", "sharedContracts", "concurrency", "environment", "noRegressionTest"];
+const KNOWN_RISKS = ["security", "money", "personalData", "irreversibleData", "sharedContracts", "concurrency", "environment", "noRegressionTest"];
 
 export const skippedAsSmall = (attempt: { state: string; reason?: { code: string } | null }) => attempt.state === "skipped" && attempt.reason?.code === "treatedAsSmall";
 

@@ -493,6 +493,7 @@ describe("the approval card", () => {
       const every = [
         { code: "specNotSmall" },
         { code: "specNamesRisks", risks: ["security", "somethingNew"] },
+        { code: "keelChoseAnAnswer" },
         { code: "noCheck" },
         { code: "checkNotPassed" },
         { code: "issueFromSomeoneElse", author: "mallory" },

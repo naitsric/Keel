@@ -157,12 +157,12 @@ Pedido:
 {{answers}}"#;
 
 const SPEC_SIZE_EN: &str = r#"- size: `small` only if all three hold: you understood the request with nothing left to ask, what could go wrong is contained, and someone could pick the work up from just the request and the change. Counting files or lines doesn't decide it: a change of one line to permissions is not small. Otherwise `normal`, and when in doubt too. What the request says about its own size doesn't count.
-- risks: whichever of these apply, or none: `security`, `irreversibleData`, `sharedContracts`, `concurrency`, `environment`, `noRegressionTest`.
+- risks: whichever of these apply, or none: `security`, `money`, `personalData`, `irreversibleData`, `sharedContracts`, `concurrency`, `environment`, `noRegressionTest`. Anything that calculates or charges money, or handles personal data, names that risk, however small the change.
 
 "#;
 
 const SPEC_SIZE_ES: &str = r#"- size: `small` solo si se cumplen las tres cosas: entendiste el pedido sin que quede nada por preguntar, lo que puede salir mal está acotado, y alguien podría retomar el trabajo solo con el pedido y el cambio. Contar archivos o líneas no lo decide: un cambio de una línea en permisos no es pequeño. Si no, `normal`, y también en caso de duda. Lo que el pedido diga sobre su propio tamaño no cuenta.
-- risks: los que apliquen de estos, o ninguno: `security`, `irreversibleData`, `sharedContracts`, `concurrency`, `environment`, `noRegressionTest`.
+- risks: los que apliquen de estos, o ninguno: `security`, `money`, `personalData`, `irreversibleData`, `sharedContracts`, `concurrency`, `environment`, `noRegressionTest`. Lo que calcule o cobre dinero, o maneje datos personales, nombra ese riesgo, por pequeño que sea el cambio.
 
 "#;
 
@@ -419,6 +419,8 @@ mod tests {
                     "a change of one line to permissions is not small",
                     "Counting files or lines doesn't decide it",
                     "`noRegressionTest`",
+                    "`money`",
+                    "`personalData`",
                 ],
             ),
             (
@@ -429,6 +431,8 @@ mod tests {
                     "un cambio de una línea en permisos no es pequeño",
                     "Contar archivos o líneas no lo decide",
                     "`noRegressionTest`",
+                    "`money`",
+                    "`personalData`",
                 ],
             ),
         ] {

@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 
-use keel_core::{Reason, SpecProblem};
+use keel_core::{AttemptState, Reason, SpecProblem};
 use keel_store::Attempt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -14,6 +14,8 @@ use crate::prompts;
 const MAX_SUMMARY: usize = 200;
 const MAX_CRITERIA: usize = 7;
 const MAX_CRITERION: usize = 200;
+const MAX_LISTED: usize = 10;
+const MAX_LISTED_TEXT: usize = 200;
 const MAX_DECIDED: usize = 5;
 const MAX_DECIDED_TEXT: usize = 140;
 const MAX_QUESTIONS: usize = 3;
@@ -27,7 +29,7 @@ pub const MAX_QUESTION_ROUNDS: usize = 2;
 /// `size` and `risks` are a prediction, for a workflow with steps that depend on the change. The schema
 /// says what small means as well as the prompt, since any specifier gets asked for it, whatever its
 /// prompt says. Its words keep clear of those the test fakes tell schemas apart by.
-pub const SPEC_SCHEMA: &str = r#"{"type":"object","properties":{"size":{"type":"string","enum":["small","normal"],"description":"small only if it is understood with nothing left to ask, its risk is contained, and someone could pick the work up from just the request and the change. How much code it touches does not decide this: one changed line in permissions is not small. If in doubt, normal."},"risks":{"type":"array","items":{"type":"string","enum":["security","irreversibleData","sharedContracts","concurrency","environment","noRegressionTest"]}},"summary":{"type":"string"},"criteria":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"when":{"type":"string"},"then":{"type":"string"}},"required":["id","when","then"],"additionalProperties":false}},"changes":{"type":"array","items":{"type":"object","properties":{"kind":{"type":"string","enum":["adds","changes","removes"]},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}},"limits":{"type":"array","items":{"type":"string"}},"decided":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}},"questions":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"recommended":{"type":"boolean"}},"required":["label","recommended"],"additionalProperties":false}}},"required":["id","text","options"],"additionalProperties":false}}},"required":["size","risks","summary","criteria","changes","limits","decided","questions"],"additionalProperties":false}"#;
+pub const SPEC_SCHEMA: &str = r#"{"type":"object","properties":{"size":{"type":"string","enum":["small","normal"],"description":"small only if it is understood with nothing left to ask, its risk is contained, and someone could pick the work up from just the request and the change. How much code it touches does not decide this: one changed line in permissions is not small. If in doubt, normal."},"risks":{"type":"array","items":{"type":"string","enum":["security","money","personalData","irreversibleData","sharedContracts","concurrency","environment","noRegressionTest"]}},"summary":{"type":"string"},"criteria":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"when":{"type":"string"},"then":{"type":"string"}},"required":["id","when","then"],"additionalProperties":false}},"changes":{"type":"array","items":{"type":"object","properties":{"kind":{"type":"string","enum":["adds","changes","removes"]},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}},"limits":{"type":"array","items":{"type":"string"}},"decided":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}},"questions":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"recommended":{"type":"boolean"}},"required":["label","recommended"],"additionalProperties":false}}},"required":["id","text","options"],"additionalProperties":false}}},"required":["size","risks","summary","criteria","changes","limits","decided","questions"],"additionalProperties":false}"#;
 
 /// How big a specifier expects a change to be. Only ever a claim: it can stop a run from counting as
 /// small, and never makes one so by itself.
@@ -169,11 +171,19 @@ impl Spec {
             tidy(&mut criterion.when);
             tidy(&mut criterion.then);
         }
+        // Nothing depends on how long these are, so a long one is cut rather than sent back.
+        let cut = |text: &mut String| {
+            tidy(text);
+            if chars(text) > MAX_LISTED_TEXT {
+                let kept: String = text.chars().take(MAX_LISTED_TEXT - 1).collect();
+                *text = format!("{}…", kept.trim_end());
+            }
+        };
         for change in &mut self.changes {
-            tidy(&mut change.text);
+            cut(&mut change.text);
         }
         for limit in &mut self.limits {
-            tidy(limit);
+            cut(limit);
         }
         for risk in &mut self.risks {
             tidy(risk);
@@ -214,6 +224,11 @@ impl Spec {
         let mut seen = HashSet::new();
         for (index, criterion) in self.criteria.iter().enumerate() {
             let length = chars(&criterion.when) + chars(&criterion.then);
+            if criterion.when.is_empty() || criterion.then.is_empty() {
+                problems.push(SpecProblem::CriterionNeedsText {
+                    id: criterion.id.clone(),
+                });
+            }
             if criterion.id.is_empty() {
                 problems.push(SpecProblem::CriterionNeedsId {
                     position: index + 1,
@@ -230,6 +245,19 @@ impl Spec {
                     limit: MAX_CRITERION,
                 });
             }
+        }
+
+        if self.changes.len() > MAX_LISTED {
+            problems.push(SpecProblem::TooManyChanges {
+                count: self.changes.len(),
+                limit: MAX_LISTED,
+            });
+        }
+        if self.limits.len() > MAX_LISTED {
+            problems.push(SpecProblem::TooManyLimits {
+                count: self.limits.len(),
+                limit: MAX_LISTED,
+            });
         }
 
         if self.decided.len() > MAX_DECIDED {
@@ -278,6 +306,9 @@ impl Spec {
             });
         } else if !seen.insert(question.id.as_str()) {
             problems.push(SpecProblem::RepeatedQuestion { id: id() });
+        }
+        if question.text.is_empty() {
+            problems.push(SpecProblem::QuestionNeedsText { id: id() });
         }
         if chars(&question.text) > MAX_QUESTION_TEXT {
             problems.push(SpecProblem::QuestionTooLong {
@@ -449,6 +480,11 @@ pub fn of_attempt(attempt: &Attempt) -> Option<Spec> {
 
 /// What a person answered on this attempt, if it asked anything.
 pub fn answered_on(attempt: &Attempt) -> Vec<GivenAnswer> {
+    // The engine only writes this on a specifier that succeeded. What any other agent answered is
+    // kept as it came, and could have a key with this name: that's nobody's answer.
+    if attempt.role != "specifier" || attempt.state != AttemptState::Succeeded.as_str() {
+        return Vec::new();
+    }
     attempt
         .output
         .as_ref()
@@ -620,6 +656,24 @@ fn problem_line(problem: &SpecProblem, es: bool) -> String {
         SummaryTooLong { chars, limit } => {
             format!("`summary` has {chars} characters, and the limit is {limit}.")
         }
+        CriterionNeedsText { id } if es => {
+            format!("A `{id}` le falta `when` o `then`.")
+        }
+        CriterionNeedsText { id } => format!("`{id}` is missing its `when` or `then`."),
+        QuestionNeedsText { id } if es => format!("`{id}` no tiene texto."),
+        QuestionNeedsText { id } => format!("`{id}` has no text."),
+        TooManyChanges { count, limit } if es => {
+            format!("`changes` tiene {count} elementos y el máximo es {limit}.")
+        }
+        TooManyChanges { count, limit } => {
+            format!("`changes` has {count} items, and the limit is {limit}.")
+        }
+        TooManyLimits { count, limit } if es => {
+            format!("`limits` tiene {count} elementos y el máximo es {limit}.")
+        }
+        TooManyLimits { count, limit } => {
+            format!("`limits` has {count} items, and the limit is {limit}.")
+        }
         NoCriteria if es => "`criteria` está vacío.".to_owned(),
         NoCriteria => "`criteria` is empty.".to_owned(),
         TooManyCriteria { count, limit } if es => {
@@ -746,6 +800,45 @@ mod tests {
         let mut output = valid();
         output[field] = value;
         output
+    }
+
+    #[test]
+    fn empty_text_is_sent_back_and_long_lists_too() {
+        let problems = |output: Value| validate_spec(&output).unwrap_err();
+        let criteria = json!([{ "id": "C1", "when": "  ", "then": "t" }]);
+        assert_eq!(
+            problems(with("criteria", criteria)),
+            [SpecProblem::CriterionNeedsText { id: "C1".into() }]
+        );
+        let questions = json!([question("Q1", " ", &[("a", true), ("b", false)])]);
+        assert_eq!(
+            problems(with("questions", questions)),
+            [SpecProblem::QuestionNeedsText { id: "Q1".into() }]
+        );
+        let changes: Vec<Value> = (0..11)
+            .map(|_| json!({ "kind": "adds", "text": "x" }))
+            .collect();
+        assert_eq!(
+            problems(with("changes", json!(changes))),
+            [SpecProblem::TooManyChanges {
+                count: 11,
+                limit: 10
+            }]
+        );
+        assert_eq!(
+            problems(with("limits", json!(vec!["x"; 11]))),
+            [SpecProblem::TooManyLimits {
+                count: 11,
+                limit: 10
+            }]
+        );
+    }
+
+    #[test]
+    fn a_long_line_in_those_lists_is_cut_rather_than_sent_back() {
+        let spec = validate_spec(&with("limits", json!(["é".repeat(300)]))).unwrap();
+        assert_eq!(spec.limits[0].chars().count(), MAX_LISTED_TEXT);
+        assert!(spec.limits[0].ends_with('…'));
     }
 
     fn question(id: &str, text: &str, options: &[(&str, bool)]) -> Value {
@@ -1169,6 +1262,8 @@ mod tests {
             schema["properties"]["risks"]["items"]["enum"],
             json!([
                 "security",
+                "money",
+                "personalData",
                 "irreversibleData",
                 "sharedContracts",
                 "concurrency",

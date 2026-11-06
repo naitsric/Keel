@@ -250,6 +250,7 @@ impl World {
                 saved_workflow: Some(workflow.reference()),
                 language: "en".into(),
                 source_issue: None,
+                started_by: None,
             })
             .unwrap()
     }
@@ -452,6 +453,7 @@ fn delivered_with_verifier(w: &World, verifier_says: &str, language: &str) -> St
             saved_workflow: None,
             language: language.into(),
             source_issue: None,
+            started_by: None,
         })
         .unwrap();
     let human = w.wait_step(&run, "human", AttemptState::WaitingApproval);
@@ -897,6 +899,7 @@ fn a_card_shows_what_became_of_its_pull_request_and_stays_done_either_way() {
             saved_workflow: Some(workflow.reference()),
             language: "en".into(),
             source_issue: None,
+            started_by: None,
         })
         .unwrap();
     let human = w.wait_step(&run, "human", AttemptState::WaitingApproval);

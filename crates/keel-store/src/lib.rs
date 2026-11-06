@@ -438,6 +438,8 @@ pub struct NewRun {
     pub source_issue: Option<String>,
     pub workflow_id: Option<String>,
     pub workflow_name: Option<String>,
+    /// The assistant that started it over MCP, if one did.
+    pub started_by: Option<String>,
 }
 
 const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by, workflow_id, workflow_name, pr_state, pr_state_at, pr_checked_at";
@@ -848,9 +850,9 @@ fn bottom_of_backlog(conn: &Connection, project_id: &str) -> rusqlite::Result<i6
 
 fn insert_run(conn: &Connection, run: &NewRun) -> rusqlite::Result<()> {
     conn.execute(
-        "insert into run (id, project_id, title, request, workflow, language, source_issue, created_at, workflow_id, workflow_name)
-         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        params![run.id, run.project_id, run.title, run.request, run.workflow, run.language, run.source_issue, now(), run.workflow_id, run.workflow_name],
+        "insert into run (id, project_id, title, request, workflow, language, source_issue, created_at, workflow_id, workflow_name, started_by)
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![run.id, run.project_id, run.title, run.request, run.workflow, run.language, run.source_issue, now(), run.workflow_id, run.workflow_name, run.started_by],
     )?;
     Ok(())
 }
@@ -1097,14 +1099,6 @@ impl Store {
             [client_id],
             |r| r.get(0),
         )?)
-    }
-
-    pub fn set_run_started_by(&self, run_id: &str, client_name: &str) -> Result<()> {
-        self.lock().execute(
-            "update run set started_by = ?2 where id = ?1",
-            rusqlite::params![run_id, client_name],
-        )?;
-        Ok(())
     }
 
     pub fn add_project(&self, project: &Project) -> Result<()> {
@@ -2146,6 +2140,7 @@ mod tests {
                 source_issue: None,
                 workflow_id: None,
                 workflow_name: None,
+                started_by: None,
             })
             .unwrap();
         store
@@ -2706,6 +2701,7 @@ mod tests {
                 source_issue: None,
                 workflow_id: None,
                 workflow_name: None,
+                started_by: None,
             })
             .unwrap();
         let text = |value: Option<&str>| value.map_or(Value::Null, |v| Value::Text(v.into()));
@@ -2801,6 +2797,7 @@ mod tests {
                     source_issue: None,
                     workflow_id: workflow.map(|w| w.0.into()),
                     workflow_name: workflow.map(|w| w.1.into()),
+                    started_by: None,
                 })
                 .unwrap();
             store
@@ -2912,6 +2909,7 @@ mod tests {
                     source_issue: None,
                     workflow_id: Some("w".into()),
                     workflow_name: Some("W".into()),
+                    started_by: None,
                 })
                 .unwrap();
             if finished {
@@ -2984,6 +2982,7 @@ mod tests {
                     source_issue: None,
                     workflow_id: Some("w".into()),
                     workflow_name: Some("W".into()),
+                    started_by: None,
                 })
                 .unwrap();
             if finished {
@@ -3524,6 +3523,7 @@ mod tests {
                 source_issue: None,
                 workflow_id: None,
                 workflow_name: None,
+                started_by: None,
             })
             .unwrap();
         assert_eq!(store.working_runs().unwrap(), 1);
@@ -3543,6 +3543,7 @@ mod tests {
             source_issue: None,
             workflow_id: None,
             workflow_name: None,
+            started_by: None,
         };
         card(&store, "c");
         assert!(store.move_card("c", CardLane::Todo, 0, "en").unwrap());
@@ -3611,6 +3612,7 @@ mod tests {
                         source_issue: None,
                         workflow_id: None,
                         workflow_name: None,
+                        started_by: None,
                     },
                     id,
                 )

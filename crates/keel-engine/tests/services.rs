@@ -144,6 +144,7 @@ impl World {
                 language: "en".into(),
                 source_issue: None,
                 saved_workflow: None,
+                started_by: None,
             })
             .unwrap()
     }

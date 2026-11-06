@@ -106,7 +106,9 @@ export function specOf(attempt: { role?: string; output?: unknown }): SpecOutput
 export const askedText = (attempt: { resultText: string | null; role?: string; output?: unknown }): string | null => specOf(attempt)?.summary.trim() || attempt.resultText?.trim() || null;
 
 /** What a person has answered in this run, oldest first. */
-export const answersIn = (attempts: { role?: string; output?: unknown }[]): GivenAnswer[] => attempts.flatMap((a) => specOf(a)?.answered ?? []);
+// As in the engine, only one that succeeded: any other holds what the agent wrote, which isn't an answer.
+export const answersIn = (attempts: { role?: string; state?: string; output?: unknown }[]): GivenAnswer[] =>
+  attempts.filter((a) => a.state === undefined || a.state === "succeeded").flatMap((a) => specOf(a)?.answered ?? []);
 
 /** How many rounds of questions a person has already answered at this step, before the one it's on. */
 export const roundsAnswered = (attempts: { stepId: string; round: number; role?: string; output?: unknown }[], attempt: { stepId: string; round: number }) => attempts.filter((a) => a.stepId === attempt.stepId && a.round === attempt.round && (specOf(a)?.answered?.length ?? 0) > 0).length;

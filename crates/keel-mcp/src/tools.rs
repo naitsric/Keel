@@ -504,6 +504,7 @@ impl McpServer {
                     workflow: workflow.steps,
                     language,
                     source_issue: issue,
+                    started_by: Some(client.name.clone()),
                 })
                 .map_err(|error| match (error, issue_number) {
                     (Error::InvalidState, Some(number)) => ToolError::new(format!(
@@ -511,9 +512,6 @@ impl McpServer {
                     )),
                     (error, _) => engine_error(error),
                 })?;
-            store
-                .set_run_started_by(&run, &client.name)
-                .map_err(store_error)?;
             engine.announce(&run);
             Ok((server.run_view(&run)?, Some(run)))
         })

@@ -483,6 +483,7 @@ impl Engine {
             language: language.to_owned(),
             source_issue: None,
             saved_workflow: None,
+            started_by: None,
         })
     }
 

@@ -979,6 +979,10 @@
     "openRun": "Abrir esa ejecución"
   },
   "specProblems": {
+    "criterionNeedsText": "{{id}} no dice cuándo pasa o qué debe cumplirse entonces",
+    "questionNeedsText": "la pregunta {{id}} está vacía",
+    "tooManyChanges": "lista {{count}} cambios, y el límite es {{limit}}",
+    "tooManyLimits": "lista {{count}} cosas que no deben cambiar, y el límite es {{limit}}",
     "unreadable": "lo que escribió no viene en la forma que Keel pidió",
     "noSummary": "no dijo qué va a cambiar",
     "summaryTooLong": "la frase que dice qué va a cambiar tiene {{chars}} caracteres y el límite es {{limit}}",
@@ -1022,6 +1026,7 @@
     "andMore": "{{files}} y {{more}} más",
     "count": "{{why}}: {{runs}}",
     "why": {
+      "keelChoseAnAnswer": "después de dos rondas de preguntas, Keel tomó una opción por su cuenta, así que nadie la eligió de verdad",
       "specNotSmall": "quien definió el cambio no lo consideró pequeño",
       "specNamesRisks": "podría afectar {{risks}}",
       "noCheck": "este workflow no tiene verificación, así que nada demuestra que funcione",
@@ -1042,6 +1047,8 @@
     },
     "risks": {
       "security": "la seguridad",
+      "money": "dinero",
+      "personalData": "datos personales",
       "irreversibleData": "datos que no se pueden recuperar",
       "sharedContracts": "algo de lo que depende otro código",
       "concurrency": "cosas que pasan al mismo tiempo",
@@ -1050,6 +1057,7 @@
       "other": "algo que no supo nombrar"
     },
     "short": {
+      "keelChoseAnAnswer": "una opción que tomó Keel",
       "specNotSmall": "no se consideró pequeño",
       "specNamesRisks": "señaló un riesgo",
       "noCheck": "sin verificación",

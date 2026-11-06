@@ -48,7 +48,8 @@ describe("what was last decided", () => {
 describe("why it isn't small", () => {
   const every: Reason[] = [
     { code: "specNotSmall" },
-    { code: "specNamesRisks", risks: ["security"] },
+    { code: "specNamesRisks", risks: ["security", "money", "personalData"] },
+    { code: "keelChoseAnAnswer" },
     { code: "noCheck" },
     { code: "checkNotPassed" },
     { code: "issueFromSomeoneElse", author: "mallory" },

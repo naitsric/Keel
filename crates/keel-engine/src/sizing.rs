@@ -61,6 +61,13 @@ pub const ALWAYS_SENSITIVE: &[&str] = &[
     "**/Dockerfile*",
     "**/docker-compose*",
     "**/compose.y*ml",
+    "**/build.rs",
+    "**/vite.config.*",
+    "**/webpack.config.*",
+    "**/rollup.config.*",
+    "**/.pre-commit-config.yaml",
+    "**/.husky/**",
+    "**/lefthook.y*ml",
     // Migrations and the shape of the data. Not easily undone once they've run.
     "**/migrations/**",
     "**/migrate/**",
@@ -206,6 +213,8 @@ pub struct Facts<'a> {
     /// The assistant that started the run over MCP, if one did.
     pub started_by: Option<&'a str>,
     pub sensitive: &'a [String],
+    /// What the project runs to set up and to check.
+    pub commands: &'a [String],
     /// `None` if it couldn't be read.
     pub change: Option<ChangeSize>,
 }
@@ -272,7 +281,7 @@ pub fn already_up(steps: &[WorkflowStep], attempts: &[Attempt]) -> bool {
         .any(|a| conditional.contains(a.step_id.as_str()) && !skipped_as_small(a))
 }
 
-fn why_from_spec(attempts: &[Attempt]) -> Vec<WhyNotSmall> {
+pub(crate) fn why_from_spec(attempts: &[Attempt]) -> Vec<WhyNotSmall> {
     // A spec from before this was asked for reads as normal, and so does a step that wrote free text.
     let Some(spec) = workflows::specifying_attempt(attempts).and_then(specs::of_attempt) else {
         return vec![WhyNotSmall::SpecNotSmall];
@@ -280,6 +289,14 @@ fn why_from_spec(attempts: &[Attempt]) -> Vec<WhyNotSmall> {
     let mut why = Vec::new();
     if spec.size != Size::Small {
         why.push(WhyNotSmall::SpecNotSmall);
+    }
+    // Small means understood with nothing left to ask, and this was left to ask.
+    if spec
+        .decided
+        .iter()
+        .any(|decided| decided.taken == Some(specs::Taken::RoundsLimit))
+    {
+        why.push(WhyNotSmall::KeelChoseAnAnswer);
     }
     // Any value at all counts: one Keel doesn't know must never read as no risk.
     if !spec.risks.is_empty() {
@@ -324,17 +341,65 @@ fn why_from_issue(issue: Option<&Value>, account: Option<&str>) -> Option<WhyNot
     }
 }
 
-fn why_from_change(change: Option<&ChangeSize>, own: &[String]) -> Vec<WhyNotSmall> {
+/// What runs the file it's given, rather than only reading it.
+const INTERPRETERS: [&str; 14] = [
+    "sh", "bash", "zsh", "dash", "python", "python3", "node", "deno", "bun", "ruby", "perl", "php",
+    "uv", "tsx",
+];
+
+/// A file a test command takes as an argument is usually the test itself, which changes with the code.
+fn looks_like_a_test(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    path.split('/')
+        .any(|part| matches!(part, "test" | "tests" | "__tests__" | "spec" | "specs"))
+        || name.starts_with("test_")
+        || name.contains("_test.")
+        || name.contains(".test.")
+        || name.contains(".spec.")
+}
+
+/// The files a project's commands run, as written in them. With `./scripts/test.sh` as the check, one
+/// line in that script can make it pass. Nothing here understands a shell: it can only add to the list.
+fn run_by_commands(commands: &[String]) -> HashSet<String> {
+    let mut found = HashSet::new();
+    for command in commands {
+        for part in command.split(['&', '|', ';', '\n']) {
+            let words: Vec<&str> = part
+                .split_whitespace()
+                .map(|word| word.trim_matches(['"', '\'']))
+                .map(|word| word.strip_prefix("./").unwrap_or(word))
+                .filter(|word| !word.contains('='))
+                .collect();
+            let Some((first, rest)) = words.split_first() else {
+                continue;
+            };
+            found.insert((*first).to_owned());
+            // What `grep` or `test -f` is given is only data. What `node` is given is what runs.
+            if INTERPRETERS.contains(first) {
+                let scripts = rest.iter().filter(|word| !looks_like_a_test(word));
+                found.extend(scripts.map(|word| (*word).to_owned()));
+            }
+        }
+    }
+    found
+}
+
+fn why_from_change(
+    change: Option<&ChangeSize>,
+    own: &[String],
+    commands: &[String],
+) -> Vec<WhyNotSmall> {
     let Some(change) = change else {
         return vec![WhyNotSmall::DiffUnreadable];
     };
     let mut why = Vec::new();
+    let run_by = run_by_commands(commands);
     match sensitive_set(own) {
         Ok(set) => {
             let touched: Vec<String> = change
                 .files
                 .iter()
-                .filter(|file| set.is_match(file))
+                .filter(|file| set.is_match(file) || run_by.contains(file.as_str()))
                 .cloned()
                 .collect();
             if !touched.is_empty() {
@@ -407,7 +472,11 @@ pub fn decide(facts: &Facts) -> Decision {
                 client: client.to_owned(),
             }),
     );
-    why.extend(why_from_change(facts.change.as_ref(), facts.sensitive));
+    why.extend(why_from_change(
+        facts.change.as_ref(),
+        facts.sensitive,
+        facts.commands,
+    ));
     why.extend(why_from_verifier(facts.steps, facts.attempts, facts.round));
     match (&facts.change, why.is_empty()) {
         (Some(change), true) => Decision::Small {
@@ -433,7 +502,7 @@ mod tests {
 
     fn sensitive(file: &str, own: &[&str]) -> bool {
         let own: Vec<String> = own.iter().map(|pattern| (*pattern).to_owned()).collect();
-        !why_from_change(Some(&change(&[file], 1)), &own).is_empty()
+        !why_from_change(Some(&change(&[file], 1)), &own, &[]).is_empty()
     }
 
     #[test]
@@ -503,6 +572,7 @@ mod tests {
             "calc.py",
             "src/makefile_parser.ts",
             "docs/package.md",
+            "src/build.rs.md",
             "src/monkey.ts",
             "src/lib/session.test.ts",
         ] {
@@ -530,6 +600,29 @@ mod tests {
         ] {
             assert!(sensitive(file, &[]), "{file}");
         }
+    }
+
+    #[test]
+    fn what_a_project_s_own_commands_run_is_sensitive_but_not_the_test_a_command_names() {
+        let touches = |file: &str, command: &str| {
+            !why_from_change(Some(&change(&[file], 1)), &[], &[command.to_owned()]).is_empty()
+        };
+        assert!(touches("scripts/test.sh", "./scripts/test.sh"));
+        assert!(touches("scripts/test.sh", "bash scripts/test.sh"));
+        assert!(touches(
+            "scripts/check.mjs",
+            "pnpm i && node scripts/check.mjs"
+        ));
+        assert!(touches("run_test.sh", "CI=1 ./run_test.sh"));
+        assert!(touches("check.py", "uv run 'check.py' | tee out"));
+        // Tests change along with the code. If this counted, nothing on such a project would be small.
+        assert!(!touches("test_calc.py", "python3 test_calc.py"));
+        assert!(!touches("tests/calc.py", "python3 tests/calc.py"));
+        assert!(!touches("src/calc.test.ts", "node src/calc.test.ts"));
+        assert!(!touches("calc.py", "python3 test_calc.py"));
+        // Only what's run, and not what a command happens to read.
+        assert!(!touches("built.txt", "test -f built.txt"));
+        assert!(!touches("notes.md", "grep ok notes.md"));
     }
 
     #[test]
@@ -570,7 +663,7 @@ mod tests {
         );
         assert_eq!(check_patterns(&["billing/".to_owned()]), Ok(()));
         assert_eq!(
-            why_from_change(Some(&change(&["calc.py"], 1)), &bad),
+            why_from_change(Some(&change(&["calc.py"], 1)), &bad, &[]),
             [WhyNotSmall::BadSensitivePattern {
                 pattern: "a[".into()
             }]
@@ -581,7 +674,7 @@ mod tests {
     fn a_reason_names_a_few_files_and_says_how_many_there_were() {
         let many: Vec<String> = (0..8).map(|n| format!(".github/{n}.yml")).collect();
         let files: Vec<&str> = many.iter().map(String::as_str).collect();
-        let why = why_from_change(Some(&change(&files, 8)), &[]);
+        let why = why_from_change(Some(&change(&files, 8)), &[], &[]);
         let [WhyNotSmall::SensitiveFiles { files, total }] = &why[..] else {
             panic!("{why:?}")
         };
@@ -591,9 +684,11 @@ mod tests {
 
     #[test]
     fn the_line_limit_is_a_limit_and_what_git_will_not_count_is_not_a_small_number() {
-        assert!(why_from_change(Some(&change(&["a.py"], MAX_CHANGED_LINES - 1)), &[]).is_empty());
+        assert!(
+            why_from_change(Some(&change(&["a.py"], MAX_CHANGED_LINES - 1)), &[], &[]).is_empty()
+        );
         assert_eq!(
-            why_from_change(Some(&change(&["a.py"], MAX_CHANGED_LINES)), &[]),
+            why_from_change(Some(&change(&["a.py"], MAX_CHANGED_LINES)), &[], &[]),
             [WhyNotSmall::TooManyLines {
                 lines: 400,
                 limit: 400
@@ -605,13 +700,16 @@ mod tests {
             without_lines: vec!["big.py".into()],
         };
         assert_eq!(
-            why_from_change(Some(&counted_nothing), &[]),
+            why_from_change(Some(&counted_nothing), &[], &[]),
             [WhyNotSmall::FilesWithoutLines {
                 files: vec!["big.py".into()],
                 total: 1
             }]
         );
-        assert_eq!(why_from_change(None, &[]), [WhyNotSmall::DiffUnreadable]);
+        assert_eq!(
+            why_from_change(None, &[], &[]),
+            [WhyNotSmall::DiffUnreadable]
+        );
     }
 
     #[test]

@@ -23,7 +23,7 @@ back, and how often a run stopped to ask.
 The built-in **Fits the change** skips the reviews and the approver when a change is small. Keel
 decides that itself from what it can see, and an agent or an issue saying so doesn't make it so:
 
-- What was asked was worked out as small, with no risks named.
+- What was asked was worked out as small, with no risks named, such as money or personal data.
 - The project's check passed, on this code. With no check, nothing is ever small.
 - The run doesn't come from an issue by anyone other than the project's GitHub account, or from an
   assistant over MCP.

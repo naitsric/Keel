@@ -387,6 +387,7 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
         saved_workflow,
         language: request.language,
         source_issue: request.issue,
+        started_by: None,
     })?)
 }
 

@@ -313,6 +313,15 @@ impl World {
     }
 
     fn start_from(&self, steps: Vec<WorkflowStep>, source: Option<Issue>) -> String {
+        self.start_as(steps, source, None)
+    }
+
+    fn start_as(
+        &self,
+        steps: Vec<WorkflowStep>,
+        source: Option<Issue>,
+        started_by: Option<String>,
+    ) -> String {
         self.engine
             .start_run(StartRun {
                 project_id: self.project_id.clone(),
@@ -328,6 +337,7 @@ impl World {
                 }),
                 language: "en".into(),
                 source_issue: source,
+                started_by,
             })
             .unwrap()
     }
@@ -522,6 +532,7 @@ fn a_small_change_with_a_check_that_passed_skips_the_reviews_and_still_stops_for
             saved_workflow: Some(organic.reference()),
             language: "en".into(),
             source_issue: None,
+            started_by: None,
         })
         .unwrap();
 
@@ -728,8 +739,7 @@ fn an_issue_in_a_project_with_no_account_counts_as_someone_else() {
 #[test]
 fn a_run_an_assistant_started_is_never_small_since_no_person_wrote_what_it_asks() {
     let w = world();
-    let run = w.start(fitting());
-    w.store.set_run_started_by(&run, "Some client").unwrap();
+    let run = w.start_as(fitting(), None, Some("Some client".into()));
     w.moved_up(&run, "startedByAssistant");
 }
 

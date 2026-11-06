@@ -979,6 +979,10 @@
     "openRun": "Open that run"
   },
   "specProblems": {
+    "criterionNeedsText": "{{id}} doesn't say when it happens or what must then be true",
+    "questionNeedsText": "question {{id}} is empty",
+    "tooManyChanges": "it lists {{count}} changes, and the limit is {{limit}}",
+    "tooManyLimits": "it lists {{count}} things that must not change, and the limit is {{limit}}",
     "unreadable": "what it wrote isn't in the form Keel asked for",
     "noSummary": "it didn't say what will change",
     "summaryTooLong": "the sentence saying what will change has {{chars}} characters, and the limit is {{limit}}",
@@ -1022,6 +1026,7 @@
     "andMore": "{{files}} and {{more}} more",
     "count": "{{why}}: {{runs}}",
     "why": {
+      "keelChoseAnAnswer": "after two rounds of questions, Keel took an option itself, so nobody really chose it",
       "specNotSmall": "whoever worked out the change didn't call it small",
       "specNamesRisks": "it could affect {{risks}}",
       "noCheck": "this workflow has no check, so nothing proves it works",
@@ -1042,6 +1047,8 @@
     },
     "risks": {
       "security": "security",
+      "money": "money",
+      "personalData": "personal data",
       "irreversibleData": "data that can't be recovered",
       "sharedContracts": "something other code depends on",
       "concurrency": "things happening at the same time",
@@ -1050,6 +1057,7 @@
       "other": "something it couldn't name"
     },
     "short": {
+      "keelChoseAnAnswer": "an option Keel took itself",
       "specNotSmall": "not called small",
       "specNamesRisks": "named a risk",
       "noCheck": "no check",

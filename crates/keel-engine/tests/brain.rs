@@ -152,6 +152,7 @@ impl World {
                 language: "en".into(),
                 source_issue: None,
                 saved_workflow: None,
+                started_by: None,
             })
             .unwrap();
         self.wait_finished(&run);
@@ -499,6 +500,7 @@ fn a_decision_always_gets_in_and_the_map_makes_room() {
             language: "en".into(),
             source_issue: None,
             saved_workflow: None,
+            started_by: None,
         })
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);

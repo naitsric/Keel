@@ -229,6 +229,7 @@ impl World {
                 language: "en".into(),
                 source_issue: None,
                 saved_workflow: None,
+                started_by: None,
             })
             .unwrap()
     }
@@ -745,6 +746,7 @@ fn a_verifier_with_no_specifier_before_it_cannot_start_or_be_saved() {
         language: "en".into(),
         source_issue: None,
         saved_workflow: None,
+        started_by: None,
     });
     assert!(
         matches!(&started, Err(Error::Blocked(reason)) if *reason == refused),
@@ -820,6 +822,7 @@ fn the_built_in_workflow_goes_through_its_verifier_and_on_to_the_person() {
             language: "es".into(),
             source_issue: None,
             saved_workflow: None,
+            started_by: None,
         })
         .unwrap();
     w.wait_for(&run, "humano", AttemptState::WaitingApproval);
@@ -874,6 +877,7 @@ fn the_results_count_what_was_left_once_a_run_has_finished() {
             saved_workflow: Some(workflow.reference()),
             language: "en".into(),
             source_issue: None,
+            started_by: None,
         })
         .unwrap();
     let waiting = w.wait_for(&run, "human", AttemptState::WaitingApproval);

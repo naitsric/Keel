@@ -480,6 +480,7 @@ impl World {
                     source_issue: None,
                     workflow_id: None,
                     workflow_name: None,
+                    started_by: None,
                 },
                 &id,
             )
@@ -525,6 +526,7 @@ impl World {
                 language: "en".into(),
                 source_issue: None,
                 saved_workflow: None,
+                started_by: None,
             })
             .unwrap()
     }
@@ -705,6 +707,7 @@ fn outside_run(w: &World, workflow: Vec<WorkflowStep>, request: &str) -> StartRu
         language: "en".into(),
         source_issue: None,
         saved_workflow: None,
+        started_by: None,
     }
 }
 
@@ -1693,6 +1696,7 @@ fn a_full_board_flow_asks_github_for_nothing_delivery_does_not_already_do() {
             language: "en".into(),
             source_issue: None,
             saved_workflow: None,
+            started_by: None,
         })
         .unwrap();
     let deadline = Instant::now() + PATIENCE;
@@ -1959,6 +1963,7 @@ fn starting_a_run_by_hand_does_not_lock_up_with_the_scheduler() {
                     language: "en".into(),
                     source_issue: None,
                     saved_workflow: None,
+                    started_by: None,
                 })
                 .unwrap();
         }
@@ -2802,6 +2807,7 @@ fn dying_with_the_run_linked_and_not_yet_begun_runs_the_card_once() {
                 source_issue: None,
                 workflow_id: None,
                 workflow_name: None,
+                started_by: None,
             },
             &id,
         )

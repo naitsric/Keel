@@ -2,13 +2,20 @@
 //! `gh` for one when it's about to use it and hands it only to that one process.
 
 use std::fmt;
+use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use keel_core::PrState;
 use serde::{Deserialize, Serialize};
 
 use crate::command::clean_env;
+use crate::process::{SIGKILL, signal_group};
+
+/// How long a look at a pull request gets. It's asked again later anyway.
+const LOOK_LIMIT: Duration = Duration::from_secs(30);
 
 /// A token that can't end up in a log by accident.
 pub struct Token(String);
@@ -305,11 +312,82 @@ impl Gh {
             .unwrap_or_default())
     }
 
+    /// `run`, giving up at the limit along with anything it started. For what runs on its own in the
+    /// background, where nobody would notice it hanging and everything after it would wait.
+    fn run_within(&self, token: &Token, args: &[&str], limit: Duration) -> Result<String, GhError> {
+        let mut command = self.command();
+        command
+            .args(args)
+            .env("GH_TOKEN", token.expose())
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0);
+        let failed = |detail: String| GhError {
+            kind: "other",
+            detail,
+        };
+        let mut child = command.spawn().map_err(|e| failed(e.to_string()))?;
+        let read = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+            std::thread::spawn(move || {
+                let mut bytes = Vec::new();
+                if let Some(mut pipe) = pipe {
+                    let _ = pipe.read_to_end(&mut bytes);
+                }
+                bytes
+            })
+        };
+        let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
+        let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
+        let deadline = Instant::now() + limit;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Ok(None) => {
+                    signal_group(child.id() as i32, SIGKILL);
+                    let _ = child.wait();
+                    return Err(failed(format!(
+                        "gh took longer than {} seconds",
+                        limit.as_secs()
+                    )));
+                }
+                Err(e) => return Err(failed(e.to_string())),
+            }
+        };
+        let text = |reader: std::thread::JoinHandle<Vec<u8>>| {
+            String::from_utf8_lossy(&reader.join().unwrap_or_default())
+                .trim()
+                .to_owned()
+        };
+        let (out, err) = (text(stdout), text(stderr));
+        if status.success() {
+            return Ok(out);
+        }
+        let detail = token.redact(&err);
+        Err(GhError {
+            kind: classify_error(&detail),
+            detail,
+        })
+    }
+
     /// What became of a pull request. Only reads: after opening one, Keel writes nothing to it.
     pub fn pr_status(&self, token: &Token, repo: &str, number: i64) -> Result<PrStatus, GhError> {
+        self.pr_status_within(token, repo, number, LOOK_LIMIT)
+    }
+
+    fn pr_status_within(
+        &self,
+        token: &Token,
+        repo: &str,
+        number: i64,
+        limit: Duration,
+    ) -> Result<PrStatus, GhError> {
         let number = number.to_string();
-        let text = self.run(
-            Some(token),
+        let text = self.run_within(
+            token,
             &[
                 "pr",
                 "view",
@@ -319,6 +397,7 @@ impl Gh {
                 "--json",
                 "state,isDraft,mergedAt,closedAt,updatedAt",
             ],
+            limit,
         )?;
         let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| GhError {
             kind: "other",
@@ -521,6 +600,25 @@ mod tests {
         ] {
             assert_eq!(pull_request_of(url), None, "{url}");
         }
+    }
+
+    #[test]
+    fn a_gh_that_hangs_is_given_up_on_along_with_what_it_started() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("gh");
+        std::fs::write(&bin, "#!/bin/sh\nsleep 30 &\nwait\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let gh = Gh {
+            bin,
+            path_env: std::env::var("PATH").unwrap_or_default(),
+        };
+        let started = Instant::now();
+        let error = gh
+            .pr_status_within(&Token("t".into()), "a/b", 1, Duration::from_millis(100))
+            .unwrap_err();
+        assert!(error.detail.contains("longer than"), "{}", error.detail);
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

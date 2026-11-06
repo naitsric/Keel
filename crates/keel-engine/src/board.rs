@@ -487,6 +487,7 @@ impl Engine {
             workflow: workflow.steps,
             language,
             source_issue: issue,
+            started_by: None,
         })
     }
 
