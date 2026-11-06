@@ -12,7 +12,7 @@ import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
 import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
-import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, Project, ProjectAdded, Reason, Run, RunRow, WorkflowStep, WorkflowDraft } from "../src/lib/api";
+import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, Project, ProjectAdded, ProjectProposal, Reason, Run, RunRow, WorkflowStep, WorkflowDraft } from "../src/lib/api";
 import { useApp } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -132,6 +132,12 @@ const runWorkflow: WorkflowStep[] =
 // node=<a step's name> selects it once the page has loaded, and saveProblem=noPrompt:builder makes
 // saving fail like that (with click=Save a copy to press it). Add theme=light to any of them.
 /** `draft=late` has work happening after the person's approval, which the review has to call out. */
+const proposedProjects: ProjectProposal[] = [
+  { id: "pp2", path: "/Users/you/www/billing-api", name: "billing-api", githubRepo: "octo/billing-api", proposedBy: "Claude Code", createdAt: "2026-11-06T15:40:00.000Z", returning: false, gone: false },
+  { id: "pp1", path: "/Users/you/www/app-movil", name: "app-movil", githubRepo: null, proposedBy: "Claude Code", createdAt: "2026-11-06T15:30:00.000Z", returning: params.get("proposed") === "returning", gone: params.get("proposed") === "gone" },
+];
+const projectsProposed = params.get("proposed") ? proposedProjects.slice(params.get("proposed") === "2" ? 0 : 1) : [];
+
 const draftsWaiting: WorkflowDraft[] = [
   {
     id: "d1",
@@ -432,7 +438,7 @@ mockIPC((command, args) => {
       // A new object each time, as the real answer is.
       return { ...preflight };
     case "overview":
-      return params.get("empty") === "1" ? { pendingProposals: 0, workflowDrafts: 0, runs: params.get("history") === "1" ? runs : [], projects: listedProjects, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: params.get("proposals") === "1" ? 1 : 0, workflowDrafts: params.get("drafts") === "1" ? draftsWaiting.length : 0, runs, projects: listedProjects.map((p) => (p.id === "p1" ? { ...p, defaultWorkflow } : p)), totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
+      return params.get("empty") === "1" ? { pendingProposals: 0, workflowDrafts: 0, projectProposals: projectsProposed.length, runs: params.get("history") === "1" ? runs : [], projects: listedProjects, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: params.get("proposals") === "1" ? 1 : 0, workflowDrafts: params.get("drafts") === "1" ? draftsWaiting.length : 0, projectProposals: projectsProposed.length, runs, projects: listedProjects.map((p) => (p.id === "p1" ? { ...p, defaultWorkflow } : p)), totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
     case "plugin:dialog|open":
       return params.get("picker") === "cancel" ? null : freshProject.path;
     case "project_add":
@@ -478,6 +484,8 @@ mockIPC((command, args) => {
         { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: [...workflow, learnerStep] },
         { id: "mine", name: i18next.language === "es" ? "Solo revisiones" : "Reviews only", builtin: false, steps: workflow.slice(3) },
       ];
+    case "project_proposals_list":
+      return projectsProposed;
     case "workflow_drafts_list":
       return params.get("drafts") === "1" ? draftsWaiting : [];
     case "workflow_draft_save":

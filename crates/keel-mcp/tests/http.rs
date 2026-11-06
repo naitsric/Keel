@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use keel_core::{AttemptState, BoardColumn, CardLane, MASK, StepSpec, ToolProfile, WorkflowStep};
-use keel_engine::{Config, Engine, Workflow};
+use keel_engine::{AddOutcome, Config, Engine, MAX_PROJECT_PROPOSALS, Workflow};
 use keel_harness::Tools;
 use keel_mcp::{MAX_DRAFTS, MAX_OPEN_RUNS, MCP_PATH, McpServer, StartError};
 use keel_store::Store;
@@ -23,8 +23,9 @@ use serde_json::{Value as Json, json};
 
 /// Everything a client can do. A new tool has to be added here on purpose: nothing that answers an
 /// approval, merges, changes settings or saved workflows, or lets anything into the Brain belongs
-/// here. draft_workflow is here because what it leaves can't run until the person saves it.
-const TOOLS: [&str; 11] = [
+/// here. draft_workflow is here because what it leaves can't run until the person saves it, and
+/// propose_project because what it leaves isn't a project until the person adds it.
+const TOOLS: [&str; 12] = [
     "draft_workflow",
     "get_brain",
     "get_run",
@@ -33,6 +34,7 @@ const TOOLS: [&str; 11] = [
     "list_projects",
     "list_runs",
     "list_workflows",
+    "propose_project",
     "start_run",
     "stop_run",
     "wait_for_run",
@@ -535,6 +537,127 @@ async fn a_client_that_may_only_read_cannot_propose_and_drafts_have_a_limit() {
         .unwrap();
     ok(&call(&client, "draft_workflow", draft_args("app")).await);
     client.cancel().await.unwrap();
+}
+
+impl World {
+    /// A repo on this Mac that isn't in Keel, as git names it.
+    fn repo_outside_keel(&self, name: &str) -> String {
+        let repo = self._dir.path().join(name);
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Tester"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "init"]);
+        std::fs::canonicalize(&repo)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+#[tokio::test]
+async fn a_proposed_project_waits_for_the_person_and_no_run_can_reach_it_until_they_add_it() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let path = w.repo_outside_keel("other");
+
+    let answer = ok(&call(&client, "propose_project", json!({ "path": path })).await);
+    assert_eq!(answer["state"], "waitingForPerson");
+    assert_eq!(answer["path"], path);
+    assert_eq!(answer["proposedBy"], "Claude Code");
+    assert!(answer["who"].as_str().unwrap().contains("Tell them"));
+
+    let listed = ok(&call(&client, "list_projects", json!({})).await);
+    assert_eq!(listed["projects"].as_array().unwrap().len(), 1, "{listed}");
+    assert_eq!(listed["proposals"][0]["path"], path);
+
+    let args = json!({ "project": "other", "workflow": w.workflow_id, "request": "x" });
+    let refusal = refused(&call(&client, "start_run", args).await);
+    assert!(refusal.contains("no project"), "{refusal}");
+    assert!(w.store.runs(10).unwrap().is_empty());
+
+    // Asking again doesn't ask the person again.
+    let again = ok(&call(&client, "propose_project", json!({ "path": path })).await);
+    assert_eq!(again["proposalId"], answer["proposalId"]);
+
+    let id = answer["proposalId"].as_str().unwrap();
+    let added = w.engine.accept_project_proposal(id, "en").unwrap();
+    assert_eq!(added.outcome, AddOutcome::New);
+    let listed = ok(&call(&client, "list_projects", json!({})).await);
+    assert_eq!(listed["projects"].as_array().unwrap().len(), 2, "{listed}");
+    assert!(listed["proposals"].as_array().unwrap().is_empty());
+
+    let answer = ok(&call(&client, "propose_project", json!({ "path": path })).await);
+    assert_eq!(answer["state"], "alreadyInKeel");
+    assert_eq!(answer["project"]["id"], added.project.id);
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_proposal_can_only_name_the_folder() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let tools = client.list_all_tools().await.unwrap();
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name == "propose_project")
+        .unwrap();
+    let schema = serde_json::to_value(&tool.input_schema).unwrap();
+    let properties: Vec<&String> = schema["properties"].as_object().unwrap().keys().collect();
+    assert_eq!(properties, ["path"]);
+
+    let path = w.repo_outside_keel("other");
+    for extra in ["githubAccount", "checkCommand", "setupCommand", "name"] {
+        let args = json!({ "path": path, extra: "whatever" });
+        let refusal = refused(&call(&client, "propose_project", args).await);
+        assert!(refusal.contains(extra), "{refusal}");
+    }
+    assert!(w.engine.project_proposals().unwrap().is_empty());
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_proposal_is_refused_when_it_should_be_and_the_call_is_on_record() {
+    let w = world().await;
+    let reader = w.client(&w.token(false)).await;
+    let path = w.repo_outside_keel("other");
+    let refusal = refused(&call(&reader, "propose_project", json!({ "path": path })).await);
+    assert!(refusal.contains("may only read"), "{refusal}");
+    reader.cancel().await.unwrap();
+
+    let client = w.client(&w.token(true)).await;
+    for relative in ["other", "./other", "~/other", "", "../other"] {
+        let refusal = refused(&call(&client, "propose_project", json!({ "path": relative })).await);
+        assert!(refusal.contains("full path"), "{relative}: {refusal}");
+    }
+    let long = format!("/{}", "a".repeat(2000));
+    let refusal = refused(&call(&client, "propose_project", json!({ "path": long })).await);
+    assert!(refusal.contains("full path"), "{refusal}");
+
+    let plain = w._dir.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    let refusal = refused(&call(&client, "propose_project", json!({ "path": plain })).await);
+    assert!(refusal.contains("not a git repository"), "{refusal}");
+    assert!(w.engine.project_proposals().unwrap().is_empty());
+
+    for i in 0..MAX_PROJECT_PROPOSALS {
+        let path = w.repo_outside_keel(&format!("repo-{i}"));
+        ok(&call(&client, "propose_project", json!({ "path": path })).await);
+    }
+    let refusal = refused(&call(&client, "propose_project", json!({ "path": path })).await);
+    assert!(refusal.contains("as many as may wait"), "{refusal}");
+    client.cancel().await.unwrap();
+
+    let calls = w.store.mcp_calls(100).unwrap();
+    let on_record = calls.iter().filter(|c| c.tool == "propose_project");
+    assert!(
+        on_record
+            .clone()
+            .any(|c| c.args.contains(&path) && c.error.is_some())
+    );
+    assert!(on_record.clone().any(|c| c.error.is_none()));
 }
 
 #[tokio::test]

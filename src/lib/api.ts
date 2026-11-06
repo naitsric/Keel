@@ -245,6 +245,20 @@ export interface WorkflowDraft {
   createdAt: string;
 }
 
+/** A folder an assistant proposed adding, as it is now. It isn't a project until the person adds it. */
+export interface ProjectProposal {
+  id: string;
+  path: string;
+  name: string;
+  githubRepo: string | null;
+  proposedBy: string;
+  createdAt: string;
+  /** It was in Keel and was removed, so it comes back with its history and starts no map. */
+  returning: boolean;
+  /** It isn't the root of a repo with commits anymore, so all that's left is to discard it. */
+  gone: boolean;
+}
+
 /** A reviewer's answer. */
 export interface Verdict {
   verdict: "approved" | "changes";
@@ -318,6 +332,7 @@ export interface Overview {
   projects: Project[];
   pendingProposals: number;
   workflowDrafts: number;
+  projectProposals: number;
 }
 
 export interface Attempt {
@@ -424,6 +439,9 @@ export const api = {
   refreshSession: () => invoke<Preflight>("refresh_session"),
   overview: () => invoke<Overview>("overview"),
   projectAdd: (path: string, language: string) => invoke<ProjectAdded>("project_add", { path, language }),
+  projectProposalsList: () => invoke<ProjectProposal[]>("project_proposals_list"),
+  projectProposalAccept: (proposalId: string, language: string) => invoke<ProjectAdded>("project_proposal_accept", { proposalId, language }),
+  projectProposalDiscard: (proposalId: string) => invoke<void>("project_proposal_discard", { proposalId }),
   projectSetup: (projectId: string) => invoke<ProjectSetup>("project_setup", { projectId }),
   projectTryCheck: (projectId: string, setup: string, check: string, language: string) => invoke<string>("project_try_check", { projectId, setup, check, language }),
   projectRemove: (projectId: string) => invoke<void>("project_remove", { projectId }),
