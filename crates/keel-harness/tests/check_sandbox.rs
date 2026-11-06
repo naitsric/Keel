@@ -486,6 +486,98 @@ fn setup_still_cannot_reach_anything_on_this_machine() {
     );
 }
 
+/// Where a real install keeps a project: its cache beside its mirror, apart from the run, with
+/// other projects next door. uv stopped dead there, and a cache right in the home folder hid it.
+#[test]
+fn setup_can_find_its_way_to_its_cache_and_learns_nothing_else_on_the_way() {
+    let d = deep_run();
+    let projects = d.root.path().join("Application Support/projects");
+    let project = projects.join("p1");
+    let cache = project.join("cache");
+    let mirror = project.join("mirror.git");
+    let other_project = projects.join("p2");
+    let other_cache = other_project.join("cache");
+    for folder in [&cache, &mirror, &other_cache] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    std::fs::write(mirror.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(other_cache.join("wheel"), "theirs").unwrap();
+
+    let run = |profile: &str, script: &str| {
+        Command::new("/usr/bin/sandbox-exec")
+            .args(["-p", profile, "/bin/sh", "-c", script])
+            .current_dir(&d.workspace)
+            .output()
+            .unwrap()
+    };
+    let profile = setup_profile(&d.workspace, &d.home, &[], &[], &cache);
+    let allowed = |script: &str| {
+        let output = run(&profile, script);
+        assert!(
+            output.status.success(),
+            "{script}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+
+    // `realpath` needs what uv needs here: to ask about every folder on the way down.
+    let real_path = format!("/bin/realpath {}", quoted(&cache));
+    assert_eq!(
+        String::from_utf8_lossy(&allowed(&real_path).stdout).trim(),
+        cache.canonicalize().unwrap().to_string_lossy()
+    );
+    let without = [&projects, &project]
+        .iter()
+        .fold(profile.clone(), |rules, folder| {
+            rules.replace(&format!(" (literal \"{}\")", folder.display()), "")
+        });
+    assert_ne!(without, profile);
+    assert!(
+        !run(&without, &real_path).status.success(),
+        "if this passes, the test proves nothing"
+    );
+    let inside = quoted(&cache.join("uv/sdists-v10"));
+    allowed(&format!(
+        "mkdir -p {inside} && echo x > {inside}/f && cat {inside}/f && mv {inside}/f {inside}/g"
+    ));
+
+    // That the folders on the way exist, and nothing else. Each of these is there, so being
+    // refused can't be mistaken for not finding it.
+    allowed(&format!("ls -ld {}", quoted(&projects)));
+    allowed(&format!("ls -ld {}", quoted(&project)));
+    for script in [
+        format!("ls {}", quoted(&projects)),
+        format!("ls {}", quoted(&project)),
+        format!("ls {}", quoted(&mirror)),
+        format!("ls -ld {}", quoted(&mirror)),
+        format!("cat {}", quoted(&mirror.join("HEAD"))),
+        format!("ls -ld {}", quoted(&other_project)),
+        format!("ls {}", quoted(&other_cache)),
+        format!("ls -ld {}", quoted(&other_cache)),
+        format!("cat {}", quoted(&other_cache.join("wheel"))),
+        format!("touch {}", quoted(&projects.join("new"))),
+        format!("touch {}", quoted(&project.join("new"))),
+        format!("echo x >> {}", quoted(&mirror.join("HEAD"))),
+        format!("touch {}", quoted(&other_cache.join("poison"))),
+    ] {
+        let output = run(&profile, &script);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{script}");
+        assert!(
+            stderr.contains("Operation not permitted"),
+            "{script}: {stderr}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(mirror.join("HEAD")).unwrap(),
+        "ref: refs/heads/main\n"
+    );
+    assert!(!other_cache.join("poison").exists());
+    assert!(!project.join("new").exists());
+    assert!(!projects.join("new").exists());
+}
+
 #[test]
 fn the_cache_is_only_writable_during_setup() {
     let s = sandbox();
