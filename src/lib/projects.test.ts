@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Attempt, AttemptState, Project } from "./api";
 import { accountToSelect, commandNotFound, needsSetup, shortPath, trialOutcome, withSetup } from "./projects";
 
-const project = (fields: Partial<Project>) => ({ id: "p", name: "demo", path: "/w", githubAccount: null, githubRepo: null, setupCommand: null, checkCommand: null, allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, ...fields }) as Project;
+const project = (fields: Partial<Project>) => ({ id: "p", name: "demo", path: "/w", githubAccount: null, githubRepo: null, setupCommand: null, checkCommand: null, allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, sensitivePaths: [], ...fields }) as Project;
 
 describe("whether a project still has setup to finish", () => {
   it("is done with a check and, on GitHub, an account", () => {
@@ -31,11 +31,13 @@ describe("what saving sends", () => {
       services: [{ type: "bridge", name: "db", port: 5432, socket: null }],
       env: [{ name: "DB", value: "x" }],
       defaultWorkflow: "mine",
+      sensitivePaths: ["billing/"],
       ...({ addedLater: 1 } as object),
     });
     const sent = withSetup(before, { githubAccount: "you", setupCommand: "npm ci", checkCommand: "npm test" });
     expect(sent).toEqual({ ...before, githubAccount: "you", setupCommand: "npm ci", checkCommand: "npm test" });
     expect(sent.defaultWorkflow).toBe("mine");
+    expect(sent.sensitivePaths).toEqual(["billing/"]);
     expect(sent.env).toEqual([{ name: "DB", value: "x" }]);
   });
 });

@@ -293,6 +293,14 @@ describe("a run with several steps", () => {
     expect(latestOfEachStep([failed, a("ux", "succeeded"), retried]).map((x) => x.state)).toEqual(["succeeded", "succeeded"]);
   });
 
+  it("doesn't take an approval put off for a person's attention, since what they asked for is going", () => {
+    const attempts = [a("human", "postponed"), a("security", "running")];
+    expect(focusAttempt(attempts)?.stepId).toBe("security");
+    expect(stillGoing({ finishedAt: null }, attempts)).toBe(true);
+    expect(stillGoing({ finishedAt: null }, [a("human", "postponed")])).toBe(true);
+    expect(focusAttempt([a("human", "postponed"), a("human", "waitingApproval")])?.state).toBe("waitingApproval");
+  });
+
   it("focuses on what needs a person, ahead of what's working", () => {
     expect(focusAttempt([a("security", "running"), a("code", "failed"), a("ux", "running")])?.stepId).toBe("code");
     expect(focusAttempt([a("security", "succeeded"), a("ux", "running")])?.stepId).toBe("ux");

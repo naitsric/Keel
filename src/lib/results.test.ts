@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { WorkflowResults } from "./api";
-import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE, matchedShare } from "./results";
+import i18next from "../i18n";
+import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE, matchedShare, movedUpReasons } from "./results";
 
-const results = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "w", workflowName: "W", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0, ...fields });
+const results = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "w", workflowName: "W", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0, shortRoute: 0, movedUp: 0, movedUpBecause: [], ...fields });
 
 describe("averages", () => {
   it("wait for enough merged pull requests or finished runs", () => {
@@ -25,6 +26,17 @@ describe("how often answers took the recommended option", () => {
   it("says nothing until there are enough answers to go on", () => {
     expect(matchedShare(results({ answers: ENOUGH_FOR_AN_AVERAGE - 1, answersRecommended: 1 }))).toBeNull();
     expect(matchedShare(results({ answers: 4, answersRecommended: 3 }))).toBe(0.75);
+  });
+});
+
+describe("why runs went to full review", () => {
+  it("reads in plain words, most common first as the engine sends them, in either language", async () => {
+    const r = results({ movedUp: 3, movedUpBecause: [{ code: "sensitiveFiles", runs: 2 }, { code: "personAsked", runs: 1 }, { code: "somethingNew", runs: 1 }] });
+    await i18next.changeLanguage("en");
+    expect(movedUpReasons(r, i18next.t)).toBe("sensitive files: 2, you asked: 1, another reason: 1");
+    await i18next.changeLanguage("es");
+    expect(movedUpReasons(r, i18next.t)).toBe("archivos sensibles: 2, lo pediste: 1, otra razón: 1");
+    await i18next.changeLanguage("en");
   });
 });
 

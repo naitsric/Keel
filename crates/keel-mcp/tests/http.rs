@@ -135,6 +135,7 @@ async fn world() -> World {
                         max_turns: None,
                         max_budget_usd: None,
                         paths: vec![],
+                        when: None,
                         role: Default::default(),
                     }),
                     WorkflowStep::Approval { id: "human".into() },
@@ -328,11 +329,64 @@ async fn it_tells_a_model_how_to_write_a_draft() {
         "maxRounds",
         "specifier",
         "verifier",
+        "when",
+        "notSmall",
     ] {
         assert!(schema.contains(word), "{word}: {schema}");
     }
     assert!(!schema.contains("setup"), "{schema}");
     assert!(!schema.contains("mapper"), "{schema}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_draft_can_ask_for_a_step_to_depend_on_the_change_and_it_is_kept_and_shown() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let args = json!({
+        "project": "app",
+        "name": "Fits",
+        "steps": [
+            { "type": "agent", "id": "builder", "model": "sonnet", "tools": "build", "prompt": "{{request}}" },
+            { "type": "parallel", "id": "reviews", "steps": [
+                { "id": "security", "model": "haiku", "prompt": "Review", "role": { "kind": "reviewer" }, "when": "notSmall" },
+            ] },
+            { "type": "agent", "id": "approver", "model": "opus", "prompt": "Decide", "role": { "kind": "approver", "reworkTo": "builder", "maxRounds": 2 }, "when": "notSmall" },
+            { "type": "approval", "id": "human" },
+        ],
+    });
+    let draft = ok(&call(&client, "draft_workflow", args).await);
+    assert_eq!(draft["steps"][1]["steps"][0]["when"], "notSmall");
+    assert_eq!(draft["steps"][2]["when"], "notSmall");
+    assert_eq!(draft["steps"][0]["when"], Json::Null);
+    let kept = w.engine.workflow_drafts().unwrap().remove(0);
+    let WorkflowStep::Agent(approver) = &kept.steps[2] else {
+        panic!()
+    };
+    assert_eq!(approver.when, Some(keel_core::StepCondition::NotSmall));
+
+    let refusal = call(
+        &client,
+        "draft_workflow",
+        json!({ "project": "app", "name": "Bad", "steps": [{ "type": "agent", "id": "a", "model": "opus", "prompt": "p", "when": "whenever" }] }),
+    )
+    .await;
+    assert!(
+        refused(&refusal).contains("whenever"),
+        "{}",
+        refused(&refusal)
+    );
+    // Only an agent can have one. On anything else it's refused, and not left to look like it worked.
+    let refusal = call(
+        &client,
+        "draft_workflow",
+        json!({ "project": "app", "name": "Bad", "steps": [
+            { "type": "agent", "id": "b", "model": "opus", "prompt": "p", "tools": "build" },
+            { "type": "approval", "id": "human", "when": "notSmall" },
+        ] }),
+    )
+    .await;
+    assert!(refused(&refusal).contains("when"), "{}", refused(&refusal));
     client.cancel().await.unwrap();
 }
 
@@ -495,6 +549,14 @@ async fn a_draft_that_breaks_the_rules_is_refused_and_says_where() {
             json!([{ "type": "agent", "id": "v", "model": "opus", "prompt": "p", "role": { "kind": "verifier" } }]),
             "verifierNeedsSpecifier",
             "v",
+        ),
+        (
+            json!([
+                { "type": "agent", "id": "r", "model": "opus", "prompt": "p", "role": { "kind": "reviewer" }, "when": "notSmall" },
+                { "type": "agent", "id": "b", "model": "opus", "prompt": "p", "tools": "build" },
+            ]),
+            "whenBeforeBuild",
+            "r",
         ),
     ];
     for (steps, problem, step) in cases {
@@ -766,6 +828,7 @@ async fn a_step_asking_the_person_something_reads_as_waiting_for_them() {
                     max_turns: None,
                     max_budget_usd: None,
                     paths: vec![],
+                    when: None,
                     role: StepRole::Specifier,
                 })],
             },

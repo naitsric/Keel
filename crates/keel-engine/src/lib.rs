@@ -10,6 +10,7 @@ mod prompts;
 mod pull_requests;
 mod runner;
 mod services;
+mod sizing;
 mod specs;
 mod verification;
 mod workflows;
@@ -23,8 +24,8 @@ use std::time::{Duration, Instant};
 pub use board::{Board, BoardCard, BoardIssue};
 pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
 pub use detect::Guess;
-pub use git::{Git, GitError, Snapshot};
-use keel_core::{AttemptState, CardLane, Reason, StepRole, StepSpec, WorkflowStep};
+pub use git::{ChangeSize, Git, GitError, Snapshot};
+use keel_core::{AttemptState, CardLane, Reason, StepCondition, StepRole, StepSpec, WorkflowStep};
 use keel_harness::auth::{self, AuthStatus, VersionCheck};
 use keel_harness::github::{self, Account, Gh, GhError, Issue, RepoInfo};
 use keel_harness::process::{self, SIGINT, SIGTERM};
@@ -248,6 +249,14 @@ pub(crate) struct Resume {
     pub from: String,
     /// What it's told, if not simply to go on.
     pub prompt: Option<String>,
+}
+
+/// What a step's condition comes to, each time `advance` goes through. Reading the change takes a
+/// moment, so it's worked out at most once, and only if a step asks.
+#[derive(Default)]
+struct SizeThisPass {
+    decision: Option<sizing::Decision>,
+    said: bool,
 }
 
 #[derive(Default)]
@@ -476,6 +485,7 @@ impl Engine {
             services: Vec::new(),
             env: Vec::new(),
             default_workflow: None,
+            sensitive_paths: Vec::new(),
         };
         self.inner.store.add_project(&project)?;
         Ok((project, AddOutcome::New))
@@ -599,6 +609,7 @@ impl Engine {
 
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<Project> {
         services::validate(&settings.services, &settings.env).map_err(Error::Blocked)?;
+        sizing::check_patterns(&settings.sensitive_paths).map_err(Error::Blocked)?;
         let before = self.inner.store.project(id)?.github_account;
         self.inner.store.update_project(id, settings)?;
         let project = self.inner.store.project(id)?;
@@ -942,6 +953,27 @@ impl Engine {
         Ok(())
     }
 
+    /// A person at an approval asks for what was skipped for being a small change to run first. Nothing
+    /// is built again and no round goes by, so this doesn't count against the approver. Their approval
+    /// comes round again afterwards. If the approver then asks for rework, that takes the normal path.
+    pub fn run_skipped(&self, attempt_id: &str) -> Result<()> {
+        let store = &self.inner.store;
+        let attempt = store.attempt(attempt_id)?;
+        if attempt.state != AttemptState::WaitingApproval.as_str() {
+            return Err(Error::InvalidState);
+        }
+        let skipped = sizing::skipped_steps(&store.attempts_of_run(&attempt.run_id)?);
+        if skipped.is_empty() {
+            return Err(Error::Blocked(Reason::NothingSkippedToRun));
+        }
+        if !store.postpone_attempt(attempt_id, &skipped)? {
+            return Err(Error::InvalidState);
+        }
+        self.inner.advance(&attempt.run_id)?;
+        (self.inner.on_change)(&attempt.run_id);
+        Ok(())
+    }
+
     pub fn decisions(&self, project_id: &str) -> Result<Vec<Decision>> {
         Ok(self.inner.store.decisions(project_id)?)
     }
@@ -1035,6 +1067,7 @@ impl Engine {
                 AttemptState::WaitingApproval
                     | AttemptState::WaitingAnswers
                     | AttemptState::Returned
+                    | AttemptState::Postponed
             )
         {
             return Err(Error::InvalidState);
@@ -1074,7 +1107,12 @@ impl Engine {
         let attempt = self.inner.store.attempt(attempt_id)?;
         let state = AttemptState::parse(&attempt.state).ok_or(Error::InvalidState)?;
         // What worked has moved on, and leaving it would close the run under whatever came next.
-        if state.is_active() || matches!(state, AttemptState::Succeeded | AttemptState::Returned) {
+        if state.is_active()
+            || matches!(
+                state,
+                AttemptState::Succeeded | AttemptState::Returned | AttemptState::Postponed
+            )
+        {
             return Err(Error::InvalidState);
         }
         self.inner
@@ -1563,25 +1601,36 @@ impl Inner {
                     .iter()
                     .rev()
                     .find(|a| a.step_id == id && a.round >= round)
+                    .filter(|a| !sizing::due_again(a, &attempts))
             };
+            let mut size = SizeThisPass::default();
             for (index, step) in steps.iter().enumerate() {
                 if let WorkflowStep::Parallel { steps: group, .. } = step {
                     let changed = workflows::files_changed(&attempts);
                     let mut pending = false;
                     for spec in group {
                         match latest(&spec.id, index) {
-                            None if !workflows::paths_match(&spec.paths, &changed) => {
-                                self.record_skipped(run_id, spec, &attempts)?
-                            }
                             None => {
-                                let number = workflows::next_number(&attempts, &spec.id);
-                                self.start_step(
-                                    run_id,
-                                    &WorkflowStep::Agent(spec.clone()),
-                                    number,
-                                    None,
-                                )?;
-                                pending = true;
+                                let small = self
+                                    .treated_as_small(&run, &steps, &attempts, spec, &mut size)?;
+                                let id = if let Some(reason) = small {
+                                    self.record_skipped(run_id, spec, &attempts, reason)?
+                                } else if !workflows::paths_match(&spec.paths, &changed) {
+                                    let reason = Reason::NoMatchingPaths {
+                                        paths: spec.paths.clone(),
+                                    };
+                                    self.record_skipped(run_id, spec, &attempts, reason)?
+                                } else {
+                                    pending = true;
+                                    let number = workflows::next_number(&attempts, &spec.id);
+                                    self.start_step(
+                                        run_id,
+                                        &WorkflowStep::Agent(spec.clone()),
+                                        number,
+                                        None,
+                                    )?
+                                };
+                                self.say_size(spec, &id, &run, &attempts, &mut size)?;
                             }
                             Some(a)
                                 if a.state == AttemptState::Succeeded.as_str()
@@ -1595,10 +1644,30 @@ impl Inner {
                     continue;
                 }
                 let Some(attempt) = latest(step.id(), index) else {
+                    let conditional = match step {
+                        WorkflowStep::Agent(spec) if spec.when.is_some() => Some(spec),
+                        _ => None,
+                    };
+                    if let Some(spec) = conditional
+                        && let Some(reason) =
+                            self.treated_as_small(&run, &steps, &attempts, spec, &mut size)?
+                    {
+                        let id = self.record_skipped(run_id, spec, &attempts, reason)?;
+                        self.say_size(spec, &id, &run, &attempts, &mut size)?;
+                        continue 'round;
+                    }
                     let number = workflows::next_number(&attempts, step.id());
-                    self.start_step(run_id, step, number, None)?;
+                    let id = self.start_step(run_id, step, number, None)?;
+                    if let Some(spec) = conditional {
+                        self.say_size(spec, &id, &run, &attempts, &mut size)?;
+                    }
                     return Ok(());
                 };
+                // Only a condition gets a step here that stands alone. It holds nothing up, and it has
+                // no answer to act on: an approver that didn't run sends nothing back.
+                if attempt.state == AttemptState::Skipped.as_str() {
+                    continue;
+                }
                 if attempt.state != AttemptState::Succeeded.as_str() {
                     // Proposals are a bonus. If they fail, everything before them still stands.
                     if brain::optional_step_is_over(step, attempt) {
@@ -1647,18 +1716,111 @@ impl Inner {
         }
     }
 
-    /// A reviewer that has nothing to look at says so, on the record, instead of disappearing.
+    /// Whether a step's condition says to skip it, and why, for the record.
+    fn treated_as_small(
+        &self,
+        run: &keel_store::Run,
+        steps: &[WorkflowStep],
+        attempts: &[keel_store::Attempt],
+        spec: &StepSpec,
+        size: &mut SizeThisPass,
+    ) -> Result<Option<Reason>> {
+        let Some(StepCondition::NotSmall) = spec.when else {
+            return Ok(None);
+        };
+        if size.decision.is_none() {
+            size.decision = Some(self.size_of_run(run, steps, attempts)?);
+        }
+        Ok(match size.decision {
+            Some(sizing::Decision::Small { lines, files }) => {
+                Some(Reason::TreatedAsSmall { lines, files })
+            }
+            _ => None,
+        })
+    }
+
+    /// Goes by the attempts and nothing kept in memory, so it holds across a restart.
+    fn size_of_run(
+        &self,
+        run: &keel_store::Run,
+        steps: &[WorkflowStep],
+        attempts: &[keel_store::Attempt],
+    ) -> Result<sizing::Decision> {
+        if sizing::already_up(steps, attempts) {
+            return Ok(sizing::Decision::StaysUp);
+        }
+        if sizing::person_asked(attempts) {
+            return Ok(sizing::Decision::NotSmall(vec![
+                keel_core::WhyNotSmall::PersonAsked,
+            ]));
+        }
+        let project = self.store.project(&run.project_id)?;
+        Ok(sizing::decide(&sizing::Facts {
+            steps,
+            attempts,
+            round: run.round,
+            issue: run.source_issue.as_ref(),
+            account: project.github_account.as_deref(),
+            started_by: run.started_by.as_deref(),
+            sensitive: &project.sensitive_paths,
+            change: self.change_of_run(&run.id, attempts),
+        }))
+    }
+
+    /// `None` if it can't be read, whatever the reason.
+    fn change_of_run(
+        &self,
+        run_id: &str,
+        attempts: &[keel_store::Attempt],
+    ) -> Option<git::ChangeSize> {
+        let base = attempts.iter().find_map(|a| a.sha_before.clone())?;
+        let workspace = self.workspace(run_id);
+        if !workspace.join(".git").exists() {
+            return None;
+        }
+        let git = Git::new(locked(&self.tools).git.clone()?);
+        git.change_size(&workspace, &base).ok()
+    }
+
+    /// Puts what was decided on the record, on the first step it applied to. Results count from this.
+    /// Being small again later in the same round isn't a new decision.
+    fn say_size(
+        &self,
+        spec: &StepSpec,
+        attempt_id: &str,
+        run: &keel_store::Run,
+        attempts: &[keel_store::Attempt],
+        size: &mut SizeThisPass,
+    ) -> Result<()> {
+        if spec.when.is_none() || size.said {
+            return Ok(());
+        }
+        size.said = true;
+        let told = attempts
+            .iter()
+            .any(|a| a.round == run.round && sizing::skipped_as_small(a));
+        let data = match &size.decision {
+            Some(sizing::Decision::Small { .. }) if told => None,
+            Some(decision) => decision.on_record(run.round),
+            None => None,
+        };
+        if let Some(data) = data {
+            self.store.append_event(attempt_id, "sizeDecided", &data)?;
+        }
+        Ok(())
+    }
+
+    /// A step that isn't needed says so and why, on the record, instead of disappearing. The workflow
+    /// the run keeps a copy of stays exactly as it was.
     fn record_skipped(
         &self,
         run_id: &str,
         spec: &StepSpec,
         attempts: &[keel_store::Attempt],
-    ) -> Result<()> {
+        reason: Reason,
+    ) -> Result<String> {
         let run = self.store.run(run_id)?;
         let id = new_id();
-        let reason = Reason::NoMatchingPaths {
-            paths: spec.paths.clone(),
-        };
         self.store.add_attempt(&NewAttempt {
             id: id.clone(),
             run_id: run_id.to_owned(),
@@ -1687,10 +1849,13 @@ impl Inner {
             .set_state(&id, AttemptState::Skipped, Some(&reason))?;
         self.store
             .patch_attempt(&id, &[("finished_at", Value::Text(now()))])?;
-        self.store
-            .append_event(&id, "skipped", &json!({ "paths": spec.paths }))?;
+        self.store.append_event(
+            &id,
+            "skipped",
+            &json!({ "paths": spec.paths, "reason": reason }),
+        )?;
         self.changed(run_id);
-        Ok(())
+        Ok(id)
     }
 }
 
@@ -1732,6 +1897,7 @@ mod tests {
             max_turns: None,
             max_budget_usd: None,
             paths: vec![],
+            when: None,
             role: Default::default(),
         });
         let back: WorkflowStep =

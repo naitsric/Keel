@@ -242,6 +242,7 @@ struct ProjectSettingsInput {
     services: Vec<Service>,
     env: Vec<EnvVar>,
     default_workflow: Option<String>,
+    sensitive_paths: Vec<String>,
 }
 
 #[tauri::command(async)]
@@ -263,6 +264,7 @@ fn project_update(
             services: settings.services,
             env: settings.env,
             default_workflow: clean(settings.default_workflow),
+            sensitive_paths: settings.sensitive_paths,
         },
     )?)
 }
@@ -371,6 +373,7 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
                 max_turns,
                 max_budget_usd: None,
                 paths: vec![],
+                when: None,
                 role: Default::default(),
             });
             (vec![step], None)
@@ -577,6 +580,11 @@ fn approval_send_back(
     instructions: String,
 ) -> CommandResult<()> {
     Ok(state.engine.send_back(&attempt_id, &instructions)?)
+}
+
+#[tauri::command(async)]
+fn approval_run_skipped(state: State<'_, AppState>, attempt_id: String) -> CommandResult<()> {
+    Ok(state.engine.run_skipped(&attempt_id)?)
 }
 
 /// Opens a pull request in the browser. Only GitHub URLs, so a value from a run can't open anything else.
@@ -919,6 +927,7 @@ pub fn run() {
             approval_answer,
             questions_answer,
             approval_send_back,
+            approval_run_skipped,
             open_github_url,
             attempt_events,
             attempt_diff,
@@ -1009,6 +1018,7 @@ mod tests {
                 value: SECRET.into(),
             }],
             default_workflow: Some("mine".into()),
+            sensitive_paths: vec!["billing/".into()],
         })
         .unwrap();
         sent["checkCommand"] = json!("pnpm test");
@@ -1019,6 +1029,7 @@ mod tests {
         assert_eq!(settings.services.len(), 1);
         assert_eq!(settings.env[0].value, SECRET);
         assert_eq!(settings.default_workflow.as_deref(), Some("mine"));
+        assert_eq!(settings.sensitive_paths, ["billing/"]);
     }
 
     #[test]
@@ -1120,6 +1131,7 @@ mod tests {
                     value: SECRET.into(),
                 }],
                 default_workflow: None,
+                sensitive_paths: vec![],
             }],
             pending_proposals: 0,
             workflow_drafts: 0,

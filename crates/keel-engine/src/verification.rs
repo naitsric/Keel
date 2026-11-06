@@ -327,10 +327,7 @@ impl CheckFact {
 /// check before the round's last change to the code says nothing about that change.
 pub fn checks_in_round(steps: &[WorkflowStep], attempts: &[Attempt], round: i64) -> CheckFact {
     let in_round: Vec<&Attempt> = attempts.iter().filter(|a| a.round == round).collect();
-    let after_last_build = in_round
-        .iter()
-        .rposition(|a| a.kind == "agent" && a.tools == keel_core::ToolProfile::Build.as_str())
-        .map_or(0, |index| index + 1);
+    let after_last_build = after_last_build(&in_round);
     let mut latest: Vec<&Attempt> = Vec::new();
     for attempt in in_round[after_last_build..]
         .iter()
@@ -358,6 +355,18 @@ pub fn checks_in_round(steps: &[WorkflowStep], attempts: &[Attempt], round: i64)
     } else {
         CheckFact::NoCheckInWorkflow
     }
+}
+
+/// Where the round's code stopped changing. A step that was skipped changed nothing.
+pub fn after_last_build(in_round: &[&Attempt]) -> usize {
+    in_round
+        .iter()
+        .rposition(|a| {
+            a.kind == "agent"
+                && a.tools == keel_core::ToolProfile::Build.as_str()
+                && a.state != AttemptState::Skipped.as_str()
+        })
+        .map_or(0, |index| index + 1)
 }
 
 /// `{{check}}`: the fact, for a prompt, in the run's language.
@@ -404,6 +413,8 @@ mod tests {
 
     fn spec(ids: &[&str]) -> Spec {
         Spec {
+            size: Default::default(),
+            risks: vec![],
             summary: "x".into(),
             criteria: ids
                 .iter()
@@ -614,7 +625,7 @@ mod tests {
         }
     }
 
-    use AttemptState::{Failed, Running, Succeeded};
+    use AttemptState::{Failed, Running, Skipped, Succeeded};
 
     fn ran(command: &str, passed: bool) -> CheckFact {
         CheckFact::Ran {
@@ -659,6 +670,13 @@ mod tests {
             ("builder", "agent", "build", 0, Succeeded, "b"),
             ("check", "check", "check", 0, Succeeded, "make test"),
             ("code", "agent", "readOnly", 0, Succeeded, "r"),
+        ]);
+        assert!(checks_in_round(&[check_step()], &attempts, 0).passed());
+        // Nor does what could have built, and was skipped.
+        let attempts = recorded(&[
+            ("builder", "agent", "build", 0, Succeeded, "b"),
+            ("check", "check", "check", 0, Succeeded, "make test"),
+            ("polish", "agent", "build", 0, Skipped, "p"),
         ]);
         assert!(checks_in_round(&[check_step()], &attempts, 0).passed());
     }

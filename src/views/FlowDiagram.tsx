@@ -4,6 +4,7 @@ import { type FocusEvent, Fragment, type KeyboardEvent, useEffect, useLayoutEffe
 import { useTranslation } from "react-i18next";
 import type { AttemptState, StepRole } from "../lib/api";
 import { type Flow, type FlowAttempt, type FlowNode, layoutFlow, nextItem, type PlacedNode, scrollToShow } from "../lib/flow";
+import { skippedAsSmall } from "../lib/size";
 import { cx, StateBadge } from "../ui/primitives";
 
 const KIND_LABELS: Record<FlowNode["kind"], string> = {
@@ -38,6 +39,7 @@ const NODE_TONES: Partial<Record<AttemptState | "pending", string>> = {
   abandoned: "opacity-70",
   rejected: "opacity-70",
   returned: "opacity-70",
+  postponed: "opacity-70",
   stopped: "opacity-70",
 };
 
@@ -67,7 +69,10 @@ function roundText(t: TFunction, node: FlowNode<FlowAttempt>): string | null {
   return node.attempts.length > 1 ? t("flow.attempts", { count: node.attempts.length }) : null;
 }
 
+const skippedForBeingSmall = (node: FlowNode<FlowAttempt>) => node.attempt !== null && skippedAsSmall(node.attempt);
+
 function stateText(t: TFunction, node: FlowNode<FlowAttempt>): string {
+  if (skippedForBeingSmall(node)) return t("flow.skippedSmallWhy");
   return node.state === "pending" ? t("run.pending") : t(`states.${node.state}`);
 }
 
@@ -80,6 +85,7 @@ function describeNode(t: TFunction, node: FlowNode<FlowAttempt>, live: boolean, 
     live && stateText(t, node),
     live && node.outdated && t("flow.lastRan", { number: node.round + 1 }),
     live && roundText(t, node),
+    node.conditional && !skippedForBeingSmall(node) && t("flow.onlyIfNotSmall"),
     problem,
   ]
     .filter(Boolean)
@@ -110,6 +116,8 @@ function NodeButton<T extends FlowAttempt>({ placed, live, selected, tabbable, p
         live && !node.minor && !node.outdated && NODE_TONES[node.state],
         live && !node.minor && node.outdated && "border-dashed opacity-70",
         node.minor && "border-dashed border-border bg-transparent",
+        // The diagram of a workflow that's being edited has nothing else to tell these apart by.
+        !live && node.conditional && "border-dashed",
         problem && "border-danger bg-danger/10",
         selected && "opacity-100 ring-2 ring-accent",
       )}
@@ -132,7 +140,7 @@ function NodeButton<T extends FlowAttempt>({ placed, live, selected, tabbable, p
           {node.state === "pending" || node.outdated ? (
             <span className="min-w-0 truncate text-[11.5px] text-subtle">{node.outdated ? t("flow.lastRan", { number: node.round + 1 }) : t("run.pending")}</span>
           ) : (
-            <StateBadge state={node.state} label={t(`states.${node.state}`)} />
+            <StateBadge state={node.state} label={skippedForBeingSmall(node) ? t("flow.skippedSmall") : t(`states.${node.state}`)} />
           )}
         </span>
       )}

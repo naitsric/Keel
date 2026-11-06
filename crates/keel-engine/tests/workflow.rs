@@ -167,6 +167,7 @@ fn world() -> World {
                 services: vec![],
                 env: vec![],
                 default_workflow: None,
+                sensitive_paths: vec![],
             },
         )
         .unwrap();

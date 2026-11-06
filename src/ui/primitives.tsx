@@ -46,6 +46,7 @@ const STATE_TONES: Record<AttemptState, string> = {
   waitingAnswers: "text-warning",
   rejected: "text-muted",
   returned: "text-muted",
+  postponed: "text-muted",
   skipped: "text-subtle",
   abandoned: "text-subtle",
 };
@@ -64,6 +65,7 @@ const STATE_DOTS: Record<AttemptState, string> = {
   waitingAnswers: "bg-warning animate-pulse",
   rejected: "bg-subtle",
   returned: "bg-subtle",
+  postponed: "bg-subtle",
   skipped: "bg-subtle",
   abandoned: "bg-subtle",
 };

@@ -4,11 +4,38 @@ A local software factory on top of [Claude Code](https://claude.com/product/clau
 define the workflow and pick the model for each step. Keel runs the agents in isolation, shows
 what each step did, and keeps an audit record you can check. A person always decides what ships.
 
-**Status: early, macOS only.** Keel takes a request from the app or a GitHub issue through a spec
-writer, a builder and a check, then has reviewers look at the change at the same time. An approver
-can send the work back, at most twice, and every review runs again. Then a person approves, and
-Keel opens a draft pull request. You can edit each project's workflows in the app. See the
+**Status: early, macOS only.** Keel takes a request from the app or a GitHub issue and works out
+what it will change. If something can only be decided by you, the run stops and asks, with an option
+it recommends, and taking that option costs nothing. A builder does the work and a check runs. Then
+an agent goes through what was asked and says what a test really proves and what nothing does.
+Reviewers look at the change at the same time, and an approver can send the work back, at most
+twice, and every review runs again. Then a person approves, and Keel opens a draft pull request. At
+that approval you can also change anything it decided on its own, which sends the work back without
+starting over. You can edit each project's workflows in the app. See the
 [M0 report](docs/m0-report.md) for what's behind the isolation.
+
+Keel looks up what became of each pull request it opened, and never writes to one again. The
+**Workflows** page compares workflows with that: what got merged, at what cost, how often work went
+back, and how often a run stopped to ask.
+
+## A workflow that fits the change
+
+The built-in **Fits the change** skips the reviews and the approver when a change is small. Keel
+decides that itself from what it can see, and an agent or an issue saying so doesn't make it so:
+
+- What was asked was worked out as small, with no risks named.
+- The project's check passed, on this code. With no check, nothing is ever small.
+- The run doesn't come from an issue by anyone other than the project's GitHub account, or from an
+  assistant over MCP.
+- The change touches nothing sensitive: `.github/`, build and dependency files, test settings,
+  migrations, SQL schema, sign-in and permissions, secrets, environment files, lock files, and
+  whatever else a project lists in **Settings**.
+- The change is under 400 lines.
+- The check against what was asked found nothing missing.
+
+Your approval, the sandbox and the check are never skipped. The approval says what didn't run and
+why, with a button to run it now. Once a change gets the full review, it keeps getting it for the rest
+of the run. This workflow isn't the default: you choose it.
 
 ## The Brain
 

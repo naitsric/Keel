@@ -159,6 +159,59 @@ describe("the run page's flow", () => {
     });
   });
 
+  describe("a workflow that fits the change", () => {
+    const decided = (attemptId: string, data: Record<string, unknown>): AuditEvent => ({ seq: 50, attemptId, at: "", kind: "sizeDecided", data });
+    const fitting = () => {
+      run = { ...run, workflow: WORKFLOW };
+      const asSmall = { reason: { code: "treatedAsSmall", lines: 3, files: 1 } };
+      return [...built(), attempt("check", "succeeded", { kind: "check", tools: "check", prompt: "make test" }), attempt("security", "skipped", { role: "reviewer", ...asSmall }), attempt("ux", "skipped", { role: "reviewer", ...asSmall }), attempt("approver", "skipped", { role: "approver", ...asSmall }), human()];
+    };
+
+    it("offers what was skipped, and asking for it is the one thing that changes anything", async () => {
+      attempts = fitting();
+      await open();
+      expect(page()).toContain("Keel treated this as a small change: 3 changed lines in 1 file.");
+      expect(node("security").textContent).toContain("Small change");
+      await settle(900);
+      calls = [];
+      const runNow = [...document.querySelectorAll("button")].find((b) => b.textContent === "Run them now");
+      await act(async () => runNow?.click());
+      await settle();
+      expect(calls).toContain("approval_run_skipped");
+      expect(calls).not.toContain("approval_answer");
+    });
+
+    it("finds why it went to full review on whichever step it was recorded", async () => {
+      attempts = [...built(), attempt("check", "succeeded", { kind: "check", tools: "check", prompt: "make test" }), attempt("security", "succeeded", { id: "security-a", role: "reviewer" }), attempt("ux", "succeeded", { role: "reviewer" }), attempt("approver", "succeeded", { role: "approver" }), human()];
+      events = { "security-a": [decided("security-a", { small: false, because: [{ code: "sensitiveFiles", files: [".github/workflows/ci.yml"], total: 1 }], round: 0 })] };
+      await open();
+      await settle();
+      expect(page()).toContain("It went to full review because:");
+      expect(page()).toContain("it touches .github/workflows/ci.yml");
+    });
+
+    it("says what it found in the step's own activity too", async () => {
+      attempts = fitting();
+      const reviewer = attempts.find((a) => a.stepId === "security") as Attempt;
+      events = { [reviewer.id]: [{ seq: 49, attemptId: reviewer.id, at: "", kind: "skipped", data: { reason: { code: "treatedAsSmall" } } }, decided(reviewer.id, { small: true, lines: 3, files: 1, round: 0 })] };
+      await open();
+      await act(async () => node("security").click());
+      await settle();
+      expect(page()).toContain("Skipped: Keel treated this as a small change");
+      expect(page()).toContain("Keel treated this as a small change: 3 changed lines in 1 file");
+    });
+
+    it("once a person has asked, says what's going on and offers nothing", async () => {
+      attempts = [...built(), attempt("security", "skipped", { role: "reviewer", reason: { code: "treatedAsSmall", lines: 3, files: 1 } }), attempt("human", "postponed", { kind: "approval", tools: "none", modelRequested: "" }), attempt("security", "running", { role: "reviewer", number: 2 })];
+      await open();
+      expect(document.querySelector('[role="alert"]')).toBeNull();
+      expect(node("human").textContent).toContain("Asked for more");
+      expect(page()).not.toContain("Run them now");
+      expect(page()).not.toContain("so these didn't run");
+      expect([...document.querySelectorAll("button")].some((b) => b.textContent === "Retry")).toBe(false);
+    });
+  });
+
   describe("what opens", () => {
     it("is the step that needs the person", async () => {
       await open();

@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { Workflow, WorkflowResults } from "../lib/api";
 import { formatCost, formatNumber } from "../lib/format";
-import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE, matchedShare } from "../lib/results";
+import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE, matchedShare, movedUpReasons } from "../lib/results";
 import { Card } from "../ui/primitives";
 
 /** Workflows side by side, one row per measure, so a new measure is one more line here. */
@@ -10,6 +10,9 @@ export function WorkflowResultsCard({ results, workflows }: { results: WorkflowR
   const notEnough = t("workflows.results.notEnough");
   const nothingChecked = t("workflows.results.nothingChecked");
   // A workflow with no verifier never checks anything, so "not enough yet" would be wrong for it.
+  // A workflow with nothing that depends on the change never decides this, so "0" would mislead.
+  const depends = t("workflows.results.doesNotDepend");
+  const fits = (r: WorkflowResults, count: number) => (r.shortRoute + r.movedUp === 0 ? depends : formatNumber(count));
   const checked = (r: WorkflowResults, count: number) => (r.criteriaMet + r.criteriaUnmet + r.criteriaUnverified === 0 ? nothingChecked : formatNumber(count));
   const rows: { label: string; note?: string; value: (r: WorkflowResults) => string }[] = [
     { label: t("workflows.results.runs"), value: (r) => formatNumber(r.runs) },
@@ -42,6 +45,13 @@ export function WorkflowResultsCard({ results, workflows }: { results: WorkflowR
     { label: t("workflows.results.criteriaMet"), value: (r) => checked(r, r.criteriaMet) },
     { label: t("workflows.results.criteriaUnmet"), value: (r) => checked(r, r.criteriaUnmet) },
     { label: t("workflows.results.criteriaUnverified"), note: t("workflows.results.criteriaUnverifiedNote"), value: (r) => checked(r, r.criteriaUnverified) },
+    { label: t("workflows.results.shortRoute"), value: (r) => fits(r, r.shortRoute) },
+    { label: t("workflows.results.movedUp"), value: (r) => fits(r, r.movedUp) },
+    {
+      label: t("workflows.results.movedUpWhy"),
+      note: t("workflows.results.movedUpWhyNote"),
+      value: (r) => (r.movedUp === 0 ? fits(r, 0) : movedUpReasons(r, t)),
+    },
   ];
   const compared = comparedResults(results, workflows);
   return (
@@ -77,7 +87,7 @@ export function WorkflowResultsCard({ results, workflows }: { results: WorkflowR
                     {compared.map((r) => {
                       const value = row.value(r);
                       return (
-                        <td key={r.workflowId} className={value === notEnough || value === nothingChecked ? "px-2 py-1 align-top text-subtle" : "px-2 py-1 align-top"}>
+                        <td key={r.workflowId} className={value === notEnough || value === nothingChecked || value === depends ? "px-2 py-1 align-top text-subtle" : "px-2 py-1 align-top"}>
                           {value}
                         </td>
                       );

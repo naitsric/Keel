@@ -6,6 +6,7 @@ import i18next from "../i18n";
 import type { Attempt, Run, SpecOutput } from "../lib/api";
 import type { CommandRun } from "../lib/audit";
 import { useApp } from "../lib/store";
+import type { SizeDecision } from "../lib/size";
 import { ApprovalCard, QuestionsCard } from "./RunDetail";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -34,9 +35,12 @@ describe("the approval card", () => {
   let sentBack: unknown[];
   let addsSecret: boolean;
   let answerFails: boolean;
+  let askedToRun: unknown[];
+  let runFails: boolean;
+  let errors: string[];
 
-  const show = (attempts: Attempt[], files: string[], workflow: unknown[] = deliverNext, commands: CommandRun[] = [], asked: Attempt = human) => {
-    act(() => root.render(<ApprovalCard attempt={asked} run={runWith(workflow)} attempts={attempts} files={files} commands={commands} rawCheck="intact" onShowChanges={() => {}} onError={() => {}} />));
+  const show = (attempts: Attempt[], files: string[], workflow: unknown[] = deliverNext, commands: CommandRun[] = [], asked: Attempt = human, sizeDecision: SizeDecision | null = null) => {
+    act(() => root.render(<ApprovalCard attempt={asked} run={runWith(workflow)} attempts={attempts} files={files} commands={commands} rawCheck="intact" sizeDecision={sizeDecision} onShowChanges={() => {}} onError={(message) => errors.push(message)} />));
   };
   const textarea = () => document.querySelector("textarea") as HTMLTextAreaElement;
   const settle = () => act(() => vi.advanceTimersByTimeAsync(0));
@@ -58,7 +62,14 @@ describe("the approval card", () => {
     sentBack = [];
     addsSecret = false;
     answerFails = false;
+    askedToRun = [];
+    runFails = false;
+    errors = [];
     mockIPC((command, args) => {
+      if (command === "approval_run_skipped") {
+        if (runFails) throw { code: "blocked", reason: { code: "nothingSkippedToRun" }, detail: null };
+        askedToRun.push(args);
+      }
       if (command === "approval_answer") {
         if (answerFails) throw { code: "invalidState", reason: null, detail: null };
         answers.push(args);
@@ -391,6 +402,137 @@ describe("the approval card", () => {
       show([builder(["calc.py"]), check, verifier([met, open]), human], ["calc.py"]);
       act(() => proof()?.querySelector("summary")?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
       expect(answers).toEqual([]);
+    });
+  });
+
+  describe("when the workflow fits the change", () => {
+    const small = { code: "treatedAsSmall", lines: 12, files: 2 };
+    const skip = (id: string, role: Attempt["role"]) => attempt({ id, stepId: id, role, state: "skipped", reason: small });
+    const skipped = [skip("security", "reviewer"), skip("code", "reviewer"), skip("approver", "approver")];
+    const went = (because: { code: string; [key: string]: unknown }[]): SizeDecision => ({ small: false, because, round: 0 });
+    const row = (label: string) => [...document.querySelectorAll("dt")].find((dt) => dt.textContent?.startsWith(label))?.nextElementSibling?.textContent ?? null;
+    const JARGON = ["spec", "ODD", "organic", "escalat", "route", "size", "criteria", "regression"];
+
+    it("says it treated this as small, how big it was, and what didn't run", () => {
+      show([builder(["calc.py"]), check, ...skipped, human], ["calc.py"]);
+      const said = row("Small change");
+      expect(said).toContain("Keel treated this as a small change: 12 changed lines in 2 files.");
+      expect(said).toContain("It touches nothing sensitive, and the check passed.");
+      expect(said).toContain("So these didn't run: security, code, approver.");
+      expect(said).toContain("Nothing already built is done again");
+      expect(row("Reviews")).toBeNull();
+      expect(page()).not.toContain("nothing they cover changed");
+    });
+
+    it("counts one line and one file in the singular", () => {
+      show([builder(["calc.py"]), check, attempt({ id: "code", stepId: "code", role: "reviewer", state: "skipped", reason: { code: "treatedAsSmall", lines: 1, files: 1 } }), human], ["calc.py"]);
+      expect(row("Small change")).toContain("1 changed line in 1 file.");
+    });
+
+    it("reads the same way in Spanish, in the person's words", async () => {
+      await i18next.changeLanguage("es");
+      show([builder(["calc.py"]), check, ...skipped, human], ["calc.py"]);
+      const said = row("Cambio pequeño");
+      expect(said).toContain("Keel lo trató como un cambio pequeño: 12 líneas cambiadas en 2 archivos.");
+      expect(said).toContain("Por eso no corrieron: security, code, approver.");
+      expect(button("Correrlos ahora")).toBeDefined();
+    });
+
+    it("runs them when asked, only after a moment, and neither approves nor rejects", async () => {
+      show([builder(["calc.py"]), check, ...skipped, human], ["calc.py"]);
+      expect(button("Run them now")?.disabled).toBe(true);
+      press("Run them now");
+      expect(askedToRun).toEqual([]);
+      act(() => vi.advanceTimersByTime(800));
+      expect(button("Run them now")?.disabled).toBe(false);
+      press("Run them now");
+      await settle();
+      expect(askedToRun).toEqual([{ attemptId: "human" }]);
+      expect(answers).toEqual([]);
+      expect(sentBack).toEqual([]);
+    });
+
+    it("Enter on it answers nothing", () => {
+      show([builder(["calc.py"]), check, ...skipped, human], ["calc.py"]);
+      act(() => vi.advanceTimersByTime(800));
+      const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+      act(() => void button("Run them now")?.dispatchEvent(enter));
+      expect(enter.defaultPrevented).toBe(true);
+      expect(askedToRun).toEqual([]);
+    });
+
+    it("says so if it's refused, and lets them answer", async () => {
+      runFails = true;
+      show([builder(["calc.py"]), check, ...skipped, human], ["calc.py"]);
+      act(() => vi.advanceTimersByTime(800));
+      press("Run them now");
+      await settle();
+      expect(errors).toEqual(["Nothing was skipped for being a small change, so there's nothing to run."]);
+      expect(button("Approve and open a draft")?.disabled).toBe(false);
+    });
+
+    it("has nothing to offer when nothing was skipped, or everything it asked for has run", () => {
+      show([builder(["calc.py"]), check, reviewer, human], ["calc.py"]);
+      expect(button("Run them now")).toBeUndefined();
+      expect(row("Small change")).toBeNull();
+
+      const ranAfter = attempt({ ...skipped[1], state: "succeeded", reason: null, number: 2, output: { verdict: "approved", findings: [], summary: "Fine." } as unknown as Attempt["output"] });
+      show([builder(["calc.py"]), check, skipped[1], ranAfter, human], ["calc.py"]);
+      expect(button("Run them now")).toBeUndefined();
+      expect(row("Reviews")).toContain("No problems");
+    });
+
+    it("keeps apart what had nothing to look at", () => {
+      const nothing = attempt({ id: "ux", stepId: "ux", role: "reviewer", state: "skipped", reason: { code: "noMatchingPaths", paths: ["**/*.tsx"] } });
+      show([builder(["calc.py"]), check, reviewer, nothing, human], ["calc.py"]);
+      expect(row("Reviews")).toContain("ux: skipped, nothing they cover changed");
+      expect(row("Small change")).toBeNull();
+    });
+
+    it("says every reason it went to full review, in plain words", () => {
+      const every = [
+        { code: "specNotSmall" },
+        { code: "specNamesRisks", risks: ["security", "somethingNew"] },
+        { code: "noCheck" },
+        { code: "checkNotPassed" },
+        { code: "issueFromSomeoneElse", author: "mallory" },
+        { code: "issueFromUnknownAuthor" },
+        { code: "issueWithNoAccount" },
+        { code: "startedByAssistant", client: "Claude Code" },
+        { code: "sensitiveFiles", files: [".github/workflows/ci.yml"], total: 1 },
+        { code: "badSensitivePattern", pattern: "a[" },
+        { code: "tooManyLines", lines: 512, limit: 400 },
+        { code: "filesWithoutLines", files: ["logo.png"], total: 1 },
+        { code: "diffUnreadable" },
+        { code: "verifierFoundUnmet", count: 1 },
+        { code: "verifierHasNotRun" },
+        { code: "personAsked" },
+      ];
+      show([builder(["calc.py"]), check, reviewer, human], ["calc.py"], deliverNext, [], human, went(every));
+      const said = row("Full review") ?? "";
+      expect(said).toContain("It went to full review because:");
+      for (const line of ["it could affect security, something it couldn't name", "this workflow has no check", "it comes from an issue by mallory, who isn't this project's account", "it touches .github/workflows/ci.yml", "it changes 512 lines, and a small change stays under 400", "you asked for it"]) expect(said).toContain(line);
+      expect([...document.querySelectorAll("dt")].find((dt) => dt.textContent === "Full review")?.nextElementSibling?.querySelectorAll("li").length).toBe(every.length);
+      for (const word of JARGON) expect(said.toLowerCase()).not.toContain(word.toLowerCase());
+    });
+
+    it("says it in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      show([builder(["calc.py"]), check, reviewer, human], ["calc.py"], deliverNext, [], human, went([{ code: "sensitiveFiles", files: [".github/ci.yml"], total: 3 }]));
+      const said = row("Revisión completa") ?? "";
+      expect(said).toContain("Pasó a revisión completa porque:");
+      expect(said).toContain("toca .github/ci.yml y 2 más");
+    });
+
+    it("says which round those reasons are from, once it's a later one", () => {
+      const later = { ...runWith(deliverNext), round: 1 };
+      act(() => root.render(<ApprovalCard attempt={human} run={later} attempts={[builder(["calc.py"]), check, human]} files={["calc.py"]} commands={[]} rawCheck="intact" sizeDecision={went([{ code: "verifierFoundUnmet", count: 1 }])} onShowChanges={() => {}} onError={() => {}} />));
+      expect([...document.querySelectorAll("dt")].find((dt) => dt.textContent?.startsWith("Full review"))?.textContent).toBe("Full reviewRound 1");
+    });
+
+    it("says nothing about it for a workflow that doesn't depend on the change", () => {
+      show([builder(["calc.py"]), check, reviewer, human], ["calc.py"]);
+      expect(row("Full review")).toBeNull();
     });
   });
 

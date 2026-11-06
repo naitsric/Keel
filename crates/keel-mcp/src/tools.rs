@@ -3,7 +3,9 @@
 
 use std::time::{Duration, Instant};
 
-use keel_core::{StepRole, StepSpec, ToolProfile, WorkflowStep, mask_secrets, mask_value};
+use keel_core::{
+    StepCondition, StepRole, StepSpec, ToolProfile, WorkflowStep, mask_secrets, mask_value,
+};
 use keel_engine::{Error, StartRun, request_from_issue};
 use keel_store::{Attempt, McpClient, NewMcpCall, Project};
 use schemars::JsonSchema;
@@ -188,6 +190,11 @@ pub struct DraftAgent {
     /// Run it only if the run changed files matching one of these globs.
     #[serde(default)]
     pub paths: Vec<String>,
+    /// `notSmall` skips it for a change Keel finds small. Keel decides that itself, from the change
+    /// and whether the check passed, and a person still approves. It has to come after the first
+    /// worker that builds.
+    #[serde(default)]
+    pub when: Option<DraftCondition>,
     #[serde(default)]
     pub max_turns: Option<u32>,
     #[serde(default)]
@@ -210,6 +217,13 @@ pub enum DraftTools {
     ReadOnly,
     /// Edits files and runs commands inside the sandbox.
     Build,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum DraftCondition {
+    /// Only if the change isn't small.
+    NotSmall,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -769,7 +783,7 @@ fn project_view(project: &Project) -> Json {
 fn step_summary(step: &WorkflowStep) -> Json {
     match step {
         WorkflowStep::Agent(spec) => json!({
-            "type": "agent", "id": spec.id, "model": spec.model, "tools": spec.tools, "role": spec.role,
+            "type": "agent", "id": spec.id, "model": spec.model, "tools": spec.tools, "role": spec.role, "when": spec.when,
         }),
         WorkflowStep::Setup { id, run } => json!({ "type": "setup", "id": id, "run": run }),
         WorkflowStep::Check { id, run } => json!({ "type": "check", "id": id, "run": run }),
@@ -777,7 +791,7 @@ fn step_summary(step: &WorkflowStep) -> Json {
             "type": "parallel",
             "id": id,
             "steps": steps.iter().map(|spec| json!({
-                "id": spec.id, "model": spec.model, "tools": spec.tools, "paths": spec.paths,
+                "id": spec.id, "model": spec.model, "tools": spec.tools, "paths": spec.paths, "when": spec.when,
             })).collect::<Vec<_>>(),
         }),
         WorkflowStep::Approval { id } => json!({ "type": "approval", "id": id }),
@@ -830,6 +844,9 @@ impl DraftAgent {
             max_turns: self.max_turns,
             max_budget_usd: self.max_budget_usd,
             paths: self.paths,
+            when: self.when.map(|when| match when {
+                DraftCondition::NotSmall => StepCondition::NotSmall,
+            }),
             role: match self.role {
                 Some(DraftRole::Worker) | None => StepRole::Worker,
                 Some(DraftRole::Reviewer) => StepRole::Reviewer,

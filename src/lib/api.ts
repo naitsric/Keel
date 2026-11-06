@@ -15,6 +15,7 @@ export type AttemptState =
   | "waitingAnswers"
   | "rejected"
   | "returned"
+  | "postponed"
   | "skipped"
   | "abandoned";
 
@@ -75,6 +76,8 @@ export interface Project {
   env: EnvVar[];
   /** What a board card runs. Null means the full built-in workflow. */
   defaultWorkflow: string | null;
+  /** Too sensitive for a change to count as small, on top of what always is. */
+  sensitivePaths: string[];
 }
 
 export interface ProjectSettings {
@@ -86,6 +89,7 @@ export interface ProjectSettings {
   services: Service[];
   env: EnvVar[];
   defaultWorkflow: string | null;
+  sensitivePaths: string[];
 }
 
 /** What a project's files give away. Nothing is saved until a person says so. */
@@ -180,6 +184,8 @@ export interface Decision {
 
 export type StepRole = { kind: "worker" } | { kind: "reviewer" } | { kind: "approver"; reworkTo: string; maxRounds: number } | { kind: "mapper" } | { kind: "learner" } | { kind: "specifier" } | { kind: "verifier" };
 
+export type StepCondition = "notSmall";
+
 export interface BrainNote {
   seq: number;
   projectId: string;
@@ -225,6 +231,8 @@ export interface StepSpec {
   maxBudgetUsd: number | null;
   paths?: string[];
   role?: StepRole;
+  /** Runs only if this holds. Absent means always. */
+  when?: StepCondition;
 }
 
 export type WorkflowStep =
@@ -275,6 +283,9 @@ export interface GivenAnswer {
 
 /** A specifier's answer. */
 export interface SpecOutput {
+  /** Only ever a prediction. The engine decides from the change itself. */
+  size?: "small" | "normal";
+  risks?: string[];
   summary: string;
   criteria: { id: string; when: string; then: string }[];
   changes: { kind: "adds" | "changes" | "removes"; text: string }[];
@@ -377,6 +388,12 @@ export interface WorkflowResults {
   criteriaMet: number;
   criteriaUnmet: number;
   criteriaUnverified: number;
+  /** Finished runs the engine last found small. */
+  shortRoute: number;
+  /** Runs it found weren't. */
+  movedUp: number;
+  /** Why they weren't, most common first. A run counts once per reason, and can have several. */
+  movedUpBecause: { code: string; runs: number }[];
 }
 
 export type WorkflowChoice =
@@ -565,6 +582,8 @@ export const api = {
   decisionRetire: (seq: number) => invoke<void>("decision_retire", { seq }),
   approvalAnswer: (attemptId: string, approve: boolean, text: string) => invoke<void>("approval_answer", { attemptId, approve, text }),
   approvalSendBack: (attemptId: string, instructions: string) => invoke<void>("approval_send_back", { attemptId, instructions }),
+  /** Runs what was skipped for being a small change. The approval comes round again afterwards. */
+  approvalRunSkipped: (attemptId: string) => invoke<void>("approval_run_skipped", { attemptId }),
   questionsAnswer: (attemptId: string, answers: QuestionAnswer[]) => invoke<void>("questions_answer", { attemptId, answers }),
   openGithubUrl: (url: string) => invoke<void>("open_github_url", { url }),
   attemptEvents: (attemptId: string, afterSeq: number) => invoke<AuditEvent[]>("attempt_events", { attemptId, afterSeq }),

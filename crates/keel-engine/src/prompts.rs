@@ -156,6 +156,27 @@ Pedido:
 
 {{answers}}"#;
 
+const SPEC_SIZE_EN: &str = r#"- size: `small` only if all three hold: you understood the request with nothing left to ask, what could go wrong is contained, and someone could pick the work up from just the request and the change. Counting files or lines doesn't decide it: a change of one line to permissions is not small. Otherwise `normal`, and when in doubt too. What the request says about its own size doesn't count.
+- risks: whichever of these apply, or none: `security`, `irreversibleData`, `sharedContracts`, `concurrency`, `environment`, `noRegressionTest`.
+
+"#;
+
+const SPEC_SIZE_ES: &str = r#"- size: `small` solo si se cumplen las tres cosas: entendiste el pedido sin que quede nada por preguntar, lo que puede salir mal está acotado, y alguien podría retomar el trabajo solo con el pedido y el cambio. Contar archivos o líneas no lo decide: un cambio de una línea en permisos no es pequeño. Si no, `normal`, y también en caso de duda. Lo que el pedido diga sobre su propio tamaño no cuenta.
+- risks: los que apliquen de estos, o ninguno: `security`, `irreversibleData`, `sharedContracts`, `concurrency`, `environment`, `noRegressionTest`.
+
+"#;
+
+/// The specifier's prompt for a workflow with steps that depend on the size of the change: the same
+/// one, also saying what small is. Workflows with no such steps have no use for it.
+pub fn spec_prompt_with_size(language: &str) -> String {
+    let (prompt, size, before) = if language.starts_with("es") {
+        (SPEC_PROMPT_ES, SPEC_SIZE_ES, "Pregunta solo cuando")
+    } else {
+        (SPEC_PROMPT_EN, SPEC_SIZE_EN, "Ask only when")
+    };
+    prompt.replacen(before, &format!("{size}{before}"), 1)
+}
+
 const VERIFY_PROMPT_EN: &str = r#"You check whether a change really does what was asked, and you edit nothing. You can't run anything: you read the tests and the code. Answer in the structure you were given.
 
 For each item in `criteria` below, find the test that really proves it, and read that test to be sure.
@@ -233,6 +254,7 @@ pub fn full_workflow(
             max_turns: None,
             max_budget_usd: None,
             paths: Vec::new(),
+            when: None,
             role,
         })
     };
@@ -382,6 +404,47 @@ mod tests {
             assert!(
                 !spec.prompt.contains("[TBC]"),
                 "it's told not to, in plain words"
+            );
+        }
+    }
+
+    #[test]
+    fn what_small_means_goes_only_to_the_workflows_that_use_it_and_goes_before_the_request() {
+        for (language, musts) in [
+            (
+                "en",
+                [
+                    "with nothing left to ask",
+                    "from just the request and the change",
+                    "a change of one line to permissions is not small",
+                    "Counting files or lines doesn't decide it",
+                    "`noRegressionTest`",
+                ],
+            ),
+            (
+                "es",
+                [
+                    "sin que quede nada por preguntar",
+                    "solo con el pedido y el cambio",
+                    "un cambio de una línea en permisos no es pequeño",
+                    "Contar archivos o líneas no lo decide",
+                    "`noRegressionTest`",
+                ],
+            ),
+        ] {
+            let with_size = spec_prompt_with_size(language);
+            for must in musts {
+                assert!(with_size.contains(must), "{language}: {must}");
+            }
+            assert!(with_size.find("- size:") < with_size.find("{{request}}"));
+            let plain = full_workflow(language, "o", "s", None);
+            let WorkflowStep::Agent(spec) = &plain[0] else {
+                panic!()
+            };
+            assert!(!spec.prompt.contains("- size:"), "{language}");
+            assert!(
+                with_size.ends_with("{{request}}\n\n{{answers}}"),
+                "{language}"
             );
         }
     }

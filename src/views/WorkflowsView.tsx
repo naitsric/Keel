@@ -1,7 +1,7 @@
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Bot, CheckCircle2, GitPullRequest, Layers, Plus, Trash2, TriangleAlert, UserCheck, Wrench } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type CommandError, type StepRole, type StepSpec, type ToolProfile, type Workflow, type WorkflowDraft, type WorkflowResults, type WorkflowStep } from "../lib/api";
+import { api, type CommandError, type StepCondition, type StepRole, type StepSpec, type ToolProfile, type Workflow, type WorkflowDraft, type WorkflowResults, type WorkflowStep } from "../lib/api";
 import { draftFacts } from "../lib/drafts";
 import { flowOf, pathKey, pathOfKey, problemKeys, type StepPath } from "../lib/flow";
 import { formatRelative } from "../lib/format";
@@ -84,6 +84,14 @@ export function removedStep(steps: WorkflowStep[], path: StepPath): StepsEdit {
 
 const newAgent = (id: string, role: StepRole, tools: ToolProfile): StepSpec => ({ id, model: "sonnet", effort: null, tools, prompt: "", maxTurns: null, maxBudgetUsd: null, paths: [], role });
 
+const ALWAYS = "always";
+
+/** A step with this condition. A step with none says nothing about it, like one saved before there were any. */
+export function withWhen(spec: StepSpec, when: StepCondition | typeof ALWAYS): StepSpec {
+  const { when: _, ...rest } = spec;
+  return when === ALWAYS ? rest : { ...rest, when };
+}
+
 /** The fields of an agent, standing alone or inside a group. */
 function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; earlier: string[]; inGroup: boolean; onChange: (spec: StepSpec) => void }) {
   const { t } = useTranslation();
@@ -163,6 +171,19 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
             </div>
           </>
         )}
+      </div>
+      <div>
+        <span className="mb-1 block text-[12px] font-medium text-muted">{t("workflows.when")}</span>
+        <Segmented<StepCondition | typeof ALWAYS>
+          label={t("workflows.when")}
+          value={spec.when ?? ALWAYS}
+          onChange={(when) => onChange(withWhen(spec, when))}
+          options={[
+            { value: ALWAYS, label: t("workflows.whenAlways") },
+            { value: "notSmall", label: t("workflows.whenNotSmall") },
+          ]}
+        />
+        <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t("workflows.whenHint")}</p>
       </div>
       <Field label={t("workflows.paths")} hint={t("workflows.pathsHint")}>
         <input
@@ -347,6 +368,12 @@ function DraftReview({ draft, steps, project }: { draft: WorkflowDraft; steps: W
           <dt className={label}>{t("workflows.draftDelivery")}</dt>
           <dd>{facts.delivers ? t("workflows.draftDelivers") : t("workflows.draftNoDelivery")}</dd>
         </div>
+        {facts.conditional.length > 0 && (
+          <div>
+            <dt className={label}>{t("workflows.draftConditional")}</dt>
+            <dd className="font-mono text-[11.5px] break-words">{facts.conditional.join(", ")}</dd>
+          </div>
+        )}
       </dl>
       {facts.afterApproval.length > 0 && (
         <p role="alert" className="flex gap-1.5 text-[12.5px] font-medium text-warning">

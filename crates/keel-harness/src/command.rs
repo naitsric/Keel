@@ -146,6 +146,7 @@ mod tests {
             max_turns: Some(5),
             max_budget_usd: None,
             paths: vec![],
+            when: None,
             role: Default::default(),
         }
     }

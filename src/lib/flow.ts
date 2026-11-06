@@ -14,6 +14,7 @@ export interface FlowAttempt {
   modelRequested: string;
   modelActual: string | null;
   output: { decision?: string } | null;
+  reason?: { code: string } | null;
 }
 
 export interface FlowNode<T extends FlowAttempt = Attempt> {
@@ -25,6 +26,8 @@ export interface FlowNode<T extends FlowAttempt = Attempt> {
   model: string | null;
   /** Shown small: the learner runs after everything else, and its failing holds nothing back. */
   minor: boolean;
+  /** Only runs if the change isn't small. */
+  conditional: boolean;
   state: NodeState;
   /** Every attempt of this step, oldest first. */
   attempts: T[];
@@ -57,7 +60,7 @@ export interface Flow<T extends FlowAttempt = Attempt> {
   live: boolean;
 }
 
-const SETTLED: NodeState[] = ["succeeded", "skipped", "returned"];
+const SETTLED: NodeState[] = ["succeeded", "skipped", "returned", "postponed"];
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 const SINGLE_KINDS = ["agent", "setup", "check", "approval", "deliver"];
@@ -127,7 +130,7 @@ export function flowOf<T extends FlowAttempt = Attempt>(steps: WorkflowStep[], a
   const reworks = reworksOf(steps, given, round);
   const reruns = reworks[0]?.to ?? reworkIndex(steps) ?? Number.POSITIVE_INFINITY;
 
-  const nodeOf = (key: string, id: string, kind: Attempt["kind"], role: StepRole["kind"] | null, model: string | null | undefined, stage: number): FlowNode<T> => {
+  const nodeOf = (key: string, id: string, kind: Attempt["kind"], role: StepRole["kind"] | null, model: string | null | undefined, stage: number, conditional = false): FlowNode<T> => {
     const found = unclaimed.get(id) ?? [];
     unclaimed.delete(id);
     const attempt = found.at(-1) ?? null;
@@ -138,6 +141,7 @@ export function flowOf<T extends FlowAttempt = Attempt>(steps: WorkflowStep[], a
       role,
       model: (kind === "agent" && (attempt?.modelActual || attempt?.modelRequested || model)) || null,
       minor: role === "learner",
+      conditional,
       state: attempt?.state ?? "pending",
       attempts: found,
       attempt,
@@ -149,8 +153,8 @@ export function flowOf<T extends FlowAttempt = Attempt>(steps: WorkflowStep[], a
 
   const stages = steps.map((step, index): FlowStage<T> => {
     const key = String(index);
-    if (step.type === "parallel") return { type: "parallel", key, id: step.id, nodes: step.steps.map((spec, member) => nodeOf(`${index}.${member}`, spec.id, "agent", spec.role?.kind ?? "worker", spec.model, index)) };
-    const node = step.type === "agent" ? nodeOf(key, step.id, "agent", step.role?.kind ?? "worker", step.model, index) : nodeOf(key, step.id, step.type, null, null, index);
+    if (step.type === "parallel") return { type: "parallel", key, id: step.id, nodes: step.steps.map((spec, member) => nodeOf(`${index}.${member}`, spec.id, "agent", spec.role?.kind ?? "worker", spec.model, index, Boolean(spec.when))) };
+    const node = step.type === "agent" ? nodeOf(key, step.id, "agent", step.role?.kind ?? "worker", step.model, index, Boolean(step.when)) : nodeOf(key, step.id, step.type, null, null, index);
     return { type: "step", key, node };
   });
   const extras = [...unclaimed.entries()].map(([id, found], index) => {

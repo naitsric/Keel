@@ -359,15 +359,27 @@ impl Inner {
             body.push_str(&format!("- `{}`{round}: {model}\n", attempt.step_id));
         }
         let mut wrote_reviews = false;
+        // A person can ask for a review that was skipped, and then that's what became of it.
+        let current = |a: &keel_store::Attempt| {
+            !attempts
+                .iter()
+                .any(|b| b.step_id == a.step_id && b.number > a.number)
+        };
         for attempt in attempts
             .iter()
-            .filter(|a| a.role == "reviewer" && a.round == run.round)
+            .filter(|a| a.role == "reviewer" && a.round == run.round && current(a))
         {
             if !wrote_reviews {
                 body.push_str(&format!("\n### {}\n\n", label("Reviews", "Revisiones")));
                 wrote_reviews = true;
             }
-            let line = if attempt.state == AttemptState::Skipped.as_str() {
+            let line = if crate::sizing::skipped_as_small(attempt) {
+                label(
+                    "skipped: Keel treated this as a small change",
+                    "omitida: Keel lo trató como un cambio pequeño",
+                )
+                .to_owned()
+            } else if attempt.state == AttemptState::Skipped.as_str() {
                 label(
                     "skipped: nothing it covers changed",
                     "omitida: no cambió nada de lo que cubre",
@@ -383,6 +395,22 @@ impl Inner {
                     .to_owned()
             };
             body.push_str(&format!("- `{}`: {line}\n", attempt.step_id));
+        }
+        // Whoever reads the pull request should know what nobody looked at, and that it was on purpose.
+        let skipped = crate::sizing::skipped_steps(&attempts);
+        if !skipped.is_empty() {
+            let names = skipped
+                .iter()
+                .map(|step| format!("`{step}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            body.push_str(&format!(
+                "\n{} {names}\n",
+                label(
+                    "Keel treated this as a small change, and a person approved it. These didn't run:",
+                    "Keel lo trató como un cambio pequeño, y una persona lo aprobó. Esto no corrió:",
+                ),
+            ));
         }
         for attempt in attempts.iter().filter(|a| a.kind == "approval") {
             if let Some(decision) = self

@@ -88,6 +88,15 @@ impl StepRole {
     }
 }
 
+/// Something that has to hold for a step to run. A closed list, since the engine has to be able to
+/// work out each one from facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StepCondition {
+    /// Only if the change isn't small. See `WhyNotSmall` for what small takes.
+    NotSmall,
+}
+
 /// One agent step as the user defined it, including its own model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -104,6 +113,10 @@ pub struct StepSpec {
     pub paths: Vec<String>,
     #[serde(default, skip_serializing_if = "StepRole::is_worker")]
     pub role: StepRole,
+    /// Runs only if this holds. Only agents can have one, so a person's approval and a check are
+    /// never skipped this way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<StepCondition>,
 }
 
 /// Something a project's commands need, such as a test database. Keel runs these outside the
@@ -225,7 +238,10 @@ pub enum AttemptState {
     Rejected,
     /// A person sent the work back at an approval step, with what to change. The run goes on.
     Returned,
-    /// Not needed for this change: nothing it covers was touched.
+    /// A person asked for what was skipped to run first. They didn't answer: the run goes on, and
+    /// the approval comes round again.
+    Postponed,
+    /// Not needed for this change. Its reason says why.
     Skipped,
     Abandoned,
 }
@@ -248,6 +264,7 @@ impl AttemptState {
             Self::WaitingAnswers => "waitingAnswers",
             Self::Rejected => "rejected",
             Self::Returned => "returned",
+            Self::Postponed => "postponed",
             Self::Skipped => "skipped",
             Self::Abandoned => "abandoned",
         }
@@ -268,6 +285,7 @@ impl AttemptState {
             "waitingAnswers" => Self::WaitingAnswers,
             "rejected" => Self::Rejected,
             "returned" => Self::Returned,
+            "postponed" => Self::Postponed,
             "skipped" => Self::Skipped,
             "abandoned" => Self::Abandoned,
             _ => return None,
@@ -356,6 +374,12 @@ pub enum Reason {
     NoMatchingPaths {
         paths: Vec<String>,
     },
+    /// The engine found the change small, going by what it could see for itself, and the step only
+    /// runs for one that isn't. `lines` and `files` are the size of the change at that moment.
+    TreatedAsSmall {
+        lines: usize,
+        files: usize,
+    },
     /// `problem` is a code the UI translates, and `step` is the step it's about.
     InvalidWorkflow {
         problem: String,
@@ -412,6 +436,52 @@ pub enum Reason {
     SendBackNeedsInstructions,
     /// This approval has nothing before it that could do the work again.
     NothingToSendBackTo,
+    /// Nothing was skipped for being a small change, so there's nothing to run now.
+    NothingSkippedToRun,
+}
+
+/// Why a run doesn't count as small. Each is a fact the engine checked for itself, and any one is
+/// enough. The UI puts them in words, and the results count them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "code",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum WhyNotSmall {
+    /// What was asked was worked out as not small, or didn't say, or there's nothing structured
+    /// that could say.
+    SpecNotSmall,
+    /// What was asked names these risks. Whatever they say counts, known or not.
+    SpecNamesRisks { risks: Vec<String> },
+    /// The workflow has no check, so nothing proves the change works.
+    NoCheck,
+    /// It has one, and it hasn't passed on the code as it is in this round.
+    CheckNotPassed,
+    /// The run came from an issue this person wrote, who isn't the project's GitHub account.
+    IssueFromSomeoneElse { author: String },
+    /// The run came from an issue, and it doesn't say who wrote it.
+    IssueFromUnknownAuthor,
+    /// The run came from an issue, and the project has no GitHub account to compare its author with.
+    IssueWithNoAccount,
+    /// An assistant started the run over MCP, so no person wrote or vouched for what it asks.
+    StartedByAssistant { client: String },
+    /// The change touches these files, out of `total`, which are too sensitive to count as small.
+    SensitiveFiles { files: Vec<String>, total: usize },
+    /// A pattern in the project's list can't be read, so it can't be said that nothing matched it.
+    BadSensitivePattern { pattern: String },
+    /// The change has this many changed lines, and small has to be under `limit`.
+    TooManyLines { lines: usize, limit: usize },
+    /// These files, out of `total`, have changes git won't count in lines, so the size isn't known.
+    FilesWithoutLines { files: Vec<String>, total: usize },
+    /// The change couldn't be read.
+    DiffUnreadable,
+    /// A verifier said this many things aren't so, in this round.
+    VerifierFoundUnmet { count: usize },
+    /// The workflow has a verifier that hasn't looked at the code as it is in this round.
+    VerifierHasNotRun,
+    /// A person asked for what was skipped to run.
+    PersonAsked,
 }
 
 /// What's wrong with a specifier's answer. The UI and the prompt asking for a fix each put it in
@@ -552,7 +622,9 @@ impl Reason {
             | Self::SpecNotUsable { .. }
             | Self::InvalidAnswer { .. }
             | Self::SendBackNeedsInstructions
-            | Self::NothingToSendBackTo => false,
+            | Self::NothingToSendBackTo
+            | Self::TreatedAsSmall { .. }
+            | Self::NothingSkippedToRun => false,
         }
     }
 }
@@ -663,7 +735,7 @@ mod tests {
     use BoardColumn::{Backlog as InBacklog, Done, HumanReview, InProgress, Todo as InTodo};
 
     /// Every state, with the run open and then finished.
-    const STARTED: [(AttemptState, BoardColumn, BoardColumn); 15] = [
+    const STARTED: [(AttemptState, BoardColumn, BoardColumn); 16] = [
         (Queued, InProgress, Done),
         (Preparing, InProgress, Done),
         (Running, InProgress, Done),
@@ -678,6 +750,8 @@ mod tests {
         (Rejected, HumanReview, InBacklog),
         // The work went back, and the next step is on its way.
         (Returned, InProgress, Done),
+        // What was skipped is on its way, and the approval comes round again after it.
+        (Postponed, InProgress, Done),
         (Skipped, InProgress, Done),
         (Abandoned, HumanReview, InBacklog),
     ];
@@ -707,7 +781,7 @@ mod tests {
             match parsed {
                 Queued | Preparing | Running | Stalled | Succeeded | Failed | Stopped
                 | Interrupted | Blocked | WaitingApproval | WaitingAnswers | Rejected
-                | Returned | Skipped | Abandoned => {}
+                | Returned | Postponed | Skipped | Abandoned => {}
             }
         }
         let mut unique = states.clone();
@@ -853,6 +927,8 @@ mod tests {
             ),
             (Reason::SendBackNeedsInstructions, false),
             (Reason::NothingToSendBackTo, false),
+            (Reason::TreatedAsSmall { lines: 1, files: 1 }, false),
+            (Reason::NothingSkippedToRun, false),
         ]
     }
 
@@ -900,6 +976,8 @@ mod tests {
             Reason::InvalidAnswer { .. } => 38,
             Reason::SendBackNeedsInstructions => 39,
             Reason::NothingToSendBackTo => 40,
+            Reason::TreatedAsSmall { .. } => 41,
+            Reason::NothingSkippedToRun => 42,
         }
     }
 
@@ -913,7 +991,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=40).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=42).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]
@@ -943,10 +1021,71 @@ mod tests {
     fn a_specifier_is_a_role_of_its_own_and_states_read_back_as_themselves() {
         assert_eq!(StepRole::Specifier.as_str(), "specifier");
         assert_eq!(StepRole::Verifier.as_str(), "verifier");
-        for state in [AttemptState::WaitingAnswers, AttemptState::Returned] {
+        for state in [
+            AttemptState::WaitingAnswers,
+            AttemptState::Returned,
+            AttemptState::Postponed,
+        ] {
             assert_eq!(AttemptState::parse(state.as_str()), Some(state));
             assert!(!state.is_active(), "nothing is running");
         }
+    }
+
+    fn a_step() -> StepSpec {
+        StepSpec {
+            id: "a".into(),
+            model: "opus".into(),
+            effort: None,
+            tools: ToolProfile::ReadOnly,
+            prompt: "p".into(),
+            max_turns: None,
+            max_budget_usd: None,
+            paths: vec![],
+            role: StepRole::Reviewer,
+            when: None,
+        }
+    }
+
+    #[test]
+    fn a_condition_only_shows_up_on_a_step_that_has_one() {
+        let without = serde_json::to_value(a_step()).unwrap();
+        assert_eq!(
+            without.get("when"),
+            None,
+            "what was saved before stays as it was"
+        );
+        let with = StepSpec {
+            when: Some(StepCondition::NotSmall),
+            ..a_step()
+        };
+        let value = serde_json::to_value(&with).unwrap();
+        assert_eq!(value["when"], "notSmall");
+        assert_eq!(serde_json::from_value::<StepSpec>(value).unwrap(), with);
+        assert_eq!(
+            serde_json::from_value::<StepSpec>(without).unwrap(),
+            a_step()
+        );
+    }
+
+    #[test]
+    fn a_condition_nobody_knows_is_refused_rather_than_taken_as_no_condition() {
+        let mut value = serde_json::to_value(a_step()).unwrap();
+        value["when"] = serde_json::json!("whenever");
+        assert!(serde_json::from_value::<StepSpec>(value).is_err());
+    }
+
+    #[test]
+    fn why_a_run_is_not_small_reads_as_a_code_with_its_data() {
+        let why = WhyNotSmall::TooManyLines {
+            lines: 512,
+            limit: 400,
+        };
+        let value = serde_json::to_value(&why).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "code": "tooManyLines", "lines": 512, "limit": 400 })
+        );
+        assert_eq!(serde_json::from_value::<WhyNotSmall>(value).unwrap(), why);
     }
 
     #[test]

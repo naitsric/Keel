@@ -114,6 +114,7 @@
     "waitingAnswers": "Te espera",
     "rejected": "Rechazado",
     "returned": "Devuelto",
+    "postponed": "Se pidió más",
     "skipped": "Omitido"
   },
   "reasons": {
@@ -150,6 +151,7 @@
     "noStructuredOutput": "Terminó sin la respuesta que se le pidió.",
     "reworkLimit": "El aprobador lo devolvió {{rounds}} veces y sigue sin quedar conforme. Ahora decides tú.",
     "noMatchingPaths": "No cambió nada de lo que cubre ({{paths}}).",
+    "treatedAsSmall": "Keel lo trató como un cambio pequeño, así que no corrió.",
     "invalidWorkflow": "Este workflow no puede correr.",
     "snapshotFailed": "El paso terminó, pero Keel no pudo leer lo que cambió, así que no cuenta como hecho.",
     "brainFull": "El Brain está lleno. Retira algo primero, y luego acepta esto.",
@@ -160,7 +162,8 @@
     "specNotUsable": "No pudo escribir esto dentro de lo que Keel te puede mostrar, ni después de que se le pidió corregirlo: {{problems}}.",
     "invalidAnswer": "Esa respuesta no corresponde a estas preguntas.",
     "sendBackNeedsInstructions": "Para devolverlo, di qué debe cambiar.",
-    "nothingToSendBackTo": "Nada antes de esta aprobación puede volver a hacer el trabajo."
+    "nothingToSendBackTo": "Nada antes de esta aprobación puede volver a hacer el trabajo.",
+    "nothingSkippedToRun": "No se omitió nada por ser un cambio pequeño, así que no hay nada que correr."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
@@ -428,6 +431,7 @@
     "servicesLost": "No se pudieron restaurar los servicios al reabrir: {{error}}",
     "setupResult": "La preparación terminó con código {{code}}",
     "skipped": "Omitido: no cambió nada de lo que cubre",
+    "skippedSmall": "Omitido: Keel lo trató como un cambio pequeño",
     "rework": "Devuelto para la ronda {{round}}",
     "reworkLimit": "Llegó al límite de rondas",
     "reworkLimitAnswerRound": "Pediste otra ronda",
@@ -450,7 +454,9 @@
     "verificationCorrected_other": "Keel no le creyó en {{count}} cosas, y cuentan como sin verificar:",
     "verificationDropped_one": "También respondió sobre algo que no se preguntó, y Keel lo dejó fuera.",
     "verificationDropped_other": "También respondió sobre {{count}} cosas que no se preguntaron, y Keel las dejó fuera.",
-    "returned": "Lo devolviste para la ronda {{round}}"
+    "returned": "Lo devolviste para la ronda {{round}}",
+    "postponed": "Pediste que esto corriera antes de responder: {{names}}",
+    "sizeSmall": "Keel lo trató como un cambio pequeño: {{lines}} en {{files}}"
   },
   "commands": {
     "empty": "No corrió ningún comando.",
@@ -531,6 +537,8 @@
     "domainsHint": "Uno por línea. No se llega a nada más.",
     "readPaths": "Otras carpetas que los agentes pueden leer",
     "readPathsHint": "Una por línea, como ~/.nvm. Tu carpeta personal queda oculta en lo demás.",
+    "sensitive": "Archivos demasiado sensibles para un cambio pequeño",
+    "sensitiveHint": "Un patrón por línea, como billing/ o *.proto. Un cambio que toque uno recibe la revisión completa. Estos siempre cuentan: .github/, migraciones, esquema SQL, inicio de sesión y permisos, secretos, archivos de entorno y archivos de bloqueo.",
     "save": "Guardar",
     "saved": "Guardado",
     "services": "Servicios",
@@ -600,7 +608,8 @@
     "servicePort": "Elige un puerto para el servicio.",
     "serviceStart": "Escribe el comando que inicia «{{value}}».",
     "envName": "El nombre de una variable usa mayúsculas, números y guiones bajos: «{{value}}».",
-    "envReserved": "Keel controla «{{value}}», o podría llevar una credencial, así que un proyecto no puede definirla."
+    "envReserved": "Keel controla «{{value}}», o podría llevar una credencial, así que un proyecto no puede definirla.",
+    "sensitivePaths": "«{{value}}» no se puede leer como patrón de archivos."
   },
   "invalidWorkflow": {
     "empty": "Un workflow necesita al menos un paso.",
@@ -618,7 +627,8 @@
     "deliverNeedsApproval": "«{{step}}» abre un pull request, así que una persona tiene que aprobar en un paso anterior.",
     "learnerNotLast": "«{{step}}» propone lo que enseñó la ejecución, así que tiene que ser el último paso.",
     "groupRole": "«{{step}}» no puede ir en un grupo. Solo pueden los pasos que hacen o revisan el trabajo.",
-    "verifierNeedsSpecifier": "«{{step}}» repasa lo que tiene que cumplirse, así que antes tiene que haber un paso que defina el cambio."
+    "verifierNeedsSpecifier": "«{{step}}» repasa lo que tiene que cumplirse, así que antes tiene que haber un paso que defina el cambio.",
+    "whenBeforeBuild": "«{{step}}» depende de qué tan grande es el cambio, así que tiene que ir después del primer paso que construye. Antes no hay ningún cambio que mirar."
   },
   "workflows": {
     "title": "Workflows",
@@ -654,6 +664,10 @@
     "maxRounds": "Rondas como máximo",
     "paths": "Solo si cambian estos archivos (opcional)",
     "pathsHint": "Patrones separados por comas, como **/*.tsx. Vacío significa que siempre corre.",
+    "when": "Cuándo corre",
+    "whenAlways": "Siempre",
+    "whenNotSmall": "Solo si el cambio no es pequeño",
+    "whenHint": "Keel lo decide con el cambio real: lo que se pidió, una verificación que pasó, quién escribió el issue, nada sensible y menos de 400 líneas. Va después del primer paso que construye, y una persona sigue aprobando.",
     "prompt": "Qué hace",
     "promptHint": "Puedes usar {{tokens}}, donde spec es el nombre de un paso.",
     "command": "Comando",
@@ -704,8 +718,14 @@
       "criteriaUnmet": "Lo que tenía que cumplirse: no se cumplió",
       "criteriaUnverified": "Lo que tenía que cumplirse: sin verificar",
       "criteriaUnverifiedNote": "Si es alto, valdría la pena un paso que de verdad corra las pruebas.",
-      "nothingChecked": "Nada comprobado aún"
-    }
+      "nothingChecked": "Nada comprobado aún",
+      "shortRoute": "Tratados como cambios pequeños",
+      "movedUp": "Pasaron a revisión completa",
+      "movedUpWhy": "Por qué pasaron",
+      "movedUpWhyNote": "Una ejecución puede tener varias razones.",
+      "doesNotDepend": "No depende del cambio"
+    },
+    "draftConditional": "Se omite en un cambio pequeño"
   },
   "flow": {
     "groupLabel": "{{step}}, a la vez",
@@ -727,7 +747,10 @@
     "addBefore": "Agregar un paso antes de {{step}}",
     "addEnd": "Agregar un paso al final",
     "addMember": "Agregar un paso a {{step}}",
-    "memberOf": "Agente en {{group}}"
+    "memberOf": "Agente en {{group}}",
+    "skippedSmall": "Cambio pequeño",
+    "skippedSmallWhy": "Omitido: Keel lo trató como un cambio pequeño",
+    "onlyIfNotSmall": "Solo si el cambio no es pequeño"
   },
   "brain": {
     "title": "Brain",
@@ -982,5 +1005,68 @@
     "unanswered": "Falta responder la pregunta {{question}}.",
     "optionNotOffered": "Esa opción no está entre las de la pregunta {{question}}.",
     "emptyText": "Escribe tu respuesta a la pregunta {{question}}, o elige una de sus opciones."
+  },
+  "fits": {
+    "smallLabel": "Cambio pequeño",
+    "upLabel": "Revisión completa",
+    "small": "Keel lo trató como un cambio pequeño: {{lines}} en {{files}}. No toca nada sensible, y la verificación pasó.",
+    "didNotRun": "Por eso no corrieron: {{names}}.",
+    "runNow": "Correrlos ahora",
+    "runNowHint": "No se repite nada de lo ya construido, y esta aprobación vuelve cuando terminen.",
+    "up": "Pasó a revisión completa porque:",
+    "summary": "Keel lo trató como un cambio pequeño, así que esto no corrió: {{names}}.",
+    "lines_one": "{{count}} línea cambiada",
+    "lines_other": "{{count}} líneas cambiadas",
+    "files_one": "{{count}} archivo",
+    "files_other": "{{count}} archivos",
+    "andMore": "{{files}} y {{more}} más",
+    "count": "{{why}}: {{runs}}",
+    "why": {
+      "specNotSmall": "quien definió el cambio no lo consideró pequeño",
+      "specNamesRisks": "podría afectar {{risks}}",
+      "noCheck": "este workflow no tiene verificación, así que nada demuestra que funcione",
+      "checkNotPassed": "la verificación no ha pasado sobre el código como está ahora",
+      "issueFromSomeoneElse": "viene de un issue de {{author}}, que no es la cuenta de este proyecto",
+      "issueFromUnknownAuthor": "viene de un issue, y no se sabe quién lo escribió",
+      "issueWithNoAccount": "viene de un issue, y este proyecto no tiene una cuenta de GitHub con la cual comparar a su autor",
+      "startedByAssistant": "lo inició {{client}}, así que ninguna persona escribió lo que pide",
+      "sensitiveFiles": "toca {{files}}",
+      "badSensitivePattern": "la lista de archivos sensibles de este proyecto tiene algo que Keel no puede leer: {{pattern}}",
+      "tooManyLines": "cambia {{lines}} líneas, y un cambio pequeño se queda por debajo de {{limit}}",
+      "filesWithoutLines": "Keel no puede saber cuánto cambió en {{files}}",
+      "diffUnreadable": "Keel no pudo leer el cambio",
+      "verifierFoundUnmet": "algo que tenía que cumplirse no se cumple",
+      "verifierHasNotRun": "nadie ha comprobado todavía que este código haga lo que se pidió",
+      "personAsked": "lo pediste",
+      "unknown": "Keel encontró una razón que no puede explicar aquí"
+    },
+    "risks": {
+      "security": "la seguridad",
+      "irreversibleData": "datos que no se pueden recuperar",
+      "sharedContracts": "algo de lo que depende otro código",
+      "concurrency": "cosas que pasan al mismo tiempo",
+      "environment": "cómo se configura o se despliega",
+      "noRegressionTest": "algo que ninguna prueba detectaría si se rompe otra vez",
+      "other": "algo que no supo nombrar"
+    },
+    "short": {
+      "specNotSmall": "no se consideró pequeño",
+      "specNamesRisks": "señaló un riesgo",
+      "noCheck": "sin verificación",
+      "checkNotPassed": "verificación sin pasar",
+      "issueFromSomeoneElse": "issue de otra persona",
+      "issueFromUnknownAuthor": "issue de autor desconocido",
+      "issueWithNoAccount": "issue, sin cuenta configurada",
+      "startedByAssistant": "iniciado por un asistente",
+      "sensitiveFiles": "archivos sensibles",
+      "badSensitivePattern": "un patrón ilegible",
+      "tooManyLines": "demasiadas líneas",
+      "filesWithoutLines": "archivos que no puede medir",
+      "diffUnreadable": "no pudo leer el cambio",
+      "verifierFoundUnmet": "algo sin cumplir",
+      "verifierHasNotRun": "sin comprobar",
+      "personAsked": "lo pediste",
+      "unknown": "otra razón"
+    }
   }
 }

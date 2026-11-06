@@ -111,6 +111,7 @@ fn agent(id: &str, role: StepRole, prompt: &str) -> WorkflowStep {
         max_turns: None,
         max_budget_usd: None,
         paths: Vec::new(),
+        when: None,
         role,
     })
 }

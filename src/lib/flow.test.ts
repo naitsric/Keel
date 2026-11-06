@@ -125,6 +125,22 @@ describe("what attempts say about a node", () => {
   });
 });
 
+describe("a step that depends on the change", () => {
+  const steps: WorkflowStep[] = [agent("builder"), { type: "parallel", id: "reviews", steps: [{ ...spec("security"), when: "notSmall" }, spec("code")] }, { ...agent("approver"), when: "notSmall" } as WorkflowStep, { type: "approval", id: "human" }];
+
+  it("says so on its node, and a step saved with nothing says nothing", () => {
+    const nodes = allNodes(flowOf(steps));
+    expect(nodes.map((node) => [node.id, node.conditional])).toEqual([["builder", false], ["security", true], ["code", false], ["approver", true], ["human", false]]);
+  });
+
+  it("counts as gone past once it's been skipped for being small, and work still goes back to where it says", () => {
+    const flow = flowOf(steps, [attempt("builder", "succeeded"), attempt("approver", "skipped", { reason: { code: "treatedAsSmall" } })]);
+    expect(allNodes(flow).find((node) => node.id === "approver")?.state).toBe("skipped");
+    const line = layoutFlow(flowOf(steps, [attempt("builder", "succeeded"), attempt("human", "postponed")]));
+    expect(line.lines.some((l) => l.travelled)).toBe(true);
+  });
+});
+
 describe("where work goes back to", () => {
   const worker = (id: string) => ({ type: "agent", id, model: "sonnet", tools: "build", prompt: "p", effort: null, maxTurns: null, maxBudgetUsd: null }) as WorkflowStep;
   const reader = (id: string) => ({ ...worker(id), tools: "readOnly" }) as WorkflowStep;

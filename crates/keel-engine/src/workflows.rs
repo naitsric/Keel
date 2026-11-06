@@ -6,12 +6,14 @@ use std::io;
 use std::path::Path;
 
 use globset::{Glob, GlobSetBuilder};
-use keel_core::{AttemptState, Reason, StepRole, StepSpec, ToolProfile, WorkflowStep};
+use keel_core::{
+    AttemptState, Reason, StepCondition, StepRole, StepSpec, ToolProfile, WorkflowStep,
+};
 use keel_store::Attempt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{brain, prompts, specs, verification};
+use crate::{brain, prompts, sizing, specs, verification};
 
 /// How much of a diff goes into a prompt. A reviewer can still read any file it wants.
 const DIFF_LIMIT: usize = 200 * 1024;
@@ -118,12 +120,22 @@ pub fn validate(steps: &[WorkflowStep]) -> Result<(), Reason> {
     };
     let mut approval_seen = false;
     let mut specifier_seen = false;
+    let mut built = false;
+    // Whether a change is small is judged on the change, so there has to be one to look at.
+    let check_when = |spec: &StepSpec, built: bool| -> Result<(), Reason> {
+        if spec.when.is_some() && !built {
+            return Err(problem("whenBeforeBuild", &spec.id));
+        }
+        Ok(())
+    };
     let mut earlier: Vec<&str> = Vec::new();
     for (index, step) in steps.iter().enumerate() {
         remember(step.id())?;
         match step {
             WorkflowStep::Agent(spec) => {
                 check_agent(spec)?;
+                check_when(spec, built)?;
+                built |= spec.role == StepRole::Worker && spec.tools == ToolProfile::Build;
                 // It's about what the run did, so it has to come once the run has done it.
                 if spec.role == StepRole::Learner && index + 1 != steps.len() {
                     return Err(problem("learnerNotLast", &spec.id));
@@ -154,6 +166,7 @@ pub fn validate(steps: &[WorkflowStep]) -> Result<(), Reason> {
                 for spec in group {
                     remember(&spec.id)?;
                     check_agent(spec)?;
+                    check_when(spec, built)?;
                     // The rest act on what the whole run has done, so they can't run alongside it.
                     if !matches!(spec.role, StepRole::Worker | StepRole::Reviewer) {
                         return Err(problem("groupRole", &spec.id));
@@ -288,6 +301,11 @@ pub fn output_of(attempts: &[Attempt], step_id: &str) -> String {
     let Some(attempt) = attempts.iter().rev().find(|a| a.step_id == step_id) else {
         return String::new();
     };
+    // Agents read this, and neither one can pass for the step having looked and found nothing wrong.
+    if sizing::skipped_as_small(attempt) {
+        return "(skipped: Keel treated this as a small change, so this step looked at nothing)"
+            .to_owned();
+    }
     if attempt.state == AttemptState::Skipped.as_str() {
         return "(skipped: nothing it covers changed)".to_owned();
     }
@@ -448,8 +466,31 @@ fn agent(
         max_turns: None,
         max_budget_usd: None,
         paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+        when: None,
         role,
     }
+}
+
+/// A copy of the full workflow that fits the change: the reviews and the approver only run for one
+/// that isn't small. The person's approval, the check and the verifier stay as they are.
+fn fitting_the_change(mut steps: Vec<WorkflowStep>, language: &str) -> Vec<WorkflowStep> {
+    for step in &mut steps {
+        match step {
+            WorkflowStep::Parallel { steps: group, .. } => {
+                for spec in group {
+                    spec.when = Some(StepCondition::NotSmall);
+                }
+            }
+            WorkflowStep::Agent(spec) if matches!(spec.role, StepRole::Approver { .. }) => {
+                spec.when = Some(StepCondition::NotSmall);
+            }
+            WorkflowStep::Agent(spec) if spec.role == StepRole::Specifier => {
+                spec.prompt = prompts::spec_prompt_with_size(language);
+            }
+            _ => {}
+        }
+    }
+    steps
 }
 
 /// The same in both languages, like `spec` and `builder`: the approver's prompt names it.
@@ -567,6 +608,7 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
     full.push(learner(&[security, "ux", "ui", code]));
     let mut simple = simple;
     simple.push(learner(&[]));
+    let fitting = fitting_the_change(full.clone(), language);
 
     vec![
         Workflow {
@@ -579,6 +621,13 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
             id: "builtin:simple".into(),
             name: text("Simple, without reviews", "Simple, sin revisiones").into(),
             steps: simple,
+            builtin: true,
+        },
+        // After these two, so that nothing that goes by their place in the list changes.
+        Workflow {
+            id: "builtin:organic".into(),
+            name: text("Fits the change", "Se adapta al cambio").into(),
+            steps: fitting,
             builtin: true,
         },
     ]
@@ -1229,6 +1278,274 @@ mod tests {
             }]),
             Err(problem("groupRole", "spec"))
         );
+    }
+
+    fn organic(language: &str, check: Option<&str>) -> Workflow {
+        let organic = builtin(language, check).remove(2);
+        assert_eq!(organic.id, "builtin:organic");
+        organic
+    }
+
+    #[test]
+    fn the_workflow_that_fits_the_change_is_third_and_says_so_in_either_language() {
+        let ids = |language| {
+            builtin(language, None)
+                .into_iter()
+                .map(|w| w.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids("en"),
+            ["builtin:full", "builtin:simple", "builtin:organic"]
+        );
+        assert_eq!(organic("en", None).name, "Fits the change");
+        assert_eq!(organic("es", None).name, "Se adapta al cambio");
+    }
+
+    #[test]
+    fn the_workflow_that_fits_the_change_is_the_full_one_with_only_the_reviews_depending_on_it() {
+        for language in ["en", "es"] {
+            for check in [None, Some("make test")] {
+                let full = builtin(language, check).remove(0);
+                let organic = organic(language, check);
+                assert_eq!(
+                    organic
+                        .steps
+                        .iter()
+                        .map(WorkflowStep::id)
+                        .collect::<Vec<_>>(),
+                    full.steps.iter().map(WorkflowStep::id).collect::<Vec<_>>(),
+                );
+                for step in &organic.steps {
+                    match step {
+                        WorkflowStep::Parallel { steps, .. } => {
+                            assert!(
+                                steps
+                                    .iter()
+                                    .all(|s| s.when == Some(StepCondition::NotSmall))
+                            );
+                        }
+                        WorkflowStep::Agent(spec) => {
+                            let expected = matches!(spec.role, StepRole::Approver { .. })
+                                .then_some(StepCondition::NotSmall);
+                            assert_eq!(spec.when, expected, "{}", spec.id);
+                        }
+                        _ => {}
+                    }
+                }
+                let spec = |w: &Workflow| match find_step(&w.steps, "spec") {
+                    Some(WorkflowStep::Agent(spec)) => spec.prompt,
+                    _ => panic!(),
+                };
+                assert!(spec(&organic).contains("- size:"), "{language}");
+                let same_otherwise = |mut w: Workflow| {
+                    for step in &mut w.steps {
+                        match step {
+                            WorkflowStep::Parallel { steps, .. } => {
+                                steps.iter_mut().for_each(|s| s.when = None);
+                            }
+                            WorkflowStep::Agent(agent) => {
+                                agent.when = None;
+                                if agent.id == "spec" {
+                                    agent.prompt.clear();
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    w.steps
+                };
+                assert_eq!(same_otherwise(organic), same_otherwise(full));
+            }
+        }
+    }
+
+    #[test]
+    fn the_first_two_built_ins_depend_on_nothing_and_are_not_told_about_size() {
+        for language in ["en", "es"] {
+            for check in [None, Some("make test")] {
+                for workflow in &builtin(language, check)[..2] {
+                    for step in &workflow.steps {
+                        let specs: Vec<&StepSpec> = match step {
+                            WorkflowStep::Agent(spec) => vec![spec],
+                            WorkflowStep::Parallel { steps, .. } => steps.iter().collect(),
+                            _ => vec![],
+                        };
+                        for spec in specs {
+                            assert_eq!(spec.when, None, "{}: {}", workflow.id, spec.id);
+                            assert!(!spec.prompt.contains("- size:"), "{}", spec.id);
+                        }
+                    }
+                    // Nothing in what's saved or sent says anything about it.
+                    let text = serde_json::to_string(&workflow.steps).unwrap();
+                    assert!(!text.contains("\"when\""), "{}", workflow.id);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_workflow_that_fits_the_change_still_needs_a_person_and_sends_back_to_the_builder() {
+        for language in ["en", "es"] {
+            let fits = organic(language, Some("make test"));
+            let from = rework_index(&fits.steps).unwrap();
+            assert_eq!(fits.steps[from].id(), "builder");
+            let approval = fits
+                .steps
+                .iter()
+                .find(|s| matches!(s, WorkflowStep::Approval { .. }))
+                .unwrap();
+            assert!(can_send_back(&fits.steps, approval.id()));
+
+            let without_approval: Vec<WorkflowStep> = fits
+                .steps
+                .iter()
+                .filter(|s| !matches!(s, WorkflowStep::Approval { .. }))
+                .cloned()
+                .collect();
+            assert_eq!(
+                validate(&without_approval),
+                Err(problem("deliverNeedsApproval", "pull-request"))
+            );
+        }
+    }
+
+    fn conditional(id: &str, tools: ToolProfile, role: StepRole) -> StepSpec {
+        let mut spec = worker(id, tools);
+        spec.role = role;
+        spec.when = Some(StepCondition::NotSmall);
+        spec
+    }
+
+    #[test]
+    fn a_condition_needs_a_real_diff_to_look_at() {
+        let builder = || step_of(worker("b", ToolProfile::Build));
+        let reader = || step_of(worker("reader", ToolProfile::ReadOnly));
+        let review = || step_of(conditional("r", ToolProfile::ReadOnly, StepRole::Reviewer));
+        let refused = Err(problem("whenBeforeBuild", "r"));
+        assert_eq!(validate(&[review()]), refused, "there's no build at all");
+        assert_eq!(validate(&[review(), builder()]), refused, "before it");
+        assert_eq!(
+            validate(&[reader(), review()]),
+            refused,
+            "reading isn't building"
+        );
+        assert_eq!(validate(&[builder(), review()]), Ok(()));
+        // At it: the first one to build can't be what's skipped for the change it would make.
+        let at = step_of(conditional("b", ToolProfile::Build, StepRole::Worker));
+        assert_eq!(validate(&[at]), Err(problem("whenBeforeBuild", "b")));
+        // A second one can.
+        let again = step_of(conditional("again", ToolProfile::Build, StepRole::Worker));
+        assert_eq!(validate(&[builder(), again]), Ok(()));
+        // In a group it's the same, and only what came before the group counts.
+        let group = |spec: StepSpec| WorkflowStep::Parallel {
+            id: "g".into(),
+            steps: vec![spec],
+        };
+        let member = conditional("m", ToolProfile::ReadOnly, StepRole::Reviewer);
+        assert_eq!(
+            validate(&[group(member.clone()), builder()]),
+            Err(problem("whenBeforeBuild", "m"))
+        );
+        assert_eq!(validate(&[builder(), group(member)]), Ok(()));
+    }
+
+    #[test]
+    fn a_workflow_with_a_condition_comes_back_from_a_yaml_file_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = organic("en", Some("make test"));
+        let saved = save(dir.path(), &original).unwrap();
+        let text = std::fs::read_to_string(dir.path().join(format!("{}.yaml", saved.id))).unwrap();
+        assert!(text.contains("when: notSmall"), "readable: {text}");
+        let loaded = load_all(dir.path()).unwrap();
+        assert_eq!(loaded[0].steps, original.steps);
+    }
+
+    #[test]
+    fn a_workflow_saved_before_conditions_reads_as_having_none_and_stays_that_way_when_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("old.yaml"),
+            "name: Old\nsteps:\n- type: agent\n  id: builder\n  model: sonnet\n  effort: null\n  tools: build\n  prompt: Do it\n  maxTurns: null\n  maxBudgetUsd: null\n- type: agent\n  id: review\n  model: sonnet\n  effort: null\n  tools: readOnly\n  prompt: Look\n  maxTurns: null\n  maxBudgetUsd: null\n  role:\n    kind: reviewer\n",
+        )
+        .unwrap();
+        let old = load_all(dir.path()).unwrap().remove(0);
+        let WorkflowStep::Agent(review) = &old.steps[1] else {
+            panic!()
+        };
+        assert_eq!(review.when, None);
+        assert_eq!(validate(&old.steps), Ok(()));
+        save(dir.path(), &old).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("old.yaml")).unwrap();
+        assert!(!text.contains("when"), "{text}");
+    }
+
+    #[test]
+    fn a_condition_nobody_knows_in_a_file_keeps_it_from_loading_rather_than_running_it_always() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("odd.yaml"),
+            "name: Odd\nsteps:\n- type: agent\n  id: a\n  model: sonnet\n  effort: null\n  tools: readOnly\n  prompt: Look\n  maxTurns: null\n  maxBudgetUsd: null\n  when: someday\n",
+        )
+        .unwrap();
+        assert_eq!(load_all(dir.path()).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn only_an_agent_can_have_a_condition_so_a_person_and_a_check_never_lose_their_turn() {
+        for sent in [
+            serde_json::json!({ "type": "approval", "id": "h", "when": "notSmall" }),
+            serde_json::json!({ "type": "check", "id": "h", "run": "make test", "when": "notSmall" }),
+            serde_json::json!({ "type": "deliver", "id": "h", "when": "notSmall" }),
+        ] {
+            let step: WorkflowStep = serde_json::from_value(sent).unwrap();
+            let back = serde_json::to_value(&step).unwrap();
+            assert_eq!(back.get("when"), None, "{back}");
+        }
+    }
+
+    #[test]
+    fn what_a_skipped_step_left_says_why_for_either_reason_and_never_looks_like_an_answer() {
+        let mut attempts = recorded(&[
+            ("nothing", "agent", "reviewer", AttemptState::Skipped, ""),
+            ("small", "agent", "reviewer", AttemptState::Skipped, ""),
+            ("approver", "agent", "approver", AttemptState::Skipped, ""),
+        ]);
+        attempts[0].reason = Some(serde_json::json!({ "code": "noMatchingPaths", "paths": ["a"] }));
+        for index in [1, 2] {
+            attempts[index].reason =
+                Some(serde_json::json!({ "code": "treatedAsSmall", "lines": 3, "files": 1 }));
+        }
+        assert_eq!(
+            output_of(&attempts, "nothing"),
+            "(skipped: nothing it covers changed)"
+        );
+        for id in ["small", "approver"] {
+            let text = output_of(&attempts, id);
+            assert!(text.starts_with("(skipped:"), "{text}");
+            assert!(text.contains("small change"), "{text}");
+            assert!(!text.contains("nothing it covers"), "{text}");
+        }
+        // Nothing an approver didn't say can send the work back.
+        assert!(!wants_rework(&attempts[2]));
+    }
+
+    #[test]
+    fn the_editor_and_the_engine_read_a_condition_the_same_way() {
+        let sent = serde_json::json!({
+            "id": "", "name": "Mine", "builtin": false,
+            "steps": [
+                { "type": "agent", "id": "builder", "model": "sonnet", "effort": null, "tools": "build", "prompt": "Do it",
+                  "maxTurns": null, "maxBudgetUsd": null, "paths": [], "role": { "kind": "worker" } },
+                { "type": "agent", "id": "review", "model": "sonnet", "effort": null, "tools": "readOnly", "prompt": "Look",
+                  "maxTurns": null, "maxBudgetUsd": null, "paths": [], "role": { "kind": "reviewer" }, "when": "notSmall" },
+            ],
+        });
+        let workflow: Workflow = serde_json::from_value(sent).unwrap();
+        assert_eq!(validate(&workflow.steps), Ok(()));
+        let back = serde_json::to_value(&workflow).unwrap();
+        assert_eq!(back["steps"][1]["when"], "notSmall");
+        assert_eq!(back["steps"][0].get("when"), None);
     }
 
     #[test]

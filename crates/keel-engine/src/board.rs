@@ -582,6 +582,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Done.","nu
                         max_turns: None,
                         max_budget_usd: None,
                         paths: vec![],
+                        when: None,
                         role: Default::default(),
                     })],
                     builtin: false,

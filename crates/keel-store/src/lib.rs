@@ -260,6 +260,10 @@ const MIGRATIONS: &[&str] = &[
     create trigger decision_question_fixed before update of question on decision
     begin select raise(abort, 'decisions are never rewritten'); end;
 "#,
+    // 12: What a project counts as too sensitive for a change to be small, on top of what always is.
+    r#"
+    alter table project add column sensitive_paths text not null default '[]';
+"#,
 ];
 
 /// The attempt that says where a run stands, for a query that calls its run `r`. Of each step's
@@ -351,6 +355,8 @@ pub struct Project {
     pub env: Vec<EnvVar>,
     /// The workflow its cards start with. `None` means the full one.
     pub default_workflow: Option<String>,
+    /// Patterns for files too sensitive for a change to count as small, on top of what always is.
+    pub sensitive_paths: Vec<String>,
 }
 
 /// What a person can change about a project.
@@ -364,9 +370,10 @@ pub struct ProjectSettings {
     pub services: Vec<Service>,
     pub env: Vec<EnvVar>,
     pub default_workflow: Option<String>,
+    pub sensitive_paths: Vec<String>,
 }
 
-const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow";
+const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths";
 
 fn project_from(r: &Row) -> rusqlite::Result<Project> {
     let list = |text: String| serde_json::from_str(&text).unwrap_or_default();
@@ -384,6 +391,7 @@ fn project_from(r: &Row) -> rusqlite::Result<Project> {
         env: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
         setup_command: r.get(11)?,
         default_workflow: r.get(12)?,
+        sensitive_paths: list(r.get(13)?),
     })
 }
 
@@ -690,6 +698,21 @@ pub struct WorkflowResults {
     pub criteria_met: i64,
     pub criteria_unmet: i64,
     pub criteria_unverified: i64,
+    /// Finished runs the engine last found small, so they skipped what only a bigger change needs.
+    /// An open run's can still change.
+    pub short_route: i64,
+    /// Runs the engine found weren't small. That's final the moment it happens.
+    pub moved_up: i64,
+    /// Why they weren't, most common first. A run counts once per reason, and can have several.
+    pub moved_up_because: Vec<MovedUpBecause>,
+}
+
+/// How many of a workflow's runs weren't small for one reason. `code` is a `WhyNotSmall`'s.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MovedUpBecause {
+    pub code: String,
+    pub runs: i64,
 }
 
 /// A card on the board, with what its column depends on. The issue is a copy taken on import.
@@ -1086,8 +1109,8 @@ impl Store {
 
     pub fn add_project(&self, project: &Project) -> Result<()> {
         self.lock().execute(
-            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 project.id,
                 project.name,
@@ -1102,6 +1125,7 @@ impl Store {
                 serde_json::to_string(&project.env).unwrap_or_default(),
                 project.setup_command,
                 project.default_workflow,
+                serde_json::to_string(&project.sensitive_paths).unwrap_or_default(),
             ],
         )?;
         Ok(())
@@ -1109,7 +1133,7 @@ impl Store {
 
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<()> {
         self.lock().execute(
-            "update project set github_account = ?2, check_command = ?3, allowed_domains = ?4, allowed_read = ?5, services = ?6, env = ?7, setup_command = ?8, default_workflow = ?9 where id = ?1",
+            "update project set github_account = ?2, check_command = ?3, allowed_domains = ?4, allowed_read = ?5, services = ?6, env = ?7, setup_command = ?8, default_workflow = ?9, sensitive_paths = ?10 where id = ?1",
             params![
                 id,
                 settings.github_account,
@@ -1120,6 +1144,7 @@ impl Store {
                 serde_json::to_string(&settings.env).unwrap_or_default(),
                 settings.setup_command,
                 settings.default_workflow,
+                serde_json::to_string(&settings.sensitive_paths).unwrap_or_default(),
             ],
         )?;
         Ok(())
@@ -1298,7 +1323,15 @@ impl Store {
                                   where a.run_id = r.id and a.state = 'returned')), 0),
                     {},
                     {},
-                    {}
+                    {},
+                    coalesce(sum(case when r.finished_at is not null then
+                        (select json_extract(e.data, '$.small') from event e
+                         join attempt a on a.id = e.attempt_id
+                         where a.run_id = r.id and e.kind = 'sizeDecided'
+                         order by e.seq desc limit 1) end), 0),
+                    coalesce(sum(exists (select 1 from event e join attempt a on a.id = e.attempt_id
+                                         where a.run_id = r.id and e.kind = 'sizeDecided'
+                                           and json_extract(e.data, '$.small') = 0)), 0)
              from run r
              where r.project_id = ?1 and r.workflow_id is not null
              group by r.workflow_id
@@ -1330,9 +1363,38 @@ impl Store {
                 criteria_met: r.get(12)?,
                 criteria_unmet: r.get(13)?,
                 criteria_unverified: r.get(14)?,
+                short_route: r.get(15)?,
+                moved_up: r.get(16)?,
+                moved_up_because: Vec::new(),
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<_>>()?)
+        let mut results: Vec<WorkflowResults> = rows.collect::<rusqlite::Result<_>>()?;
+        let mut stmt = conn.prepare(
+            "select r.workflow_id, json_extract(why.value, '$.code'), count(distinct r.id)
+             from run r
+             join attempt a on a.run_id = r.id
+             join event e on e.attempt_id = a.id and e.kind = 'sizeDecided'
+             join json_each(e.data, '$.because') why
+             where r.project_id = ?1 and r.workflow_id is not null
+             group by r.workflow_id, json_extract(why.value, '$.code')
+             order by 3 desc, 2",
+        )?;
+        let rows = stmt.query_map([project_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                MovedUpBecause {
+                    code: r.get(1)?,
+                    runs: r.get(2)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (workflow_id, because) = row?;
+            if let Some(found) = results.iter_mut().find(|w| w.workflow_id == workflow_id) {
+                found.moved_up_because.push(because);
+            }
+        }
+        Ok(results)
     }
 
     pub fn patch_run(&self, id: &str, fields: &[(&'static str, Value)]) -> Result<()> {
@@ -1584,6 +1646,29 @@ impl Store {
                 at,
                 serde_json::json!({ "instructions": instructions, "round": round }).to_string()
             ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// A person asks for what was skipped to run before they answer: its attempt says so, and reads
+    /// as neither approved nor rejected. The round stays, since nothing has to be built again. All or
+    /// nothing, like `return_attempt`. False if it wasn't waiting.
+    pub fn postpone_attempt(&self, id: &str, skipped: &[String]) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let at = now();
+        let changed = tx.execute(
+            "update attempt set state = 'postponed', reason = null, finished_at = ?2
+             where id = ?1 and state = 'waitingApproval'",
+            params![id, at],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "insert into event (attempt_id, at, kind, data) values (?1, ?2, 'postponed', ?3)",
+            params![id, at, serde_json::json!({ "steps": skipped }).to_string()],
         )?;
         tx.commit()?;
         Ok(true)
@@ -1966,7 +2051,7 @@ impl Store {
                    and (exists (select 1 from attempt x where x.run_id = r.id
                                   and x.state in ('queued', 'preparing', 'running', 'stalled'))
                         or coalesce((select a.state from attempt a where a.rowid = ({ATTEMPT_THAT_MATTERS})), 'none')
-                           in ('none', 'succeeded', 'skipped', 'returned'))"
+                           in ('none', 'succeeded', 'skipped', 'returned', 'postponed'))"
             ),
             [],
             |r| r.get(0),
@@ -2047,6 +2132,7 @@ mod tests {
                 services: vec![],
                 env: vec![],
                 default_workflow: None,
+                sensitive_paths: vec![],
             })
             .unwrap();
         store
@@ -2162,6 +2248,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 alter table project drop column sensitive_paths;
                  drop trigger decision_question_fixed;
                  alter table decision drop column question;
                  alter table run drop column workflow_id;
@@ -2420,10 +2507,12 @@ mod tests {
                         value: "{{socket:db}}".into(),
                     }],
                     default_workflow: Some("builtin:simple".into()),
+                    sensitive_paths: vec!["billing/".into()],
                 },
             )
             .unwrap();
         let project = store.project("p").unwrap();
+        assert_eq!(project.sensitive_paths, ["billing/"]);
         assert_eq!(project.default_workflow.as_deref(), Some("builtin:simple"));
         assert_eq!(project.github_account.as_deref(), Some("octo"));
         assert_eq!(project.setup_command.as_deref(), Some("uv sync"));
@@ -2794,6 +2883,9 @@ mod tests {
                 criteria_met: 0,
                 criteria_unmet: 0,
                 criteria_unverified: 0,
+                short_route: 0,
+                moved_up: 0,
+                moved_up_because: vec![],
             }
         );
         assert_eq!(of("builtin:simple").merged, 0);
@@ -2874,6 +2966,115 @@ mod tests {
             ),
             (2, 1, 2)
         );
+    }
+
+    #[test]
+    fn results_count_the_short_route_when_it_is_final_and_moving_up_by_reason() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let add_run = |id: &str, finished: bool| {
+            store
+                .add_run(&NewRun {
+                    id: id.into(),
+                    project_id: "p".into(),
+                    title: id.into(),
+                    request: id.into(),
+                    workflow: "[]".into(),
+                    language: "en".into(),
+                    source_issue: None,
+                    workflow_id: Some("w".into()),
+                    workflow_name: Some("W".into()),
+                })
+                .unwrap();
+            if finished {
+                store
+                    .patch_run(id, &[("finished_at", Value::Text(now()))])
+                    .unwrap();
+            }
+        };
+        let decided = |run: &str, attempt: &str, data: serde_json::Value| {
+            store
+                .add_attempt(&new_attempt(attempt, run, "review", AttemptState::Skipped))
+                .unwrap();
+            store.append_event(attempt, "sizeDecided", &data).unwrap();
+        };
+        let small = serde_json::json!({ "small": true, "lines": 3, "files": 1, "round": 0 });
+        let up = |codes: &[&str]| {
+            let because: Vec<serde_json::Value> = codes
+                .iter()
+                .map(|code| serde_json::json!({ "code": code }))
+                .collect();
+            serde_json::json!({ "small": false, "because": because, "round": 0 })
+        };
+        add_run("short", true);
+        decided("short", "a1", small.clone());
+        // Sent back after being small, and found otherwise the second time.
+        add_run("changed-its-mind", true);
+        decided("changed-its-mind", "a2", small.clone());
+        decided("changed-its-mind", "a3", up(&["tooManyLines", "noCheck"]));
+        add_run("twice", true);
+        decided("twice", "a4", up(&["tooManyLines"]));
+        decided("twice", "a5", up(&["tooManyLines"]));
+        // Still going, so being small doesn't count yet. Going up already does.
+        add_run("open-small", false);
+        decided("open-small", "a6", small);
+        add_run("open-up", false);
+        decided("open-up", "a7", up(&["personAsked"]));
+        // Nothing in its workflow asks.
+        add_run("plain", true);
+
+        let results = store.workflow_results("p").unwrap();
+        assert_eq!(results[0].runs, 6);
+        assert_eq!(results[0].short_route, 1);
+        assert_eq!(results[0].moved_up, 3);
+        assert_eq!(
+            results[0].moved_up_because,
+            [
+                MovedUpBecause {
+                    code: "tooManyLines".into(),
+                    runs: 2
+                },
+                MovedUpBecause {
+                    code: "noCheck".into(),
+                    runs: 1
+                },
+                MovedUpBecause {
+                    code: "personAsked".into(),
+                    runs: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn asking_for_what_was_skipped_reads_as_neither_answer_and_only_happens_once() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_attempt(&new_attempt(
+                "h",
+                "r",
+                "human",
+                AttemptState::WaitingApproval,
+            ))
+            .unwrap();
+        let steps = vec!["security".to_owned(), "approver".to_owned()];
+        assert!(store.postpone_attempt("h", &steps).unwrap());
+        let attempt = store.attempt("h").unwrap();
+        assert_eq!(attempt.state, "postponed");
+        assert!(attempt.finished_at.is_some());
+        assert_eq!(store.run("r").unwrap().round, 0, "nothing is built again");
+        let events = store.events("h", 0).unwrap();
+        assert_eq!(events[0].kind, "postponed");
+        assert_eq!(events[0].data["steps"][1], "approver");
+        // Whichever answer got there first stands.
+        assert!(!store.postpone_attempt("h", &steps).unwrap());
+        assert_eq!(store.events("h", 0).unwrap().len(), 1);
+        store
+            .add_attempt(&new_attempt("g", "r", "other", AttemptState::Succeeded))
+            .unwrap();
+        assert!(!store.postpone_attempt("g", &steps).unwrap());
+        assert_eq!(store.attempt("g").unwrap().state, "succeeded");
     }
 
     #[test]
@@ -3002,6 +3203,7 @@ mod tests {
                 services: vec![],
                 env: vec![],
                 default_workflow: None,
+                sensitive_paths: vec![],
             })
             .unwrap();
         assert_eq!(
@@ -3256,6 +3458,8 @@ mod tests {
             (AttemptState::Skipped, 1),
             // The work went back and the next step is on its way.
             (AttemptState::Returned, 1),
+            // What was skipped is on its way.
+            (AttemptState::Postponed, 1),
             (AttemptState::WaitingApproval, 0),
             // Nothing is running, and it could wait for days.
             (AttemptState::WaitingAnswers, 0),
@@ -3574,6 +3778,7 @@ mod tests {
                 services: vec![],
                 env: vec![],
                 default_workflow: None,
+                sensitive_paths: vec![],
             })
             .unwrap();
         let pause = || std::thread::sleep(std::time::Duration::from_millis(5));
@@ -3731,6 +3936,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table project drop column sensitive_paths;
                  drop trigger decision_question_fixed;
                  alter table decision drop column question;
                  alter table run drop column workflow_id;
@@ -3745,6 +3951,10 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(store.projects().unwrap().len(), 1);
         assert!(!store.project_is_removed("p").unwrap());
+        assert_eq!(
+            store.project("p").unwrap().sensitive_paths,
+            Vec::<String>::new()
+        );
     }
 
     #[test]

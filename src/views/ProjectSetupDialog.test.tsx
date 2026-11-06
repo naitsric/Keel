@@ -22,6 +22,7 @@ const PROJECT: Project = {
   services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }],
   env: [{ name: "DB_HOST", value: "{{socketDir:db}}" }],
   defaultWorkflow: "mine",
+  sensitivePaths: ["billing/"],
 };
 const NO_GUESS: Guess = { check: null, setup: null, from: [] };
 const PNPM: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"] };
@@ -236,6 +237,7 @@ describe("the setup dialog", () => {
       useApp.setState({ overview: { ...useApp.getState().overview, projects: [{ ...PROJECT, allowedDomains: ["changed.example"] }] } });
       await click("Save");
       expect((called("project_update")[0].args.settings as Project).allowedDomains).toEqual(["changed.example"]);
+      expect((called("project_update")[0].args.settings as Project).sensitivePaths).toEqual(["billing/"]);
     });
 
     it("says why when it can't save, and stays open", async () => {

@@ -60,8 +60,9 @@ const DRAFT_WORKFLOW: &str = "Propose a workflow for a project, as a draft the p
                               to follow Keel's rules, and a refusal names the problem and the step: a `deliver` \
                               needs an `approval` earlier, ids are unique, reviewers, approvers, learners, specifiers and \
                               verifiers are read-only, members of a `parallel` are read-only workers or reviewers, \
-                              a learner can only be the last step, a verifier needs a specifier earlier, and an \
-                              approver's `reworkTo` is an earlier step outside a group. A draft can't ask for network, other folders or anything in the project's \
+                              a learner can only be the last step, a verifier needs a specifier earlier, an \
+                              approver's `reworkTo` is an earlier step outside a group, and `when` has to come \
+                              after the first worker that builds. A draft can't ask for network, other folders or anything in the project's \
                               settings. Refused if this client may only read, or the project already has 20 \
                               drafts waiting.";
 const STOP_RUN: &str = "Ask whatever a run has working to stop. It doesn't reject or abandon the run: what \

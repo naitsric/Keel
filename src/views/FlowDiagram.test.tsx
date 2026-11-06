@@ -421,3 +421,70 @@ describe("the flow diagram", () => {
     });
   });
 });
+
+describe("a step that depends on the change, on the flow diagram", () => {
+  let root: Root;
+  const show = (flow: Flow<FlowAttempt>) => act(() => root.render(<FlowDiagram flow={flow} label="Steps" selected={null} onSelect={() => {}} />));
+  const node = (id: string) => document.querySelector<HTMLButtonElement>(`button[data-flow-id="${id}"]`) as HTMLButtonElement;
+  const small = { reason: { code: "treatedAsSmall" } };
+  const steps: WorkflowStep[] = [
+    { type: "agent", ...spec("builder") },
+    { type: "parallel", id: "reviews", steps: [{ ...spec("security", "sonnet", { kind: "reviewer" }), when: "notSmall" }, { ...spec("ux", "sonnet", { kind: "reviewer" }), when: "notSmall" }] },
+    { type: "agent", ...spec("approver", "opus", { kind: "approver", reworkTo: "builder", maxRounds: 2 }), when: "notSmall" },
+    { type: "approval", id: "human" },
+  ];
+  const shown = (attempts: FlowAttempt[]) => show(flowOf(steps, attempts));
+  const skippedForNothing = attempt("ux", "skipped", { reason: { code: "noMatchingPaths" } });
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.replaceChildren();
+  });
+
+  it("says it was skipped for being small, right on the node", () => {
+    shown([attempt("builder", "succeeded"), attempt("security", "skipped", small), skippedForNothing, attempt("approver", "skipped", small), attempt("human", "waitingApproval", { kind: "approval" })]);
+    expect(node("security").textContent).toContain("Small change");
+    expect(node("security").getAttribute("aria-label")).toContain("Skipped: Keel treated this as a small change");
+    expect(node("approver").textContent).toContain("Small change");
+    expect(node("approver").className).toContain("border-dashed");
+    expect(node("human").textContent).toContain("Waiting for you");
+  });
+
+  it("tells apart a step that had nothing to look at", () => {
+    shown([attempt("builder", "succeeded"), skippedForNothing]);
+    expect(node("ux").textContent).toContain("Skipped");
+    expect(node("ux").textContent).not.toContain("Small change");
+  });
+
+  it("says in words that it depends on it until it has been skipped", () => {
+    shown([attempt("builder", "running")]);
+    expect(node("security").getAttribute("aria-label")).toContain("Only if the change isn't small");
+    expect(node("builder").getAttribute("aria-label")).not.toContain("Only if");
+  });
+
+  it("shows what really ran once a person asked for it, not what was skipped first", () => {
+    shown([attempt("builder", "succeeded"), attempt("security", "skipped", small), attempt("security", "succeeded", { number: 2 }), attempt("human", "postponed", { kind: "approval" }), attempt("human", "waitingApproval", { kind: "approval", number: 2 })]);
+    expect(node("security").textContent).not.toContain("Small change");
+    expect(node("security").textContent).toContain("Finished");
+    expect(node("human").textContent).toContain("Waiting for you");
+  });
+
+  it("counts an approval that was put off as passed, and says what happened to it", () => {
+    shown([attempt("builder", "succeeded"), attempt("human", "postponed", { kind: "approval" })]);
+    expect(node("human").textContent).toContain("Asked for more");
+  });
+
+  it("is in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    shown([attempt("builder", "succeeded"), attempt("security", "skipped", small)]);
+    expect(node("security").textContent).toContain("Cambio pequeño");
+    expect(node("security").getAttribute("aria-label")).toContain("Omitido: Keel lo trató como un cambio pequeño");
+  });
+});

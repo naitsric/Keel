@@ -128,6 +128,7 @@ fn spec(id: &str, tools: ToolProfile, role: StepRole, paths: &[&str], prompt: &s
         max_turns: None,
         max_budget_usd: None,
         paths: paths.iter().map(|p| (*p).to_owned()).collect(),
+        when: None,
         role,
     }
 }
@@ -542,7 +543,7 @@ fn a_project_keeps_its_own_workflows_beside_the_built_in_ones() {
     let builtins = w.engine.workflows(&w.project_id, "es").unwrap();
     assert_eq!(
         builtins.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(),
-        ["builtin:full", "builtin:simple"]
+        ["builtin:full", "builtin:simple", "builtin:organic"]
     );
 
     let mut mine = builtins[0].clone();
@@ -550,8 +551,8 @@ fn a_project_keeps_its_own_workflows_beside_the_built_in_ones() {
     let saved = w.engine.save_workflow(&w.project_id, &mine).unwrap();
     assert_eq!(saved.id, "mi-flujo");
     let all = w.engine.workflows(&w.project_id, "es").unwrap();
-    assert_eq!(all.len(), 3);
-    assert_eq!(all[2].steps, mine.steps);
+    assert_eq!(all.len(), 4);
+    assert_eq!(all[3].steps, mine.steps);
 
     let broken = Workflow {
         id: String::new(),
@@ -562,7 +563,7 @@ fn a_project_keeps_its_own_workflows_beside_the_built_in_ones() {
     assert!(w.engine.save_workflow(&w.project_id, &broken).is_err());
 
     w.engine.delete_workflow(&w.project_id, "mi-flujo").unwrap();
-    assert_eq!(w.engine.workflows(&w.project_id, "es").unwrap().len(), 2);
+    assert_eq!(w.engine.workflows(&w.project_id, "es").unwrap().len(), 3);
 }
 
 #[test]

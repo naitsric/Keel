@@ -70,6 +70,7 @@ fn main() {
                 max_turns: Some(10),
                 max_budget_usd: None,
                 paths: vec![],
+                when: None,
                 role: Default::default(),
             },
             "es".into(),

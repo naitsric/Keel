@@ -8,6 +8,8 @@ export interface DraftFacts {
   delivers: boolean;
   /** Steps that act between the person's approval and the pull request, so the person never sees what they do. */
   afterApproval: string[];
+  /** Agents that don't run for a change the engine finds small, in a group or not. */
+  conditional: string[];
 }
 
 export function draftFacts(steps: WorkflowStep[]): DraftFacts {
@@ -17,5 +19,6 @@ export function draftFacts(steps: WorkflowStep[]): DraftFacts {
   const approval = deliver < 0 ? -1 : steps.slice(0, deliver).map((step) => step.type).lastIndexOf("approval");
   const between = approval < 0 ? [] : steps.slice(approval + 1, deliver);
   const afterApproval = between.flatMap((step) => ((step.type === "agent" && step.tools === "build") || step.type === "check" || step.type === "setup" ? [step.id] : []));
-  return { commands, builders, delivers: deliver >= 0, afterApproval };
+  const conditional = steps.flatMap((step) => (step.type === "parallel" ? step.steps : step.type === "agent" ? [step] : [])).flatMap((spec) => (spec.when ? [spec.id] : []));
+  return { commands, builders, delivers: deliver >= 0, afterApproval, conditional };
 }

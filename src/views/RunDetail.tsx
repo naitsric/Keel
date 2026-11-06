@@ -9,6 +9,7 @@ import { attemptChoices, canSendBack, type FlowNode, flowOf, nodeOfAttempt, node
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
 import { answerFrom, differsFromRecommended, needsText, type QuestionPick, recommendedAnswers, startingPick } from "../lib/questions";
+import { latestSizeDecision, type SizeDecision, skippedAsSmall, skippedSteps, whyNotSmallText } from "../lib/size";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
 import { ProposalRow } from "./BrainPage";
@@ -30,6 +31,7 @@ const DECISIONS: Record<AttemptState, string> = {
   waitingAnswers: "run.decideAnswers",
   rejected: "run.decideRejected",
   returned: "run.decideActive",
+  postponed: "run.decideActive",
   skipped: "run.decideActive",
   abandoned: "run.decideAbandoned",
 };
@@ -94,6 +96,7 @@ function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: 
   const checksPassed = latestChecks.filter((a) => a.state === "succeeded").length;
   const anyActive = attempts.some((a) => isActive(a.state));
   const verification = verificationInRound(attempts, run?.round ?? 0);
+  const skipped = skippedSteps(attempts);
   // A step that's done says nothing about the run while others are still to come.
   const between = !run?.finishedAt && (current.state === "succeeded" || current.state === "skipped");
   // A run that only had to work out what's asked has that to say for itself, and no worker to say it.
@@ -137,6 +140,7 @@ function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: 
             <p className={cx(checksPassed === latestChecks.length ? "text-muted" : "font-medium text-danger")}>{t("run.checksPassed", { passed: checksPassed, total: latestChecks.length })}</p>
           )}
           {verification && <VerificationProof verification={verification} />}
+          {skipped.length > 0 && <p className="text-muted">{t("fits.summary", { names: skipped.map((step) => step.stepId).join(", ") })}</p>}
           <p className="text-muted">{commands.length === 0 ? t("run.noCommands") : t("run.commandsPassed", { passed, total: commands.length })}</p>
           <p className={cx("mt-0.5", rawCheck === "changed" || rawCheck === "missing" ? "font-medium text-danger" : "text-muted")}>
             {t(auditKey(rawCheck))}
@@ -264,7 +268,8 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
   const { reviewers, approver } = reviewsOfRound(attempts, round);
   const latest = latestOfEachStep(reviewers);
   const ran = latest.filter((review) => review.state !== "skipped");
-  const skipped = latest.filter((review) => review.state === "skipped");
+  // Those it skipped for being small are on a line of their own, with what can be done about it.
+  const skipped = latest.filter((review) => review.state === "skipped" && !skippedAsSmall(review));
   return (
     <div className="space-y-0.5">
       {ran.length > 0 && (
@@ -296,6 +301,44 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
 }
 
 const SHOWN_FILES = 5;
+
+/** What the engine skipped because the change was small, and why, with a way to ask for it anyway. */
+function SkippedForSize({ skipped, onRunNow, disabled }: { skipped: Attempt[]; onRunNow?: () => void; disabled: boolean }) {
+  const { t } = useTranslation();
+  const reason = skipped[0].reason as { lines?: number; files?: number } | null;
+  return (
+    <ApprovalRow
+      label={t("fits.smallLabel")}
+      action={
+        onRunNow && (
+          <Button disabled={disabled} onKeyDown={ignoreEnter} onClick={onRunNow}>
+            {t("fits.runNow")}
+          </Button>
+        )
+      }
+    >
+      <p>{t("fits.small", { lines: t("fits.lines", { count: reason?.lines ?? 0 }), files: t("fits.files", { count: reason?.files ?? 0 }) })}</p>
+      <p className="selectable break-words text-muted">{t("fits.didNotRun", { names: skipped.map((step) => step.stepId).join(", ") })}</p>
+      {onRunNow && <p className="mt-0.5 text-[11.5px] text-subtle">{t("fits.runNowHint")}</p>}
+    </ApprovalRow>
+  );
+}
+
+/** Why it got the full review, in plain words: every reason, and not only the first. */
+function MovedUp({ decision, round }: { decision: SizeDecision; round: number }) {
+  const { t } = useTranslation();
+  // It stays there, so in a later round these can be about code that has changed since.
+  return (
+    <ApprovalRow label={t("fits.upLabel")} note={decision.round < round ? t("run.round", { number: decision.round + 1 }) : undefined}>
+      <p>{t("fits.up")}</p>
+      <ul className="selectable list-disc space-y-0.5 pl-4 break-words text-muted">
+        {decision.because.map((why) => (
+          <li key={why.code}>{whyNotSmallText(t, why)}</li>
+        ))}
+      </ul>
+    </ApprovalRow>
+  );
+}
 
 /** Enter is what opens a run from the palette, so a second one must not answer it. A click or Space does. */
 const ignoreEnter = (e: React.KeyboardEvent) => {
@@ -431,7 +474,7 @@ function DecidedList({ attemptId, decided, canChange, armed, busy, onSend }: { a
  * so the focus starts on the note, where Enter only adds a line. Enter never answers, and approve
  * arms after a moment.
  */
-export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck, onShowChanges, onError }: { attempt: Attempt; run: Run; attempts: Attempt[]; files: string[]; commands: CommandRun[]; rawCheck: RawCheck; onShowChanges: () => void; onError: (message: string) => void }) {
+export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck, sizeDecision = null, onShowChanges, onError }: { attempt: Attempt; run: Run; attempts: Attempt[]; files: string[]; commands: CommandRun[]; rawCheck: RawCheck; sizeDecision?: SizeDecision | null; onShowChanges: () => void; onError: (message: string) => void }) {
   const { t } = useTranslation();
   const project = useApp((s) => s.overview.projects.find((p) => p.id === run.projectId));
   const draft = useApp((s) => s.approvalDrafts[attempt.id] ?? "");
@@ -477,6 +520,15 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
     });
   };
 
+  const runSkipped = () => {
+    setBusy(true);
+    // The card goes when it's done, and the approval comes round again once what was skipped has run.
+    api.approvalRunSkipped(attempt.id).catch((e) => {
+      setBusy(false);
+      onError(errorText(t, e));
+    });
+  };
+
   const outcome = approvalOutcome(run.workflow, attempt.stepId, files);
   const empty = outcome === "nothingToDeliver";
   const delivers = outcome === "delivers" || outcome === "deliversLater";
@@ -495,6 +547,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const nothingToExplain = asked !== null && !attempts.some((a) => a.kind === "agent" && a.role === "worker");
   const { reviewers, approver } = reviewsOfRound(attempts, run.round);
   const reviewed = reviewers.some((review) => review.state !== "skipped") || approver != null;
+  const skippedForSize = skippedSteps(attempts);
   const hiddenFiles = files.length - SHOWN_FILES;
 
   return (
@@ -580,7 +633,9 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
         <ApprovalRow label={t("run.whatProves")}>
           <ApprovalProof attempts={attempts} round={run.round} commands={commands} rawCheck={rawCheck} reviewed={reviewed} />
         </ApprovalRow>
-        {(reviewers.length > 0 || approver) && (
+        {skippedForSize.length > 0 && <SkippedForSize skipped={skippedForSize} onRunNow={empty ? undefined : runSkipped} disabled={!armed || busy} />}
+        {sizeDecision && !sizeDecision.small && <MovedUp decision={sizeDecision} round={run.round} />}
+        {(reviewers.some((review) => !skippedAsSmall(review)) || approver) && (
           <ApprovalRow
             label={t("run.reviewsTitle")}
             note={run.round > 0 ? t("run.round", { number: run.round + 1 }) : undefined}
@@ -835,7 +890,7 @@ function Actions({ attempt, onError }: { attempt: Attempt; onError: (message: st
       </div>
     );
   }
-  if (attempt.state === "succeeded" || attempt.state === "abandoned" || attempt.state === "rejected" || attempt.state === "skipped" || attempt.state === "returned") return null;
+  if (attempt.state === "succeeded" || attempt.state === "abandoned" || attempt.state === "rejected" || attempt.state === "skipped" || attempt.state === "returned" || attempt.state === "postponed") return null;
   const canResume = attempt.kind === "agent" && ["interrupted", "blocked", "stopped", "failed"].includes(attempt.state);
   return (
     <Card className="p-4">
@@ -898,7 +953,22 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
     case "waiting":
       return line(t("activity.waiting"), "text-warning");
     case "skipped":
-      return line(t("activity.skipped"), "text-subtle");
+      return line(data.reason?.code === "treatedAsSmall" ? t("activity.skippedSmall") : t("activity.skipped"), "text-subtle");
+    case "postponed":
+      return line(t("activity.postponed", { names: (data.steps ?? []).join(", ") }), "font-medium");
+    case "sizeDecided":
+      return data.small ? (
+        line(t("activity.sizeSmall", { lines: t("fits.lines", { count: data.lines ?? 0 }), files: t("fits.files", { count: data.files ?? 0 }) }))
+      ) : (
+        <div>
+          {line(t("fits.up"))}
+          <ul className="selectable mt-0.5 list-disc space-y-0.5 pl-4 text-[12.5px] break-words text-muted">
+            {(data.because ?? []).map((why: { code: string }) => (
+              <li key={why.code}>{whyNotSmallText(t, why)}</li>
+            ))}
+          </ul>
+        </div>
+      );
     case "rework":
       return line(t("activity.rework", { round: data.round }), "text-warning");
     case "reworkLimit":
@@ -1143,16 +1213,19 @@ function ApproverVerdict({ output, riskClass = "text-subtle" }: { output: NonNul
 }
 
 function ReviewsList({ attempts, round }: { attempts: Attempt[]; round: number }) {
+  const { t } = useTranslation();
   const { reviewers, approver } = reviewsOfRound(attempts, round);
+  // A person can ask for a review that was skipped, and then that's what became of it.
   return (
     <>
       <ul className="space-y-2">
-        {reviewers.map((review) => (
+        {latestOfEachStep(reviewers).map((review) => (
           <li key={review.id} className="text-[12.5px]">
             <div className="flex flex-wrap items-baseline gap-2">
               <span className="font-mono text-[12px] font-medium">{review.stepId}</span>
               <ReviewVerdict review={review} />
             </div>
+            {review.state === "skipped" && review.reason && <p className="selectable mt-0.5 text-muted">{reasonText(t, review.reason)}</p>}
             {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
             {(review.output?.findings ?? []).length > 0 && (
               <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 text-muted">
@@ -1369,6 +1442,7 @@ export function RunDetail({ runId }: { runId: string }) {
   const allCommands = useMemo(() => attempts.flatMap((a) => commandsFrom(eventsByAttempt[a.id] ?? [])), [attempts, eventsByAttempt]);
   const rawCheck = worstRawCheck(Object.values(rawChecks));
   const files = useMemo(() => filesChangedBy(attempts), [attempts]);
+  const sizeDecision = useMemo(() => latestSizeDecision(Object.values(eventsByAttempt).flat()), [eventsByAttempt]);
   const showChanges = () => void api.runDiff(runId).then(setRunDiff);
 
   useRunCommands({
@@ -1423,7 +1497,7 @@ export function RunDetail({ runId }: { runId: string }) {
           </p>
         )}
         {latest.state === "waitingApproval" ? (
-          <ApprovalCard key={latest.id} attempt={latest} run={run} attempts={attempts} files={files} commands={allCommands} rawCheck={rawCheck} onShowChanges={showChanges} onError={setError} />
+          <ApprovalCard key={latest.id} attempt={latest} run={run} attempts={attempts} files={files} commands={allCommands} rawCheck={rawCheck} sizeDecision={sizeDecision} onShowChanges={showChanges} onError={setError} />
         ) : latest.state === "waitingAnswers" ? (
           <QuestionsCard key={latest.id} attempt={latest} attempts={attempts} onError={setError} />
         ) : (

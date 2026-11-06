@@ -83,6 +83,20 @@ const reviewerStep = (id: string, paths: string[]) => ({ id, model: "sonnet", to
 const verifyMode = params.get("verify");
 const verifyShown = verifyMode !== null || params.get("flow") === "verifying" || params.get("flow") === "verifyUnreadable";
 const verifyStep: WorkflowStep = { ...agentStep("verify", "sonnet", "readOnly"), role: { kind: "verifier" } };
+// The workflow that fits the change: flow=small is its approval card when the change was small, flow=asked
+// the moment after pressing "Run them now", and flow=movedUp its approval card when it wasn't. why=all
+// has every reason, with long=1 for long names. view=workflows shows it among the others, node=security
+// its control, view=settings the field for a project's own list.
+const fittingSteps: WorkflowStep[] = [
+  { ...agentStep("spec", "opus", "readOnly"), role: { kind: "specifier" } },
+  agentStep("builder", "sonnet", "build"),
+  { type: "check", id: "check", run: "make test" },
+  verifyStep,
+  { type: "parallel", id: "reviews", steps: [{ ...reviewerStep("security", []), when: "notSmall" }, { ...reviewerStep("ux", ["**/*.tsx"]), when: "notSmall" }, { ...reviewerStep("ui", ["**/*.tsx"]), when: "notSmall" }, { ...reviewerStep("code", []), when: "notSmall" }] },
+  { ...agentStep("approver", "opus", "readOnly"), role: { kind: "approver", reworkTo: "builder", maxRounds: 2 }, when: "notSmall" },
+  { type: "approval", id: "approval" },
+  { type: "deliver", id: "pull-request" },
+];
 const workflow: WorkflowStep[] = [
   { ...agentStep("spec", "opus", "readOnly"), ...(params.get("specifier") === "1" || params.get("flow") === "questions" || params.get("flow") === "corrected" ? { role: { kind: "specifier" as const } } : {}) },
   agentStep("builder", "sonnet", "build"),
@@ -252,7 +266,34 @@ const manySteps: WorkflowStep[] = [
   { type: "deliver", id: "pull-request" },
   learnerStep,
 ];
+const asSmall = { reason: { code: "treatedAsSmall", lines: 12, files: 2 } as Reason };
+const skippedAsSmallRan = (id: string, role: Attempt["role"] = "reviewer") => ran(id, "skipped", { role, ...asSmall });
+const longName = (name: string) => (long ? `src/modules/billing/invoices/generated/handlers/${name}` : name);
+const WHY_MOVED_UP: Reason[] =
+  params.get("why") === "all"
+    ? [
+        { code: "specNotSmall" },
+        { code: "specNamesRisks", risks: ["security", "irreversibleData", "sharedContracts", "concurrency", "environment", "noRegressionTest", "somethingNew"] },
+        { code: "noCheck" },
+        { code: "checkNotPassed" },
+        { code: "issueFromSomeoneElse", author: "someone" },
+        { code: "issueFromUnknownAuthor" },
+        { code: "issueWithNoAccount" },
+        { code: "startedByAssistant", client: "Claude Code" },
+        { code: "sensitiveFiles", files: [".github/workflows/ci.yml", longName("auth.py"), longName("schema.sql")], total: 9 },
+        { code: "badSensitivePattern", pattern: "billing[" },
+        { code: "tooManyLines", lines: 512, limit: 400 },
+        { code: "filesWithoutLines", files: [longName("logo.png")], total: 1 },
+        { code: "diffUnreadable" },
+        { code: "verifierFoundUnmet", count: 1 },
+        { code: "verifierHasNotRun" },
+        { code: "personAsked" },
+      ]
+    : [{ code: "sensitiveFiles", files: [".github/workflows/ci.yml"], total: 1 }, { code: "tooManyLines", lines: 512, limit: 400 }];
 const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Attempt[]; round: number }> = {
+  small: { steps: fittingSteps, round: 0, attempts: [specRan, builderRan(), checkRan(), verifierAttempt("succeeded"), skippedAsSmallRan("security"), skippedAsSmallRan("ux"), skippedAsSmallRan("ui"), skippedAsSmallRan("code"), skippedAsSmallRan("approver", "approver"), humanWaits] },
+  asked: { steps: fittingSteps, round: 0, attempts: [specRan, builderRan(), checkRan(), verifierAttempt("succeeded"), skippedAsSmallRan("security"), skippedAsSmallRan("ux"), skippedAsSmallRan("ui"), skippedAsSmallRan("code"), skippedAsSmallRan("approver", "approver"), ran("approval", "postponed", { kind: "approval", tools: "none", modelRequested: "", modelActual: null }), reviewRan("security", "running", { number: 2, modelActual: "claude-sonnet-5-5", finishedAt: null }), reviewRan("ux", "skipped", { number: 2 }), reviewRan("ui", "skipped", { number: 2 }), reviewRan("code", "running", { number: 2, modelActual: "claude-sonnet-5-5", finishedAt: null })] },
+  movedUp: { steps: fittingSteps, round: 0, attempts: [specRan, builderRan({ runFiles: [".github/workflows/ci.yml", "calc.py"], filesChanged: [".github/workflows/ci.yml", "calc.py"] }), checkRan(), verifierAttempt("succeeded"), reviewRan("security", "succeeded", verdict("approved")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", verdict("approved")), decided("approve"), humanWaits] },
   running: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "running", { modelActual: "claude-sonnet-5-5" }), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "running")] },
   // Back at the builder: what ran after it is from round 1, so it doesn't count as done.
   rework: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "succeeded", verdict("changes")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", verdict("approved")), decided("rework"), builderRan({ round: 1, number: 2, state: "running", finishedAt: null })] },
@@ -397,7 +438,7 @@ const mcpOverview = () => {
 };
 
 let defaultWorkflow: string | null = params.get("defaultWorkflow");
-const demoProject: Project = { id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: noCheck ? null : "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.nvm"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }], defaultWorkflow };
+const demoProject: Project = { sensitivePaths: params.get("sensitive") === "1" ? ["billing/", "*.proto"] : [],  id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: noCheck ? null : "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.nvm"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }], defaultWorkflow };
 // A second project on the board, with one card, to try the selector and coming back from a run.
 const otherProject: Project = { ...demoProject, id: "p2", name: "payments", path: "/Users/you/payments", services: [], env: [], defaultWorkflow: null };
 const projects = view === "board" || palette || params.get("drafts") === "1" ? [demoProject, otherProject] : [demoProject];
@@ -516,15 +557,17 @@ const blockedBy = (code: string) => ({ code: "blocked", reason: { code }, detail
 // The results on the Workflows page. results=none has no runs, and results=few has too few to average.
 const noAsking = { stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0 };
 const noneChecked = { criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0 };
+const noneFitted = { shortRoute: 0, movedUp: 0, movedUpBecause: [] };
 const workflowResults: WorkflowResults[] =
   params.get("results") === "none"
     ? []
     : params.get("results") === "few"
-      ? [{ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 2, finished: 1, merged: 1, closed: 0, costPerMergedUsd: 2.4, averageRounds: 1, stoppedToAsk: 1, answers: 2, answersRecommended: 1, sentBack: 0, criteriaMet: 1, criteriaUnmet: 0, criteriaUnverified: 2 }]
+      ? [{ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 2, finished: 1, merged: 1, closed: 0, costPerMergedUsd: 2.4, averageRounds: 1, stoppedToAsk: 1, answers: 2, answersRecommended: 1, sentBack: 0, criteriaMet: 1, criteriaUnmet: 0, criteriaUnverified: 2, ...noneFitted }]
       : [
-          { workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 24, finished: 22, merged: 15, closed: 3, costPerMergedUsd: 3.12, averageRounds: 0.7, stoppedToAsk: 6, answers: 9, answersRecommended: 7, sentBack: 2, criteriaMet: 41, criteriaUnmet: 3, criteriaUnverified: 28 },
-          { workflowId: "mine", workflowName: "Reviews only", runs: 6, finished: 5, merged: 1, closed: 2, costPerMergedUsd: 1.8, averageRounds: 0, ...noAsking, ...noneChecked },
-          { workflowId: "gone", workflowName: "A workflow since deleted", runs: 9, finished: 9, merged: 4, closed: 1, costPerMergedUsd: 0.86, averageRounds: 0.25, ...noAsking, ...noneChecked },
+          { workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 24, finished: 22, merged: 15, closed: 3, costPerMergedUsd: 3.12, averageRounds: 0.7, stoppedToAsk: 6, answers: 9, answersRecommended: 7, sentBack: 2, criteriaMet: 41, criteriaUnmet: 3, criteriaUnverified: 28, ...noneFitted },
+          { workflowId: "builtin:organic", workflowName: "Fits the change", runs: 17, finished: 16, merged: 12, closed: 1, costPerMergedUsd: 1.04, averageRounds: 0.2, stoppedToAsk: 2, answers: 2, answersRecommended: 2, sentBack: 1, criteriaMet: 30, criteriaUnmet: 1, criteriaUnverified: 9, shortRoute: 9, movedUp: 7, movedUpBecause: [{ code: "sensitiveFiles", runs: 3 }, { code: "specNotSmall", runs: 3 }, { code: "tooManyLines", runs: 1 }, { code: "personAsked", runs: 1 }] },
+          { workflowId: "mine", workflowName: "Reviews only", runs: 6, finished: 5, merged: 1, closed: 2, costPerMergedUsd: 1.8, averageRounds: 0, ...noAsking, ...noneChecked, ...noneFitted },
+          { workflowId: "gone", workflowName: "A workflow since deleted", runs: 9, finished: 9, merged: 4, closed: 1, costPerMergedUsd: 0.86, averageRounds: 0.25, ...noAsking, ...noneChecked, ...noneFitted },
         ];
 
 // Same as the backend: the card lands at that index of the lane, and the rest close up around it.
@@ -593,6 +636,7 @@ mockIPC((command, args) => {
       return [
         ...(params.get("flow") === "many" ? [{ id: "many", name: i18next.language === "es" ? "Muchos pasos" : "Many steps", builtin: false, steps: manySteps }] : []),
         { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: [...workflow, learnerStep] },
+        { id: "builtin:organic", name: i18next.language === "es" ? "Se adapta al cambio" : "Fits the change", builtin: true, steps: [...fittingSteps, learnerStep] },
         { id: "mine", name: i18next.language === "es" ? "Solo revisiones" : "Reviews only", builtin: false, steps: workflow.slice(3) },
       ];
     case "workflow_results":
@@ -685,6 +729,10 @@ mockIPC((command, args) => {
     case "attempt_events":
       if ((args as { attemptId?: string } | undefined)?.attemptId?.startsWith("try-")) {
         return [{ seq: 1, attemptId: "try-check", at: at(0), kind: "checkResult", data: tryOutput[(params.get("try") ?? "pass") as keyof typeof tryOutput] ?? tryOutput.pass }];
+      }
+      if ((args as { attemptId?: string } | undefined)?.attemptId === "security-0-1") {
+        if (params.get("flow") === "small" || params.get("flow") === "asked") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "skipped", data: { reason: asSmall.reason } }, { seq: 101, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: true, lines: 12, files: 2, round: 0 } }];
+        if (params.get("flow") === "movedUp") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: false, because: WHY_MOVED_UP, round: 0 } }];
       }
       // Only one step has a log, or the run's commands would count once per step.
       return (args as { attemptId?: string } | undefined)?.attemptId === attempt.id ? events : [];

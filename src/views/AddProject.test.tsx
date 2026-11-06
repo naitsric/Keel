@@ -31,6 +31,7 @@ const project = (id: string, fields: Partial<Project> = {}): Project => ({
   services: [],
   env: [],
   defaultWorkflow: null,
+  sensitivePaths: [],
   ...fields,
 });
 const READY = project("ready", { checkCommand: "make test" });
@@ -383,6 +384,29 @@ describe("adding a project", () => {
       await click(i18next.t("settings.save"));
       expect(field(i18next.t("settings.setupCommand")).value).toBe("uv sync");
       expect(page()).toContain(i18next.t("settings.saved"));
+    });
+
+    it("saves the files too sensitive for a small change, one pattern per line", async () => {
+      await show(<SettingsView />, [{ ...READY, sensitivePaths: ["billing/"] }]);
+      const box = [...document.querySelectorAll("label")].find((l) => l.textContent?.startsWith(i18next.t("settings.sensitive")))?.querySelector("textarea") as HTMLTextAreaElement;
+      expect(box.value).toBe("billing/");
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(box, "billing/\n\n  *.proto \n");
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await click(i18next.t("settings.save"));
+      expect(called("project_update")[0].args.settings).toMatchObject({ sensitivePaths: ["billing/", "*.proto"] });
+      expect(page()).toContain(".github/, migrations, SQL schema");
+    });
+
+    it("says which pattern it can't read", async () => {
+      await show(<SettingsView />, [READY]);
+      mockIPC((command) => {
+        if (command === "project_update") throw { code: "blocked", reason: { code: "invalidSetting", field: "sensitivePaths", value: "a[" }, detail: null };
+        return command === "workflows_list" ? [WORKFLOW] : null;
+      });
+      await click(i18next.t("settings.save"));
+      expect(page()).toContain("“a[” can't be read as a file pattern.");
     });
 
     it("carries the default workflow when it saves", async () => {

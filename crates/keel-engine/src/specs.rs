@@ -24,12 +24,32 @@ const MAX_OPTION_LABEL: usize = 60;
 /// After this many, the engine takes the recommended options rather than asking a third time.
 pub const MAX_QUESTION_ROUNDS: usize = 2;
 
-pub const SPEC_SCHEMA: &str = r#"{"type":"object","properties":{"summary":{"type":"string"},"criteria":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"when":{"type":"string"},"then":{"type":"string"}},"required":["id","when","then"],"additionalProperties":false}},"changes":{"type":"array","items":{"type":"object","properties":{"kind":{"type":"string","enum":["adds","changes","removes"]},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}},"limits":{"type":"array","items":{"type":"string"}},"decided":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}},"questions":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"recommended":{"type":"boolean"}},"required":["label","recommended"],"additionalProperties":false}}},"required":["id","text","options"],"additionalProperties":false}}},"required":["summary","criteria","changes","limits","decided","questions"],"additionalProperties":false}"#;
+/// `size` and `risks` are a prediction, for a workflow with steps that depend on the change. The schema
+/// says what small means as well as the prompt, since any specifier gets asked for it, whatever its
+/// prompt says. Its words keep clear of those the test fakes tell schemas apart by.
+pub const SPEC_SCHEMA: &str = r#"{"type":"object","properties":{"size":{"type":"string","enum":["small","normal"],"description":"small only if it is understood with nothing left to ask, its risk is contained, and someone could pick the work up from just the request and the change. How much code it touches does not decide this: one changed line in permissions is not small. If in doubt, normal."},"risks":{"type":"array","items":{"type":"string","enum":["security","irreversibleData","sharedContracts","concurrency","environment","noRegressionTest"]}},"summary":{"type":"string"},"criteria":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"when":{"type":"string"},"then":{"type":"string"}},"required":["id","when","then"],"additionalProperties":false}},"changes":{"type":"array","items":{"type":"object","properties":{"kind":{"type":"string","enum":["adds","changes","removes"]},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}},"limits":{"type":"array","items":{"type":"string"}},"decided":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}},"questions":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"recommended":{"type":"boolean"}},"required":["label","recommended"],"additionalProperties":false}}},"required":["id","text","options"],"additionalProperties":false}}},"required":["size","risks","summary","criteria","changes","limits","decided","questions"],"additionalProperties":false}"#;
+
+/// How big a specifier expects a change to be. Only ever a claim: it can stop a run from counting as
+/// small, and never makes one so by itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Size {
+    Small,
+    /// Also what a spec from before this was asked for reads as.
+    #[default]
+    Normal,
+}
 
 /// What a specifier answers, once it has passed [`validate_spec`]. New fields need `default`: runs
 /// already in the database don't have them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Spec {
+    #[serde(default)]
+    pub size: Size,
+    /// Plain text rather than a closed list on this side: one Keel doesn't know is still a risk, and
+    /// refusing it here would only ask the agent to take it out.
+    #[serde(default)]
+    pub risks: Vec<String>,
     pub summary: String,
     pub criteria: Vec<Criterion>,
     #[serde(default)]
@@ -154,6 +174,9 @@ impl Spec {
         }
         for limit in &mut self.limits {
             tidy(limit);
+        }
+        for risk in &mut self.risks {
+            tidy(risk);
         }
         for decided in &mut self.decided {
             tidy(&mut decided.text);
@@ -1137,6 +1160,63 @@ mod tests {
     #[test]
     fn the_schema_is_valid_json_and_asks_for_every_field() {
         let schema: Value = serde_json::from_str(SPEC_SCHEMA).unwrap();
-        assert_eq!(schema["required"].as_array().unwrap().len(), 6);
+        assert_eq!(schema["required"].as_array().unwrap().len(), 8);
+        assert_eq!(
+            schema["properties"]["size"]["enum"],
+            json!(["small", "normal"])
+        );
+        assert_eq!(
+            schema["properties"]["risks"]["items"]["enum"],
+            json!([
+                "security",
+                "irreversibleData",
+                "sharedContracts",
+                "concurrency",
+                "environment",
+                "noRegressionTest"
+            ])
+        );
+    }
+
+    #[test]
+    fn the_schema_avoids_the_words_that_tell_schemas_apart() {
+        for word in ["unverified", "decision", "verdict", "learnings"] {
+            assert!(!SPEC_SCHEMA.contains(word), "{word}");
+        }
+    }
+
+    #[test]
+    fn a_spec_from_before_size_was_asked_for_is_normal_with_no_risks() {
+        let spec = validate_spec(&valid()).unwrap();
+        assert_eq!(spec.size, Size::Normal);
+        assert!(spec.risks.is_empty());
+    }
+
+    #[test]
+    fn a_small_spec_keeps_saying_so_through_being_kept() {
+        let mut output = valid();
+        output["size"] = json!("small");
+        output["risks"] = json!(["security"]);
+        let Verdict::Ready(kept) = judge(Some(&output), false, 0) else {
+            panic!()
+        };
+        let spec: Spec = serde_json::from_value(kept).unwrap();
+        assert_eq!(spec.size, Size::Small);
+        assert_eq!(spec.risks, ["security"]);
+    }
+
+    #[test]
+    fn a_risk_nobody_knows_still_counts_and_is_not_refused() {
+        let output = with("risks", json!(["something new", "   "]));
+        let spec = validate_spec(&output).unwrap();
+        assert_eq!(spec.risks, ["something new", ""], "none of them go away");
+    }
+
+    #[test]
+    fn a_size_nobody_knows_is_not_read_as_either_one() {
+        assert_eq!(
+            problems(with("size", json!("tiny"))),
+            [SpecProblem::Unreadable]
+        );
     }
 }

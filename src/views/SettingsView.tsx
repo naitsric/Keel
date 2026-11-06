@@ -81,6 +81,7 @@ function ProjectSettingsCard({ project, saved, onSaved }: { project: Project; sa
   const [services, setServices] = useState<Service[]>(project.services);
   const [env, setEnv] = useState(project.env.map((v) => `${v.name}=${v.value}`).join("\n"));
   const [workflow, setWorkflow] = useState(project.defaultWorkflow ?? FULL_WORKFLOW);
+  const [sensitive, setSensitive] = useState(project.sensitivePaths.join("\n"));
   const [workflows, setWorkflows] = useState<Workflow[] | null>(null);
   const [status, setStatus] = useState<GithubStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -150,6 +151,7 @@ function ProjectSettingsCard({ project, saved, onSaved }: { project: Project; sa
         services,
         env: parsed.env,
         defaultWorkflow: workflow === FULL_WORKFLOW ? null : workflow,
+        sensitivePaths: lines(sensitive),
       });
       await refreshOverview();
       onSaved();
@@ -265,6 +267,9 @@ function ProjectSettingsCard({ project, saved, onSaved }: { project: Project; sa
             <textarea rows={3} value={paths} onChange={(e) => setPaths(e.target.value)} className={`${inputClass} resize-y font-mono`} />
           </Field>
         </div>
+        <Field label={t("settings.sensitive")} hint={t("settings.sensitiveHint")}>
+          <textarea rows={3} value={sensitive} onChange={(e) => setSensitive(e.target.value)} className={`${inputClass} resize-y font-mono`} />
+        </Field>
       </div>
       <h4 className="mt-5 text-[12.5px] font-semibold">{t("settings.services")}</h4>
       <p className="mt-0.5 text-[12px] text-muted">{t("settings.servicesHint")}</p>
