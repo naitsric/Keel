@@ -45,7 +45,7 @@ interface AppState {
 export const useApp = create<AppState>((set, get) => ({
   view: { name: "home" },
   preflight: null,
-  overview: { runs: [], projects: [], pendingProposals: 0, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } },
+  overview: { runs: [], projects: [], pendingProposals: 0, workflowDrafts: 0, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } },
   overviewLoaded: false,
   newRunOpen: false,
   projectSetup: null,

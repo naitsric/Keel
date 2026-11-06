@@ -235,6 +235,16 @@ export interface Workflow {
   builtin: boolean;
 }
 
+/** A workflow an assistant proposed, which can't run until the person saves it. */
+export interface WorkflowDraft {
+  id: string;
+  projectId: string;
+  name: string;
+  steps: WorkflowStep[];
+  proposedBy: string;
+  createdAt: string;
+}
+
 /** A reviewer's answer. */
 export interface Verdict {
   verdict: "approved" | "changes";
@@ -307,6 +317,7 @@ export interface Overview {
   totals: Totals;
   projects: Project[];
   pendingProposals: number;
+  workflowDrafts: number;
 }
 
 export interface Attempt {
@@ -432,6 +443,9 @@ export const api = {
   workflowsList: (projectId: string, language: string) => invoke<Workflow[]>("workflows_list", { projectId, language }),
   workflowSave: (projectId: string, workflow: Workflow) => invoke<Workflow>("workflow_save", { projectId, workflow }),
   workflowDelete: (projectId: string, workflowId: string) => invoke<void>("workflow_delete", { projectId, workflowId }),
+  workflowDraftsList: () => invoke<WorkflowDraft[]>("workflow_drafts_list"),
+  workflowDraftSave: (projectId: string, draftId: string, workflow: Workflow) => invoke<Workflow>("workflow_draft_save", { projectId, draftId, workflow }),
+  workflowDraftDiscard: (projectId: string, draftId: string) => invoke<void>("workflow_draft_discard", { projectId, draftId }),
   reworkLimitAnswer: (attemptId: string, anotherRound: boolean) => invoke<void>("rework_limit_answer", { attemptId, anotherRound }),
   runAttempts: (runId: string) => invoke<Attempt[]>("run_attempts", { runId }),
   projectUpdate: (projectId: string, settings: ProjectSettings) => invoke<Project>("project_update", { projectId, settings }),

@@ -30,7 +30,7 @@ use keel_store::rusqlite_value::Value;
 use keel_store::{Decision, NewAttempt, NewRun, Project, ProjectSettings, Store, now};
 pub use prompts::full_workflow;
 use serde_json::json;
-pub use workflows::Workflow;
+pub use workflows::{Workflow, WorkflowDraft};
 
 const RESUME_PROMPT: &str = "Continue where you left off.";
 
@@ -1056,6 +1056,79 @@ impl Engine {
         )?)
     }
 
+    /// Leaves a proposed workflow for the person to review. It follows the same rules as any other,
+    /// but [`Engine::workflows`] doesn't see it, so nothing can run it until they save it.
+    pub fn draft_workflow(
+        &self,
+        project_id: &str,
+        name: &str,
+        steps: Vec<WorkflowStep>,
+        proposed_by: &str,
+    ) -> Result<WorkflowDraft> {
+        self.inner.store.project(project_id)?;
+        workflows::validate(&steps).map_err(Error::Blocked)?;
+        let draft = WorkflowDraft {
+            id: uuid::Uuid::new_v4().to_string(),
+            project_id: project_id.to_owned(),
+            name: name.trim().to_owned(),
+            steps,
+            proposed_by: proposed_by.to_owned(),
+            created_at: keel_store::now(),
+        };
+        workflows::save_draft(&self.inner.drafts_dir(project_id), &draft)?;
+        self.inner.changed("");
+        Ok(draft)
+    }
+
+    /// One project's drafts, newest first.
+    pub fn workflow_drafts_of(&self, project_id: &str) -> Result<Vec<WorkflowDraft>> {
+        Ok(workflows::load_drafts(
+            &self.inner.drafts_dir(project_id),
+            project_id,
+        )?)
+    }
+
+    /// Every project's drafts, newest first, so none stays out of sight behind another project.
+    pub fn workflow_drafts(&self) -> Result<Vec<WorkflowDraft>> {
+        let mut all = Vec::new();
+        for project in self.inner.store.projects()? {
+            all.extend(self.workflow_drafts_of(&project.id)?);
+        }
+        all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(all)
+    }
+
+    /// The person saves a draft: what they have on screen, with their changes, becomes a new
+    /// workflow. It never replaces one, whatever id comes along.
+    pub fn save_workflow_draft(
+        &self,
+        project_id: &str,
+        draft_id: &str,
+        workflow: &Workflow,
+    ) -> Result<Workflow> {
+        let dir = self.inner.drafts_dir(project_id);
+        if !workflows::draft_exists(&dir, draft_id)? {
+            return Err(Error::InvalidState);
+        }
+        let saved = self.save_workflow(
+            project_id,
+            &Workflow {
+                id: String::new(),
+                builtin: false,
+                ..workflow.clone()
+            },
+        )?;
+        workflows::delete(&dir, draft_id)?;
+        self.inner.changed("");
+        Ok(saved)
+    }
+
+    pub fn discard_workflow_draft(&self, project_id: &str, draft_id: &str) -> Result<()> {
+        workflows::delete(&self.inner.drafts_dir(project_id), draft_id)?;
+        self.inner.changed("");
+        Ok(())
+    }
+
     pub fn diff(&self, attempt_id: &str) -> Result<String> {
         let attempt = self.inner.store.attempt(attempt_id)?;
         Ok(match attempt.diff_path {
@@ -1104,6 +1177,10 @@ impl Inner {
 
     fn workspace(&self, run_id: &str) -> PathBuf {
         self.run_dir(run_id).join("workspace")
+    }
+
+    fn drafts_dir(&self, project_id: &str) -> PathBuf {
+        self.mirror(project_id).with_file_name("workflow-drafts")
     }
 
     fn mirror(&self, project_id: &str) -> PathBuf {

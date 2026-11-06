@@ -12,7 +12,9 @@
     "workflows": "Workflows",
     "brain": "Brain",
     "brainProposals": "{{count}} proposals waiting",
-    "board": "Board"
+    "board": "Board",
+    "workflowDrafts_one": "{{count}} workflow draft to review",
+    "workflowDrafts_other": "{{count}} workflow drafts to review"
   },
   "statusBar": {
     "running_one": "{{count}} running",
@@ -573,7 +575,22 @@
     "saved": "Saved",
     "delete": "Delete",
     "newName": "My workflow",
-    "roleLearner": "Proposes learnings"
+    "roleLearner": "Proposes learnings",
+    "draftsTitle": "Drafts to review",
+    "draftFrom": "From {{client}}, {{when}}, for {{project}}",
+    "draftTitle": "{{client}} proposed this for {{project}}",
+    "draftNote": "It can't run until you save it. What gets saved is what you see here, with your changes, as a new workflow.",
+    "draftPrompts": "Each step in the diagram has its prompt. Open them before you save.",
+    "draftCommands": "Commands it runs",
+    "draftNoCommands": "None",
+    "draftBuilders": "Agents that can change files and run commands",
+    "draftNoBuilders": "None",
+    "draftDelivery": "Pull request",
+    "draftDelivers": "A draft, after your approval",
+    "draftNoDelivery": "None",
+    "draftAfterApproval_one": "{{steps}} runs after your approval and before the pull request. Whatever it changes goes up without you seeing it. To see it first, move your approval after it.",
+    "draftAfterApproval_other": "{{steps}} run after your approval and before the pull request. Whatever they change goes up without you seeing it. To see it first, move your approval after them.",
+    "draftDiscard": "Discard"
   },
   "flow": {
     "groupLabel": "{{step}}, at once",
@@ -734,7 +751,7 @@
   "mcp": {
     "title": "MCP server",
     "hint": "Lets an assistant like Claude Code see your projects and start runs on this Mac, and you watch them here. Only this Mac can reach it, and it's off until you turn it on.",
-    "limits": "It can't approve or reject a step, merge, change settings or workflows, or accept anything into the Brain. Those stay with you, here.",
+    "limits": "It can't approve or reject a step, merge, change settings, save a workflow or accept anything into the Brain. Those stay with you, here. A workflow it proposes waits for you on Workflows, and can't run until you save it.",
     "off": "Off",
     "on": "On",
     "port": "Port",
@@ -744,7 +761,7 @@
     "connectClaude": "Connect Claude Code",
     "reconnectClaude": "Connect Claude Code again",
     "connected": "Connected. New Claude Code sessions see it on their own. In one that's already open, run /mcp.",
-    "canRun": "Can start and stop runs",
+    "canRun": "Can start and stop runs, and propose workflows",
     "clients": "Clients",
     "noClients": "No clients yet.",
     "lastSeen": "used {{when}}",

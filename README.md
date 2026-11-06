@@ -87,7 +87,9 @@ Keel has a built-in [MCP](https://modelcontextprotocol.io) server, so an assista
 
 For another client, create a token there and give it the URL and the header it shows, once.
 
-A client can read projects, workflows, runs, issues and the Brain. If you allow it, it can also start and stop runs, with up to 3 open at a time. It can't approve or reject a step, merge, change settings or workflows, or accept anything into the Brain: a run that needs you waits for you in the app. **Settings** shows every call, and revoking a client cuts it off at once.
+A client can read projects, workflows, runs, issues and the Brain. If you allow it, it can also start and stop runs, with up to 3 open at a time, and propose workflows. It can't approve or reject a step, merge, change settings, save a workflow or accept anything into the Brain: a run that needs you waits for you in the app. **Settings** shows every call, and revoking a client cuts it off at once.
+
+A workflow a client proposes is a draft on the **Workflows** page. It shows the commands it would run, the agents that could change files, and any work that would happen after your approval. Nothing can run it until you save it, you can change it first, and saving always creates a new workflow rather than replacing one.
 
 Connecting stores the token in Claude Code's own configuration, `~/.claude.json`, as it does for any MCP server.
 
