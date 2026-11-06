@@ -475,6 +475,8 @@ impl World {
                     workflow: serde_json::to_string(&[&step]).unwrap(),
                     language: "en".into(),
                     source_issue: None,
+                    workflow_id: None,
+                    workflow_name: None,
                 },
                 &id,
             )
@@ -519,6 +521,7 @@ impl World {
                 workflow: vec![agent("work", ToolProfile::ReadOnly)],
                 language: "en".into(),
                 source_issue: None,
+                saved_workflow: None,
             })
             .unwrap()
     }
@@ -698,6 +701,7 @@ fn outside_run(w: &World, workflow: Vec<WorkflowStep>, request: &str) -> StartRu
         workflow,
         language: "en".into(),
         source_issue: None,
+        saved_workflow: None,
     }
 }
 
@@ -781,6 +785,7 @@ fn an_issue_keeps_its_one_card_when_a_run_starts_from_outside() {
     let request = StartRun {
         title: Some(format!("#{} {}", issue.number, issue.title)),
         source_issue: Some(issue.clone()),
+        saved_workflow: None,
         ..outside_run(&w, steps_of(&w, &workflow), &request_from_issue(&issue, ""))
     };
 
@@ -1684,6 +1689,7 @@ fn a_full_board_flow_asks_github_for_nothing_delivery_does_not_already_do() {
             workflow,
             language: "en".into(),
             source_issue: None,
+            saved_workflow: None,
         })
         .unwrap();
     let deadline = Instant::now() + PATIENCE;
@@ -1949,6 +1955,7 @@ fn starting_a_run_by_hand_does_not_lock_up_with_the_scheduler() {
                     workflow: vec![agent("work", ToolProfile::ReadOnly)],
                     language: "en".into(),
                     source_issue: None,
+                    saved_workflow: None,
                 })
                 .unwrap();
         }
@@ -2133,6 +2140,8 @@ fn the_board_has_the_shape_the_contract_says() {
             "id",
             "issue",
             "position",
+            "prState",
+            "prStateAt",
             "prUrl",
             "projectId",
             "reason",
@@ -2788,6 +2797,8 @@ fn dying_with_the_run_linked_and_not_yet_begun_runs_the_card_once() {
                 workflow: serde_json::to_string(&steps).unwrap(),
                 language: "en".into(),
                 source_issue: None,
+                workflow_id: None,
+                workflow_name: None,
             },
             &id,
         )

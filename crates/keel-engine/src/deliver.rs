@@ -5,14 +5,20 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use keel_core::{AttemptState, Reason, mask_secrets};
+use keel_core::{AttemptState, PrState, Reason, mask_secrets};
 use keel_harness::github::{Gh, GhError, Token};
 use keel_store::rusqlite_value::Value;
-use keel_store::{Attempt, Project, Run};
+use keel_store::{Attempt, Project, Run, now};
 use serde_json::json;
 
 use crate::git::{Git, GitError, RemoteAuth};
 use crate::{Error, Inner, Result, locked};
+
+/// GitHub refuses a description over 65,536 characters, and the whole delivery would fail with it.
+/// This stays a little under, in case GitHub counts some characters as more than one.
+const PR_BODY_ROOM: usize = 65_000;
+/// Less room than this for what was asked isn't worth a fragment of it.
+const SMALLEST_FRAGMENT: usize = 200;
 
 /// The URL git reaches a repo at. Only ever the configured host and a repo name from the project.
 fn repo_url(base: &str, repo: &str) -> String {
@@ -182,7 +188,7 @@ impl Inner {
                 .unwrap_or_else(|| run.title.clone())
         };
         let title = mask_secrets(&title);
-        let url = self.open_pull_request(
+        let (url, opened_now) = self.open_pull_request(
             &gh,
             &token,
             &repo,
@@ -193,12 +199,21 @@ impl Inner {
         )?;
 
         let number = url.rsplit('/').next().and_then(|n| n.parse::<i64>().ok());
+        // One just opened is a draft, with no need to ask. Of one that was already there Keel knows
+        // nothing, so the next look finds out, and until then nothing claims anything about it.
+        let known = |value: Value| if opened_now { value } else { Value::Null };
         store.patch_run(
             &run.id,
             &[
                 ("pr_url", Value::Text(url.clone())),
                 ("pr_number", number.map_or(Value::Null, Value::Integer)),
                 ("branch", Value::Text(branch.clone())),
+                (
+                    "pr_state",
+                    known(Value::Text(PrState::Draft.as_str().to_owned())),
+                ),
+                ("pr_state_at", known(Value::Text(now()))),
+                ("pr_checked_at", known(Value::Text(now()))),
             ],
         )?;
         store.patch_attempt(&attempt.id, &[("account", Value::Text(account.clone()))])?;
@@ -210,6 +225,7 @@ impl Inner {
         Ok(url)
     }
 
+    /// The pull request's URL, and whether this call is what opened it.
     #[allow(clippy::too_many_arguments)]
     fn open_pull_request(
         &self,
@@ -220,15 +236,15 @@ impl Inner {
         base: &str,
         title: &str,
         body_file: &Path,
-    ) -> Result<String> {
+    ) -> Result<(String, bool)> {
         match gh.create_draft_pr(token, repo, head, base, title, body_file) {
-            Ok(url) => Ok(url),
+            Ok(url) => Ok((url, true)),
             // A retry after a partial failure finds the PR already there, which is what it wanted.
             Err(error) if error.detail.contains("already exists") => error
                 .detail
                 .split_whitespace()
                 .find(|w| w.starts_with("http"))
-                .map(str::to_owned)
+                .map(|url| (url.to_owned(), false))
                 .ok_or_else(|| delivery_failed(error)),
             Err(error) => Err(delivery_failed(error)),
         }
@@ -277,6 +293,10 @@ impl Inner {
         {
             body.push_str(&format!("Refs #{number}\n\n"));
         }
+
+        let top = std::mem::take(&mut body);
+        let asked =
+            crate::workflows::specifying_attempt(&attempts).and_then(crate::workflows::asked_text);
 
         let files = crate::workflows::files_changed(&attempts);
         body.push_str(&format!("### {}\n\n", label("What changed", "Qué cambió")));
@@ -373,13 +393,180 @@ impl Inner {
                 "Borrador abierto por [Keel](https://github.com/naitsric/Keel) después de que una persona lo aprobara. Revísalo antes de mergear.",
             )
         ));
-        Ok(body)
+        // Masked before anything is cut: half a secret is one that masking no longer recognizes.
+        Ok(fit_body(
+            &mask_secrets(&top),
+            asked.map(mask_secrets).as_deref(),
+            &mask_secrets(&body),
+            spanish,
+        ))
+    }
+}
+
+/// Up to `limit` characters of `text`, ending at a word if it can, and saying it was cut.
+fn cut_with_note(text: &str, limit: usize, spanish: bool) -> String {
+    let note = if spanish {
+        "_Cortado aquí para caber en el límite de GitHub. El texto completo está en Keel._"
+    } else {
+        "_Cut here to fit GitHub's limit. The whole text is in Keel._"
+    };
+    let room = limit.saturating_sub(note.chars().count() + "\n```\n\n".len());
+    let kept: String = text.chars().take(room).collect();
+    let mut kept = kept
+        .rfind(char::is_whitespace)
+        .filter(|space| *space > kept.len() / 2)
+        .map_or(kept.as_str(), |space| &kept[..space])
+        .to_owned();
+    // A code block left open would swallow everything after it.
+    if kept.matches("```").count() % 2 == 1 {
+        kept.push_str("\n```");
+    }
+    format!("{kept}\n\n{note}")
+}
+
+fn details(summary: &str, text: &str) -> String {
+    format!("<details>\n<summary>{summary}</summary>\n\n{text}\n\n</details>\n\n")
+}
+
+/// What was asked, collapsed, in as much room as there is.
+fn asked_section(text: &str, room: usize, spanish: bool) -> String {
+    let say = |en: &'static str, es: &'static str| if spanish { es } else { en };
+    let summary = say("What was asked", "Qué se pidió");
+    let whole = details(summary, text);
+    if whole.chars().count() <= room {
+        return whole;
+    }
+    let text_room = room.saturating_sub(details(summary, "").chars().count());
+    if text_room < SMALLEST_FRAGMENT {
+        return format!(
+            "_{}_\n\n",
+            say(
+                "What was asked was left out to fit GitHub's limit. It's in Keel.",
+                "Lo que se pidió quedó fuera para caber en el límite de GitHub. Está en Keel.",
+            )
+        );
+    }
+    details(summary, &cut_with_note(text, text_room, spanish))
+}
+
+/// Puts the description together so that GitHub takes it. What was asked gives way first, then what
+/// the agents wrote, and whatever gives way says so. All of it has to be masked already.
+fn fit_body(top: &str, asked: Option<&str>, rest: &str, spanish: bool) -> String {
+    let count = |text: &str| text.chars().count();
+    let section = asked.map_or_else(String::new, |text| {
+        let room = PR_BODY_ROOM.saturating_sub(count(top) + count(rest));
+        asked_section(text, room, spanish)
+    });
+    let top_room = PR_BODY_ROOM.saturating_sub(count(&section) + count(rest));
+    let body = if count(top) <= top_room {
+        format!("{top}{section}{rest}")
+    } else {
+        format!(
+            "{}\n\n{section}{rest}",
+            cut_with_note(top, top_room.saturating_sub(2), spanish)
+        )
+    };
+    if count(&body) <= PR_BODY_ROOM {
+        body
+    } else {
+        // Only a change to thousands of files gets here, and that's still better than no pull request.
+        cut_with_note(&body, PR_BODY_ROOM, spanish)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const NOTE: &str = "Cut here to fit GitHub's limit";
+
+    fn chars(text: &str) -> usize {
+        text.chars().count()
+    }
+
+    #[test]
+    fn what_was_asked_is_collapsed_between_what_the_agents_wrote_and_the_rest() {
+        let body = fit_body(
+            "Fixed it.\n\n",
+            Some("add returns the sum"),
+            "### What changed\n",
+            false,
+        );
+        assert_eq!(
+            body,
+            "Fixed it.\n\n<details>\n<summary>What was asked</summary>\n\nadd returns the sum\n\n</details>\n\n### What changed\n"
+        );
+        let body = fit_body("", Some("la suma"), "", true);
+        assert!(body.contains("<summary>Qué se pidió</summary>"), "{body}");
+        assert_eq!(fit_body("top\n", None, "rest\n", false), "top\nrest\n");
+    }
+
+    #[test]
+    fn what_was_asked_gives_way_first_and_says_so() {
+        let body = fit_body(
+            "Fixed it.\n\n",
+            Some(&"word ".repeat(30_000)),
+            "### What changed\n",
+            false,
+        );
+        assert!(chars(&body) <= PR_BODY_ROOM, "{}", chars(&body));
+        assert!(body.starts_with("Fixed it."), "what the agents wrote stays");
+        assert!(body.ends_with("### What changed\n"), "and so does the rest");
+        assert!(body.contains(NOTE), "it says so");
+        assert!(body.contains("</details>"), "the section still closes");
+    }
+
+    #[test]
+    fn spanish_counts_characters_and_not_bytes() {
+        let body = fit_body("", Some(&"ñ".repeat(PR_BODY_ROOM - 100)), "", true);
+        assert!(
+            !body.contains("Cortado"),
+            "it fits, though it's twice as many bytes"
+        );
+        let body = fit_body("", Some(&"ñ".repeat(PR_BODY_ROOM)), "", true);
+        assert!(chars(&body) <= PR_BODY_ROOM);
+        assert!(
+            body.contains("Cortado aquí"),
+            "{}",
+            &body[body.len() - 200..]
+        );
+    }
+
+    #[test]
+    fn with_no_room_at_all_what_was_asked_leaves_a_line_and_the_agents_text_is_what_gets_cut() {
+        let top = "fixed ".repeat(20_000);
+        let body = fit_body(
+            &top,
+            Some("add returns the sum"),
+            "### What changed\n",
+            false,
+        );
+        assert!(chars(&body) <= PR_BODY_ROOM, "{}", chars(&body));
+        assert!(!body.contains("add returns the sum"));
+        assert!(body.contains("What was asked was left out"), "it says so");
+        assert!(body.contains(NOTE), "and about the cut too");
+        assert!(body.ends_with("### What changed\n"), "the rest stays");
+    }
+
+    #[test]
+    fn a_change_too_long_to_list_still_makes_a_description_github_takes() {
+        let body = fit_body(
+            "top\n",
+            Some("asked"),
+            &"- `a/file.rs`\n".repeat(10_000),
+            false,
+        );
+        assert!(chars(&body) <= PR_BODY_ROOM, "{}", chars(&body));
+        assert!(body.contains(NOTE));
+    }
+
+    #[test]
+    fn a_cut_never_leaves_a_code_block_open_to_swallow_what_follows() {
+        let text = format!("```\n{}", "code ".repeat(30_000));
+        let body = fit_body("", Some(&text), "### What changed\n", false);
+        assert_eq!(body.matches("```").count(), 2, "opened and closed");
+        assert!(body.ends_with("### What changed\n"));
+    }
 
     #[test]
     fn repo_urls_come_only_from_the_host_and_the_repo() {

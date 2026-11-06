@@ -13,6 +13,7 @@ use keel_engine::{Config, Engine, Workflow};
 use keel_harness::Tools;
 use keel_mcp::{MAX_DRAFTS, MAX_OPEN_RUNS, MCP_PATH, McpServer, StartError};
 use keel_store::Store;
+use keel_store::rusqlite_value::Value;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::RunningService;
@@ -245,6 +246,37 @@ async fn it_offers_these_tools_and_no_way_to_approve_anything() {
 }
 
 /// A workflow any reader would want: a builder, a check, the person, and a pull request.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_run_says_which_workflow_it_used_and_what_became_of_its_pull_request() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let started = ok(&call(&client, "start_run", w.start_args("Fix the bug")).await);
+    let run = started["id"].as_str().unwrap().to_owned();
+    assert_eq!(started["workflowId"], json!(w.workflow_id));
+    assert_eq!(started["workflowName"], "Build and ask");
+    assert_eq!(started["prState"], Json::Null, "no pull request yet");
+
+    w.store
+        .patch_run(
+            &run,
+            &[
+                (
+                    "pr_url",
+                    Value::Text("https://github.com/acme/app/pull/12".into()),
+                ),
+                ("pr_state", Value::Text("merged".into())),
+                ("pr_state_at", Value::Text("2026-11-06T10:00:00Z".into())),
+                ("pr_checked_at", Value::Text("2026-11-06T10:05:00Z".into())),
+            ],
+        )
+        .unwrap();
+    let view = ok(&call(&client, "get_run", json!({ "run": run })).await);
+    assert_eq!(view["prState"], "merged");
+    assert_eq!(view["prStateAt"], "2026-11-06T10:00:00Z");
+    assert_eq!(view["prCheckedAt"], "2026-11-06T10:05:00Z");
+    client.cancel().await.unwrap();
+}
+
 fn draft_args(project: &str) -> Json {
     json!({
         "project": project,

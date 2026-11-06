@@ -72,6 +72,7 @@ fn main() {
             workflow,
             language: "en".into(),
             source_issue: None,
+            saved_workflow: None,
         })
         .unwrap();
     loop {

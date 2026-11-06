@@ -443,6 +443,38 @@ impl Reason {
     }
 }
 
+/// What became of a pull request after Keel opened it, as GitHub tells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PrState {
+    Open,
+    Draft,
+    Merged,
+    /// Closed without merging. It can still be reopened.
+    Closed,
+}
+
+impl PrState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Draft => "draft",
+            Self::Merged => "merged",
+            Self::Closed => "closed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "open" => Some(Self::Open),
+            "draft" => Some(Self::Draft),
+            "merged" => Some(Self::Merged),
+            "closed" => Some(Self::Closed),
+            _ => None,
+        }
+    }
+}
+
 /// Where a card is kept. A started card's column comes from its run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -758,6 +790,20 @@ mod tests {
         assert!(limit(Some(1_001)).stops_every_card(1_000));
         assert!(!limit(Some(1_000)).stops_every_card(1_000));
         assert!(!limit(Some(999)).stops_every_card(1_000));
+    }
+
+    #[test]
+    fn a_pull_request_state_reads_back_as_itself() {
+        for state in [
+            PrState::Open,
+            PrState::Draft,
+            PrState::Merged,
+            PrState::Closed,
+        ] {
+            assert_eq!(PrState::parse(state.as_str()), Some(state));
+            assert_eq!(serde_json::to_value(state).unwrap(), state.as_str());
+        }
+        assert_eq!(PrState::parse("MERGED"), None);
     }
 
     #[test]

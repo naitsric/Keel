@@ -3,8 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type RawCheck, type Run } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, toolSummary, touchesWorkflows, stillGoing } from "../lib/audit";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type PrState, type RawCheck, type Run } from "../lib/api";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, specifyingAttempt, toolSummary, touchesWorkflows, stillGoing } from "../lib/audit";
 import { attemptChoices, type FlowNode, flowOf, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
@@ -30,6 +30,28 @@ const DECISIONS: Record<AttemptState, string> = {
   skipped: "run.decideActive",
   abandoned: "run.decideAbandoned",
 };
+
+/** Once there's a pull request, what's left to decide depends on what became of it. */
+const PR_DECISIONS: Record<PrState, string> = {
+  draft: "run.decideDelivered",
+  open: "run.decideOpen",
+  merged: "run.decideMerged",
+  closed: "run.decideClosed",
+};
+
+const PR_TONES: Record<PrState, string> = {
+  draft: "text-subtle",
+  open: "text-subtle",
+  merged: "font-medium text-success",
+  closed: "font-medium text-warning",
+};
+
+/** What became of the pull request, in the line under the run's title. */
+function PrStatus({ state, at }: { state: PrState; at: string | null }) {
+  const { t } = useTranslation();
+  const dated = at !== null && (state === "merged" || state === "closed");
+  return <span className={PR_TONES[state]}>{dated ? t(`run.pr.${state}At`, { when: formatDateTime(at) }) : t(`run.pr.${state}`)}</span>;
+}
 
 function SummaryBlock({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
   return (
@@ -70,7 +92,7 @@ function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: 
   const anyActive = attempts.some((a) => isActive(a.state));
   // A step that's done says nothing about the run while others are still to come.
   const between = !run?.finishedAt && (current.state === "succeeded" || current.state === "skipped");
-  const decision = mapper && current.state === "succeeded" ? "run.decideMap" : run?.prUrl ? "run.decideDelivered" : current.reason?.code === "reworkLimit" ? "run.decideReworkLimit" : between ? "run.decideActive" : DECISIONS[current.state];
+  const decision = mapper && current.state === "succeeded" ? "run.decideMap" : run?.prUrl ? PR_DECISIONS[run.prState ?? "draft"] : current.reason?.code === "reworkLimit" ? "run.decideReworkLimit" : between ? "run.decideActive" : DECISIONS[current.state];
   return (
     <Card className="grid gap-5 p-4 md:grid-cols-2">
       <SummaryBlock title={t("run.whatItDid")} note={explaining.length > 0 ? t("run.generated") : undefined}>
@@ -225,7 +247,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const note = sent ?? draft;
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [reading, setReading] = useState<"explanation" | "reviews" | null>(null);
+  const [reading, setReading] = useState<"asked" | "explanation" | "reviews" | null>(null);
   // A click on this window while it's in the background acts as a click, not only as a way to bring
   // it forward. So approving is off while it's away, and arms again a moment after it's back.
   useEffect(() => {
@@ -286,6 +308,10 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const told = explaining.length > 2 ? [explaining[0], explaining[explaining.length - 1]] : explaining;
   const gists = told.map((a) => ({ attempt: a, ...gist(a.resultText ?? "") }));
   const hasMore = explaining.length > told.length || gists.some((g) => g.cut);
+  const specifying = specifyingAttempt(attempts);
+  // At an approval right after that step, "What it did" is already showing this same text.
+  const asked = specifying && !explaining.some((a) => a.id === specifying.id) ? askedText(specifying) : null;
+  const askedGist = asked ? gist(asked, 160) : null;
   const { reviewers, approver } = reviewsOfRound(attempts, run.round);
   const reviewed = reviewers.some((review) => review.state !== "skipped") || approver != null;
   const hiddenFiles = files.length - SHOWN_FILES;
@@ -298,6 +324,21 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
       <p className="mt-1 mb-3 text-[12.5px] text-muted">{t(empty ? "run.approvalEmptyBody" : "run.approvalBody")}</p>
       {/* What's being approved never shrinks away: in a short window the card scrolls instead. */}
       <dl className="max-h-[50vh] min-h-24 shrink-0 overflow-y-auto">
+        {askedGist && (
+          <ApprovalRow
+            label={t("run.whatWasAsked")}
+            note={t("run.generated")}
+            action={
+              askedGist.cut && (
+                <Button variant="ghost" aria-label={t("run.approvalReadAsked")} onClick={() => setReading("asked")}>
+                  {t("run.approvalReadAll")}
+                </Button>
+              )
+            }
+          >
+            <p className="selectable break-words">{askedGist.text}</p>
+          </ApprovalRow>
+        )}
         <ApprovalRow
           label={t("run.whatItDid")}
           note={explaining.length > 0 ? t("run.generated") : undefined}
@@ -424,9 +465,11 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
           </div>
         </>
       )}
-      <Modal open={reading !== null} onOpenChange={(open) => !open && setReading(null)} title={t(reading === "reviews" ? "run.reviewsTitle" : "run.approvalExplanationTitle")} className="w-[720px]">
+      <Modal open={reading !== null} onOpenChange={(open) => !open && setReading(null)} title={t(reading === "reviews" ? "run.reviewsTitle" : reading === "asked" ? "run.whatWasAsked" : "run.approvalExplanationTitle")} className="w-[720px]">
         {reading === "reviews" ? (
           <ReviewsList attempts={attempts} round={run.round} />
+        ) : reading === "asked" ? (
+          <p className="selectable text-[13px] leading-relaxed whitespace-pre-wrap">{asked}</p>
         ) : (
           <div className="text-[13px] leading-relaxed">
             <Explanations attempts={explaining} />
@@ -951,6 +994,12 @@ export function RunDetail({ runId }: { runId: string }) {
     void load();
   }, [load, revision]);
 
+  // A person opening a run may be wondering. Whether there's anything to ask, and the answer, are
+  // the engine's: a change arrives if there's news, and a failure stays quiet.
+  useEffect(() => {
+    api.runLookAtPr(runId).catch(() => {});
+  }, [runId]);
+
   // Audit events only ever grow, so only what's new is fetched, for every attempt of the run.
   useEffect(() => {
     for (const a of attempts) {
@@ -1002,6 +1051,7 @@ export function RunDetail({ runId }: { runId: string }) {
           <div className="min-w-0 flex-1">
             <h1 className="selectable text-[17px] leading-snug font-semibold">{run?.title}</h1>
             <p className="mt-0.5 flex flex-wrap gap-x-3 text-[12px] text-subtle">
+              {run?.prUrl && run.prState && <PrStatus state={run.prState} at={run.prStateAt} />}
               {run?.startedBy && <span>{t("run.startedBy", { client: run.startedBy })}</span>}
               {run?.sourceIssue && <span>{t("run.fromIssue", { number: run.sourceIssue.number })}</span>}
               {accounts.claude && <span>{t("run.accountClaude", { account: accounts.claude })}</span>}

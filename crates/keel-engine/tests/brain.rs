@@ -150,6 +150,7 @@ impl World {
                 workflow: steps,
                 language: "en".into(),
                 source_issue: None,
+                saved_workflow: None,
             })
             .unwrap();
         self.wait_finished(&run);
@@ -496,6 +497,7 @@ fn a_decision_always_gets_in_and_the_map_makes_room() {
             workflow: vec![WorkflowStep::Approval { id: "human".into() }],
             language: "en".into(),
             source_issue: None,
+            saved_workflow: None,
         })
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);

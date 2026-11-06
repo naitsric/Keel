@@ -106,6 +106,7 @@ fn main() {
             workflow: steps,
             language: "es".into(),
             source_issue: None,
+            saved_workflow: None,
         })
         .unwrap();
 

@@ -74,6 +74,7 @@ fn main() {
             })],
             language: "en".into(),
             source_issue: None,
+            saved_workflow: None,
         })
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(240);

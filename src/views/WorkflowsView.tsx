@@ -1,7 +1,7 @@
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Bot, CheckCircle2, GitPullRequest, Layers, Plus, Trash2, TriangleAlert, UserCheck, Wrench } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type CommandError, type StepRole, type StepSpec, type ToolProfile, type Workflow, type WorkflowDraft, type WorkflowStep } from "../lib/api";
+import { api, type CommandError, type StepRole, type StepSpec, type ToolProfile, type Workflow, type WorkflowDraft, type WorkflowResults, type WorkflowStep } from "../lib/api";
 import { draftFacts } from "../lib/drafts";
 import { flowOf, pathKey, pathOfKey, problemKeys, type StepPath } from "../lib/flow";
 import { formatRelative } from "../lib/format";
@@ -11,6 +11,7 @@ import { Button, Card, cx, Field, inputClass, Segmented } from "../ui/primitives
 import { AddProject } from "./AddProject";
 import { FlowDiagram } from "./FlowDiagram";
 import { ModelField } from "./ModelField";
+import { WorkflowResultsCard } from "./WorkflowResultsCard";
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 const DEFAULT_EFFORT = "__default__";
@@ -364,6 +365,7 @@ export function WorkflowsView() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [editing, setEditing] = useState<Workflow | null>(null);
   const [drafts, setDrafts] = useState<WorkflowDraft[]>([]);
+  const [results, setResults] = useState<WorkflowResults[]>([]);
   // The proposed workflow in the editor. It isn't a workflow until it's saved, so it has no id there.
   const [reviewing, setReviewing] = useState<WorkflowDraft | null>(null);
   const openingDraft = useRef(false);
@@ -408,6 +410,19 @@ export function WorkflowsView() {
   useEffect(() => {
     loadDrafts().catch((e) => setError(errorText(t, e)));
   }, [loadDrafts, revision, t]);
+
+  // What a pull request became arrives as a change like any other.
+  useEffect(() => {
+    if (!projectId) return;
+    let current = true;
+    api
+      .workflowResults(projectId)
+      .then((found) => current && setResults(found))
+      .catch((e) => current && setError(errorText(t, e)));
+    return () => {
+      current = false;
+    };
+  }, [projectId, revision, t]);
 
   const steps = editing?.steps ?? [];
   const flow = useMemo(() => flowOf(steps), [steps]);
@@ -680,6 +695,7 @@ export function WorkflowsView() {
             )}
           </div>
         )}
+        {projects.length > 0 && <WorkflowResultsCard results={results} workflows={workflows} />}
       </main>
     </>
   );

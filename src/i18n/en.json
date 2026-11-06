@@ -215,6 +215,7 @@
     "stop": "Stop",
     "generated": "Written by the agent",
     "whatItDid": "What it did",
+    "whatWasAsked": "What was asked",
     "noResultYet": "It's still working. Its explanation appears here when it finishes.",
     "noResult": "It finished without an explanation.",
     "whatChanged": "What changed",
@@ -249,10 +250,21 @@
     "pending": "Not started",
     "pullRequest": "Pull request #{{number}}",
     "openPr": "Open on GitHub",
+    "pr": {
+      "draft": "Pull request still a draft",
+      "open": "Pull request open",
+      "merged": "Pull request merged",
+      "closed": "Pull request closed without merging",
+      "mergedAt": "Pull request merged on {{when}}",
+      "closedAt": "Pull request closed without merging on {{when}}"
+    },
     "fromIssue": "From issue #{{number}}",
     "base": "Based on {{base}}",
     "decideApproval": "Approve or reject above.",
     "decideDelivered": "Review and merge the draft on GitHub. Keel doesn't merge.",
+    "decideOpen": "Review and merge it on GitHub. Keel doesn't merge.",
+    "decideMerged": "Nothing. The pull request was merged.",
+    "decideClosed": "Nothing. The pull request was closed without merging.",
     "decideRejected": "Nothing. You rejected this, and your reason will reach this project's next runs.",
     "approvalTitle": "Should this become a pull request?",
     "approvalContinueTitle": "Should this run go on?",
@@ -274,6 +286,7 @@
     "approvalCloseHint": "It stays on record as rejected. Nothing leaves your Mac.",
     "approvalWhere": "Goes to",
     "approvalReadAll": "Read all",
+    "approvalReadAsked": "Read all of what was asked",
     "approvalExplanationTitle": "What the agent wrote",
     "approvalSeeReviews": "See the reviews",
     "approvalMoreFiles": "and {{count}} more",
@@ -590,7 +603,19 @@
     "draftNoDelivery": "None",
     "draftAfterApproval_one": "{{steps}} runs after your approval and before the pull request. Whatever it changes goes up without you seeing it. To see it first, move your approval after it.",
     "draftAfterApproval_other": "{{steps}} run after your approval and before the pull request. Whatever they change goes up without you seeing it. To see it first, move your approval after them.",
-    "draftDiscard": "Discard"
+    "draftDiscard": "Discard",
+    "results": {
+      "title": "Results",
+      "hint": "How the runs of each workflow in this project have gone. Runs from before Keel kept track of this aren't counted.",
+      "none": "There isn't enough data yet. No workflow has run in this project since Keel began keeping track.",
+      "runs": "Runs",
+      "merged": "Pull requests merged",
+      "closed": "Closed without merging",
+      "cost": "Average cost per merged pull request",
+      "rounds": "Average times sent back",
+      "notEnough": "Not enough data yet",
+      "enoughNote": "Averages show from {{min}} merged pull requests or {{min}} finished runs. Fewer than that says little."
+    }
   },
   "flow": {
     "groupLabel": "{{step}}, at once",
@@ -693,6 +718,12 @@
       "rejected": "Rejected",
       "abandoned": "Abandoned",
       "couldNotStart": "Couldn't start"
+    },
+    "pr": {
+      "draft": "Draft pull request",
+      "open": "Pull request open",
+      "merged": "Merged",
+      "closed": "Closed without merging"
     },
     "needed": {
       "waitingApproval": "Open it to approve or reject.",

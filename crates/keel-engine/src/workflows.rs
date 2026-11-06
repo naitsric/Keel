@@ -42,6 +42,15 @@ pub struct Workflow {
     pub builtin: bool,
 }
 
+impl Workflow {
+    pub fn reference(&self) -> crate::WorkflowRef {
+        crate::WorkflowRef {
+            id: self.id.clone(),
+            name: self.name.clone(),
+        }
+    }
+}
+
 /// A workflow an assistant proposed, waiting for a person. It's its own type in its own folder so
 /// that nothing that runs can reach it: it only becomes a [`Workflow`] when the person saves it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -248,6 +257,26 @@ pub fn output_of(attempts: &[Attempt], step_id: &str) -> String {
         Some(output) => output.to_string(),
         None => attempt.result_text.clone().unwrap_or_default(),
     }
+}
+
+/// The attempt that says what was asked: the latest that worked of a step with the specifier's role,
+/// or else of a step called `spec`, which is how workflows saved before that role say it.
+pub fn specifying_attempt(attempts: &[Attempt]) -> Option<&Attempt> {
+    let latest = |applies: fn(&Attempt) -> bool| {
+        attempts.iter().rev().find(|a| {
+            a.kind == "agent" && a.state == AttemptState::Succeeded.as_str() && applies(a)
+        })
+    };
+    latest(|a| a.role == "specifier").or_else(|| latest(|a| a.step_id == "spec"))
+}
+
+/// What that attempt says, in words a person can read.
+pub fn asked_text(attempt: &Attempt) -> Option<&str> {
+    attempt
+        .result_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
 }
 
 pub fn wants_rework(attempt: &Attempt) -> bool {
@@ -575,6 +604,119 @@ pub fn draft_exists(dir: &Path, id: &str) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type Row<'a> = (&'a str, &'a str, &'a str, AttemptState, &'a str);
+
+    /// Attempts as the store reads them back: step, kind, role, state and what it wrote.
+    fn recorded(rows: &[Row]) -> Vec<Attempt> {
+        use keel_store::rusqlite_value::Value;
+        let dir = tempfile::tempdir().unwrap();
+        let store = keel_store::Store::open(&dir.path().join("keel.db")).unwrap();
+        for (index, (step, kind, role, state, text)) in rows.iter().enumerate() {
+            let id = format!("a{index}");
+            store
+                .add_attempt(&keel_store::NewAttempt {
+                    id: id.clone(),
+                    run_id: "r".into(),
+                    step_id: (*step).into(),
+                    kind: (*kind).into(),
+                    role: (*role).into(),
+                    round: 0,
+                    number: index as i64 + 1,
+                    state: *state,
+                    model_requested: "fake".into(),
+                    effort: None,
+                    tools: "readOnly".into(),
+                    max_turns: None,
+                    max_budget_usd: None,
+                    language: "en".into(),
+                    prompt: String::new(),
+                    system_prompt_sources: "[]".into(),
+                    settings: "{}".into(),
+                    session_id: id.clone(),
+                    resumed_from: None,
+                    workspace: String::new(),
+                    raw_path: String::new(),
+                    started_at: keel_store::now(),
+                })
+                .unwrap();
+            store
+                .patch_attempt(&id, &[("result_text", Value::Text((*text).into()))])
+                .unwrap();
+        }
+        store.attempts_of_run("r").unwrap()
+    }
+
+    fn asked(rows: &[Row]) -> Option<String> {
+        let attempts = recorded(rows);
+        specifying_attempt(&attempts)
+            .and_then(asked_text)
+            .map(str::to_owned)
+    }
+
+    use AttemptState::{Failed, Succeeded};
+
+    #[test]
+    fn a_workflow_saved_before_the_role_says_what_was_asked_in_a_step_called_spec() {
+        assert_eq!(
+            asked(&[
+                (
+                    "spec",
+                    "agent",
+                    "worker",
+                    Succeeded,
+                    "  add returns the sum\n"
+                ),
+                ("builder", "agent", "worker", Succeeded, "Fixed it."),
+            ])
+            .as_deref(),
+            Some("add returns the sum")
+        );
+    }
+
+    #[test]
+    fn the_specifiers_role_counts_for_more_than_a_steps_name() {
+        assert_eq!(
+            asked(&[
+                ("plan", "agent", "specifier", Succeeded, "From the role"),
+                ("spec", "agent", "worker", Succeeded, "From the name"),
+            ])
+            .as_deref(),
+            Some("From the role")
+        );
+    }
+
+    #[test]
+    fn what_was_asked_is_the_latest_attempt_that_worked() {
+        assert_eq!(
+            asked(&[
+                ("spec", "agent", "worker", Succeeded, "First try"),
+                ("spec", "agent", "worker", Succeeded, "Second try"),
+                ("spec", "agent", "worker", Failed, "Third try"),
+            ])
+            .as_deref(),
+            Some("Second try")
+        );
+    }
+
+    #[test]
+    fn nothing_says_what_was_asked_without_an_agent_that_wrote_it() {
+        assert_eq!(
+            asked(&[("builder", "agent", "worker", Succeeded, "Fixed it.")]),
+            None,
+            "no such step"
+        );
+        assert_eq!(
+            asked(&[("spec", "check", "worker", Succeeded, "make test")]),
+            None,
+            "a check that happens to have that name"
+        );
+        assert_eq!(
+            asked(&[("spec", "agent", "worker", Succeeded, "  \n")]),
+            None,
+            "it wrote nothing"
+        );
+    }
 
     fn worker(id: &str, tools: ToolProfile) -> StepSpec {
         agent(id, "opus", tools, StepRole::Worker, &[], "do it")

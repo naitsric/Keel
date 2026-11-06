@@ -194,6 +194,7 @@ impl World {
                 workflow: steps,
                 language: "en".into(),
                 source_issue: None,
+                saved_workflow: None,
             })
             .unwrap()
     }
@@ -514,6 +515,7 @@ fn an_invalid_workflow_is_refused_before_anything_runs() {
             workflow: vec![WorkflowStep::Deliver { id: "pr".into() }],
             language: "en".into(),
             source_issue: None,
+            saved_workflow: None,
         })
         .unwrap_err();
     assert!(matches!(

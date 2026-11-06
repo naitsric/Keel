@@ -215,6 +215,7 @@
     "stop": "Detener",
     "generated": "Escrito por el agente",
     "whatItDid": "Qué hizo",
+    "whatWasAsked": "Qué se pidió",
     "noResultYet": "Sigue trabajando. Su explicación aparece aquí cuando termine.",
     "noResult": "Terminó sin dar una explicación.",
     "whatChanged": "Qué cambió",
@@ -249,10 +250,21 @@
     "pending": "Sin empezar",
     "pullRequest": "Pull request #{{number}}",
     "openPr": "Abrir en GitHub",
+    "pr": {
+      "draft": "Pull request todavía en borrador",
+      "open": "Pull request abierto",
+      "merged": "Pull request mergeado",
+      "closed": "Pull request cerrado sin mergear",
+      "mergedAt": "Pull request mergeado el {{when}}",
+      "closedAt": "Pull request cerrado sin mergear el {{when}}"
+    },
     "fromIssue": "Del issue #{{number}}",
     "base": "Basado en {{base}}",
     "decideApproval": "Aprueba o rechaza arriba.",
     "decideDelivered": "Revisa y mergea el borrador en GitHub. Keel no mergea.",
+    "decideOpen": "Revísalo y mergéalo en GitHub. Keel no mergea.",
+    "decideMerged": "Nada. El pull request se mergeó.",
+    "decideClosed": "Nada. El pull request se cerró sin mergear.",
     "decideRejected": "Nada. Lo rechazaste, y tu motivo llegará a las próximas ejecuciones de este proyecto.",
     "approvalTitle": "¿Esto debe convertirse en un pull request?",
     "approvalContinueTitle": "¿Debe seguir esta ejecución?",
@@ -274,6 +286,7 @@
     "approvalCloseHint": "Queda en el registro como rechazada. Nada sale de tu Mac.",
     "approvalWhere": "Va a",
     "approvalReadAll": "Leer todo",
+    "approvalReadAsked": "Leer todo lo que se pidió",
     "approvalExplanationTitle": "Lo que escribió el agente",
     "approvalSeeReviews": "Ver las revisiones",
     "approvalMoreFiles": "y {{count}} más",
@@ -590,7 +603,19 @@
     "draftNoDelivery": "Ninguno",
     "draftAfterApproval_one": "{{steps}} corre después de tu aprobación y antes del pull request. Lo que cambie se sube sin que lo veas. Para verlo antes, mueve tu aprobación después de ese paso.",
     "draftAfterApproval_other": "{{steps}} corren después de tu aprobación y antes del pull request. Lo que cambien se sube sin que lo veas. Para verlo antes, mueve tu aprobación después de esos pasos.",
-    "draftDiscard": "Descartar"
+    "draftDiscard": "Descartar",
+    "results": {
+      "title": "Resultados",
+      "hint": "Cómo les ha ido a las ejecuciones de cada workflow en este proyecto. No cuentan las de antes de que Keel llevara este registro.",
+      "none": "Aún no hay datos suficientes. Ningún workflow ha corrido en este proyecto desde que Keel lleva este registro.",
+      "runs": "Ejecuciones",
+      "merged": "Pull requests mergeados",
+      "closed": "Cerrados sin mergear",
+      "cost": "Costo promedio por pull request mergeado",
+      "rounds": "Veces devuelto, en promedio",
+      "notEnough": "Aún no hay datos suficientes",
+      "enoughNote": "Los promedios aparecen a partir de {{min}} pull requests mergeados o {{min}} ejecuciones terminadas. Menos que eso dice poco."
+    }
   },
   "flow": {
     "groupLabel": "{{step}}, a la vez",
@@ -693,6 +718,12 @@
       "rejected": "Rechazada",
       "abandoned": "Abandonada",
       "couldNotStart": "No pudo empezar"
+    },
+    "pr": {
+      "draft": "Pull request en borrador",
+      "open": "Pull request abierto",
+      "merged": "Mergeado",
+      "closed": "Cerrado sin mergear"
     },
     "needed": {
       "waitingApproval": "Ábrela para aprobar o rechazar.",

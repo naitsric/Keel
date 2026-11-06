@@ -12,7 +12,7 @@ import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
 import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
-import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, Project, ProjectAdded, Reason, Run, RunRow, WorkflowStep, WorkflowDraft } from "../src/lib/api";
+import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, PrState, Project, ProjectAdded, Reason, Run, RunRow, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
 import { useApp } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -89,7 +89,10 @@ const workflow: WorkflowStep[] = [
 const delivered = params.get("flow") === "delivered";
 const waiting = params.get("flow") === "approval" || params.get("flow") === "limit" || delivered;
 // Variants of an approval: check=none, reviews=none, changes=none (the run changed nothing), long=1
-// (text that would push the buttons away), gate=build (asks before building), gate=end (never delivers).
+// (text that would push the buttons away, what was asked included), gate=build (asks before building,
+// where what was asked is already what the card shows), gate=end (never delivers). asked=none has no
+// step that says what was asked. With flow=delivered, pr=draft|open|merged|closed is what became of the
+// pull request, and pr=unknown is one Keel hasn't looked at yet.
 const noCheck = params.get("check") === "none";
 const noReviews = params.get("reviews") === "none";
 const noChanges = params.get("changes") === "none";
@@ -100,7 +103,8 @@ const LONG_FILES = Array.from({ length: 14 }, (_, i) => `src/modules/billing/inv
 const builtText = noChanges ? "I changed nothing. The bug in `add` is already fixed on main, in commit 8a3f21c, and `python3 test_calc.py` passes without touching the code.\n\nThere's no change to review. You can close this issue." : long ? LONG_TEXT : "I fixed `add` in calc.py: it subtracted instead of adding.\n\nTests: `make test` passes.";
 const builtFiles = noChanges ? [] : [...(long ? LONG_FILES : ["calc.py"]), ...(params.get("workflows") === "1" ? [".github/workflows/ci.yml"] : [])];
 const round = params.get("round") === "2" ? 1 : 0;
-const specAttempt: Attempt = { ...attempt, id: "a0", stepId: "spec", tools: "readOnly", state: "succeeded", reason: null, modelActual: "claude-opus-5-5", filesChanged: null, resultText: "1. add returns the sum.\n2. The tests pass.", finishedAt: at(2) };
+const askedLong = `The add function in calc.py has to return the sum of its two arguments, for whole numbers, negative numbers and decimals alike, because invoices, reports and the export all rely on it.\n\n${"Every caller keeps working as it does today, and the tests in test_calc.py prove each of these cases.\n".repeat(30)}`;
+const specAttempt: Attempt = { ...attempt, id: "a0", stepId: "spec", tools: "readOnly", state: "succeeded", reason: null, modelActual: "claude-opus-5-5", filesChanged: null, resultText: long ? askedLong : "1. add returns the sum.\n2. The tests pass.", finishedAt: at(2) };
 const builtAttempt: Attempt = { ...attempt, state: "succeeded", reason: null, shaAfter: "28c696fd11223344556677889900aabbccddeeff", finishedAt: at(1), rawSha256: "9f2c", resultText: builtText, filesChanged: builtFiles, runFiles: builtFiles };
 const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", round, state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12" };
 const approvalAttempt: Attempt = { ...attempt, id: "a3", stepId: "approval", kind: "approval", tools: "none", round, state: delivered ? "succeeded" : "waitingApproval", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, rawSha256: null, finishedAt: delivered ? at(0) : null };
@@ -118,7 +122,8 @@ const reviews: Attempt[] = [
 ];
 const built = [builtAttempt, ...(round > 0 ? [reworkAttempt] : [])];
 const gated = gate === "build" ? [specAttempt, approvalAttempt] : gate === "end" ? [specAttempt, builtAttempt, approvalAttempt] : null;
-const attemptsList: Attempt[] = params.get("flow") === "limit" ? [specAttempt, builtAttempt, checkAttempt, ...reviews] : gated ?? (waiting ? [specAttempt, ...built, ...(noCheck ? [] : [checkAttempt]), ...(noReviews ? [] : reviews), approvalAttempt, ...(delivered ? [prAttempt] : [])] : [attempt]);
+const asked = params.get("asked") === "none" ? [] : [specAttempt];
+const attemptsList: Attempt[] = params.get("flow") === "limit" ? [specAttempt, builtAttempt, checkAttempt, ...reviews] : gated ?? (waiting ? [...asked, ...built, ...(noCheck ? [] : [checkAttempt]), ...(noReviews ? [] : reviews), approvalAttempt, ...(delivered ? [prAttempt] : [])] : [attempt]);
 const stepNamed = (id: string) => workflow.filter((step) => step.id === id);
 const runWorkflow: WorkflowStep[] =
   gate === "build"
@@ -189,6 +194,8 @@ const mapNotes = [
   { ...note(3, "Screens are in web/src/views and share web/src/ui/primitives.tsx.", ["web/src/views", "web/src/ui/primitives.tsx"]), stale: false, included: params.get("full") !== "1" },
 ];
 const proposals: BrainNote[] = [{ ...note(7, "Migrations must be added in order: the app refuses to start if one is missing.", ["db/migrations"]), kind: "learning", state: "proposed", evidence: "The check failed with 'migration 12 missing' until the builder renamed the file." }];
+const prShown = params.get("pr") ?? "draft";
+const prState: PrState | null = delivered && prShown !== "unknown" ? (prShown as PrState) : null;
 const run: Run = {
   id: "r1",
   startedBy: params.get("mcp") === "on" ? "Claude Code" : null,
@@ -202,6 +209,11 @@ const run: Run = {
   branch: "keel/5e882d0f",
   prUrl: delivered ? "https://github.com/acme/app/pull/12" : null,
   prNumber: delivered ? 12 : null,
+  workflowId: "builtin:full",
+  workflowName: "Full, with reviews",
+  prState,
+  prStateAt: prState ? at(30) : null,
+  prCheckedAt: prState ? at(2) : null,
   round: flowScene?.round ?? (params.get("round") === "2" ? 1 : 0),
   createdAt: at(4),
   finishedAt: delivered ? at(0) : null,
@@ -367,7 +379,7 @@ const setupAccounts = (account: string | null | undefined) => {
 
 const PR = "https://github.com/acme/app/pull/12";
 const issueOf = (number: number, title: string) => ({ number, title, author: "someone", url: `https://github.com/acme/app/issues/${number}` });
-const boardCard = (id: string, title: string, column: BoardColumn, extra: Partial<BoardCard> = {}): BoardCard => ({ id, projectId: "p1", title, body: "", issue: null, column, position: 0, runId: null, runState: null, reason: null, prUrl: null, rejection: null, startBlocked: null, createdAt: at(100), ...extra });
+const boardCard = (id: string, title: string, column: BoardColumn, extra: Partial<BoardCard> = {}): BoardCard => ({ id, projectId: "p1", title, body: "", issue: null, column, position: 0, runId: null, runState: null, reason: null, prUrl: null, prState: null, prStateAt: null, rejection: null, startBlocked: null, createdAt: at(100), ...extra });
 const inRun = (runState: AttemptState, reason: Reason | null = null) => ({ runId: "r1", runState, reason });
 let boardCards: BoardCard[] =
   params.get("cards") === "none"
@@ -392,7 +404,11 @@ let boardCards: BoardCard[] =
         boardCard("c17", "Upgrade the database driver", "humanReview", inRun("stalled", REASONS.stalled ?? null)),
         boardCard("c18", "Add tests to the importer", "humanReview", inRun("interrupted", { code: "agentLost" })),
         boardCard("c19", "Split the settings page", "humanReview", inRun("stopped")),
-        boardCard("c20", "Show the invoice number on the receipt", "done", { ...inRun("succeeded"), prUrl: PR }),
+        boardCard("c20", "Show the invoice number on the receipt", "done", { ...inRun("succeeded"), prUrl: PR, prState: "merged", prStateAt: at(600) }),
+        boardCard("c23", "Add a filter to the orders list", "done", { ...inRun("succeeded"), prUrl: PR, prState: "closed", prStateAt: at(2000) }),
+        boardCard("c24", "Show the plan name in the header", "done", { ...inRun("succeeded"), prUrl: PR, prState: "open", prStateAt: at(90) }),
+        boardCard("c25", "Trim the weekly email", "done", { ...inRun("succeeded"), prUrl: PR, prState: "draft", prStateAt: at(20) }),
+        boardCard("c26", "A pull request Keel hasn't looked at yet", "done", { ...inRun("succeeded"), prUrl: PR }),
         boardCard("c21", "Write the map of the project", "done", inRun("succeeded")),
         boardCard("c22", "Rotate the payments key", "done", { ...inRun("succeeded"), projectId: "p2", prUrl: PR }),
       ];
@@ -412,6 +428,18 @@ const issues: Issue[] = [
   { ...issueOf(31, "Typo in the password reset email"), body: "b" },
 ];
 const blockedBy = (code: string) => ({ code: "blocked", reason: { code }, detail: null });
+
+// The results on the Workflows page. results=none has no runs, and results=few has too few to average.
+const workflowResults: WorkflowResults[] =
+  params.get("results") === "none"
+    ? []
+    : params.get("results") === "few"
+      ? [{ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 2, finished: 1, merged: 1, closed: 0, costPerMergedUsd: 2.4, averageRounds: 1 }]
+      : [
+          { workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 24, finished: 22, merged: 15, closed: 3, costPerMergedUsd: 3.12, averageRounds: 0.7 },
+          { workflowId: "mine", workflowName: "Reviews only", runs: 6, finished: 5, merged: 1, closed: 2, costPerMergedUsd: 1.8, averageRounds: 0 },
+          { workflowId: "gone", workflowName: "A workflow since deleted", runs: 9, finished: 9, merged: 4, closed: 1, costPerMergedUsd: 0.86, averageRounds: 0.25 },
+        ];
 
 // Same as the backend: the card lands at that index of the lane, and the rest close up around it.
 function moveBoardCard(cardId: string, lane: "backlog" | "todo", index: number) {
@@ -478,6 +506,8 @@ mockIPC((command, args) => {
         { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: [...workflow, learnerStep] },
         { id: "mine", name: i18next.language === "es" ? "Solo revisiones" : "Reviews only", builtin: false, steps: workflow.slice(3) },
       ];
+    case "workflow_results":
+      return workflowResults;
     case "workflow_drafts_list":
       return params.get("drafts") === "1" ? draftsWaiting : [];
     case "workflow_draft_save":

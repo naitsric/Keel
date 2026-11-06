@@ -7,7 +7,9 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use keel_core::{AttemptState, BoardColumn, CardLane, EnvVar, Reason, Service, card_column};
+use keel_core::{
+    AttemptState, BoardColumn, CardLane, EnvVar, PrState, Reason, Service, card_column,
+};
 pub use rusqlite::types as rusqlite_value;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
@@ -243,6 +245,15 @@ const MIGRATIONS: &[&str] = &[
     r#"
     alter table project add column removed_at text;
 "#,
+    // 10: Which workflow a run used, since its copy only holds the steps, and what became of its
+    // pull request as of the last time Keel looked. Older runs have nulls.
+    r#"
+    alter table run add column workflow_id text;
+    alter table run add column workflow_name text;
+    alter table run add column pr_state text;
+    alter table run add column pr_state_at text;
+    alter table run add column pr_checked_at text;
+"#,
 ];
 
 /// The attempt that says where a run stands, for a query that calls its run `r`. Of each step's
@@ -391,6 +402,15 @@ pub struct Run {
     pub finished_at: Option<String>,
     /// The MCP client that started it. None when a person did, in the app.
     pub started_by: Option<String>,
+    /// The saved workflow its steps came from, as it was called then. None for a run that had no
+    /// saved workflow, or from before Keel kept this.
+    pub workflow_id: Option<String>,
+    pub workflow_name: Option<String>,
+    /// What became of its pull request, as of `pr_checked_at`. None until Keel knows.
+    pub pr_state: Option<PrState>,
+    /// When that happened, going by GitHub.
+    pub pr_state_at: Option<String>,
+    pub pr_checked_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -402,9 +422,15 @@ pub struct NewRun {
     pub workflow: String,
     pub language: String,
     pub source_issue: Option<String>,
+    pub workflow_id: Option<String>,
+    pub workflow_name: Option<String>,
 }
 
-const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by";
+const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by, workflow_id, workflow_name, pr_state, pr_state_at, pr_checked_at";
+
+fn pr_state_from(text: Option<String>) -> Option<PrState> {
+    text.as_deref().and_then(PrState::parse)
+}
 
 fn run_from(r: &Row) -> rusqlite::Result<Run> {
     let source_issue: Option<String> = r.get(7)?;
@@ -425,6 +451,11 @@ fn run_from(r: &Row) -> rusqlite::Result<Run> {
         finished_at: r.get(12)?,
         round: r.get(13)?,
         started_by: r.get(14)?,
+        workflow_id: r.get(15)?,
+        workflow_name: r.get(16)?,
+        pr_state: pr_state_from(r.get(17)?),
+        pr_state_at: r.get(18)?,
+        pr_checked_at: r.get(19)?,
     })
 }
 
@@ -616,6 +647,27 @@ pub struct Totals {
     pub cost_usd: f64,
 }
 
+/// How a workflow's runs in one project have gone. A run that doesn't say which workflow it used
+/// isn't in here: it had no saved one, or it's from before Keel kept this.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowResults {
+    pub workflow_id: String,
+    /// What its latest run called it. It may have been renamed or deleted since.
+    pub workflow_name: String,
+    pub runs: i64,
+    /// Those that ended, however they ended.
+    pub finished: i64,
+    /// Pull requests merged, and closed without merging, as of the last time Keel looked.
+    pub merged: i64,
+    pub closed: i64,
+    /// What a run whose pull request got merged cost on average. None if none did.
+    pub cost_per_merged_usd: Option<f64>,
+    /// How many times a finished run was sent back on average. None if none finished, since an open
+    /// run's count isn't final.
+    pub average_rounds: Option<f64>,
+}
+
 /// A card on the board, with what its column depends on. The issue is a copy taken on import.
 #[derive(Debug, Clone)]
 pub struct Card {
@@ -638,6 +690,8 @@ pub struct Card {
     pub run_state: Option<AttemptState>,
     pub run_reason: Option<serde_json::Value>,
     pub pr_url: Option<String>,
+    pub pr_state: Option<PrState>,
+    pub pr_state_at: Option<String>,
     /// What the person wrote when rejecting it. Empty if they wrote nothing.
     pub rejection: Option<String>,
 }
@@ -687,6 +741,8 @@ fn card_from(r: &Row) -> rusqlite::Result<Card> {
         run_state,
         run_reason: json_col(r, "attempt_reason")?,
         pr_url: r.get("run_pr_url")?,
+        pr_state: pr_state_from(r.get("run_pr_state")?),
+        pr_state_at: r.get("run_pr_state_at")?,
         // A rejection with nothing written leaves no decision, and is still a rejection.
         rejection: (run_state == Some(AttemptState::Rejected))
             .then(|| rejection.unwrap_or_default()),
@@ -701,6 +757,7 @@ fn read_cards<P: rusqlite::Params>(
 ) -> rusqlite::Result<Vec<Card>> {
     let mut stmt = conn.prepare(&format!(
         "select c.*, r.created_at as run_started_at, r.finished_at as run_finished_at, r.pr_url as run_pr_url,
+                r.pr_state as run_pr_state, r.pr_state_at as run_pr_state_at,
                 a.state as attempt_state, a.reason as attempt_reason,
                 (select d.text from decision d where d.attempt_id = a.id and d.answer = 'reject'
                  order by d.seq desc limit 1) as rejection
@@ -744,9 +801,9 @@ fn bottom_of_backlog(conn: &Connection, project_id: &str) -> rusqlite::Result<i6
 
 fn insert_run(conn: &Connection, run: &NewRun) -> rusqlite::Result<()> {
     conn.execute(
-        "insert into run (id, project_id, title, request, workflow, language, source_issue, created_at)
-         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![run.id, run.project_id, run.title, run.request, run.workflow, run.language, run.source_issue, now()],
+        "insert into run (id, project_id, title, request, workflow, language, source_issue, created_at, workflow_id, workflow_name)
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        params![run.id, run.project_id, run.title, run.request, run.workflow, run.language, run.source_issue, now(), run.workflow_id, run.workflow_name],
     )?;
     Ok(())
 }
@@ -1160,6 +1217,65 @@ impl Store {
             "select {RUN_COLUMNS} from run where finished_at is null order by created_at"
         ))?;
         let rows = stmt.query_map([], run_from)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Runs with a pull request that could still change and that nobody has looked at since `before`,
+    /// the longest waiting first. A merged one can't change. A closed one can still be reopened. A
+    /// removed project's runs wait until it's back.
+    pub fn runs_with_pr_due(&self, before: &str, limit: i64) -> Result<Vec<Run>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "select {RUN_COLUMNS} from run
+             where pr_url is not null
+               and coalesce(pr_state, '') <> 'merged'
+               and (pr_checked_at is null or pr_checked_at < ?1)
+               and project_id in (select id from project where removed_at is null)
+             order by pr_checked_at is not null, pr_checked_at, created_at
+             limit ?2"
+        ))?;
+        let rows = stmt.query_map(params![before, limit], run_from)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn workflow_results(&self, project_id: &str) -> Result<Vec<WorkflowResults>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select r.workflow_id,
+                    (select latest.workflow_name from run latest
+                     where latest.project_id = r.project_id and latest.workflow_id = r.workflow_id
+                     order by latest.created_at desc, latest.rowid desc limit 1),
+                    count(*),
+                    coalesce(sum(r.finished_at is not null), 0),
+                    coalesce(sum(r.pr_state = 'merged'), 0),
+                    coalesce(sum(r.pr_state = 'closed'), 0),
+                    coalesce(sum(case when r.pr_state = 'merged'
+                                      then (select coalesce(sum(a.cost_usd), 0) from attempt a where a.run_id = r.id)
+                                      end), 0),
+                    coalesce(sum(case when r.finished_at is not null then r.round end), 0)
+             from run r
+             where r.project_id = ?1 and r.workflow_id is not null
+             group by r.workflow_id
+             order by max(r.created_at) desc",
+        )?;
+        let rows = stmt.query_map([project_id], |r| {
+            let workflow_id: String = r.get(0)?;
+            let workflow_name: Option<String> = r.get(1)?;
+            let finished: i64 = r.get(3)?;
+            let merged: i64 = r.get(4)?;
+            let merged_cost: f64 = r.get(6)?;
+            let rounds: i64 = r.get(7)?;
+            Ok(WorkflowResults {
+                workflow_name: workflow_name.unwrap_or_else(|| workflow_id.clone()),
+                workflow_id,
+                runs: r.get(2)?,
+                finished,
+                merged,
+                closed: r.get(5)?,
+                cost_per_merged_usd: (merged > 0).then(|| merged_cost / merged as f64),
+                average_rounds: (finished > 0).then(|| rounds as f64 / finished as f64),
+            })
+        })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -1823,6 +1939,8 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
+                workflow_id: None,
+                workflow_name: None,
             })
             .unwrap();
         store
@@ -1925,6 +2043,11 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 alter table run drop column workflow_id;
+                 alter table run drop column workflow_name;
+                 alter table run drop column pr_state;
+                 alter table run drop column pr_state_at;
+                 alter table run drop column pr_checked_at;
                  alter table project drop column removed_at;
                  drop table card;
                  alter table project drop column default_workflow;
@@ -2316,6 +2439,244 @@ mod tests {
     }
 
     #[test]
+    fn runs_from_before_workflows_and_pull_requests_were_kept_load_with_nothing_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        // Exactly what the last release left, with a run that opened a pull request.
+        let before = 9;
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..before] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.pragma_update(None, "user_version", before as i64)
+                .unwrap();
+            conn.execute_batch(
+                "insert into project (id, name, path, created_at) values ('p', 'demo', '/demo', 'then');
+                 insert into run (id, project_id, title, created_at, pr_url, pr_number, finished_at)
+                     values ('r', 'p', 'old', 'then', 'https://github.com/acme/app/pull/3', 3, 'then');
+                 insert into card (id, project_id, title, lane, position, run_id, created_at)
+                     values ('c', 'p', 'old', 'started', 0, 'r', 'then');",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let run = store.run("r").unwrap();
+        assert_eq!(run.pr_number, Some(3));
+        assert_eq!(run.workflow_id, None);
+        assert_eq!(run.workflow_name, None);
+        assert_eq!(run.pr_state, None);
+        assert_eq!(run.pr_state_at, None);
+        assert_eq!(run.pr_checked_at, None);
+        let cards = store.cards("p").unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].pr_state, None);
+        assert_eq!(cards[0].pr_url, run.pr_url);
+        assert_eq!(cards[0].column(), BoardColumn::Done);
+        assert!(
+            store.workflow_results("p").unwrap().is_empty(),
+            "it doesn't say which workflow it used, so it counts for none"
+        );
+        // It can still find out what became of its pull request.
+        let due = store.runs_with_pr_due(&now(), 10).unwrap();
+        assert_eq!(due.len(), 1);
+    }
+
+    /// A run in project `p` with a pull request Keel last looked at then, or not yet.
+    fn run_with_pr(store: &Store, id: &str, state: Option<&str>, checked: Option<&str>) {
+        store
+            .add_run(&NewRun {
+                id: id.into(),
+                project_id: "p".into(),
+                title: id.into(),
+                request: id.into(),
+                workflow: "[]".into(),
+                language: "en".into(),
+                source_issue: None,
+                workflow_id: None,
+                workflow_name: None,
+            })
+            .unwrap();
+        let text = |value: Option<&str>| value.map_or(Value::Null, |v| Value::Text(v.into()));
+        store
+            .patch_run(
+                id,
+                &[
+                    (
+                        "pr_url",
+                        Value::Text(format!("https://github.com/acme/app/pull/{id}")),
+                    ),
+                    ("pr_state", text(state)),
+                    ("pr_checked_at", text(checked)),
+                ],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn only_a_pull_request_that_can_still_change_and_has_waited_long_enough_is_due() {
+        let (_dir, store) = store();
+        seeded(&store);
+        run_with_pr(&store, "never", None, None);
+        run_with_pr(
+            &store,
+            "older",
+            Some("draft"),
+            Some("2026-01-01T00:00:00.000Z"),
+        );
+        run_with_pr(
+            &store,
+            "oldest",
+            Some("open"),
+            Some("2025-01-01T00:00:00.000Z"),
+        );
+        run_with_pr(
+            &store,
+            "closed",
+            Some("closed"),
+            Some("2026-02-01T00:00:00.000Z"),
+        );
+        run_with_pr(
+            &store,
+            "merged",
+            Some("merged"),
+            Some("2025-01-01T00:00:00.000Z"),
+        );
+        run_with_pr(
+            &store,
+            "recent",
+            Some("open"),
+            Some("2026-11-01T00:00:00.000Z"),
+        );
+
+        let before = "2026-06-01T00:00:00.000Z";
+        let due = |limit| -> Vec<String> {
+            store
+                .runs_with_pr_due(before, limit)
+                .unwrap()
+                .into_iter()
+                .map(|run| run.id)
+                .collect()
+        };
+        // Never looked at first, then the longest waiting. `r` has no pull request at all.
+        assert_eq!(due(10), ["never", "oldest", "older", "closed"]);
+        assert_eq!(due(2), ["never", "oldest"]);
+
+        store
+            .lock()
+            .execute("update project set removed_at = 'now' where id = 'p'", [])
+            .unwrap();
+        assert!(due(10).is_empty(), "a removed project's runs wait");
+    }
+
+    #[test]
+    fn results_count_each_workflow_on_its_own_and_only_what_is_final() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let add = |id: &str,
+                   workflow: Option<(&str, &str)>,
+                   state: Option<&str>,
+                   round: i64,
+                   finished: bool,
+                   cost: f64| {
+            store
+                .add_run(&NewRun {
+                    id: id.into(),
+                    project_id: "p".into(),
+                    title: id.into(),
+                    request: id.into(),
+                    workflow: "[]".into(),
+                    language: "en".into(),
+                    source_issue: None,
+                    workflow_id: workflow.map(|w| w.0.into()),
+                    workflow_name: workflow.map(|w| w.1.into()),
+                })
+                .unwrap();
+            store
+                .patch_run(
+                    id,
+                    &[
+                        (
+                            "pr_state",
+                            state.map_or(Value::Null, |s| Value::Text(s.into())),
+                        ),
+                        ("round", Value::Integer(round)),
+                        (
+                            "finished_at",
+                            if finished {
+                                Value::Text(now())
+                            } else {
+                                Value::Null
+                            },
+                        ),
+                    ],
+                )
+                .unwrap();
+            let attempt = format!("{id}-a");
+            store
+                .add_attempt(&new_attempt(
+                    &attempt,
+                    id,
+                    "builder",
+                    AttemptState::Succeeded,
+                ))
+                .unwrap();
+            store
+                .patch_attempt(&attempt, &[("cost_usd", Value::Real(cost))])
+                .unwrap();
+        };
+        let full = Some(("builtin:full", "Full"));
+        add("merged-1", full, Some("merged"), 2, true, 1.0);
+        add("merged-2", full, Some("merged"), 0, true, 3.0);
+        add("closed", full, Some("closed"), 1, true, 50.0);
+        // Its rounds aren't final, and what it cost so far bought no merged pull request.
+        add("still-going", full, None, 9, false, 50.0);
+        add(
+            "simple",
+            Some(("builtin:simple", "Simple")),
+            None,
+            0,
+            true,
+            7.0,
+        );
+        add("no-workflow", None, Some("merged"), 5, true, 100.0);
+        // A later run has the workflow under a new name.
+        add("renamed", Some(("mine", "Old name")), None, 0, false, 0.0);
+        store
+            .lock()
+            .execute(
+                "update run set created_at = '2020-01-01' where id = 'renamed'",
+                [],
+            )
+            .unwrap();
+        add("renamed-2", Some(("mine", "New name")), None, 0, false, 0.0);
+
+        let results = store.workflow_results("p").unwrap();
+        let of = |id: &str| results.iter().find(|r| r.workflow_id == id).unwrap();
+        assert_eq!(results.len(), 3, "{results:?}");
+        assert_eq!(
+            *of("builtin:full"),
+            WorkflowResults {
+                workflow_id: "builtin:full".into(),
+                workflow_name: "Full".into(),
+                runs: 4,
+                finished: 3,
+                merged: 2,
+                closed: 1,
+                cost_per_merged_usd: Some(2.0),
+                average_rounds: Some(1.0),
+            }
+        );
+        assert_eq!(of("builtin:simple").merged, 0);
+        assert_eq!(of("builtin:simple").cost_per_merged_usd, None);
+        assert_eq!(of("builtin:simple").average_rounds, Some(0.0));
+        assert_eq!(of("mine").workflow_name, "New name");
+        assert_eq!(of("mine").average_rounds, None, "none has finished");
+        assert!(store.workflow_results("nobody").unwrap().is_empty());
+    }
+
+    #[test]
     fn an_issue_imported_twice_is_one_card() {
         let (_dir, store) = store();
         seeded(&store);
@@ -2658,6 +3019,8 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
+                workflow_id: None,
+                workflow_name: None,
             })
             .unwrap();
         assert_eq!(store.working_runs().unwrap(), 1);
@@ -2675,6 +3038,8 @@ mod tests {
             workflow: "[]".into(),
             language: "en".into(),
             source_issue: None,
+            workflow_id: None,
+            workflow_name: None,
         };
         card(&store, "c");
         assert!(store.move_card("c", CardLane::Todo, 0, "en").unwrap());
@@ -2741,6 +3106,8 @@ mod tests {
                         workflow: "[]".into(),
                         language: "en".into(),
                         source_issue: None,
+                        workflow_id: None,
+                        workflow_name: None,
                     },
                     id,
                 )
@@ -3065,6 +3432,11 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table run drop column workflow_id;
+                 alter table run drop column workflow_name;
+                 alter table run drop column pr_state;
+                 alter table run drop column pr_state_at;
+                 alter table run drop column pr_checked_at;
                  alter table project drop column removed_at;",
             )
             .unwrap();

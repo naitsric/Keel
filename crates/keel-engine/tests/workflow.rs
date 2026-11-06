@@ -196,6 +196,7 @@ impl World {
                 workflow: full_workflow("en", "opus", "sonnet", check),
                 language: "en".into(),
                 source_issue: None,
+                saved_workflow: None,
             })
             .unwrap()
     }
@@ -666,6 +667,7 @@ fn a_workflow_that_cannot_deliver_is_refused_before_any_agent_runs() {
             workflow: full_workflow("en", "opus", "sonnet", None),
             language: "en".into(),
             source_issue: None,
+            saved_workflow: None,
         })
         .unwrap_err();
     assert!(matches!(
@@ -824,6 +826,7 @@ fn an_issue_is_imported_as_data_and_linked_from_the_pull_request() {
             workflow: full_workflow("en", "opus", "sonnet", None),
             language: "en".into(),
             source_issue: Some(issue),
+            saved_workflow: None,
         })
         .unwrap();
     let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);

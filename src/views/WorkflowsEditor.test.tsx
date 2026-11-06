@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import i18next from "../i18n";
-import type { Project, StepSpec, Workflow, WorkflowDraft, WorkflowStep } from "../lib/api";
+import type { Project, StepSpec, Workflow, WorkflowDraft, WorkflowResults, WorkflowStep } from "../lib/api";
 import { useApp } from "../lib/store";
 import { WorkflowsView } from "./WorkflowsView";
 
@@ -34,6 +34,7 @@ describe("the workflow editor", () => {
   let drafts: WorkflowDraft[];
   let draftSaves: { projectId: string; draftId: string; workflow: Workflow }[];
   let discarded: string[];
+  let results: WorkflowResults[];
 
   const flush = () => act(async () => {});
   const open = async () => {
@@ -76,7 +77,9 @@ describe("the workflow editor", () => {
     drafts = [];
     draftSaves = [];
     discarded = [];
+    results = [];
     mockIPC((command, args) => {
+      if (command === "workflow_results") return results;
       if (command === "workflows_list") return [BUILTIN, MINE, ...copies];
       if (command === "workflow_drafts_list") return drafts;
       if (command === "workflow_draft_save") {
@@ -959,6 +962,64 @@ describe("the workflow editor", () => {
       expect(buttonWith("Agregar un paso antes de builder")).not.toBeNull();
       expect(buttonWith("Mover antes")).not.toBeNull();
       expect(buttonWith("Mover después")).not.toBeNull();
+    });
+  });
+  describe("the results", () => {
+    const of = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, ...fields });
+    const cells = (row: string) => [...document.querySelectorAll("tr")].find((tr) => tr.querySelector("th")?.textContent === row)?.querySelectorAll("td");
+
+    it("say plainly that there's nothing to go on yet", async () => {
+      await open();
+      expect(page()).toContain("There isn't enough data yet");
+      expect(document.querySelector("table")).toBeNull();
+    });
+
+    it("compare the workflows side by side, in the order of the list", async () => {
+      results = [of({ workflowId: "mine", workflowName: "An old name", runs: 8, finished: 8, merged: 4, closed: 2, costPerMergedUsd: 0.5, averageRounds: 1.25 }), of({ runs: 30, finished: 30, merged: 20, closed: 5, costPerMergedUsd: 3.2, averageRounds: 0 })];
+      await open();
+      const headers = [...document.querySelectorAll("thead th")].map((th) => th.textContent);
+      expect(headers).toEqual(["Full, with reviews", "Mine"]);
+      const texts = (row: string) => [...(cells(row) ?? [])].map((td) => td.textContent);
+      expect(texts("Runs")).toEqual(["30", "8"]);
+      expect(texts("Pull requests merged")).toEqual(["20", "4"]);
+      expect(texts("Closed without merging")).toEqual(["5", "2"]);
+      expect(texts("Average cost per merged pull request")).toEqual(["$3.20", "$0.50"]);
+      expect(texts("Average times sent back")).toEqual(["0", "1.3"]);
+    });
+
+    it("don't average too few runs, and say why", async () => {
+      results = [of({ runs: 2, finished: 2, merged: 1, closed: 1, costPerMergedUsd: 9, averageRounds: 2 })];
+      await open();
+      expect(cells("Runs")?.[0].textContent).toBe("2");
+      expect(cells("Average cost per merged pull request")?.[0].textContent).toBe("Not enough data yet");
+      expect(cells("Average times sent back")?.[0].textContent).toBe("Not enough data yet");
+      expect(page()).toContain("Averages show from 3 merged pull requests");
+      expect(page()).not.toContain("$9");
+    });
+
+    it("keep a workflow since deleted, under the name its runs knew", async () => {
+      results = [of({ workflowId: "gone", workflowName: "Since deleted", runs: 1 })];
+      await open();
+      expect(document.querySelector("thead th")?.textContent).toBe("Since deleted");
+    });
+
+    it("are of the project on show, and follow it", async () => {
+      const asked: string[] = [];
+      mockIPC((command, args) => {
+        if (command === "workflow_results") asked.push((args as { projectId: string }).projectId);
+        if (command === "workflows_list") return [BUILTIN];
+        if (command === "workflow_drafts_list") return [];
+        return command === "workflow_results" ? [] : null;
+      });
+      await open();
+      expect(asked).toEqual(["p1"]);
+      const project = labelled<HTMLSelectElement>("Project", "select") as HTMLSelectElement;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set?.call(project, "p2");
+        project.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await flush();
+      expect(asked).toEqual(["p1", "p2"]);
     });
   });
 });

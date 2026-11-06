@@ -7,6 +7,7 @@ mod deliver;
 mod detect;
 mod git;
 mod prompts;
+mod pull_requests;
 mod runner;
 mod services;
 mod workflows;
@@ -27,7 +28,9 @@ use keel_harness::github::{self, Account, Gh, GhError, Issue, RepoInfo};
 use keel_harness::process::{self, SIGINT, SIGTERM};
 use keel_harness::{Tools, settings};
 use keel_store::rusqlite_value::Value;
-use keel_store::{Decision, NewAttempt, NewRun, Project, ProjectSettings, Store, now};
+use keel_store::{
+    Decision, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
+};
 pub use prompts::full_workflow;
 use serde_json::json;
 pub use workflows::{Workflow, WorkflowDraft};
@@ -79,6 +82,8 @@ pub struct Config {
     pub session_check_limit: Duration,
     /// Where git reaches GitHub. Tests point this at local repos.
     pub github_git_base: String,
+    /// How long what Keel knows about a pull request is good for, in the background.
+    pub pr_look_again: Duration,
 }
 
 impl Config {
@@ -94,8 +99,17 @@ impl Config {
             keep_awake: true,
             session_check_limit: auth::CHECK_LIMIT,
             github_git_base: "https://github.com".to_owned(),
+            pr_look_again: pull_requests::LOOK_AGAIN,
         }
     }
+}
+
+/// Which saved workflow a run's steps came from. Its copy of them doesn't say, and comparing
+/// workflows needs it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkflowRef {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +119,8 @@ pub struct StartRun {
     pub title: Option<String>,
     pub request: String,
     pub workflow: Vec<WorkflowStep>,
+    /// None for steps put together on the spot, such as a single agent or trying a command.
+    pub saved_workflow: Option<WorkflowRef>,
     /// Language for what agents write for the person.
     pub language: String,
     /// The issue this came from, kept as evidence of where the request started.
@@ -119,6 +135,7 @@ impl StartRun {
             title: None,
             request: step.prompt.clone(),
             workflow: vec![WorkflowStep::Agent(step)],
+            saved_workflow: None,
             language,
             source_issue: None,
         }
@@ -530,6 +547,7 @@ impl Engine {
                 workflow,
                 language: language.to_owned(),
                 source_issue: None,
+                saved_workflow: None,
             },
             None,
         )
@@ -634,7 +652,7 @@ impl Engine {
         Ok(status)
     }
 
-    /// Open issues of the project's repo, to import one by choosing it. Keel never polls.
+    /// Open issues of the project's repo, to import one by choosing it. Keel never polls for these.
     pub fn issues(&self, project_id: &str) -> Result<Vec<Issue>> {
         let project = self.inner.store.project(project_id)?;
         let repo = project
@@ -726,6 +744,8 @@ impl Engine {
             source_issue: request.source_issue.as_ref().map(|issue| {
                 json!({ "number": issue.number, "title": issue.title, "author": issue.author, "url": issue.url }).to_string()
             }),
+            workflow_id: request.saved_workflow.as_ref().map(|w| w.id.clone()),
+            workflow_name: request.saved_workflow.map(|w| w.name),
         };
         match card {
             Some(card) => self.inner.store.add_run_for_card(&run, card)?,
@@ -1047,6 +1067,11 @@ impl Engine {
             &self.inner.mirror(project_id).with_file_name("workflows"),
             workflow,
         )?)
+    }
+
+    /// How each workflow's runs in a project have gone, the latest used first.
+    pub fn workflow_results(&self, project_id: &str) -> Result<Vec<WorkflowResults>> {
+        Ok(self.inner.store.workflow_results(project_id)?)
     }
 
     pub fn delete_workflow(&self, project_id: &str, workflow_id: &str) -> Result<()> {

@@ -101,6 +101,7 @@ impl World {
                 workflow,
                 language: "en".into(),
                 source_issue: None,
+                saved_workflow: None,
             })
             .unwrap()
     }
@@ -633,6 +634,7 @@ fn removing_deletes_nothing_and_a_new_run_is_refused_until_it_comes_back() {
         workflow: vec![check("check", "true")],
         language: "en".into(),
         source_issue: None,
+        saved_workflow: None,
     });
     assert_eq!(blocked_reason(refused), Reason::ProjectRemoved);
     assert_eq!(

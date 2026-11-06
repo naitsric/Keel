@@ -14,6 +14,7 @@ const attempt = (fields: Partial<Attempt>) => ({ kind: "agent", role: "worker", 
 const human = attempt({ id: "human", stepId: "human", kind: "approval", tools: "none", state: "waitingApproval" });
 const builder = (files: string[], resultText = "I fixed add in calc.py.") => attempt({ id: "builder", stepId: "builder", tools: "build", resultText, filesChanged: files, runFiles: files });
 const check = attempt({ id: "check", stepId: "check", kind: "check", tools: "check", prompt: "make test" });
+const spec = (resultText: string) => attempt({ id: "spec", stepId: "spec", resultText });
 const reviewer = attempt({ id: "code", stepId: "code", role: "reviewer", output: { verdict: "approved", findings: [], summary: "Meets each criterion." } as unknown as Attempt["output"] });
 
 const deliverNext = [
@@ -255,6 +256,53 @@ describe("the approval card", () => {
     expect(page()).not.toContain("More detail");
     press("Read all");
     expect(page()).toContain("More detail");
+  });
+
+  describe("what was asked", () => {
+    it("is there at the final approval, beside what the agent did", () => {
+      show([spec("add returns the sum of its arguments."), builder(["calc.py"]), human], ["calc.py"]);
+      expect(page()).toContain("What was asked");
+      expect(page()).toContain("add returns the sum of its arguments.");
+      expect(page()).toContain("I fixed add in calc.py.");
+    });
+
+    it("keeps long text out of the card, one click away, under its own name", () => {
+      const long = `add returns the sum of its arguments, including negative ones and decimals.\n\n${"A detail nobody needs on this card. ".repeat(40)}`;
+      show([spec(long), builder(["calc.py"]), human], ["calc.py"]);
+      expect(page()).toContain("add returns the sum");
+      expect(page()).not.toContain("A detail nobody");
+      const readAll = document.querySelector<HTMLButtonElement>('button[aria-label="Read all of what was asked"]');
+      act(() => readAll?.click());
+      expect(page()).toContain("A detail nobody");
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain("What was asked");
+    });
+
+    it("has nothing more to read when it all fits", () => {
+      show([spec("add returns the sum of its arguments, including negative ones and decimals."), builder(["calc.py"]), human], ["calc.py"]);
+      expect(document.querySelector('button[aria-label="Read all of what was asked"]')).toBeNull();
+    });
+
+    it("isn't repeated at an approval right after the spec, where the card already shows it", () => {
+      const workflow = [{ type: "agent", id: "spec" }, { type: "approval", id: "human" }, { type: "agent", id: "builder" }, { type: "deliver", id: "pr" }];
+      show([spec("add returns the sum of its arguments."), human], [], workflow);
+      expect(page()).not.toContain("What was asked");
+      expect(page().match(/add returns the sum/g)).toHaveLength(1);
+    });
+
+    it("isn't there if nothing says it", () => {
+      show([builder(["calc.py"]), human], ["calc.py"]);
+      expect(page()).not.toContain("What was asked");
+      show([spec("   "), builder(["calc.py"]), human], ["calc.py"]);
+      expect(page()).not.toContain("What was asked");
+    });
+
+    it("scrolls with the rest of what's being approved, so it never pushes the buttons away", () => {
+      show([spec("add returns the sum."), builder(["calc.py"]), human], ["calc.py"]);
+      const list = document.querySelector("dl") as HTMLElement;
+      expect(list.textContent).toContain("What was asked");
+      expect(list.className).toContain("overflow-y-auto");
+      expect(list.contains(button("Reject") as HTMLElement)).toBe(false);
+    });
   });
 
   it("offers nothing to approve when the run changed nothing, and closes it as a rejection with no note", () => {

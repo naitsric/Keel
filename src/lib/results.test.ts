@@ -1,0 +1,29 @@
+import { describe, expect, it } from "vitest";
+import type { WorkflowResults } from "./api";
+import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE } from "./results";
+
+const results = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "w", workflowName: "W", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, ...fields });
+
+describe("averages", () => {
+  it("wait for enough merged pull requests or finished runs", () => {
+    const few = results({ merged: ENOUGH_FOR_AN_AVERAGE - 1, finished: ENOUGH_FOR_AN_AVERAGE - 1, costPerMergedUsd: 2, averageRounds: 1 });
+    expect(costPerMerged(few)).toBeNull();
+    expect(averageRounds(few)).toBeNull();
+    const enough = results({ merged: ENOUGH_FOR_AN_AVERAGE, finished: ENOUGH_FOR_AN_AVERAGE, costPerMergedUsd: 2, averageRounds: 0 });
+    expect(costPerMerged(enough)).toBe(2);
+    expect(averageRounds(enough)).toBe(0);
+  });
+
+  it("go by what each one counts: runs can finish without anything merged", () => {
+    const unmerged = results({ merged: 0, finished: 10, averageRounds: 1 });
+    expect(costPerMerged(unmerged)).toBeNull();
+    expect(averageRounds(unmerged)).toBe(1);
+  });
+});
+
+describe("the workflows compared", () => {
+  it("follow the list beside them and use the names they have now", () => {
+    const compared = comparedResults([results({ workflowId: "b", workflowName: "Old b" }), results({ workflowId: "gone", workflowName: "Deleted" }), results({ workflowId: "a", workflowName: "Old a" })], [{ id: "a", name: "A" }, { id: "b", name: "B" }]);
+    expect(compared.map((r) => r.workflowName)).toEqual(["A", "B", "Deleted"]);
+  });
+});

@@ -63,6 +63,7 @@ fn main() {
             workflow: full_workflow("es", &model, &model, Some("python3 test_calc.py")),
             language: "es".into(),
             source_issue: None,
+            saved_workflow: None,
         })
         .unwrap();
 

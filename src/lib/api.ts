@@ -18,6 +18,9 @@ export type AttemptState =
 
 export type ToolProfile = "readOnly" | "build";
 
+/** What became of a pull request after Keel opened it, as of the last time it looked. */
+export type PrState = "open" | "draft" | "merged" | "closed";
+
 /** A code with its data. The backend sends no sentences; `reasonText` writes them. */
 export type Reason = { code: string } & Record<string, unknown>;
 
@@ -278,6 +281,30 @@ export interface Run {
   finishedAt: string | null;
   /** The MCP client that started it. Null when a person did, in the app. */
   startedBy: string | null;
+  /** The saved workflow its steps came from. Null if it had none, or is from before Keel kept this. */
+  workflowId: string | null;
+  workflowName: string | null;
+  /** Null until Keel knows. */
+  prState: PrState | null;
+  /** When that happened, going by GitHub. */
+  prStateAt: string | null;
+  prCheckedAt: string | null;
+}
+
+/** How a workflow's runs in a project have gone. */
+export interface WorkflowResults {
+  workflowId: string;
+  /** What its latest run called it. */
+  workflowName: string;
+  runs: number;
+  /** Those that ended, however they ended. */
+  finished: number;
+  merged: number;
+  closed: number;
+  /** Null if no pull request was merged. */
+  costPerMergedUsd: number | null;
+  /** Null if no run finished. */
+  averageRounds: number | null;
 }
 
 export type WorkflowChoice =
@@ -402,6 +429,8 @@ export interface BoardCard {
   /** Of the latest attempt. */
   reason: Reason | null;
   prUrl: string | null;
+  prState: PrState | null;
+  prStateAt: string | null;
   /** What the person wrote when rejecting. It may be empty. */
   rejection: string | null;
   startBlocked: Reason | null;
@@ -438,10 +467,13 @@ export const api = {
   runProposals: (runId: string) => invoke<BrainNote[]>("run_proposals", { runId }),
   runStart: (request: RunRequest) => invoke<string>("run_start", { request }),
   runGet: (runId: string) => invoke<Run>("run_get", { runId }),
+  /** Asks Keel to see what became of the run's pull request. What it finds arrives as a change. */
+  runLookAtPr: (runId: string) => invoke<void>("run_look_at_pr", { runId }),
   runDiff: (runId: string) => invoke<string>("run_diff", { runId }),
   runAddsSecret: (runId: string) => invoke<boolean>("run_adds_secret", { runId }),
   workflowsList: (projectId: string, language: string) => invoke<Workflow[]>("workflows_list", { projectId, language }),
   workflowSave: (projectId: string, workflow: Workflow) => invoke<Workflow>("workflow_save", { projectId, workflow }),
+  workflowResults: (projectId: string) => invoke<WorkflowResults[]>("workflow_results", { projectId }),
   workflowDelete: (projectId: string, workflowId: string) => invoke<void>("workflow_delete", { projectId, workflowId }),
   workflowDraftsList: () => invoke<WorkflowDraft[]>("workflow_drafts_list"),
   workflowDraftSave: (projectId: string, draftId: string, workflow: Workflow) => invoke<Workflow>("workflow_draft_save", { projectId, draftId, workflow }),

@@ -28,13 +28,14 @@ const built = () => [attempt("spec", "succeeded"), attempt("builder", "succeeded
 const human = () => attempt("human", "waitingApproval", { kind: "approval", tools: "none", modelRequested: "" });
 
 /** What's allowed to be called by looking around a run. Anything else would be doing something. */
-const READS = ["run_get", "run_attempts", "attempt_events", "attempt_raw_check", "run_adds_secret", "run_proposals", "attempt_diff"];
+const READS = ["run_get", "run_look_at_pr", "run_attempts", "attempt_events", "attempt_raw_check", "run_adds_secret", "run_proposals", "attempt_diff"];
 
 describe("the run page's flow", () => {
   let root: Root;
   let attempts: Attempt[];
   let run: Partial<Run>;
   let calls: string[];
+  let lookFails: boolean;
 
   const settle = (ms = 20) => act(() => vi.advanceTimersByTimeAsync(ms));
   const open = async () => {
@@ -72,8 +73,10 @@ describe("the run page's flow", () => {
     attempts = [...built(), human()];
     run = { id: "r1", projectId: "p1", title: "Fix add", round: 0, workflow: WORKFLOW, branch: "keel/abc", finishedAt: null, prUrl: null };
     calls = [];
+    lookFails = false;
     mockIPC((command) => {
       calls.push(command);
+      if (command === "run_look_at_pr" && lookFails) throw { code: "internal", reason: null, detail: "no" };
       if (command === "run_get") return run;
       if (command === "run_attempts") return attempts;
       if (command === "attempt_events") return [];
@@ -93,6 +96,65 @@ describe("the run page's flow", () => {
     await act(async () => root.unmount());
     document.body.replaceChildren();
     vi.useRealTimers();
+  });
+
+  describe("what became of the pull request", () => {
+    const delivered = (fields: Partial<Run>) => {
+      attempts = [attempt("spec", "succeeded"), attempt("builder", "succeeded"), attempt("human", "succeeded"), attempt("pr", "succeeded")];
+      run = { ...run, prUrl: "https://github.com/acme/app/pull/12", prNumber: 12, finishedAt: "2026-11-06T09:00:00Z", prState: null, prStateAt: null, ...fields } as Run;
+    };
+
+    it("gets asked about when a person opens the run, once, whatever else changes", async () => {
+      await open();
+      expect(calls.filter((c) => c === "run_look_at_pr")).toEqual(["run_look_at_pr"]);
+      await update();
+      expect(calls.filter((c) => c === "run_look_at_pr")).toEqual(["run_look_at_pr"]);
+    });
+
+    it("stays quiet if asking fails", async () => {
+      lookFails = true;
+      await open();
+      expect(calls).toContain("run_look_at_pr");
+      expect(document.querySelector('[role="alert"][class*="text-danger"]')).toBeNull();
+      expect(page()).toContain("Fix add");
+    });
+
+    it("says nothing until Keel knows, and goes on saying what it did before", async () => {
+      delivered({});
+      await open();
+      expect(page()).not.toContain("merged");
+      expect(page()).toContain("Review and merge the draft on GitHub");
+    });
+
+    it("says when it was merged, and that nothing's left to decide", async () => {
+      delivered({ prState: "merged", prStateAt: "2026-11-06T10:00:00Z" });
+      await open();
+      expect(page()).toMatch(/Pull request merged on .*2026/);
+      expect(page()).toContain("Nothing. The pull request was merged.");
+      expect(page()).not.toContain("Review and merge");
+    });
+
+    it("says when it was closed without merging", async () => {
+      delivered({ prState: "closed", prStateAt: "2026-11-06T10:00:00Z" });
+      await open();
+      expect(page()).toMatch(/Pull request closed without merging on .*2026/);
+      expect(page()).toContain("Nothing. The pull request was closed without merging.");
+    });
+
+    it("doesn't call one that's ready for review a draft", async () => {
+      delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z" });
+      await open();
+      expect(page()).toContain("Pull request open");
+      expect(page()).toContain("Review and merge it on GitHub");
+      expect(page()).not.toContain("the draft");
+    });
+
+    it("says so while it's still a draft", async () => {
+      delivered({ prState: "draft", prStateAt: "2026-11-06T10:00:00Z" });
+      await open();
+      expect(page()).toContain("Pull request still a draft");
+      expect(page()).toContain("Review and merge the draft on GitHub");
+    });
   });
 
   describe("what opens", () => {

@@ -85,6 +85,18 @@ export function explainingAttempts<T extends { kind: string; tools: string; role
   return agents.slice(-1);
 }
 
+/**
+ * The attempt that says what was asked: the latest that worked of a step with the specifier's role,
+ * or else of a step called `spec`, which is how workflows saved before that role say it.
+ */
+export function specifyingAttempt<T extends { kind: string; role: string; stepId: string; state: string }>(attempts: T[]): T | undefined {
+  const latest = (applies: (attempt: T) => boolean) => [...attempts].reverse().find((a) => a.kind === "agent" && a.state === "succeeded" && applies(a));
+  return latest((a) => a.role === "specifier") ?? latest((a) => a.stepId === "spec");
+}
+
+/** What that attempt says, in words a person can read. */
+export const askedText = (attempt: { resultText: string | null }): string | null => attempt.resultText?.trim() || null;
+
 const flat = (text: string) =>
   text
     .replace(/^\s*(?:[-*•]|\d+\.)\s+/gm, "")

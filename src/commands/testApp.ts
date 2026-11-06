@@ -58,6 +58,7 @@ function backend(command: string, args: unknown) {
     case "attempt_events":
     case "run_proposals":
     case "workflows_list":
+    case "workflow_results":
     case "workflow_drafts_list":
     case "decisions_list":
     case "issues_list":

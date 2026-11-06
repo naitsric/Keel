@@ -476,6 +476,7 @@ impl Engine {
             workflow: map_workflow(language, model),
             language: language.to_owned(),
             source_issue: None,
+            saved_workflow: None,
         })
     }
 

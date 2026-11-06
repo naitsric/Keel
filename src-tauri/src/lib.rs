@@ -20,6 +20,7 @@ use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
 use keel_store::{
     Attempt, BrainNote, Decision, Event, Project, ProjectSettings, Run, RunRow, Store, Totals,
+    WorkflowResults,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
@@ -341,17 +342,18 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
         .issue
         .as_ref()
         .map(|issue| title_from_issue(issue.number, &issue.title));
-    let workflow = match request.workflow {
+    let (workflow, saved_workflow) = match request.workflow {
         WorkflowChoice::Saved { workflow_id } => {
-            state
+            let saved = state
                 .engine
                 .workflow(&request.project_id, &workflow_id, &request.language)?
                 .ok_or(CommandError {
                     code: "invalidState",
                     reason: None,
                     detail: None,
-                })?
-                .steps
+                })?;
+            let reference = saved.reference();
+            (saved.steps, Some(reference))
         }
         WorkflowChoice::Single {
             step_id,
@@ -360,7 +362,7 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
             tools,
             max_turns,
         } => {
-            vec![WorkflowStep::Agent(StepSpec {
+            let step = WorkflowStep::Agent(StepSpec {
                 id: step_id,
                 model,
                 effort,
@@ -370,7 +372,8 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
                 max_budget_usd: None,
                 paths: vec![],
                 role: Default::default(),
-            })]
+            });
+            (vec![step], None)
         }
     };
     Ok(state.engine.start_run(StartRun {
@@ -378,6 +381,7 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
         title,
         request: text,
         workflow,
+        saved_workflow,
         language: request.language,
         source_issue: request.issue,
     })?)
@@ -463,6 +467,15 @@ fn workflow_save(
     Ok(state.engine.save_workflow(&project_id, &workflow)?)
 }
 
+/// How each workflow's runs have gone. Nothing here gets saved back, so it can be masked.
+#[tauri::command(async)]
+fn workflow_results(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CommandResult<Masked<Vec<WorkflowResults>>> {
+    Ok(Masked(state.engine.workflow_results(&project_id)?))
+}
+
 #[tauri::command(async)]
 fn workflow_delete(
     state: State<'_, AppState>,
@@ -528,6 +541,14 @@ fn rework_limit_answer(
 #[tauri::command(async)]
 fn run_get(state: State<'_, AppState>, run_id: String) -> CommandResult<Masked<Run>> {
     Ok(Masked(state.store.run(&run_id)?))
+}
+
+/// A person opened this run, so see what became of its pull request. It comes back as a change
+/// when there's something new, so this returns at once and has nothing to report.
+#[tauri::command(async)]
+fn run_look_at_pr(state: State<'_, AppState>, run_id: String) {
+    state.ready.wait();
+    state.engine.look_at_pr(&run_id);
 }
 
 #[tauri::command(async)]
@@ -813,6 +834,7 @@ pub fn run() {
                     let _ = engine.recover();
                     // After that, so a run that's still going counts before anything new starts.
                     engine.start_board();
+                    engine.start_pr_watch();
                     ready.set();
                     let _ = handle.emit(CHANGED_EVENT, "");
                     // After the tools are known, so no client ever finds Keel half ready.
@@ -845,6 +867,7 @@ pub fn run() {
             mcp::mcp_client_revoke,
             mcp::mcp_connect_claude,
             run_get,
+            run_look_at_pr,
             run_proposals,
             brain_get,
             brain_generate_map,
@@ -863,6 +886,7 @@ pub fn run() {
             max_agents_set,
             workflows_list,
             workflow_save,
+            workflow_results,
             workflow_delete,
             workflow_drafts_list,
             workflow_draft_save,
@@ -1025,6 +1049,8 @@ mod tests {
                 run_state: None,
                 reason: Some(failed.clone()),
                 pr_url: None,
+                pr_state: None,
+                pr_state_at: None,
                 rejection: Some(said.clone()),
                 start_blocked: Some(failed.clone()),
                 created_at: "2026-11-05T10:00:00Z".into(),

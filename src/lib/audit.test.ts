@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuditEvent } from "./api";
-import { accountsOf, activityFrom, approvalOutcome, commandsFrom, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, stillGoing, toolSummary, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, approvalOutcome, askedText, commandsFrom, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, specifyingAttempt, stillGoing, toolSummary, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -115,6 +115,34 @@ describe("the gist of what an agent wrote", () => {
 
   it("doesn't come back empty from a message that's only a heading", () => {
     expect(gist("## Done").text).not.toBe("");
+  });
+});
+
+describe("what was asked", () => {
+  const agent = (id: string, fields: { stepId?: string; role?: string; state?: string; kind?: string } = {}) => ({ id, stepId: id, kind: "agent", role: "worker", state: "succeeded", ...fields });
+
+  it("in a workflow saved before the role, is in the step called spec", () => {
+    expect(specifyingAttempt([agent("spec"), agent("builder")])?.id).toBe("spec");
+  });
+
+  it("goes by the specifier's role before any name", () => {
+    expect(specifyingAttempt([agent("plan", { role: "specifier" }), agent("spec")])?.id).toBe("plan");
+  });
+
+  it("is the latest attempt that worked", () => {
+    const attempts = [agent("first", { stepId: "spec" }), agent("second", { stepId: "spec" }), agent("third", { stepId: "spec", state: "failed" })];
+    expect(specifyingAttempt(attempts)?.id).toBe("second");
+  });
+
+  it("is nowhere without an agent that wrote it", () => {
+    expect(specifyingAttempt([agent("builder")])).toBeUndefined();
+    expect(specifyingAttempt([agent("spec", { kind: "check" })])).toBeUndefined();
+  });
+
+  it("has no text if the agent wrote none", () => {
+    expect(askedText({ resultText: "  add returns the sum\n" })).toBe("add returns the sum");
+    expect(askedText({ resultText: " \n" })).toBeNull();
+    expect(askedText({ resultText: null })).toBeNull();
   });
 });
 

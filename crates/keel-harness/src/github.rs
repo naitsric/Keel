@@ -5,6 +5,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use keel_core::PrState;
 use serde::{Deserialize, Serialize};
 
 use crate::command::clean_env;
@@ -59,6 +60,14 @@ pub struct Issue {
     pub author: String,
     pub url: String,
     pub body: String,
+}
+
+/// Where a pull request stands. `at` is when it was merged or closed, or when it last changed if
+/// neither has happened.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrStatus {
+    pub state: PrState,
+    pub at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,6 +136,19 @@ pub fn github_repo(remote: &str) -> Option<String> {
     let (owner, name) = (parts.next()?, parts.next()?);
     (!owner.is_empty() && !name.is_empty() && parts.next().is_none())
         .then(|| format!("{owner}/{name}"))
+}
+
+/// `owner/name` and the number of a pull request, from its URL. It's the URL that says which repo,
+/// since a project's folder can point at another one by now, where that number means something else.
+pub fn pull_request_of(url: &str) -> Option<(String, i64)> {
+    let path = url.trim().strip_prefix("https://github.com/")?;
+    let mut parts = path.split('/');
+    let (owner, name, pull, number) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    if owner.is_empty() || name.is_empty() || pull != "pull" || parts.next().is_some() {
+        return None;
+    }
+    let number = number.parse().ok().filter(|number| *number > 0)?;
+    Some((format!("{owner}/{name}"), number))
 }
 
 #[derive(Debug, Clone)]
@@ -283,6 +305,31 @@ impl Gh {
             .unwrap_or_default())
     }
 
+    /// What became of a pull request. Only reads: after opening one, Keel writes nothing to it.
+    pub fn pr_status(&self, token: &Token, repo: &str, number: i64) -> Result<PrStatus, GhError> {
+        let number = number.to_string();
+        let text = self.run(
+            Some(token),
+            &[
+                "pr",
+                "view",
+                &number,
+                "--repo",
+                repo,
+                "--json",
+                "state,isDraft,mergedAt,closedAt,updatedAt",
+            ],
+        )?;
+        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| GhError {
+            kind: "other",
+            detail: e.to_string(),
+        })?;
+        parse_pr_status(&value).ok_or_else(|| GhError {
+            kind: "other",
+            detail: format!("unexpected answer about pull request {number}"),
+        })
+    }
+
     /// Opens a draft and returns its URL. Keel doesn't merge, and this module has no way to.
     pub fn create_draft_pr(
         &self,
@@ -342,6 +389,23 @@ fn parse_issue(value: &serde_json::Value) -> Option<Issue> {
             .unwrap_or_default()
             .to_owned(),
     })
+}
+
+fn parse_pr_status(value: &serde_json::Value) -> Option<PrStatus> {
+    let is_draft = value.get("isDraft").and_then(|v| v.as_bool());
+    let (state, when) = match value.get("state")?.as_str()? {
+        "MERGED" => (PrState::Merged, "mergedAt"),
+        "CLOSED" => (PrState::Closed, "closedAt"),
+        "OPEN" if is_draft == Some(true) => (PrState::Draft, "updatedAt"),
+        "OPEN" => (PrState::Open, "updatedAt"),
+        _ => return None,
+    };
+    let at = value
+        .get(when)
+        .and_then(|v| v.as_str())
+        .filter(|at| !at.is_empty())
+        .map(str::to_owned);
+    Some(PrStatus { state, at })
 }
 
 /// The arguments that make `git` authenticate through `gh`, with nothing written to any config.
@@ -436,6 +500,130 @@ mod tests {
                 .iter()
                 .any(|a| a.contains("gho_") || a.contains("token"))
         );
+    }
+
+    #[test]
+    fn a_pull_requests_repo_and_number_come_from_its_url() {
+        assert_eq!(
+            pull_request_of("https://github.com/acme/app/pull/12\n"),
+            Some(("acme/app".to_owned(), 12))
+        );
+        for url in [
+            "https://github.com/acme/app/issues/12",
+            "https://github.com/acme/app/pull/12/files",
+            "https://github.com/acme/app/pull/-1",
+            "https://github.com/acme/app/pull/twelve",
+            "https://github.com/acme/app/pull",
+            "https://github.com//app/pull/12",
+            "https://github.com.evil.com/acme/app/pull/12",
+            "http://github.com/acme/app/pull/12",
+            "",
+        ] {
+            assert_eq!(pull_request_of(url), None, "{url}");
+        }
+    }
+
+    #[test]
+    fn reads_where_a_pull_request_stands() {
+        let status = |value: serde_json::Value| parse_pr_status(&value);
+        let at = |state, at: &str| {
+            Some(PrStatus {
+                state,
+                at: Some(at.to_owned()),
+            })
+        };
+        assert_eq!(
+            status(
+                serde_json::json!({ "state": "OPEN", "isDraft": true, "mergedAt": null, "closedAt": null, "updatedAt": "t1" })
+            ),
+            at(PrState::Draft, "t1")
+        );
+        assert_eq!(
+            status(
+                serde_json::json!({ "state": "OPEN", "isDraft": false, "mergedAt": null, "closedAt": null, "updatedAt": "t2" })
+            ),
+            at(PrState::Open, "t2")
+        );
+        // A merged pull request is closed too, and GitHub says so. Merged is what matters.
+        assert_eq!(
+            status(
+                serde_json::json!({ "state": "MERGED", "isDraft": false, "mergedAt": "t3", "closedAt": "t4", "updatedAt": "t5" })
+            ),
+            at(PrState::Merged, "t3")
+        );
+        assert_eq!(
+            status(
+                serde_json::json!({ "state": "CLOSED", "isDraft": true, "mergedAt": null, "closedAt": "t6", "updatedAt": "t7" })
+            ),
+            at(PrState::Closed, "t6")
+        );
+        assert_eq!(
+            status(serde_json::json!({ "state": "MERGED", "mergedAt": null })),
+            Some(PrStatus {
+                state: PrState::Merged,
+                at: None
+            })
+        );
+        assert_eq!(
+            status(serde_json::json!({ "state": "SOMETHING_NEW" })),
+            None
+        );
+        assert_eq!(status(serde_json::json!({})), None);
+    }
+
+    /// A `gh` that writes down how it was called, then answers with what's in `reply`.
+    fn fake_gh(dir: &Path, reply: &str) -> Gh {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("gh");
+        let script = format!(
+            "#!/bin/bash\necho \"$* [token:$GH_TOKEN]\" >> '{log}'\n{reply}\n",
+            log = dir.join("calls.log").display(),
+        );
+        std::fs::write(&bin, script).unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Gh {
+            bin,
+            path_env: "/usr/bin:/bin".to_owned(),
+        }
+    }
+
+    #[test]
+    fn asking_about_a_pull_request_only_reads_and_the_token_stays_out_of_the_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(
+            dir.path(),
+            r#"echo '{"state":"MERGED","isDraft":false,"mergedAt":"2026-11-06T10:00:00Z","closedAt":"2026-11-06T10:00:00Z","updatedAt":"2026-11-06T10:00:00Z"}'"#,
+        );
+        let token = Token("gho_secret".into());
+        let status = gh.pr_status(&token, "acme/app", 12).unwrap();
+        assert_eq!(status.state, PrState::Merged);
+        assert_eq!(status.at.as_deref(), Some("2026-11-06T10:00:00Z"));
+        let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+        assert_eq!(
+            calls.trim(),
+            "pr view 12 --repo acme/app --json state,isDraft,mergedAt,closedAt,updatedAt [token:gho_secret]"
+        );
+    }
+
+    #[test]
+    fn a_failed_question_about_a_pull_request_never_repeats_the_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(
+            dir.path(),
+            "echo 'HTTP 401: Bad credentials for gho_secret' >&2; exit 1",
+        );
+        let error = gh
+            .pr_status(&Token("gho_secret".into()), "acme/app", 12)
+            .unwrap_err();
+        assert_eq!(error.kind, "notSignedIn");
+        assert_eq!(error.detail, "HTTP 401: Bad credentials for <token>");
+
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), "echo 'not what it should say'");
+        let error = gh
+            .pr_status(&Token("gho_secret".into()), "acme/app", 12)
+            .unwrap_err();
+        assert_eq!(error.kind, "other");
     }
 
     #[test]

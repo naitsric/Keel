@@ -89,6 +89,7 @@ describe("adding a project", () => {
         case "github_status":
           return { repo: null, accounts: [], info: null, excessScopes: [], error: null };
         case "workflow_drafts_list":
+        case "workflow_results":
           return [];
         case "workflows_list":
           return [WORKFLOW];
