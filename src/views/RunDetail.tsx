@@ -3,8 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type PrState, type QuestionAnswer, type RawCheck, type Run, type SpecDecided, type SpecOutput, type SpecQuestion } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing } from "../lib/audit";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Run, type SpecDecided, type SpecOutput, type SpecQuestion, type VerificationOutput } from "../lib/api";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
@@ -14,7 +14,7 @@ import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } fro
 import { ProposalRow } from "./BrainPage";
 import { FlowDiagram } from "./FlowDiagram";
 
-type Tab = "understood" | "activity" | "commands" | "changes" | "prompt" | "details" | "output";
+type Tab = "understood" | "found" | "activity" | "commands" | "changes" | "prompt" | "details" | "output";
 
 const DECISIONS: Record<AttemptState, string> = {
   queued: "run.decideActive",
@@ -93,6 +93,7 @@ function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: 
   const latestChecks = checks.filter((a, i) => !checks.slice(i + 1).some((b) => b.stepId === a.stepId));
   const checksPassed = latestChecks.filter((a) => a.state === "succeeded").length;
   const anyActive = attempts.some((a) => isActive(a.state));
+  const verification = verificationInRound(attempts, run?.round ?? 0);
   // A step that's done says nothing about the run while others are still to come.
   const between = !run?.finishedAt && (current.state === "succeeded" || current.state === "skipped");
   // A run that only had to work out what's asked has that to say for itself, and no worker to say it.
@@ -135,6 +136,7 @@ function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: 
           {latestChecks.length > 0 && (
             <p className={cx(checksPassed === latestChecks.length ? "text-muted" : "font-medium text-danger")}>{t("run.checksPassed", { passed: checksPassed, total: latestChecks.length })}</p>
           )}
+          {verification && <VerificationProof verification={verification} />}
           <p className="text-muted">{commands.length === 0 ? t("run.noCommands") : t("run.commandsPassed", { passed, total: commands.length })}</p>
           <p className={cx("mt-0.5", rawCheck === "changed" || rawCheck === "missing" ? "font-medium text-danger" : "text-muted")}>
             {t(auditKey(rawCheck))}
@@ -163,10 +165,71 @@ function ApprovalRow({ label, note, action, children }: { label: string; note?: 
   );
 }
 
-function ApprovalProof({ attempts, commands, rawCheck, reviewed }: { attempts: Attempt[]; commands: CommandRun[]; rawCheck: RawCheck; reviewed: boolean }) {
+const VERIFY_TONES: Record<CheckedCriterion["result"], string> = {
+  met: "text-success",
+  unmet: "font-medium text-warning",
+  unverified: "text-muted",
+};
+
+/** Each thing that had to be true, in its own words, with what became of it and why. */
+function VerificationItems({ verification }: { verification: VerificationOutput }) {
+  const { t } = useTranslation();
+  return (
+    <ul className="space-y-1.5">
+      {verification.criteria.map((item) => {
+        const why = item.corrected ? `run.verifyWhy.${item.corrected}` : item.result === "unverified" && !item.evidence ? "run.verifyWhy.noProof" : null;
+        return (
+          <li key={item.id} className="min-w-0">
+            <p className="selectable break-words">
+              <span className={cx("mr-1.5", VERIFY_TONES[item.result])}>{t(`run.verifyResult.${item.result}`)}</span>
+              {item.when} → {item.then}
+            </p>
+            {why && <p className="selectable text-[11.5px] leading-4 break-words text-muted">{t(why)}</p>}
+            {item.evidence && <p className="selectable font-mono text-[11.5px] leading-4 break-words text-muted">{item.evidence}</p>}
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
+/**
+ * One line that opens to the list. The green check only goes with all of it met: anything else says
+ * what it is, and not being able to verify something is a normal thing to find, not an alarm.
+ */
+function VerificationProof({ verification }: { verification: VerificationOutput }) {
+  const { t } = useTranslation();
+  const { met, unmet, total } = verificationCounts(verification);
+  return (
+    <details className="my-0.5">
+      <summary className="cursor-pointer">
+        {total > 0 && met === total && <Check size={13} className="mr-1 inline align-[-2px] text-success" />}
+        <span className={cx(unmet > 0 && "font-medium text-warning")}>{verificationLine(t, verification)}</span>
+      </summary>
+      <div className="mt-1 mb-1.5 pl-3">
+        <VerificationItems verification={verification} />
+      </div>
+    </details>
+  );
+}
+
+/** What a verifier found, as text to read. */
+function VerificationView({ verification }: { verification: VerificationOutput }) {
+  const { t } = useTranslation();
+  return (
+    <div className="space-y-3 text-[13px] leading-relaxed">
+      <p className="selectable font-medium break-words">{verificationLine(t, verification)}</p>
+      {verification.summary && <p className="selectable break-words">{verification.summary}</p>}
+      <VerificationItems verification={verification} />
+    </div>
+  );
+}
+
+function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { attempts: Attempt[]; round: number; commands: CommandRun[]; rawCheck: RawCheck; reviewed: boolean }) {
   const { t } = useTranslation();
   const checks = latestOfEachStep(attempts.filter((a) => a.kind === "check"));
   const passed = commands.filter((c) => c.status === "ok").length;
+  const verification = verificationInRound(attempts, round);
   return (
     <>
       {checks.map((check) =>
@@ -187,6 +250,7 @@ function ApprovalProof({ attempts, commands, rawCheck, reviewed }: { attempts: A
           {reviewed && ` ${t("run.approvalReviewsOnlyRead")}`}
         </p>
       )}
+      {verification && <VerificationProof verification={verification} />}
       <p className="text-muted">
         {commands.length === 0 ? t("run.noCommands") : t("run.commandsPassed", { passed, total: commands.length })} <span className={cx((rawCheck === "changed" || rawCheck === "missing") && "font-medium text-danger")}>{t(auditKey(rawCheck))}</span>
       </p>
@@ -514,7 +578,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
           </ApprovalRow>
         )}
         <ApprovalRow label={t("run.whatProves")}>
-          <ApprovalProof attempts={attempts} commands={commands} rawCheck={rawCheck} reviewed={reviewed} />
+          <ApprovalProof attempts={attempts} round={run.round} commands={commands} rawCheck={rawCheck} reviewed={reviewed} />
         </ApprovalRow>
         {(reviewers.length > 0 || approver) && (
           <ApprovalRow
@@ -811,6 +875,7 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
     case "toolCall": {
       // Its answer has a tab of its own, as text to read.
       if (role === "specifier" && data.name === "StructuredOutput") return line(t("activity.specAnswer"), "text-subtle");
+      if (role === "verifier" && data.name === "StructuredOutput") return line(t("activity.verifyAnswer"), "text-subtle");
       const failed = result?.data.isError === true;
       return (
         <div>
@@ -857,6 +922,20 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
       return line(t("activity.questionsTaken", { rounds: data.rounds }), "text-warning");
     case "specCorrected":
       return line(t("activity.specCorrected"), "text-warning");
+    case "verificationCorrected":
+      return (
+        <div>
+          {(data.corrected ?? []).length > 0 && line(t("activity.verificationCorrected", { count: data.corrected.length }), "text-warning")}
+          <ul className="selectable mt-0.5 space-y-0.5 text-[12.5px] text-muted">
+            {(data.corrected ?? []).map((item: { id: string; when: string; then: string; corrected: string }) => (
+              <li key={item.id}>
+                {item.when} → {item.then}: {t(`run.verifyWhy.${item.corrected}`)}
+              </li>
+            ))}
+          </ul>
+          {(data.dropped ?? []).length > 0 && line(t("activity.verificationDropped", { count: data.dropped.length }))}
+        </div>
+      );
     case "returned":
       return (
         <div>
@@ -1300,7 +1379,8 @@ export function RunDetail({ runId }: { runId: string }) {
   if (!latest || !run) return null;
 
   const understood = attempt ? specOf(attempt) : null;
-  const kindTabs: Tab[] = !attempt ? [] : attempt.state === "skipped" ? ["activity", "prompt"] : attempt.kind === "agent" ? [...(understood ? (["understood"] as const) : []), "activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
+  const found = attempt ? verificationOf(attempt) : null;
+  const kindTabs: Tab[] = !attempt ? [] : attempt.state === "skipped" ? ["activity", "prompt"] : attempt.kind === "agent" ? [...(understood ? (["understood"] as const) : []), ...(found ? (["found"] as const) : []), "activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
   const shownTab: Tab = kindTabs.includes(tab) ? tab : kindTabs[0];
   // Of the attempt on show, which may be an earlier one than the node's own.
   const shownModel = attempt?.kind === "agent" ? (attempt.modelActual ?? attempt.modelRequested) : shownNode?.model;
@@ -1393,6 +1473,7 @@ export function RunDetail({ runId }: { runId: string }) {
               <Segmented<Tab> arrows label={t("tabs.details")} value={shownTab} onChange={setTab} options={kindTabs.map((value) => ({ value, label: t(`tabs.${value}`) }))} />
               <div className="mt-4">
                 {shownTab === "understood" && understood && <SpecView spec={understood} />}
+                {shownTab === "found" && found && <VerificationView verification={found} />}
                 {shownTab === "activity" && <ActivityTab events={events} role={attempt.role} />}
                 {shownTab === "commands" && <CommandsTab commands={commands} />}
                 {shownTab === "changes" && <ChangesTab attempt={attempt} revision={revision} />}

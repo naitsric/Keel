@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { WorkflowResults } from "./api";
 import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE, matchedShare } from "./results";
 
-const results = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "w", workflowName: "W", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, ...fields });
+const results = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "w", workflowName: "W", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0, ...fields });
 
 describe("averages", () => {
   it("wait for enough merged pull requests or finished runs", () => {

@@ -339,6 +339,9 @@ impl Inner {
                 )
             ));
         }
+        if let Some(verified) = crate::verification::in_round(&attempts, run.round).pop() {
+            body.push_str(&verified.pr_section(spanish));
+        }
         body.push_str(&format!("\n### {}\n\n", label("Steps", "Pasos")));
         for attempt in attempts
             .iter()

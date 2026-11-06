@@ -1,8 +1,59 @@
 import { describe, expect, it } from "vitest";
-import type { AuditEvent } from "./api";
-import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, commandsFrom, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, specifyingAttempt, specOf, stillGoing, toolSummary, touchesWorkflows } from "./audit";
+import i18next from "../i18n";
+import type { AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
+import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, commandsFrom, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, specifyingAttempt, specOf, stillGoing, toolSummary, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
+
+describe("what a verifier found", () => {
+  const item = (result: CheckedCriterion["result"], fields: Partial<CheckedCriterion> = {}): CheckedCriterion => ({ id: "C1", when: "add(1, 2)", then: "it returns 3", result, evidence: result === "met" ? "test_calc.py:1" : "", ...fields });
+  const found = (...criteria: CheckedCriterion[]): VerificationOutput => ({ criteria, summary: "What it found" });
+  const verifier = (output: unknown, fields: { round?: number; state?: string; role?: string } = {}) => ({ role: "verifier", state: "succeeded", round: 0, output, ...fields });
+
+  it("is read only from a verifier that succeeded, since only that one has been corrected", () => {
+    const output = found(item("met"));
+    expect(verificationOf(verifier(output))).toEqual(output);
+    for (const state of ["failed", "stopped", "blocked", "interrupted", "running"]) {
+      expect(verificationOf(verifier(output, { state }))).toBeNull();
+    }
+    expect(verificationOf(verifier(output, { role: "reviewer" }))).toBeNull();
+    expect(verificationOf(verifier({ verdict: "approved" }))).toBeNull();
+    expect(verificationOf(verifier(null))).toBeNull();
+  });
+
+  it("only counts in its own round", () => {
+    const first = found(item("unmet"));
+    const second = found(item("met"));
+    const attempts = [verifier(first), verifier(second, { round: 1 }), verifier(found(item("unmet")), { round: 1, state: "failed" })];
+    expect(verificationInRound(attempts, 0)).toEqual(first);
+    expect(verificationInRound(attempts, 1)).toEqual(second);
+    expect(verificationInRound(attempts, 2)).toBeNull();
+  });
+
+  it("counts each thing once", () => {
+    expect(verificationCounts(found(item("met"), item("met"), item("unmet"), item("unverified")))).toEqual({ met: 2, unmet: 1, unverified: 1, total: 4 });
+  });
+
+  const line = (language: string, ...criteria: CheckedCriterion[]) => verificationLine(i18next.getFixedT(language), found(...criteria));
+
+  it("sums it up in a line, in either language", () => {
+    expect(line("en", item("met"), item("met"))).toBe("2 of 2 met");
+    expect(line("es", item("met"), item("met"))).toBe("2 de 2 se cumplen");
+    expect(line("en", item("met"), item("met"), item("met"), item("unverified"))).toBe("3 of 4 met, 1 not verified");
+    expect(line("es", item("met"), item("met"), item("met"), item("unverified"))).toBe("3 de 4 se cumplen, 1 sin verificar");
+    expect(line("en", item("met"), item("unmet"), item("unverified"), item("unverified"))).toBe("1 of 4 met, 1 not met, 2 not verified");
+    expect(line("es", item("met"), item("unmet"), item("unverified"), item("unverified"))).toBe("1 de 4 se cumple, 1 no se cumple, 2 sin verificar");
+    expect(line("en", item("unmet"), item("unmet"))).toBe("0 of 2 met, 2 not met");
+    expect(line("es", item("unmet"), item("unmet"))).toBe("0 de 2 se cumplen, 2 no se cumplen");
+  });
+
+  it("says plainly when none of it could be verified", () => {
+    expect(line("en", item("unverified"), item("unverified"))).toBe("None of the 2 could be verified");
+    expect(line("es", item("unverified"), item("unverified"))).toBe("No se pudo verificar ninguno de los 2");
+    expect(line("en", item("unverified"))).toBe("It couldn't be verified");
+    expect(line("es", item("unverified"))).toBe("No se pudo verificar");
+  });
+});
 
 describe("commandsFrom", () => {
   const events = [

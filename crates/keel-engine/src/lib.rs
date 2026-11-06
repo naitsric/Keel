@@ -11,6 +11,7 @@ mod pull_requests;
 mod runner;
 mod services;
 mod specs;
+mod verification;
 mod workflows;
 
 use std::collections::{HashMap, HashSet};
@@ -1496,7 +1497,7 @@ impl Inner {
         let mut text = self.render_prompt(&spec.prompt, run)?;
         if spec.role == StepRole::Worker && spec.tools == keel_core::ToolProfile::Build {
             let attempts = self.store.attempts_of_run(&run.id)?;
-            if workflows::returned_last_round(&attempts, run.round) {
+            if workflows::returned_before(&attempts, run.round) {
                 let rework = workflows::rework_text(&attempts, run.round, &run.language);
                 if !text.contains(&rework) {
                     text.push_str(&format!("\n\n{rework}"));
@@ -1509,6 +1510,8 @@ impl Inner {
     /// What a step's prompt becomes right now. The answers come from this run's latest round.
     fn render_prompt(&self, template: &str, run: &keel_store::Run) -> Result<String> {
         let attempts = self.store.attempts_of_run(&run.id)?;
+        let steps: Vec<WorkflowStep> =
+            serde_json::from_value(run.workflow.clone()).unwrap_or_default();
         let workspace = self.workspace(&run.id);
         let base = attempts.iter().find_map(|a| a.sha_before.clone());
         let git = locked(&self.tools).git.clone().map(Git::new);
@@ -1525,6 +1528,10 @@ impl Inner {
             }
             "rework" => Some(workflows::rework_text(&attempts, run.round, &run.language)),
             "answers" => Some(workflows::answers_text(&attempts, &run.language)),
+            "check" => Some(verification::check_text(
+                &verification::checks_in_round(&steps, &attempts, run.round),
+                &run.language,
+            )),
             _ => {
                 let id = name.strip_prefix("steps.")?.strip_suffix(".output")?;
                 Some(workflows::output_of(&attempts, id))

@@ -18,7 +18,7 @@ use serde_json::json;
 use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
 use crate::specs::{self, Verdict};
-use crate::{Error, Inner, Result, Resume, brain, locked, prompts, workflows};
+use crate::{Error, Inner, Result, Resume, brain, locked, prompts, verification, workflows};
 
 /// Tool output kept in the database. The raw file always has all of it.
 const EVENT_TEXT_LIMIT: usize = 64 * 1024;
@@ -1013,9 +1013,9 @@ impl Inner {
         let mut correction = None;
         if state == AttemptState::Succeeded && m.role == "specifier" {
             match self.judge_spec(&m) {
-                Verdict::Ready(output) => self.keep_spec(&m, &output),
+                Verdict::Ready(output) => self.keep_output(&m, &output),
                 Verdict::Ask { output, questions } => {
-                    self.keep_spec(&m, &output);
+                    self.keep_output(&m, &output);
                     state = AttemptState::WaitingAnswers;
                     let _ = store.append_event(
                         &m.attempt_id,
@@ -1024,7 +1024,7 @@ impl Inner {
                     );
                 }
                 Verdict::TookRecommended { output, settled } => {
-                    self.keep_spec(&m, &output);
+                    self.keep_output(&m, &output);
                     let _ = store.append_event(
                         &m.attempt_id,
                         "questionsTaken",
@@ -1043,6 +1043,12 @@ impl Inner {
                     reason = Some(Reason::SpecNotUsable { problems });
                 }
             }
+        }
+        // Anything that makes it succeed comes through here, a resumed or retried attempt included,
+        // and what can't be corrected has to reach a person rather than pass.
+        if state == AttemptState::Succeeded && m.role == "verifier" && !self.correct_verifier(&m) {
+            state = AttemptState::Failed;
+            reason = Some(Reason::NoStructuredOutput);
         }
         let _ = store.set_state(&m.attempt_id, state, reason.as_ref());
         let _ = store.append_event(
@@ -1127,11 +1133,50 @@ impl Inner {
 
     /// What it answered, without anything an agent added beyond the structure. The whole answer as
     /// it came stays on the record, in the `result` event.
-    fn keep_spec(&self, m: &Monitor, output: &serde_json::Value) {
+    fn keep_output(&self, m: &Monitor, output: &serde_json::Value) {
         let _ = self.store.patch_attempt(
             &m.attempt_id,
             &[("output", Value::Text(output.to_string()))],
         );
+    }
+
+    /// Replaces what a verifier answered with what the engine can stand behind. Whether a check
+    /// passed comes from what Keel ran in this attempt's round, and the list from the latest spec.
+    /// False if there's no answer to correct, or nothing to correct it against.
+    fn correct_verifier(&self, m: &Monitor) -> bool {
+        let Ok(attempts) = self.store.attempts_of_run(&m.run_id) else {
+            return false;
+        };
+        let Some(this) = attempts.iter().find(|a| a.id == m.attempt_id) else {
+            return false;
+        };
+        let Ok(run) = self.store.run(&m.run_id) else {
+            return false;
+        };
+        let steps: Vec<WorkflowStep> = serde_json::from_value(run.workflow).unwrap_or_default();
+        let check = verification::checks_in_round(&steps, &attempts, this.round);
+        let corrected = workflows::specifying_attempt(&attempts)
+            .and_then(specs::of_attempt)
+            .zip(this.output.as_ref())
+            .and_then(|(spec, output)| verification::correct(output, &spec, check.passed()));
+        let Some(corrected) = corrected else {
+            return false;
+        };
+        self.keep_output(m, &json!(corrected.verification));
+        let changed: Vec<_> = corrected
+            .verification
+            .criteria
+            .iter()
+            .filter(|checked| checked.corrected.is_some())
+            .collect();
+        if !changed.is_empty() || !corrected.dropped.is_empty() {
+            let _ = self.store.append_event(
+                &m.attempt_id,
+                "verificationCorrected",
+                &json!({ "corrected": changed, "dropped": corrected.dropped, "check": check }),
+            );
+        }
+        true
     }
 
     /// Resumes the same session once, saying exactly what to fix.

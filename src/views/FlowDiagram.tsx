@@ -1,4 +1,4 @@
-import { AlertTriangle, Bot, CheckCircle2, Eye, FileText, GitPullRequest, Layers, Lightbulb, Map as MapIcon, Plus, ShieldCheck, UserCheck, Wrench } from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, Eye, FileText, GitPullRequest, Layers, Lightbulb, ListChecks, Map as MapIcon, Plus, ShieldCheck, UserCheck, Wrench } from "lucide-react";
 import type { TFunction } from "i18next";
 import { type FocusEvent, Fragment, type KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -20,6 +20,7 @@ const ROLE_LABELS: Record<StepRole["kind"], string> = {
   mapper: "flow.roleMapper",
   learner: "workflows.roleLearner",
   specifier: "workflows.roleSpecifier",
+  verifier: "workflows.roleVerifier",
 };
 
 const NODE_TONES: Partial<Record<AttemptState | "pending", string>> = {
@@ -53,6 +54,7 @@ function StepIcon({ node }: { node: FlowNode<FlowAttempt> }) {
     if (node.role === "learner") return <Lightbulb size={12} />;
     if (node.role === "mapper") return <MapIcon size={12} />;
     if (node.role === "specifier") return <FileText size={12} />;
+    if (node.role === "verifier") return <ListChecks size={12} />;
     return <Bot size={12} />;
   };
   return <span className="shrink-0 text-subtle">{icon()}</span>;

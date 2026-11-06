@@ -327,6 +327,7 @@ async fn it_tells_a_model_how_to_write_a_draft() {
         "reworkTo",
         "maxRounds",
         "specifier",
+        "verifier",
     ] {
         assert!(schema.contains(word), "{word}: {schema}");
     }
@@ -489,6 +490,11 @@ async fn a_draft_that_breaks_the_rules_is_refused_and_says_where() {
             json!([{ "type": "parallel", "id": "g", "steps": [{ "id": "w", "model": "opus", "prompt": "p", "tools": "build" }] }]),
             "parallelMustReadOnly",
             "w",
+        ),
+        (
+            json!([{ "type": "agent", "id": "v", "model": "opus", "prompt": "p", "role": { "kind": "verifier" } }]),
+            "verifierNeedsSpecifier",
+            "v",
         ),
     ];
     for (steps, problem, step) in cases {

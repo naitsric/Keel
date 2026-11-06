@@ -17,6 +17,8 @@ const check = attempt({ id: "check", stepId: "check", kind: "check", tools: "che
 const spec = (resultText: string) => attempt({ id: "spec", stepId: "spec", resultText });
 const specOutput = (fields: Partial<SpecOutput> = {}): SpecOutput => ({ summary: "add returns the sum of its arguments.", criteria: [{ id: "C1", when: "add(1, 2)", then: "it returns 3" }], changes: [{ kind: "changes", text: "add stops subtracting" }], limits: ["Its signature stays"], decided: [], questions: [], ...fields });
 const specifier = (fields: Partial<SpecOutput> = {}, state: Attempt["state"] = "succeeded") => attempt({ id: "spec", stepId: "spec", role: "specifier", state, resultText: "", output: specOutput(fields) as unknown as Attempt["output"] });
+const said = (id: string, result: string, evidence = "") => ({ id, when: `when ${id.toLowerCase()}`, then: `then ${id.toLowerCase()}`, result, evidence });
+const verifier = (criteria: unknown[], fields: Partial<Attempt> = {}) => attempt({ id: "verify", stepId: "verify", role: "verifier", output: { criteria, summary: "What it found" } as unknown as Attempt["output"], ...fields });
 const reviewer = attempt({ id: "code", stepId: "code", role: "reviewer", output: { verdict: "approved", findings: [], summary: "Meets each criterion." } as unknown as Attempt["output"] });
 
 const deliverNext = [
@@ -310,6 +312,85 @@ describe("the approval card", () => {
       expect(list.textContent).toContain("What was asked");
       expect(list.className).toContain("overflow-y-auto");
       expect(list.contains(button("Reject") as HTMLElement)).toBe(false);
+    });
+  });
+
+  describe("with a verifier in the workflow", () => {
+    const proof = () => document.querySelector("details");
+    const greenCheck = () => proof()?.querySelector("summary svg.text-success") ?? null;
+    const met = said("C1", "met", "test_calc.py:1");
+    const open = said("C2", "unverified");
+
+    it("says everything was met, with a check, when that's so", () => {
+      show([builder(["calc.py"]), check, verifier([met, said("C2", "met", "test_calc.py:2")]), human], ["calc.py"]);
+      expect(proof()?.querySelector("summary")?.textContent).toBe("2 of 2 met");
+      expect(greenCheck()).not.toBeNull();
+    });
+
+    it("never shows a green check over something not verified, and says what it is", () => {
+      show([builder(["calc.py"]), check, verifier([met, met, met, open]), human], ["calc.py"]);
+      expect(proof()?.querySelector("summary")?.textContent).toBe("3 of 4 met, 1 not verified");
+      expect(greenCheck()).toBeNull();
+    });
+
+    it("opens to each one in its own words, without bare ids or JSON", () => {
+      show([builder(["calc.py"]), check, verifier([met, open, { ...said("C3", "unverified", "test_calc.py:9"), corrected: "noCheckPassed" }, { ...said("C4", "unverified"), corrected: "noEvidence" }, { ...said("C5", "unverified"), corrected: "leftOut" }, said("C6", "unmet", "calc.py:3")]), human], ["calc.py"]);
+      const list = proof()?.querySelector("ul")?.textContent ?? "";
+      expect(list).toContain("Metwhen c1 → then c1");
+      expect(list).toContain("test_calc.py:1");
+      expect(list).toContain("Not verifiedwhen c2 → then c2");
+      expect(list).toContain("It found nothing that proves this.");
+      expect(list).toContain("It said this was met, but no check passed in this round.");
+      expect(list).toContain("test_calc.py:9");
+      expect(list).toContain("It said this was met, but not what proves it.");
+      expect(list).toContain("It said nothing about this.");
+      expect(list).toContain("Not metwhen c6 → then c6");
+      expect(list).toContain("calc.py:3");
+      expect(page()).not.toMatch(/\bC[1-6]\b/);
+      expect(page()).not.toContain("{");
+      expect(page()).not.toMatch(/criteria|acceptance/i);
+    });
+
+    it("stands out when something isn't met", () => {
+      show([builder(["calc.py"]), check, verifier([met, said("C2", "unmet", "calc.py:3")]), human], ["calc.py"]);
+      const line = proof()?.querySelector("summary span");
+      expect(line?.textContent).toBe("1 of 2 met, 1 not met");
+      expect(line?.className).toContain("text-warning");
+      expect(greenCheck()).toBeNull();
+    });
+
+    it("says plainly when nothing could be verified, as a normal thing and not as an error", () => {
+      show([builder(["calc.py"]), check, verifier([open, said("C3", "unverified")]), human], ["calc.py"]);
+      const line = proof()?.querySelector("summary span");
+      expect(line?.textContent).toBe("None of the 2 could be verified");
+      expect(line?.className).not.toContain("text-danger");
+      expect(line?.className).not.toContain("text-warning");
+      expect(greenCheck()).toBeNull();
+    });
+
+    it("is in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      show([builder(["calc.py"]), check, verifier([met, met, met, open]), human], ["calc.py"]);
+      expect(proof()?.querySelector("summary")?.textContent).toBe("3 de 4 se cumplen, 1 sin verificar");
+      expect(proof()?.textContent).toContain("Sin verificarwhen c2 → then c2");
+    });
+
+    it("says nothing about an earlier round, which looked at code that has changed since", () => {
+      const later = { id: "r1", projectId: "p1", branch: "keel/abc12345", round: 1, workflow: deliverNext } as Run;
+      act(() => root.render(<ApprovalCard attempt={human} run={later} attempts={[builder(["calc.py"]), verifier([met]), human]} files={["calc.py"]} commands={[]} rawCheck="intact" onShowChanges={() => {}} onError={() => {}} />));
+      expect(proof()).toBeNull();
+      expect(page()).not.toContain("1 of 1 met");
+    });
+
+    it("says nothing when the workflow has no verifier", () => {
+      show([builder(["calc.py"]), check, human], ["calc.py"]);
+      expect(proof()).toBeNull();
+    });
+
+    it("keeps its buttons where they were: opening it is not answering", () => {
+      show([builder(["calc.py"]), check, verifier([met, open]), human], ["calc.py"]);
+      act(() => proof()?.querySelector("summary")?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+      expect(answers).toEqual([]);
     });
   });
 

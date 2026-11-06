@@ -717,6 +717,15 @@ describe("the workflow editor", () => {
       expect(document.querySelector('[role="radiogroup"][aria-label="What can it do?"]')).toBeNull();
     });
 
+    it("offers a step that checks what was asked, which can't edit anything either", async () => {
+      await open();
+      await click(node("builder"));
+      const roles = () => [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Role"] [role="radio"]')];
+      await click(roles().find((r) => r.textContent === "Checks what was asked") as HTMLButtonElement);
+      expect(roles().find((r) => r.getAttribute("aria-checked") === "true")?.textContent).toBe("Checks what was asked");
+      expect(document.querySelector('[role="radiogroup"][aria-label="What can it do?"]')).toBeNull();
+    });
+
     it("offers the roles a group allows", async () => {
       await open();
       await click(node("ux"));
@@ -976,7 +985,7 @@ describe("the workflow editor", () => {
     });
   });
   describe("the results", () => {
-    const of = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, ...fields });
+    const of = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0, ...fields });
     const cells = (row: string) => [...document.querySelectorAll("tr")].find((tr) => tr.querySelector("th")?.textContent?.startsWith(row))?.querySelectorAll("td");
 
     it("say plainly that there's nothing to go on yet", async () => {
@@ -1016,6 +1025,22 @@ describe("the workflow editor", () => {
       expect(cells("Times “Change” was used")?.[0].textContent).toBe("2");
       expect(page()).toContain("High means it asks too much.");
       expect(page()).toContain("High means it asks too little.");
+    });
+
+    it("say how much of what had to be true was met, and what a high number of the rest would mean", async () => {
+      results = [of({ runs: 10, criteriaMet: 41, criteriaUnmet: 3, criteriaUnverified: 28 })];
+      await open();
+      expect(cells("What had to be true: met")?.[0].textContent).toBe("41");
+      expect(cells("What had to be true: not met")?.[0].textContent).toBe("3");
+      expect(cells("What had to be true: not verified")?.[0].textContent).toBe("28");
+      expect(page()).toContain("High means a step that really runs the tests would be worth having.");
+    });
+
+    it("say so plainly when a workflow hasn't checked anything", async () => {
+      results = [of({ runs: 10 })];
+      await open();
+      expect(cells("What had to be true: met")?.[0].textContent).toBe("Nothing checked yet");
+      expect(cells("What had to be true: not verified")?.[0].textContent).toBe("Nothing checked yet");
     });
 
     it("don't work out a share from too few answers", async () => {

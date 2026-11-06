@@ -65,6 +65,9 @@ pub enum StepRole {
     /// Works out what a request will change, and may ask a person what only they can decide. It
     /// can't edit anything.
     Specifier,
+    /// Says, for each thing the specifier said has to be true, whether a test really proves it. The
+    /// engine corrects what it answers, and it can't edit anything or run anything.
+    Verifier,
 }
 
 impl StepRole {
@@ -76,6 +79,7 @@ impl StepRole {
             Self::Mapper => "mapper",
             Self::Learner => "learner",
             Self::Specifier => "specifier",
+            Self::Verifier => "verifier",
         }
     }
 
@@ -342,7 +346,8 @@ pub enum Reason {
     },
     /// The step ended, but Keel couldn't read what it changed.
     SnapshotFailed,
-    /// A reviewer or approver finished without the answer it was asked for.
+    /// A reviewer, approver or verifier finished without the answer it was asked for, or with one
+    /// Keel can't use.
     NoStructuredOutput,
     /// The approver kept sending work back, up to the limit. A person decides now.
     ReworkLimit {
@@ -937,6 +942,7 @@ mod tests {
     #[test]
     fn a_specifier_is_a_role_of_its_own_and_states_read_back_as_themselves() {
         assert_eq!(StepRole::Specifier.as_str(), "specifier");
+        assert_eq!(StepRole::Verifier.as_str(), "verifier");
         for state in [AttemptState::WaitingAnswers, AttemptState::Returned] {
             assert_eq!(AttemptState::parse(state.as_str()), Some(state));
             assert!(!state.is_active(), "nothing is running");

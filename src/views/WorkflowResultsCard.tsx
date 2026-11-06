@@ -8,6 +8,9 @@ import { Card } from "../ui/primitives";
 export function WorkflowResultsCard({ results, workflows }: { results: WorkflowResults[]; workflows: Pick<Workflow, "id" | "name">[] }) {
   const { t } = useTranslation();
   const notEnough = t("workflows.results.notEnough");
+  const nothingChecked = t("workflows.results.nothingChecked");
+  // A workflow with no verifier never checks anything, so "not enough yet" would be wrong for it.
+  const checked = (r: WorkflowResults, count: number) => (r.criteriaMet + r.criteriaUnmet + r.criteriaUnverified === 0 ? nothingChecked : formatNumber(count));
   const rows: { label: string; note?: string; value: (r: WorkflowResults) => string }[] = [
     { label: t("workflows.results.runs"), value: (r) => formatNumber(r.runs) },
     { label: t("workflows.results.merged"), value: (r) => formatNumber(r.merged) },
@@ -36,6 +39,9 @@ export function WorkflowResultsCard({ results, workflows }: { results: WorkflowR
       },
     },
     { label: t("workflows.results.sentBack"), note: t("workflows.results.sentBackNote"), value: (r) => formatNumber(r.sentBack) },
+    { label: t("workflows.results.criteriaMet"), value: (r) => checked(r, r.criteriaMet) },
+    { label: t("workflows.results.criteriaUnmet"), value: (r) => checked(r, r.criteriaUnmet) },
+    { label: t("workflows.results.criteriaUnverified"), note: t("workflows.results.criteriaUnverifiedNote"), value: (r) => checked(r, r.criteriaUnverified) },
   ];
   const compared = comparedResults(results, workflows);
   return (
@@ -71,7 +77,7 @@ export function WorkflowResultsCard({ results, workflows }: { results: WorkflowR
                     {compared.map((r) => {
                       const value = row.value(r);
                       return (
-                        <td key={r.workflowId} className={value === notEnough ? "px-2 py-1 align-top text-subtle" : "px-2 py-1 align-top"}>
+                        <td key={r.workflowId} className={value === notEnough || value === nothingChecked ? "px-2 py-1 align-top text-subtle" : "px-2 py-1 align-top"}>
                           {value}
                         </td>
                       );

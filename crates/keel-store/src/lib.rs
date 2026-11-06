@@ -684,6 +684,12 @@ pub struct WorkflowResults {
     /// How many times a person sent work back from what it decided alone. A high count means it
     /// asks too little.
     pub sent_back: i64,
+    /// Of what had to be true, how much was met, not met and not verified, as the last verifier of
+    /// each finished run left it. An open run's can still change, and earlier rounds are about code
+    /// that's gone. Many not verified means a step that really runs tests would be worth building.
+    pub criteria_met: i64,
+    pub criteria_unmet: i64,
+    pub criteria_unverified: i64,
 }
 
 /// A card on the board, with what its column depends on. The issue is a copy taken on import.
@@ -1258,7 +1264,16 @@ impl Store {
 
     pub fn workflow_results(&self, project_id: &str) -> Result<Vec<WorkflowResults>> {
         let conn = self.lock();
-        let mut stmt = conn.prepare(
+        let criteria = |result: &str| {
+            format!(
+                "coalesce(sum(case when r.finished_at is not null then
+                     (select count(*) from json_each((select a.output from attempt a
+                                                      where a.run_id = r.id and a.role = 'verifier' and a.state = 'succeeded'
+                                                      order by a.rowid desc limit 1), '$.criteria') c
+                      where json_extract(c.value, '$.result') = '{result}') end), 0)"
+            )
+        };
+        let mut stmt = conn.prepare(&format!(
             "select r.workflow_id,
                     (select latest.workflow_name from run latest
                      where latest.project_id = r.project_id and latest.workflow_id = r.workflow_id
@@ -1280,12 +1295,18 @@ impl Store {
                                   join attempt a on a.id = e.attempt_id
                                   where a.run_id = r.id and e.kind = 'answers')), 0),
                     coalesce(sum((select count(*) from attempt a
-                                  where a.run_id = r.id and a.state = 'returned')), 0)
+                                  where a.run_id = r.id and a.state = 'returned')), 0),
+                    {},
+                    {},
+                    {}
              from run r
              where r.project_id = ?1 and r.workflow_id is not null
              group by r.workflow_id
              order by max(r.created_at) desc",
-        )?;
+            criteria("met"),
+            criteria("unmet"),
+            criteria("unverified"),
+        ))?;
         let rows = stmt.query_map([project_id], |r| {
             let workflow_id: String = r.get(0)?;
             let workflow_name: Option<String> = r.get(1)?;
@@ -1306,6 +1327,9 @@ impl Store {
                 answers: r.get(9)?,
                 answers_recommended: r.get(10)?,
                 sent_back: r.get(11)?,
+                criteria_met: r.get(12)?,
+                criteria_unmet: r.get(13)?,
+                criteria_unverified: r.get(14)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -2767,6 +2791,9 @@ mod tests {
                 answers: 0,
                 answers_recommended: 0,
                 sent_back: 0,
+                criteria_met: 0,
+                criteria_unmet: 0,
+                criteria_unverified: 0,
             }
         );
         assert_eq!(of("builtin:simple").merged, 0);
@@ -2775,6 +2802,78 @@ mod tests {
         assert_eq!(of("mine").workflow_name, "New name");
         assert_eq!(of("mine").average_rounds, None, "none has finished");
         assert!(store.workflow_results("nobody").unwrap().is_empty());
+    }
+
+    #[test]
+    fn results_count_what_the_last_verifier_of_each_finished_run_left() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let add_run = |id: &str, finished: bool| {
+            store
+                .add_run(&NewRun {
+                    id: id.into(),
+                    project_id: "p".into(),
+                    title: id.into(),
+                    request: id.into(),
+                    workflow: "[]".into(),
+                    language: "en".into(),
+                    source_issue: None,
+                    workflow_id: Some("w".into()),
+                    workflow_name: Some("W".into()),
+                })
+                .unwrap();
+            if finished {
+                store
+                    .patch_run(id, &[("finished_at", Value::Text(now()))])
+                    .unwrap();
+            }
+        };
+        let verifier = |id: &str, run: &str, state: AttemptState, results: &[&str]| {
+            let mut attempt = new_attempt(id, run, "verify", state);
+            attempt.role = "verifier".into();
+            store.add_attempt(&attempt).unwrap();
+            let criteria: Vec<serde_json::Value> = results
+                .iter()
+                .map(|result| serde_json::json!({ "id": "C", "when": "w", "then": "t", "result": result, "evidence": "" }))
+                .collect();
+            let output = serde_json::json!({ "criteria": criteria, "summary": "s" }).to_string();
+            store
+                .patch_attempt(id, &[("output", Value::Text(output))])
+                .unwrap();
+        };
+        add_run("one", true);
+        // An earlier round's answer is about code that's gone.
+        verifier("one-a", "one", AttemptState::Succeeded, &["unmet", "unmet"]);
+        verifier(
+            "one-b",
+            "one",
+            AttemptState::Succeeded,
+            &["met", "unverified"],
+        );
+        // It didn't succeed, so nobody corrected it, and what the agent said isn't counted.
+        verifier("one-c", "one", AttemptState::Failed, &["met", "met", "met"]);
+        add_run("two", true);
+        verifier(
+            "two-a",
+            "two",
+            AttemptState::Succeeded,
+            &["met", "unmet", "unverified"],
+        );
+        add_run("open", false);
+        verifier("open-a", "open", AttemptState::Succeeded, &["met", "met"]);
+        add_run("no-verifier", true);
+
+        let results = store.workflow_results("p").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].runs, 4);
+        assert_eq!(
+            (
+                results[0].criteria_met,
+                results[0].criteria_unmet,
+                results[0].criteria_unverified
+            ),
+            (2, 1, 2)
+        );
     }
 
     #[test]

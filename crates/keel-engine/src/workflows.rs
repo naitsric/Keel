@@ -11,7 +11,7 @@ use keel_store::Attempt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{brain, prompts, specs};
+use crate::{brain, prompts, specs, verification};
 
 /// How much of a diff goes into a prompt. A reviewer can still read any file it wants.
 const DIFF_LIMIT: usize = 200 * 1024;
@@ -28,6 +28,7 @@ pub fn schema_for(role: &StepRole) -> Option<&'static str> {
         StepRole::Mapper => Some(brain::MAP_SCHEMA),
         StepRole::Learner => Some(brain::LEARNINGS_SCHEMA),
         StepRole::Specifier => Some(specs::SPEC_SCHEMA),
+        StepRole::Verifier => Some(verification::VERIFY_SCHEMA),
     }
 }
 
@@ -116,6 +117,7 @@ pub fn validate(steps: &[WorkflowStep]) -> Result<(), Reason> {
         Ok(())
     };
     let mut approval_seen = false;
+    let mut specifier_seen = false;
     let mut earlier: Vec<&str> = Vec::new();
     for (index, step) in steps.iter().enumerate() {
         remember(step.id())?;
@@ -126,6 +128,12 @@ pub fn validate(steps: &[WorkflowStep]) -> Result<(), Reason> {
                 if spec.role == StepRole::Learner && index + 1 != steps.len() {
                     return Err(problem("learnerNotLast", &spec.id));
                 }
+                // What it checks comes from a specifier's answer. A step that writes free text, even
+                // one called `spec`, doesn't give it anything to go through.
+                if spec.role == StepRole::Verifier && !specifier_seen {
+                    return Err(problem("verifierNeedsSpecifier", &spec.id));
+                }
+                specifier_seen |= spec.role == StepRole::Specifier;
                 if let StepRole::Approver {
                     rework_to,
                     max_rounds,
@@ -365,18 +373,34 @@ pub fn rework_text(attempts: &[Attempt], round: i64, language: &str) -> String {
             };
             format!("{intro}\n{text}")
         });
-    [from_person, from_approver]
+    // The spec doesn't run again, so nothing else remembers this. Without it, a later round reads a
+    // person's change as a failure, and an approver can ask for it to be undone.
+    let earlier: Vec<String> = attempts
+        .iter()
+        .filter(|a| a.round < round - 1 && a.state == AttemptState::Returned.as_str())
+        .filter_map(instructions_of)
+        .map(|text| format!("- {text}"))
+        .collect();
+    let still_stands = (!earlier.is_empty()).then(|| {
+        let intro = if es {
+            "Antes, una persona pidió esto. Sigue en pie, así que no lo deshagas:"
+        } else {
+            "Earlier, a person asked for this. It still stands, so don't undo it:"
+        };
+        format!("{intro}\n{}", earlier.join("\n"))
+    });
+    [still_stands, from_person, from_approver]
         .into_iter()
         .flatten()
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-/// Whether a person sent the work back in the round before this one.
-pub fn returned_last_round(attempts: &[Attempt], round: i64) -> bool {
+/// Whether a person sent the work back in any round before this one.
+pub fn returned_before(attempts: &[Attempt], round: i64) -> bool {
     attempts
         .iter()
-        .any(|a| a.round == round - 1 && a.state == AttemptState::Returned.as_str())
+        .any(|a| a.round < round && a.state == AttemptState::Returned.as_str())
 }
 
 /// What a person answered in this run, for `{{answers}}`. Empty if nothing.
@@ -428,6 +452,9 @@ fn agent(
     }
 }
 
+/// The same in both languages, like `spec` and `builder`: the approver's prompt names it.
+const VERIFY_STEP: &str = "verify";
+
 const SCREEN_FILES: [&str; 8] = [
     "**/*.tsx",
     "**/*.jsx",
@@ -466,10 +493,10 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
         ("security", "code", "approver", "human")
     };
     let approver_prompt = format!(
-        "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{security}: {{{{steps.{security}.output}}}}\nux: {{{{steps.ux.output}}}}\nui: {{{{steps.ui.output}}}}\n{code}: {{{{steps.{code}.output}}}}\n\n{{{{rework}}}}",
+        "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{VERIFY_STEP}: {{{{steps.{VERIFY_STEP}.output}}}}\n{security}: {{{{steps.{security}.output}}}}\nux: {{{{steps.ux.output}}}}\nui: {{{{steps.ui.output}}}}\n{code}: {{{{steps.{code}.output}}}}\n\n{{{{rework}}}}",
         text(
-            "You decide whether this change is ready for a person to review, using the reviews below, and you edit nothing. Check each finding in the code before believing it, and discard false ones. decision = rework if a real finding remains, approve if not. risk = high if it touches authorization, personal data, money, contractual deadlines or the database schema; low if it's contained and easy to revert; medium otherwise. In instructions, say exactly what to fix.",
-            "Decides si este cambio está listo para que lo revise una persona, usando las revisiones de abajo, y no editas nada. Comprueba cada hallazgo en el código antes de creerle y descarta los falsos. decision = rework si queda un hallazgo real, approve si no. risk = high si toca autorización, datos personales, dinero, plazos contractuales o el esquema de base; low si es acotado y fácil de revertir; medium en otro caso. En instructions, di exactamente qué corregir. Responde en español.",
+            "You decide whether this change is ready for a person to review, using the reviews below and what `verify` found, and you edit nothing. Check each finding in the code before believing it, and discard false ones. Anything `unmet` in `verify` is a finding, unless what was sent back below changed it. `unverified` only means no test proves it, and isn't a finding by itself. decision = rework if a real finding remains, approve if not. risk = high if it touches authorization, personal data, money, contractual deadlines or the database schema; low if it's contained and easy to revert; medium otherwise. In instructions, say exactly what to fix.",
+            "Decides si este cambio está listo para que lo revise una persona, usando las revisiones de abajo y lo que encontró `verify`, y no editas nada. Comprueba cada hallazgo en el código antes de creerle y descarta los falsos. Todo lo que esté `unmet` en `verify` es un hallazgo, salvo que lo devuelto abajo lo haya cambiado. `unverified` solo significa que ninguna prueba lo demuestra, y por sí solo no es un hallazgo. decision = rework si queda un hallazgo real, approve si no. risk = high si toca autorización, datos personales, dinero, plazos contractuales o el esquema de base; low si es acotado y fácil de revertir; medium en otro caso. En instructions, di exactamente qué corregir. Responde en español.",
         ),
         text("Specification:", "Especificación:"),
     );
@@ -486,6 +513,14 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
         })
         .cloned()
         .collect();
+    full.push(WorkflowStep::Agent(agent(
+        VERIFY_STEP,
+        "sonnet",
+        ToolProfile::ReadOnly,
+        StepRole::Verifier,
+        &[],
+        prompts::verify_prompt(language),
+    )));
     full.push(WorkflowStep::Parallel {
         id: "reviews".into(),
         steps: vec![
@@ -835,6 +870,7 @@ mod tests {
                 "spec",
                 "builder",
                 "check",
+                "verify",
                 "reviews",
                 "aprobador",
                 "humano",
@@ -842,7 +878,14 @@ mod tests {
                 "aprendizajes"
             ]
         );
-        let WorkflowStep::Parallel { steps: group, .. } = &full.steps[3] else {
+        let WorkflowStep::Agent(verify) = &full.steps[3] else {
+            panic!()
+        };
+        assert_eq!(verify.role, StepRole::Verifier);
+        assert_eq!(verify.tools, ToolProfile::ReadOnly);
+        assert_eq!(verify.model, "sonnet");
+        assert!(verify.prompt.contains("{{check}}"));
+        let WorkflowStep::Parallel { steps: group, .. } = &full.steps[4] else {
             panic!()
         };
         assert_eq!(
@@ -884,6 +927,136 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_verifier_comes_after_the_check_and_what_it_found_reaches_the_approver() {
+        for language in ["en", "es"] {
+            let with_check = builtin(language, Some("make test")).remove(0);
+            let position =
+                |steps: &[WorkflowStep], id: &str| steps.iter().position(|s| s.id() == id);
+            assert_eq!(
+                position(&with_check.steps, VERIFY_STEP),
+                position(&with_check.steps, "check").map(|at| at + 1)
+            );
+            assert_eq!(
+                position(&with_check.steps, "reviews"),
+                position(&with_check.steps, VERIFY_STEP).map(|at| at + 1)
+            );
+            let approver = with_check
+                .steps
+                .iter()
+                .find_map(|step| match step {
+                    WorkflowStep::Agent(spec) if matches!(spec.role, StepRole::Approver { .. }) => {
+                        Some(spec)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert!(approver.prompt.contains("{{steps.verify.output}}"));
+            assert!(approver.prompt.contains("`unmet`"), "{language}");
+
+            // With nothing to run it can still say what isn't done, and says what it can't prove.
+            let without = builtin(language, None).remove(0);
+            assert_eq!(
+                position(&without.steps, VERIFY_STEP),
+                position(&without.steps, "builder").map(|at| at + 1)
+            );
+        }
+    }
+
+    #[test]
+    fn a_verifier_runs_again_each_round_since_it_comes_after_where_rework_starts() {
+        let full = builtin("en", Some("make test")).remove(0);
+        let from = rework_index(&full.steps).unwrap();
+        assert_eq!(full.steps[from].id(), "builder");
+        assert!(
+            full.steps
+                .iter()
+                .position(|s| s.id() == VERIFY_STEP)
+                .unwrap()
+                > from
+        );
+    }
+
+    #[test]
+    fn the_simple_workflow_has_no_verifier_and_stays_as_it_was() {
+        for language in ["en", "es"] {
+            for check in [None, Some("make test")] {
+                let simple = builtin(language, check).remove(1);
+                assert_eq!(simple.id, "builtin:simple");
+                let ids: Vec<&str> = simple.steps.iter().map(WorkflowStep::id).collect();
+                let learner = if language == "es" {
+                    "aprendizajes"
+                } else {
+                    "learnings"
+                };
+                let expected: Vec<&str> = if check.is_some() {
+                    vec![
+                        "spec",
+                        "builder",
+                        "check",
+                        "approval",
+                        "pull-request",
+                        learner,
+                    ]
+                } else {
+                    vec!["spec", "builder", "approval", "pull-request", learner]
+                };
+                assert_eq!(ids, expected);
+                assert!(simple.steps.iter().all(|step| !matches!(
+                    step,
+                    WorkflowStep::Agent(spec) if spec.role == StepRole::Verifier
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn a_verifier_needs_a_specifier_before_it_and_a_step_called_spec_is_not_one() {
+        let verifier = || {
+            let mut spec = worker("verify", ToolProfile::ReadOnly);
+            spec.role = StepRole::Verifier;
+            spec
+        };
+        let refused = Err(problem("verifierNeedsSpecifier", "verify"));
+        assert_eq!(validate(&[step_of(verifier())]), refused);
+        let old_free_text = worker("spec", ToolProfile::ReadOnly);
+        assert_eq!(
+            validate(&[step_of(old_free_text), step_of(verifier())]),
+            refused
+        );
+        let mut specifier = worker("plan", ToolProfile::ReadOnly);
+        specifier.role = StepRole::Specifier;
+        assert_eq!(
+            validate(&[step_of(verifier()), step_of(specifier.clone())]),
+            refused,
+            "after it is too late"
+        );
+        assert_eq!(validate(&[step_of(specifier), step_of(verifier())]), Ok(()));
+    }
+
+    #[test]
+    fn a_verifier_has_to_stay_read_only_and_alone() {
+        let mut verifier = worker("verify", ToolProfile::Build);
+        verifier.role = StepRole::Verifier;
+        let mut specifier = worker("spec", ToolProfile::ReadOnly);
+        specifier.role = StepRole::Specifier;
+        assert_eq!(
+            validate(&[step_of(specifier.clone()), step_of(verifier.clone())]),
+            Err(problem("reviewerMustReadOnly", "verify"))
+        );
+        verifier.tools = ToolProfile::ReadOnly;
+        assert_eq!(
+            validate(&[
+                step_of(specifier),
+                WorkflowStep::Parallel {
+                    id: "g".into(),
+                    steps: vec![verifier],
+                }
+            ]),
+            Err(problem("groupRole", "verify"))
+        );
     }
 
     fn approver(rework_to: &str) -> StepSpec {
@@ -986,9 +1159,14 @@ mod tests {
         assert!(!text.contains("Nothing to do"), "{text}");
         assert!(rework_text(&attempts, 1, "es").starts_with("Una persona devolvió"));
         assert_eq!(rework_text(&attempts, 0, "en"), "", "the first round");
-        assert_eq!(rework_text(&attempts, 2, "en"), "", "only the last round");
-        assert!(returned_last_round(&attempts, 1));
-        assert!(!returned_last_round(&attempts, 2));
+        // Two rounds on, the approver's words are over, and the person's still stand.
+        let later = rework_text(&attempts, 2, "en");
+        assert!(later.starts_with("Earlier, a person asked"), "{later}");
+        assert!(later.ends_with("- Return 0 instead"), "{later}");
+        assert!(rework_text(&attempts, 2, "es").starts_with("Antes, una persona"));
+        assert!(!returned_before(&attempts, 0));
+        assert!(returned_before(&attempts, 1));
+        assert!(returned_before(&attempts, 2));
         assert_eq!(rounds_asked_by_a_person(&attempts), 1);
 
         with_output(

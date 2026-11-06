@@ -174,7 +174,8 @@ pub struct DraftAgent {
     pub id: String,
     /// `fable`, `opus`, `sonnet`, `haiku` or a full model id.
     pub model: String,
-    /// What it's told to do. It can use {{request}}, {{diff}}, {{rework}} and {{steps.<id>.output}}.
+    /// What it's told to do. It can use {{request}}, {{diff}}, {{rework}}, {{answers}}, {{check}} and
+    /// {{steps.<id>.output}}.
     pub prompt: String,
     /// What it may do. Read-only unless you say otherwise.
     #[serde(default)]
@@ -242,6 +243,9 @@ pub enum DraftRole {
     /// Works out what a request will change, and may ask the person what only they can decide, in
     /// Keel. Read-only.
     Specifier,
+    /// Says, for each thing a specifier earlier in the workflow said has to be true, whether a test
+    /// really proves it. Keel corrects its answer. Read-only.
+    Verifier,
 }
 
 impl McpServer {
@@ -838,6 +842,7 @@ impl DraftAgent {
                 },
                 Some(DraftRole::Learner) => StepRole::Learner,
                 Some(DraftRole::Specifier) => StepRole::Specifier,
+                Some(DraftRole::Verifier) => StepRole::Verifier,
             },
         })
     }

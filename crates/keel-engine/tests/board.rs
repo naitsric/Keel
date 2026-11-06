@@ -97,6 +97,7 @@ failure() {
 [ -n "$card" ] && [ -f "@FLAGS@/limit-$card" ] && failure "You have reached your usage limit"
 [ -n "$card" ] && [ -f "@FLAGS@/session-$card" ] && failure "Invalid API key"
 case "$schema" in
+*unverified*) output='{"criteria":[{"id":"C1","result":"met","evidence":"tests/fixed.rs:1"}],"summary":"A test proves it"}';;
 *verdict*)
   case "$prompt" in *SECURITY*) [ -f "@FLAGS@/fail-security" ] && failure "the review broke";; esac
   case "$prompt" in *"the CODE"*)

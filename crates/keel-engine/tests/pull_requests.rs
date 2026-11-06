@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use keel_core::{
-    AttemptState, BoardColumn, CardLane, PrState, StepSpec, ToolProfile, WorkflowStep,
+    AttemptState, BoardColumn, CardLane, PrState, StepRole, StepSpec, ToolProfile, WorkflowStep,
 };
 use keel_engine::{Config, Engine, StartRun, Workflow};
 use keel_harness::Tools;
@@ -45,8 +45,8 @@ fn write_script(path: &Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Steps asked for a structure answer with what's in `spec-json`, or with no proposals. Other
-/// read-only steps answer with what's in `spec-text`, and build steps change a file.
+/// Steps asked for a structure answer with what's in `spec-json` or `verify-json`, or with no
+/// proposals. Other read-only steps answer with what's in `spec-text`, and build steps change a file.
 fn fake_claude(flags: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -66,6 +66,7 @@ list=$(printf '%s' "$tools" | sed 's/,/","/g')
 echo "{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake\",\"tools\":[\"$list\"],\"apiKeySource\":\"none\"}}"
 if [ -n "$schema" ]; then
   case "$schema" in
+  *unverified*) output="$(cat "{flags}/verify-json")";;
   *criteria*) output="$(cat "{flags}/spec-json")";;
   *) output='{{"learnings":[]}}';;
   esac
@@ -398,6 +399,144 @@ fn a_structured_answer_reads_as_text_and_the_pull_request_says_what_the_person_a
     // The step after everything else took the structured answer in its stride.
     let learner = w.step(&run, "learnings").unwrap();
     assert_eq!(learner.state, "succeeded", "{:?}", learner.reason);
+}
+
+/// Up to its pull request, with a check that passes and a verifier that says this.
+fn delivered_with_verifier(w: &World, verifier_says: &str, language: &str) -> String {
+    let spec = r#"{"summary":"add returns the sum","criteria":[{"id":"C1","when":"add(1, 2)","then":"it returns 3"},{"id":"C2","when":"one is negative","then":"it still adds"}],"changes":[],"limits":[],"decided":[],"questions":[]}"#;
+    std::fs::write(w.flags.join("spec-json"), spec).unwrap();
+    std::fs::write(w.flags.join("verify-json"), verifier_says).unwrap();
+    let specifier = WorkflowStep::Agent(StepSpec {
+        id: "spec".into(),
+        model: "fake".into(),
+        effort: None,
+        tools: ToolProfile::ReadOnly,
+        prompt: "{{request}}".into(),
+        max_turns: None,
+        max_budget_usd: None,
+        paths: vec![],
+        role: StepRole::Specifier,
+    });
+    let verifier = WorkflowStep::Agent(StepSpec {
+        id: "verify".into(),
+        model: "fake".into(),
+        effort: None,
+        tools: ToolProfile::ReadOnly,
+        prompt: "{{check}}".into(),
+        max_turns: None,
+        max_budget_usd: None,
+        paths: vec![],
+        role: StepRole::Verifier,
+    });
+    let steps = vec![
+        specifier,
+        agent("builder", ToolProfile::Build),
+        WorkflowStep::Check {
+            id: "check".into(),
+            run: "test -f fixed.txt".into(),
+        },
+        verifier,
+        WorkflowStep::Approval { id: "human".into() },
+        WorkflowStep::Deliver { id: "pr".into() },
+    ];
+    let run = w
+        .engine
+        .start_run(StartRun {
+            project_id: w.project_id.clone(),
+            title: None,
+            request: "Fix the bug".into(),
+            workflow: steps,
+            saved_workflow: None,
+            language: language.into(),
+            source_issue: None,
+        })
+        .unwrap();
+    let human = w.wait_step(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&human.id, true, "").unwrap();
+    w.wait_step(&run, "pr", AttemptState::Succeeded);
+    w.body()
+}
+
+const BOTH_MET: &str = r#"{"criteria":[{"id":"C1","result":"met","evidence":"tests/calc.rs:1"},{"id":"C2","result":"met","evidence":"tests/calc.rs:2"}],"summary":"Tests prove it"}"#;
+
+#[test]
+fn the_pull_request_says_when_everything_was_met() {
+    let w = world();
+    let body = delivered_with_verifier(&w, BOTH_MET, "en");
+    assert!(
+        body.contains("### What had to be true\n\n2 of 2 met\n\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains("- Met: add(1, 2) → it returns 3 (tests/calc.rs:1)\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains("- Met: one is negative → it still adds (tests/calc.rs:2)\n"),
+        "{body}"
+    );
+    // After how it was checked, and before the list of steps.
+    let (checked, section, steps) = (
+        body.find("### How it was checked").unwrap(),
+        body.find("### What had to be true").unwrap(),
+        body.find("### Steps").unwrap(),
+    );
+    assert!(checked < section && section < steps, "{body}");
+    assert!(!body.contains("\"criteria\""), "no JSON: {body}");
+}
+
+#[test]
+fn the_pull_request_says_what_is_not_verified_and_never_rounds_it_up() {
+    let w = world();
+    let said = r#"{"criteria":[{"id":"C1","result":"met","evidence":"tests/calc.rs:1"},{"id":"C2","result":"unverified","evidence":""}],"summary":"One has no test"}"#;
+    let body = delivered_with_verifier(&w, said, "en");
+    assert!(
+        body.contains("\n\n1 of 2 met, 1 not verified\n\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains(
+            "- Not verified: one is negative → it still adds (it found nothing that proves it)\n"
+        ),
+        "{body}"
+    );
+}
+
+#[test]
+fn the_pull_request_says_plainly_when_nothing_could_be_verified() {
+    let w = world();
+    let said = r#"{"criteria":[{"id":"C1","result":"unverified","evidence":""},{"id":"C2","result":"unverified","evidence":""}],"summary":"No tests"}"#;
+    let body = delivered_with_verifier(&w, said, "es");
+    assert!(
+        body.contains(
+            "### Lo que tenía que cumplirse\n\nNo se pudo verificar ninguno de los 2\n\n"
+        ),
+        "{body}"
+    );
+    assert!(
+        body.contains("- Sin verificar: add(1, 2) → it returns 3 (no encontró"),
+        "{body}"
+    );
+}
+
+#[test]
+fn what_a_verifier_points_at_is_masked_like_the_rest_of_the_pull_request() {
+    let w = world();
+    // Put together here, so no secret scanner trips on this file.
+    let secret = format!("{}{}", "ghp_", "x".repeat(36));
+    let said = format!(
+        r#"{{"criteria":[{{"id":"C1","result":"met","evidence":"tests/calc.rs:1 with {secret}"}},{{"id":"C2","result":"unmet","evidence":"{secret}"}}],"summary":"x"}}"#
+    );
+    let body = delivered_with_verifier(&w, &said, "en");
+    assert!(body.contains("- Met: add(1, 2) → it returns 3 ("), "{body}");
+    assert!(!body.contains(&secret), "masked: {body}");
+}
+
+#[test]
+fn a_workflow_with_no_verifier_has_no_such_section() {
+    let w = world();
+    w.delivered();
+    assert!(!w.body().contains("What had to be true"), "{}", w.body());
 }
 
 #[test]

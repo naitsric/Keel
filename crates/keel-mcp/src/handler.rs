@@ -58,10 +58,10 @@ const DRAFT_WORKFLOW: &str = "Propose a workflow for a project, as a draft the p
                               list_workflows shows it under `drafts` while it waits, and under `workflows` once \
                               saved, with a new id. A draft can't replace a workflow that exists. The steps have \
                               to follow Keel's rules, and a refusal names the problem and the step: a `deliver` \
-                              needs an `approval` earlier, ids are unique, reviewers, approvers, learners and specifiers are \
-                              read-only, members of a `parallel` are read-only workers or reviewers, a learner \
-                              can only be the last step, and an approver's `reworkTo` is an earlier step outside \
-                              a group. A draft can't ask for network, other folders or anything in the project's \
+                              needs an `approval` earlier, ids are unique, reviewers, approvers, learners, specifiers and \
+                              verifiers are read-only, members of a `parallel` are read-only workers or reviewers, \
+                              a learner can only be the last step, a verifier needs a specifier earlier, and an \
+                              approver's `reworkTo` is an earlier step outside a group. A draft can't ask for network, other folders or anything in the project's \
                               settings. Refused if this client may only read, or the project already has 20 \
                               drafts waiting.";
 const STOP_RUN: &str = "Ask whatever a run has working to stop. It doesn't reject or abandon the run: what \

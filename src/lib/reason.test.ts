@@ -26,6 +26,41 @@ describe("reasonText", () => {
   });
 });
 
+describe("what's said about a verifier", () => {
+  const JARGON = /\bspec\b|\[TBC\]|acceptance|\bscope\b|edge case|assumption|\bdelta\b|criteria/i;
+
+  it("names the step that needs a specifier, in both languages", () => {
+    const reason = { code: "invalidWorkflow", problem: "verifierNeedsSpecifier", step: "verify" };
+    expect(reasonText(t("en"), reason)).toBe("“verify” goes through what has to be true, so a step that works out the change has to come before it.");
+    expect(reasonText(t("es"), reason)).toBe("«verify» repasa lo que tiene que cumplirse, así que antes tiene que haber un paso que defina el cambio.");
+  });
+
+  it("is in plain words wherever a person reads it", () => {
+    for (const language of ["en", "es"]) {
+      const say = t(language);
+      const texts = [
+        say("run.verifyMet", { count: 3, total: 4 }),
+        say("run.verifyUnmet", { count: 1 }),
+        say("run.verifyUnverified", { count: 1 }),
+        say("run.verifyNone", { count: 4 }),
+        ...["met", "unmet", "unverified"].map((result) => say(`run.verifyResult.${result}`)),
+        ...["noEvidence", "noCheckPassed", "leftOut", "noProof"].map((why) => say(`run.verifyWhy.${why}`)),
+        say("activity.verifyAnswer"),
+        say("activity.verificationCorrected", { count: 2 }),
+        say("activity.verificationDropped", { count: 2 }),
+        say("invalidWorkflow.verifierNeedsSpecifier", { step: "x" }),
+        say("workflows.results.criteriaMet"),
+        say("workflows.results.criteriaUnmet"),
+        say("workflows.results.criteriaUnverified"),
+        say("workflows.results.criteriaUnverifiedNote"),
+        say("workflows.results.nothingChecked"),
+        say("workflows.roleVerifier"),
+      ];
+      for (const text of texts) expect(text).not.toMatch(JARGON);
+    }
+  });
+});
+
 describe("what a specifier got wrong", () => {
   const JARGON = /\bspec\b|\[TBC\]|acceptance criteria|\bscope\b|edge case|assumption|\bdelta\b|criteria/i;
 

@@ -77,10 +77,17 @@ const attempt: Attempt = {
 
 const agentStep = (id: string, model: string, tools: "readOnly" | "build") => ({ type: "agent" as const, id, model, tools, effort: null, prompt: "Implement {{steps.spec.output}}", maxTurns: null, maxBudgetUsd: null });
 const reviewerStep = (id: string, paths: string[]) => ({ id, model: "sonnet", tools: "readOnly" as const, effort: null, prompt: "Review {{diff}}", maxTurns: null, maxBudgetUsd: null, paths, role: { kind: "reviewer" as const } });
+// What the verifier found: verify=all|some|none|unmet with flow=approval|delivered, flow=verifying and
+// flow=verifyUnreadable for the step itself, and verify=old to see one from an earlier round, which
+// says nothing. node=verify opens what it found. long=1 has text at its limits.
+const verifyMode = params.get("verify");
+const verifyShown = verifyMode !== null || params.get("flow") === "verifying" || params.get("flow") === "verifyUnreadable";
+const verifyStep: WorkflowStep = { ...agentStep("verify", "sonnet", "readOnly"), role: { kind: "verifier" } };
 const workflow: WorkflowStep[] = [
   { ...agentStep("spec", "opus", "readOnly"), ...(params.get("specifier") === "1" || params.get("flow") === "questions" || params.get("flow") === "corrected" ? { role: { kind: "specifier" as const } } : {}) },
   agentStep("builder", "sonnet", "build"),
   { type: "check", id: "check", run: "make test" },
+  ...(verifyShown ? [verifyStep] : []),
   { type: "parallel", id: "reviews", steps: [reviewerStep("security", []), reviewerStep("ux", ["**/*.tsx"]), reviewerStep("ui", ["**/*.tsx"]), reviewerStep("code", [])] },
   { ...agentStep("approver", "opus", "readOnly"), role: { kind: "approver", reworkTo: "builder", maxRounds: 2 } },
   { type: "approval", id: "approval" },
@@ -161,6 +168,27 @@ const reworkAttempt: Attempt = { ...builtAttempt, id: "a1b", number: 2, round: 1
 const reviewer = (id: string, verdict: "approved" | "changes", summary: string, findings: string[]): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "succeeded", reason: null, tools: "readOnly", filesChanged: null, resultText: null, finishedAt: at(1), output: { verdict, findings, summary } as Attempt["output"] });
 const skippedReviewer = (id: string): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "skipped", reason: { code: "noMatchingPaths", paths: ["**/*.tsx"] }, tools: "readOnly", filesChanged: null, resultText: null, modelActual: null, finishedAt: at(1), output: null });
 const approverAttempt = (decision: "approve" | "rework"): Attempt => ({ ...attempt, id: "r-approver", stepId: "approver", role: "approver", round, state: params.get("flow") === "limit" ? "blocked" : "succeeded", reason: params.get("flow") === "limit" ? { code: "reworkLimit", rounds: 2 } : null, tools: "readOnly", modelActual: "claude-opus-5-5", filesChanged: null, resultText: null, finishedAt: at(1), output: { decision, risk: params.get("risk") ?? "medium", reasons: long ? "The security finding is real: the new endpoint skips the role check, and the same pattern repeats in every handler. ".repeat(6) : "The security finding is real: the new endpoint skips the role check.", instructions: "Add the role check.", overriddenByPerson: params.get("override") === "1" } as Attempt["output"] });
+const verifiedItems = () => {
+  const longWords = (text: string, limit: number) => atLimit(text, limit);
+  const item = (id: string, when: string, then: string, result: "met" | "unmet" | "unverified", evidence: string, corrected?: string) => ({ id, when: longWords(when, 100), then: longWords(then, 100), result, evidence: long ? `${evidence} ${"x".repeat(140)}`.slice(0, 140) : evidence, ...(corrected ? { corrected } : {}) });
+  const C1 = [say("add(1, 2) is called", "se llama add(1, 2)"), say("it returns 3", "devuelve 3")] as const;
+  const C2 = [say("one argument is negative", "un argumento es negativo"), say("it still returns the sum", "igual devuelve la suma")] as const;
+  const C3 = [say("an argument is a decimal", "un argumento es decimal"), say("the rounding stays as it is today", "el redondeo sigue como hoy")] as const;
+  const C4 = [say("the invoices page adds up a total", "la página de facturas suma un total"), say("the total is what it was", "el total es el mismo de antes")] as const;
+  switch (verifyMode) {
+    case "all":
+      return [item("C1", ...C1, "met", "test_calc.py::test_add"), item("C2", ...C2, "met", "test_calc.py:14"), item("C3", ...C3, "met", "test_calc.py:21")];
+    case "none":
+      return [item("C1", ...C1, "unverified", ""), item("C2", ...C2, "unverified", "test_calc.py:14", "noCheckPassed"), item("C3", ...C3, "unverified", "", "noEvidence"), item("C4", ...C4, "unverified", "", "leftOut")];
+    case "unmet":
+      return [item("C1", ...C1, "met", "test_calc.py::test_add"), item("C2", ...C2, "unmet", "calc.py:3"), item("C3", ...C3, "unverified", ""), item("C4", ...C4, "unverified", "", "leftOut")];
+    default:
+      return [item("C1", ...C1, "met", "test_calc.py::test_add"), item("C2", ...C2, "met", "test_calc.py:14"), item("C3", ...C3, "met", "test_calc.py:21"), item("C4", ...C4, "unverified", "")];
+  }
+};
+const verifierOutput = () => ({ criteria: verifiedItems(), summary: atLimit(say("Tests prove the sum works, and nothing covers the invoices page.", "Las pruebas demuestran que la suma funciona, y nada cubre la página de facturas."), 200) }) as unknown as Attempt["output"];
+const verifierAttempt = (s: AttemptState, fields: Partial<Attempt> = {}): Attempt => ({ ...attempt, id: "v1", stepId: "verify", role: "verifier", round: verifyMode === "old" ? 0 : round, tools: "readOnly", state: s, reason: null, filesChanged: null, resultText: null, finishedAt: at(1), output: s === "succeeded" ? verifierOutput() : null, ...fields });
+const verifiedAttempts = verifyMode !== null ? [verifierAttempt("succeeded")] : [];
 const reviews: Attempt[] = [
   reviewer("security", params.get("findings") === "1" ? "changes" : "approved", params.get("findings") === "1" ? "The new endpoint skips the role check." : "No problems in authorization, logs or input handling.", params.get("findings") === "1" ? ["app/api.py:42 doesn't call require_role"] : []),
   skippedReviewer("ux"),
@@ -171,7 +199,7 @@ const reviews: Attempt[] = [
 const built = [builtAttempt, ...(round > 0 ? [reworkAttempt] : [])];
 const gated = gate === "build" ? [specAttempt, approvalAttempt] : gate === "end" ? [specAttempt, builtAttempt, approvalAttempt] : null;
 const asked = params.get("asked") === "none" ? [] : [specAttempt];
-const attemptsList: Attempt[] = params.get("flow") === "limit" ? [specAttempt, builtAttempt, checkAttempt, ...reviews] : gated ?? (waiting ? [...asked, ...built, ...(noCheck ? [] : [checkAttempt]), ...(noReviews ? [] : reviews), approvalAttempt, ...(delivered ? [prAttempt] : [])] : [attempt]);
+const attemptsList: Attempt[] = params.get("flow") === "limit" ? [specAttempt, builtAttempt, checkAttempt, ...reviews] : gated ?? (waiting ? [...asked, ...built, ...(noCheck ? [] : [checkAttempt]), ...verifiedAttempts, ...(noReviews ? [] : reviews), approvalAttempt, ...(delivered ? [prAttempt] : [])] : [attempt]);
 const stepNamed = (id: string) => workflow.filter((step) => step.id === id);
 const runWorkflow: WorkflowStep[] =
   gate === "build"
@@ -233,6 +261,9 @@ const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Atte
   many: { steps: manySteps, round: 0, attempts: [setupRan, ...Array.from({ length: 6 }, (_, i) => ran(`step-${i + 1}`, "succeeded", { modelRequested: i % 2 ? "sonnet" : "opus", modelActual: i % 2 ? "claude-sonnet-5-5" : "claude-opus-5-5" })), ran("a-step-whose-name-is-much-too-long-to-fit-in-any-node-at-all", "succeeded", { modelRequested: "claude-a-model-with-a-very-long-name-indeed", modelActual: "claude-a-model-with-a-very-long-name-indeed" }), checkRan(), reviewRan("security", "succeeded", verdict("approved")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", verdict("approved")), reviewRan("a-reviewer-with-a-very-long-name-as-well", "succeeded", verdict("approved")), decided("approve"), ran("after-the-reviews", "succeeded", { filesChanged: ["calc.py"], runFiles: ["calc.py"] }), checkRan("succeeded", { id: "check-again-0-1", stepId: "check-again" }), humanWaits] },
   unreadable: { steps: null, round: 0, attempts: [setupRan, specRan, builderRan(), reviewRan("security", "succeeded", verdict("approved")), checkRan("failed")] },
   try: { steps: [setupStep, { type: "check", id: "try-check", run: "pnpm test" }], round: 0, attempts: [setupRan, checkRan("failed", { id: "try-check-0-1", stepId: "try-check", prompt: "pnpm test" })] },
+  verifying: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), verifierAttempt("running", { finishedAt: null })] },
+  // The answer wasn't in the structure it was asked for, so it stops here for a person.
+  verifyUnreadable: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), verifierAttempt("failed", { reason: { code: "noStructuredOutput" }, output: { verdict: "approved" } as unknown as Attempt["output"] })] },
   questions: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...questionAttempts] },
   corrected: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...correctedAttempts] },
   // A person sent it back: the approval they answered says so, and the run is on its next round.
@@ -484,15 +515,16 @@ const blockedBy = (code: string) => ({ code: "blocked", reason: { code }, detail
 
 // The results on the Workflows page. results=none has no runs, and results=few has too few to average.
 const noAsking = { stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0 };
+const noneChecked = { criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0 };
 const workflowResults: WorkflowResults[] =
   params.get("results") === "none"
     ? []
     : params.get("results") === "few"
-      ? [{ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 2, finished: 1, merged: 1, closed: 0, costPerMergedUsd: 2.4, averageRounds: 1, stoppedToAsk: 1, answers: 2, answersRecommended: 1, sentBack: 0 }]
+      ? [{ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 2, finished: 1, merged: 1, closed: 0, costPerMergedUsd: 2.4, averageRounds: 1, stoppedToAsk: 1, answers: 2, answersRecommended: 1, sentBack: 0, criteriaMet: 1, criteriaUnmet: 0, criteriaUnverified: 2 }]
       : [
-          { workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 24, finished: 22, merged: 15, closed: 3, costPerMergedUsd: 3.12, averageRounds: 0.7, stoppedToAsk: 6, answers: 9, answersRecommended: 7, sentBack: 2 },
-          { workflowId: "mine", workflowName: "Reviews only", runs: 6, finished: 5, merged: 1, closed: 2, costPerMergedUsd: 1.8, averageRounds: 0, ...noAsking },
-          { workflowId: "gone", workflowName: "A workflow since deleted", runs: 9, finished: 9, merged: 4, closed: 1, costPerMergedUsd: 0.86, averageRounds: 0.25, ...noAsking },
+          { workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 24, finished: 22, merged: 15, closed: 3, costPerMergedUsd: 3.12, averageRounds: 0.7, stoppedToAsk: 6, answers: 9, answersRecommended: 7, sentBack: 2, criteriaMet: 41, criteriaUnmet: 3, criteriaUnverified: 28 },
+          { workflowId: "mine", workflowName: "Reviews only", runs: 6, finished: 5, merged: 1, closed: 2, costPerMergedUsd: 1.8, averageRounds: 0, ...noAsking, ...noneChecked },
+          { workflowId: "gone", workflowName: "A workflow since deleted", runs: 9, finished: 9, merged: 4, closed: 1, costPerMergedUsd: 0.86, averageRounds: 0.25, ...noAsking, ...noneChecked },
         ];
 
 // Same as the backend: the card lands at that index of the lane, and the rest close up around it.
@@ -692,6 +724,11 @@ if (width && page) page.style.width = `${width}px`;
 const flowNode = params.get("node");
 if (flowNode) {
   setTimeout(() => document.querySelector<HTMLElement>(`[data-flow-id="${flowNode}"]`)?.click(), 1000);
+}
+
+// details=open opens whatever opens in place once the page has loaded.
+if (params.get("details") === "open") {
+  setTimeout(() => document.querySelectorAll("details").forEach((details) => (details.open = true)), 1500);
 }
 
 // click=<a button's text> presses it once the page has loaded, to see what it opens. then=<another>

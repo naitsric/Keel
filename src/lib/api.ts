@@ -178,7 +178,7 @@ export interface Decision {
   question: string | null;
 }
 
-export type StepRole = { kind: "worker" } | { kind: "reviewer" } | { kind: "approver"; reworkTo: string; maxRounds: number } | { kind: "mapper" } | { kind: "learner" } | { kind: "specifier" };
+export type StepRole = { kind: "worker" } | { kind: "reviewer" } | { kind: "approver"; reworkTo: string; maxRounds: number } | { kind: "mapper" } | { kind: "learner" } | { kind: "specifier" } | { kind: "verifier" };
 
 export interface BrainNote {
   seq: number;
@@ -285,6 +285,23 @@ export interface SpecOutput {
   answered?: GivenAnswer[];
 }
 
+/** One thing the specifier said has to be true, in its words, and what became of it. */
+export interface CheckedCriterion {
+  id: string;
+  when: string;
+  then: string;
+  result: "met" | "unmet" | "unverified";
+  evidence: string;
+  /** Why it isn't what the verifier said. Only the engine writes this. */
+  corrected?: "noEvidence" | "noCheckPassed" | "leftOut";
+}
+
+/** A verifier's answer, once the engine has corrected it. */
+export interface VerificationOutput {
+  criteria: CheckedCriterion[];
+  summary: string;
+}
+
 /** How a person answers one question. */
 export interface QuestionAnswer {
   question: string;
@@ -356,6 +373,10 @@ export interface WorkflowResults {
   answersRecommended: number;
   /** How many times a person sent work back from what it decided alone. */
   sentBack: number;
+  /** Of what had to be true, what the last verifier of each finished run left. */
+  criteriaMet: number;
+  criteriaUnmet: number;
+  criteriaUnverified: number;
 }
 
 export type WorkflowChoice =
@@ -403,7 +424,7 @@ export interface Attempt {
   runId: string;
   stepId: string;
   kind: "agent" | "setup" | "check" | "approval" | "deliver";
-  role: "worker" | "reviewer" | "approver" | "mapper" | "learner" | "specifier";
+  role: "worker" | "reviewer" | "approver" | "mapper" | "learner" | "specifier" | "verifier";
   round: number;
   output: (Verdict & Decision_ & { lines?: unknown[] }) | null;
   runFiles: string[] | null;

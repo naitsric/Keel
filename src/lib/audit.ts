@@ -1,4 +1,5 @@
-import type { AuditEvent, GivenAnswer, SpecOutput } from "./api";
+import type { TFunction } from "i18next";
+import type { AuditEvent, GivenAnswer, SpecOutput, VerificationOutput } from "./api";
 
 export interface CommandRun {
   id: string;
@@ -109,6 +110,34 @@ export const answersIn = (attempts: { role?: string; output?: unknown }[]): Give
 
 /** How many rounds of questions a person has already answered at this step, before the one it's on. */
 export const roundsAnswered = (attempts: { stepId: string; round: number; role?: string; output?: unknown }[], attempt: { stepId: string; round: number }) => attempts.filter((a) => a.stepId === attempt.stepId && a.round === attempt.round && (specOf(a)?.answered?.length ?? 0) > 0).length;
+
+/**
+ * A verifier's answer, or null for anything else. Only one that succeeded has been corrected by the
+ * engine: an attempt that was stopped can still hold what the agent first said.
+ */
+export function verificationOf(attempt: { role?: string; state?: string; output?: unknown }): VerificationOutput | null {
+  const output = attempt.output as Partial<VerificationOutput> | null | undefined;
+  if (attempt.role !== "verifier" || attempt.state !== "succeeded" || !Array.isArray(output?.criteria)) return null;
+  return { summary: "", ...output, criteria: output.criteria };
+}
+
+/** What a verifier said in this round. What it said in an earlier one is about code that has changed since. */
+export function verificationInRound(attempts: { round: number; role?: string; state?: string; output?: unknown }[], round: number): VerificationOutput | null {
+  const found = [...attempts].reverse().find((a) => a.round === round && verificationOf(a));
+  return found ? verificationOf(found) : null;
+}
+
+export function verificationCounts(verification: VerificationOutput) {
+  const count = (result: string) => verification.criteria.filter((c) => c.result === result).length;
+  return { met: count("met"), unmet: count("unmet"), unverified: count("unverified"), total: verification.criteria.length };
+}
+
+/** "3 of 4 met, 1 not verified", or that none of them could be, which is a normal thing to find. */
+export function verificationLine(t: TFunction, verification: VerificationOutput): string {
+  const { met, unmet, unverified, total } = verificationCounts(verification);
+  if (met === 0 && unmet === 0) return t("run.verifyNone", { count: total });
+  return [t("run.verifyMet", { count: met, total }), unmet > 0 && t("run.verifyUnmet", { count: unmet }), unverified > 0 && t("run.verifyUnverified", { count: unverified })].filter(Boolean).join(", ");
+}
 
 const flat = (text: string) =>
   text

@@ -365,11 +365,31 @@
     "specRemoves": "Quita",
     "specLimits": "Qué se queda igual",
     "specAsked": "Lo que te preguntó",
-    "specAnswered": "Lo que respondiste"
+    "specAnswered": "Lo que respondiste",
+    "verifyMet_one": "{{count}} de {{total}} se cumple",
+    "verifyMet_other": "{{count}} de {{total}} se cumplen",
+    "verifyUnmet_one": "{{count}} no se cumple",
+    "verifyUnmet_other": "{{count}} no se cumplen",
+    "verifyUnverified_one": "{{count}} sin verificar",
+    "verifyUnverified_other": "{{count}} sin verificar",
+    "verifyNone_one": "No se pudo verificar",
+    "verifyNone_other": "No se pudo verificar ninguno de los {{count}}",
+    "verifyResult": {
+      "met": "Se cumple",
+      "unmet": "No se cumple",
+      "unverified": "Sin verificar"
+    },
+    "verifyWhy": {
+      "noEvidence": "Dijo que se cumple, pero no qué lo demuestra.",
+      "noCheckPassed": "Dijo que se cumple, pero ninguna verificación pasó en esta ronda.",
+      "leftOut": "No dijo nada sobre esto.",
+      "noProof": "No encontró nada que lo demuestre."
+    }
   },
   "tabs": {
     "activity": "Actividad",
     "understood": "Lo que entendió",
+    "found": "Lo que encontró",
     "commands": "Comandos",
     "changes": "Cambios",
     "prompt": "Prompt",
@@ -425,6 +445,11 @@
     "questionsTaken": "Después de {{rounds}} rondas de preguntas, Keel dejó de preguntar y tomó las opciones recomendadas",
     "specCorrected": "Lo que escribió no cabía en lo que Keel te puede mostrar, así que Keel le pidió corregirlo",
     "specAnswer": "Escribió lo que entendió",
+    "verifyAnswer": "Escribió lo que encontró",
+    "verificationCorrected_one": "Keel no le creyó en una cosa, y cuenta como sin verificar:",
+    "verificationCorrected_other": "Keel no le creyó en {{count}} cosas, y cuentan como sin verificar:",
+    "verificationDropped_one": "También respondió sobre algo que no se preguntó, y Keel lo dejó fuera.",
+    "verificationDropped_other": "También respondió sobre {{count}} cosas que no se preguntaron, y Keel las dejó fuera.",
     "returned": "Lo devolviste para la ronda {{round}}"
   },
   "commands": {
@@ -592,7 +617,8 @@
     "noCommand": "Escribe el comando de «{{step}}».",
     "deliverNeedsApproval": "«{{step}}» abre un pull request, así que una persona tiene que aprobar en un paso anterior.",
     "learnerNotLast": "«{{step}}» propone lo que enseñó la ejecución, así que tiene que ser el último paso.",
-    "groupRole": "«{{step}}» no puede ir en un grupo. Solo pueden los pasos que hacen o revisan el trabajo."
+    "groupRole": "«{{step}}» no puede ir en un grupo. Solo pueden los pasos que hacen o revisan el trabajo.",
+    "verifierNeedsSpecifier": "«{{step}}» repasa lo que tiene que cumplirse, así que antes tiene que haber un paso que defina el cambio."
   },
   "workflows": {
     "title": "Workflows",
@@ -621,6 +647,7 @@
     "role": "Rol",
     "roleWorker": "Hace el trabajo",
     "roleSpecifier": "Define el cambio",
+    "roleVerifier": "Comprueba lo pedido",
     "roleReviewer": "Revisa",
     "roleApprover": "Aprueba",
     "reworkTo": "Devuelve el trabajo a",
@@ -672,7 +699,12 @@
       "matchedNote": "Si es alto, pregunta de más.",
       "matchedValue": "{{percent}}% ({{matched}} de {{total}})",
       "sentBack": "Veces que se usó “Cambiar”",
-      "sentBackNote": "Si es alto, pregunta de menos."
+      "sentBackNote": "Si es alto, pregunta de menos.",
+      "criteriaMet": "Lo que tenía que cumplirse: se cumplió",
+      "criteriaUnmet": "Lo que tenía que cumplirse: no se cumplió",
+      "criteriaUnverified": "Lo que tenía que cumplirse: sin verificar",
+      "criteriaUnverifiedNote": "Si es alto, valdría la pena un paso que de verdad corra las pruebas.",
+      "nothingChecked": "Nada comprobado aún"
     }
   },
   "flow": {

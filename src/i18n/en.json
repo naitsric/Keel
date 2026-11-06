@@ -365,11 +365,31 @@
     "specRemoves": "Removes",
     "specLimits": "What stays as it is",
     "specAsked": "What it asked you",
-    "specAnswered": "What you answered"
+    "specAnswered": "What you answered",
+    "verifyMet_one": "{{count}} of {{total}} met",
+    "verifyMet_other": "{{count}} of {{total}} met",
+    "verifyUnmet_one": "{{count}} not met",
+    "verifyUnmet_other": "{{count}} not met",
+    "verifyUnverified_one": "{{count}} not verified",
+    "verifyUnverified_other": "{{count}} not verified",
+    "verifyNone_one": "It couldn't be verified",
+    "verifyNone_other": "None of the {{count}} could be verified",
+    "verifyResult": {
+      "met": "Met",
+      "unmet": "Not met",
+      "unverified": "Not verified"
+    },
+    "verifyWhy": {
+      "noEvidence": "It said this was met, but not what proves it.",
+      "noCheckPassed": "It said this was met, but no check passed in this round.",
+      "leftOut": "It said nothing about this.",
+      "noProof": "It found nothing that proves this."
+    }
   },
   "tabs": {
     "activity": "Activity",
     "understood": "What it understood",
+    "found": "What it found",
     "commands": "Commands",
     "changes": "Changes",
     "prompt": "Prompt",
@@ -425,6 +445,11 @@
     "questionsTaken": "After {{rounds}} rounds of questions, Keel stopped asking and took the recommended options",
     "specCorrected": "What it wrote didn't fit what Keel can show you, so Keel asked it to fix that",
     "specAnswer": "It wrote down what it understood",
+    "verifyAnswer": "It wrote down what it found",
+    "verificationCorrected_one": "Keel didn't take its word for one thing, and it counts as not verified:",
+    "verificationCorrected_other": "Keel didn't take its word for {{count}} things, and they count as not verified:",
+    "verificationDropped_one": "It also answered about something that wasn't asked, and Keel left that out.",
+    "verificationDropped_other": "It also answered about {{count}} things that weren't asked, and Keel left those out.",
     "returned": "You sent it back for round {{round}}"
   },
   "commands": {
@@ -592,7 +617,8 @@
     "noCommand": "Write the command for “{{step}}”.",
     "deliverNeedsApproval": "“{{step}}” opens a pull request, so a person has to approve in a step before it.",
     "learnerNotLast": "“{{step}}” proposes what the run taught, so it has to be the last step.",
-    "groupRole": "“{{step}}” can't run in a group. Only steps that do the work or review it can."
+    "groupRole": "“{{step}}” can't run in a group. Only steps that do the work or review it can.",
+    "verifierNeedsSpecifier": "“{{step}}” goes through what has to be true, so a step that works out the change has to come before it."
   },
   "workflows": {
     "title": "Workflows",
@@ -621,6 +647,7 @@
     "role": "Role",
     "roleWorker": "Does the work",
     "roleSpecifier": "Works out the change",
+    "roleVerifier": "Checks what was asked",
     "roleReviewer": "Reviews",
     "roleApprover": "Approves",
     "reworkTo": "Sends work back to",
@@ -672,7 +699,12 @@
       "matchedNote": "High means it asks too much.",
       "matchedValue": "{{percent}}% ({{matched}} of {{total}})",
       "sentBack": "Times “Change” was used",
-      "sentBackNote": "High means it asks too little."
+      "sentBackNote": "High means it asks too little.",
+      "criteriaMet": "What had to be true: met",
+      "criteriaUnmet": "What had to be true: not met",
+      "criteriaUnverified": "What had to be true: not verified",
+      "criteriaUnverifiedNote": "High means a step that really runs the tests would be worth having.",
+      "nothingChecked": "Nothing checked yet"
     }
   },
   "flow": {

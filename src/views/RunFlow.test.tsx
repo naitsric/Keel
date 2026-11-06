@@ -575,6 +575,75 @@ describe("the run page's flow", () => {
     await choose(node("pr"));
     expect(page()).toContain("Este paso aún no empieza.");
   });
+  describe("a step that checks what was asked", () => {
+    const output = {
+      summary: "A test proves the sum, and nothing covers the rest.",
+      criteria: [
+        { id: "C1", when: "add(1, 2)", then: "it returns 3", result: "met", evidence: "test_calc.py:1" },
+        { id: "C2", when: "one is negative", then: "it still adds", result: "unverified", evidence: "" },
+        { id: "C3", when: "it is a decimal", then: "it rounds as today", result: "unverified", evidence: "test_calc.py:9", corrected: "noCheckPassed" },
+      ],
+    };
+    const verifier = (state: AttemptState, fields: Partial<Attempt> = {}) => attempt("verify", state, { role: "verifier", output: output as unknown as Attempt["output"], ...fields });
+
+    it("reads as text in its details, and not as raw JSON", async () => {
+      attempts = [verifier("succeeded"), attempt("builder", "running")];
+      await open();
+      await choose(node("verify"));
+      await choose(radio("What it found"));
+      expect(page()).toContain("1 of 3 met, 2 not verified");
+      expect(page()).toContain("A test proves the sum, and nothing covers the rest.");
+      expect(page()).toContain("add(1, 2) → it returns 3");
+      expect(page()).toContain("test_calc.py:1");
+      expect(page()).toContain("It found nothing that proves this.");
+      expect(page()).toContain("It said this was met, but no check passed in this round.");
+      expect(page()).not.toContain('"criteria"');
+      expect(page()).not.toContain("C1");
+    });
+
+    it("says it gave its answer in the activity, and what Keel changed in words", async () => {
+      const verify = verifier("succeeded");
+      attempts = [verify, attempt("builder", "running")];
+      events = {
+        [verify.id]: [
+          { seq: 1, attemptId: verify.id, at: "2026-11-06T10:00:00Z", kind: "toolCall", data: { id: "t1", name: "StructuredOutput", input: output } },
+          { seq: 2, attemptId: verify.id, at: "2026-11-06T10:00:00Z", kind: "verificationCorrected", data: { corrected: [output.criteria[2]], dropped: ["C9"], check: { state: "notRun" } } },
+        ],
+      };
+      await open();
+      await choose(node("verify"));
+      await choose(radio("Activity"));
+      expect(page()).toContain("It wrote down what it found");
+      expect(page()).toContain("Keel didn't take its word for one thing");
+      expect(page()).toContain("it is a decimal → it rounds as today: It said this was met, but no check passed in this round.");
+      expect(page()).toContain("It also answered about something that wasn't asked");
+      expect(page()).not.toContain('"summary"');
+      expect(page()).not.toContain("C9");
+    });
+
+    it("one that couldn't be read says so and offers to try again, with nothing passed off as found", async () => {
+      attempts = [verifier("failed", { reason: { code: "noStructuredOutput" }, output: { verdict: "approved" } as unknown as Attempt["output"] })];
+      await open();
+      expect(page()).toContain("It finished without the answer it was asked for.");
+      expect(page()).toContain("Try again");
+      expect(page()).not.toContain("What it found");
+    });
+
+    it("an attempt stopped with an answer in hand shows nothing it said, since nobody corrected it", async () => {
+      attempts = [verifier("stopped")];
+      await open();
+      expect(page()).not.toContain("What it found");
+      expect(page()).not.toContain("1 of 3 met");
+    });
+
+    it("the summary of a finished run says how it went", async () => {
+      attempts = [verifier("succeeded")];
+      run = { ...run, finishedAt: "2026-11-06T10:00:00Z" };
+      await open();
+      expect(page()).toContain("What proves it");
+      expect(page()).toContain("1 of 3 met, 2 not verified");
+    });
+  });
   describe("a step that works out what's asked", () => {
     const output = { summary: "add returns the sum", criteria: [{ id: "C1", when: "add(1, 2)", then: "it returns 3" }], changes: [], limits: ["Its signature stays"], decided: [{ text: "Keeps the rounding" }], questions: [] };
     const specifier = (state: AttemptState, fields: Partial<Attempt> = {}) => attempt("spec", state, { role: "specifier", output: output as unknown as Attempt["output"], ...fields });
