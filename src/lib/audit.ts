@@ -1,4 +1,4 @@
-import type { AuditEvent } from "./api";
+import type { AuditEvent, GivenAnswer, SpecOutput } from "./api";
 
 export interface CommandRun {
   id: string;
@@ -94,8 +94,21 @@ export function specifyingAttempt<T extends { kind: string; role: string; stepId
   return latest((a) => a.role === "specifier") ?? latest((a) => a.stepId === "spec");
 }
 
-/** What that attempt says, in words a person can read. */
-export const askedText = (attempt: { resultText: string | null }): string | null => attempt.resultText?.trim() || null;
+/** A specifier's structured answer, or null for anything else, including one Keel can't read. */
+export function specOf(attempt: { role?: string; output?: unknown }): SpecOutput | null {
+  const output = attempt.output as Partial<SpecOutput> | null | undefined;
+  if (attempt.role !== "specifier" || typeof output?.summary !== "string") return null;
+  return { criteria: [], changes: [], limits: [], decided: [], questions: [], ...output, summary: output.summary };
+}
+
+/** What that attempt says, in words a person can read: the sentence that sums it up, or else what it wrote. */
+export const askedText = (attempt: { resultText: string | null; role?: string; output?: unknown }): string | null => specOf(attempt)?.summary.trim() || attempt.resultText?.trim() || null;
+
+/** What a person has answered in this run, oldest first. */
+export const answersIn = (attempts: { role?: string; output?: unknown }[]): GivenAnswer[] => attempts.flatMap((a) => specOf(a)?.answered ?? []);
+
+/** How many rounds of questions a person has already answered at this step, before the one it's on. */
+export const roundsAnswered = (attempts: { stepId: string; round: number; role?: string; output?: unknown }[], attempt: { stepId: string; round: number }) => attempts.filter((a) => a.stepId === attempt.stepId && a.round === attempt.round && (specOf(a)?.answered?.length ?? 0) > 0).length;
 
 const flat = (text: string) =>
   text
@@ -157,7 +170,7 @@ export function latestOfEachStep<T extends { stepId: string }>(attempts: T[]): T
   return [...latest.values()];
 }
 
-const NEEDS_A_PERSON = ["waitingApproval", "stalled", "blocked", "interrupted", "failed", "stopped", "rejected"];
+const NEEDS_A_PERSON = ["waitingApproval", "waitingAnswers", "stalled", "blocked", "interrupted", "failed", "stopped", "rejected"];
 const WORKING = ["running", "preparing", "queued"];
 
 /**

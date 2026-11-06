@@ -3,17 +3,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type PrState, type RawCheck, type Run } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, specifyingAttempt, toolSummary, touchesWorkflows, stillGoing } from "../lib/audit";
-import { attemptChoices, type FlowNode, flowOf, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type PrState, type QuestionAnswer, type RawCheck, type Run, type SpecDecided, type SpecOutput, type SpecQuestion } from "../lib/api";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing } from "../lib/audit";
+import { attemptChoices, canSendBack, type FlowNode, flowOf, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
+import { answerFrom, differsFromRecommended, needsText, type QuestionPick, recommendedAnswers, startingPick } from "../lib/questions";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
 import { ProposalRow } from "./BrainPage";
 import { FlowDiagram } from "./FlowDiagram";
 
-type Tab = "activity" | "commands" | "changes" | "prompt" | "details" | "output";
+type Tab = "understood" | "activity" | "commands" | "changes" | "prompt" | "details" | "output";
 
 const DECISIONS: Record<AttemptState, string> = {
   queued: "run.decideActive",
@@ -26,7 +27,9 @@ const DECISIONS: Record<AttemptState, string> = {
   interrupted: "run.decideInterrupted",
   blocked: "run.decideBlocked",
   waitingApproval: "run.decideApproval",
+  waitingAnswers: "run.decideAnswers",
   rejected: "run.decideRejected",
+  returned: "run.decideActive",
   skipped: "run.decideActive",
   abandoned: "run.decideAbandoned",
 };
@@ -92,6 +95,8 @@ function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: 
   const anyActive = attempts.some((a) => isActive(a.state));
   // A step that's done says nothing about the run while others are still to come.
   const between = !run?.finishedAt && (current.state === "succeeded" || current.state === "skipped");
+  // A run that only had to work out what's asked has that to say for itself, and no worker to say it.
+  const onlyUnderstood = !mapper && explaining.length === 0 && current.state === "succeeded" ? specOf(current) : null;
   const decision = mapper && current.state === "succeeded" ? "run.decideMap" : run?.prUrl ? PR_DECISIONS[run.prState ?? "draft"] : current.reason?.code === "reworkLimit" ? "run.decideReworkLimit" : between ? "run.decideActive" : DECISIONS[current.state];
   return (
     <Card className="grid gap-5 p-4 md:grid-cols-2">
@@ -104,7 +109,8 @@ function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: 
             </Button>
           </>
         )}
-        {!mapper && explaining.length === 0 && <p className="selectable whitespace-pre-wrap">{(anyActive ? t("run.noResultYet") : current.state === "succeeded" ? t("run.noResult") : t("run.noResultEnded"))}</p>}
+        {onlyUnderstood && <p className="selectable whitespace-pre-wrap">{onlyUnderstood.summary}</p>}
+        {!mapper && !onlyUnderstood && explaining.length === 0 && <p className="selectable whitespace-pre-wrap">{(anyActive ? t("run.noResultYet") : current.state === "succeeded" ? t("run.noResult") : t("run.noResultEnded"))}</p>}
         <Explanations attempts={explaining} />
       </SummaryBlock>
       <div className="space-y-4">
@@ -233,23 +239,12 @@ const ignoreEnter = (e: React.KeyboardEvent) => {
 };
 
 /**
- * What's being decided, in one place, so nobody has to scroll to find out. Rejecting takes a reason,
- * so the focus starts on the note, where Enter only adds a line. Enter never answers, and approve
- * arms after a moment.
+ * Whether what answers for the person can be pressed yet. A click on this window while it's in the
+ * background acts as a click, not only as a way to bring it forward. So it's off while the window
+ * is away, and arms again a moment after it's back.
  */
-export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck, onShowChanges, onError }: { attempt: Attempt; run: Run; attempts: Attempt[]; files: string[]; commands: CommandRun[]; rawCheck: RawCheck; onShowChanges: () => void; onError: (message: string) => void }) {
-  const { t } = useTranslation();
-  const project = useApp((s) => s.overview.projects.find((p) => p.id === run.projectId));
-  const draft = useApp((s) => s.approvalDrafts[attempt.id] ?? "");
-  const setDraft = useApp((s) => s.setApprovalDraft);
-  // What was sent stays on the card until the card goes, instead of blinking empty.
-  const [sent, setSent] = useState<string | null>(null);
-  const note = sent ?? draft;
+function useArmed() {
   const [armed, setArmed] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [reading, setReading] = useState<"asked" | "explanation" | "reviews" | null>(null);
-  // A click on this window while it's in the background acts as a click, not only as a way to bring
-  // it forward. So approving is off while it's away, and arms again a moment after it's back.
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout>;
     const disarm = () => {
@@ -273,6 +268,116 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
       unwatchHold();
     };
   }, []);
+  return armed;
+}
+
+function SpecList({ title, items }: { title: string; items: React.ReactNode[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div>
+      <h4 className="text-[12px] font-semibold text-muted">{title}</h4>
+      <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 break-words">
+        {items.map((item, index) => (
+          // Lines of a fixed text: their position is their identity.
+          <li key={index}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** What a specifier understood, as text to read. */
+function SpecView({ spec }: { spec: SpecOutput }) {
+  const { t } = useTranslation();
+  const kinds = { adds: "run.specAdds", changes: "run.specAlters", removes: "run.specRemoves" };
+  return (
+    <div className="space-y-3 text-[13px] leading-relaxed">
+      <p className="selectable break-words">{spec.summary}</p>
+      <SpecList
+        title={t("run.specHolds")}
+        items={spec.criteria.map((criterion) => (
+          <>
+            <span className="font-mono text-[12px] text-muted">{criterion.id}</span> {criterion.when} → {criterion.then}
+          </>
+        ))}
+      />
+      <SpecList title={t("run.specChanges")} items={spec.changes.map((change) => `${t(kinds[change.kind])}: ${change.text}`)} />
+      <SpecList title={t("run.specLimits")} items={spec.limits} />
+      <SpecList
+        title={t("run.decidedTitle")}
+        items={spec.decided.map((decided) => (
+          <>
+            {decided.text}
+            {decided.taken === "person" && <span className="block text-[11.5px] text-subtle">{t("run.decidedYouChose")}</span>}
+            {decided.taken === "roundsLimit" && <span className="block text-[11.5px] text-warning">{t("run.decidedKeelTook")}</span>}
+          </>
+        ))}
+      />
+      <SpecList title={t("run.specAsked")} items={spec.questions.map((question) => `${question.text} ${question.options.map((option) => option.label).join(" / ")}`)} />
+      <SpecList title={t("run.specAnswered")} items={(spec.answered ?? []).map((answer) => `${answer.asked} ${answer.answer}`)} />
+    </div>
+  );
+}
+
+/** What it settled by itself. Each line can go back to whoever does the work, without starting over. */
+function DecidedList({ attemptId, decided, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
+  const { t } = useTranslation();
+  const [changing, setChanging] = useState<number | null>(null);
+  const draftKey = `${attemptId}:change:${changing}`;
+  const instruction = useApp((s) => s.approvalDrafts[draftKey] ?? "");
+  const setDraft = useApp((s) => s.setApprovalDraft);
+  return (
+    <ul className="space-y-1.5">
+      {decided.map((item, index) => (
+        // Lines of a fixed text: their position is their identity.
+        <li key={index}>
+          <div className="flex items-start gap-2">
+            <p className="selectable min-w-0 flex-1 break-words">{item.text}</p>
+            {canChange && changing !== index && (
+              <Button variant="ghost" className="-my-1 shrink-0" aria-label={t("run.decidedChangeThis", { text: item.text })} onClick={() => setChanging(index)}>
+                {t("run.decidedChange")}
+              </Button>
+            )}
+          </div>
+          {item.taken === "person" && <p className="text-[11.5px] text-subtle">{t("run.decidedYouChose")}</p>}
+          {item.taken === "roundsLimit" && <p className="text-[11.5px] text-warning">{t("run.decidedKeelTook")}</p>}
+          {changing === index && (
+            <div className="mt-1.5 rounded-md border border-border bg-inset p-2">
+              <Field label={t("run.sendBackLabel")} hint={t("run.sendBackHint")}>
+                <textarea autoFocus rows={2} value={instruction} onChange={(e) => setDraft(draftKey, e.target.value)} className={`${inputClass} resize-y`} />
+              </Field>
+              <div className="mt-2 flex flex-wrap gap-2">
+                <Button variant="primary" disabled={!armed || busy || !instruction.trim()} onKeyDown={ignoreEnter} onClick={() => onSend(item.text, instruction, () => setDraft(draftKey, ""))}>
+                  {t("run.sendBackAction")}
+                </Button>
+                <Button variant="ghost" onKeyDown={ignoreEnter} onClick={() => setChanging(null)}>
+                  {t("run.sendBackKeep")}
+                </Button>
+              </div>
+            </div>
+          )}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * What's being decided, in one place, so nobody has to scroll to find out. Rejecting takes a reason,
+ * so the focus starts on the note, where Enter only adds a line. Enter never answers, and approve
+ * arms after a moment.
+ */
+export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck, onShowChanges, onError }: { attempt: Attempt; run: Run; attempts: Attempt[]; files: string[]; commands: CommandRun[]; rawCheck: RawCheck; onShowChanges: () => void; onError: (message: string) => void }) {
+  const { t } = useTranslation();
+  const project = useApp((s) => s.overview.projects.find((p) => p.id === run.projectId));
+  const draft = useApp((s) => s.approvalDrafts[attempt.id] ?? "");
+  const setDraft = useApp((s) => s.setApprovalDraft);
+  // What was sent stays on the card until the card goes, instead of blinking empty.
+  const [sent, setSent] = useState<string | null>(null);
+  const note = sent ?? draft;
+  const armed = useArmed();
+  const [busy, setBusy] = useState(false);
+  const [reading, setReading] = useState<"asked" | "explanation" | "reviews" | null>(null);
   // Masking only hides a secret here. Approving would still push it with the branch.
   const [addsSecret, setAddsSecret] = useState(false);
   const changesSomething = files.length > 0;
@@ -300,6 +405,14 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
     );
   };
 
+  const sendBack = (decided: string, instruction: string, onDone: () => void) => {
+    setBusy(true);
+    api.approvalSendBack(attempt.id, t("run.sendBackAbout", { decided, instruction: instruction.trim() })).then(onDone, (e) => {
+      setBusy(false);
+      onError(errorText(t, e));
+    });
+  };
+
   const outcome = approvalOutcome(run.workflow, attempt.stepId, files);
   const empty = outcome === "nothingToDeliver";
   const delivers = outcome === "delivers" || outcome === "deliversLater";
@@ -312,6 +425,10 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   // At an approval right after that step, "What it did" is already showing this same text.
   const asked = specifying && !explaining.some((a) => a.id === specifying.id) ? askedText(specifying) : null;
   const askedGist = asked ? gist(asked, 160) : null;
+  const spec = specifying ? specOf(specifying) : null;
+  // Right after working out what's asked, nobody has done anything yet. Saying it finished without
+  // an explanation would read as something gone wrong.
+  const nothingToExplain = asked !== null && !attempts.some((a) => a.kind === "agent" && a.role === "worker");
   const { reviewers, approver } = reviewsOfRound(attempts, run.round);
   const reviewed = reviewers.some((review) => review.state !== "skipped") || approver != null;
   const hiddenFiles = files.length - SHOWN_FILES;
@@ -329,7 +446,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             label={t("run.whatWasAsked")}
             note={t("run.generated")}
             action={
-              askedGist.cut && (
+              (askedGist.cut || spec) && (
                 <Button variant="ghost" aria-label={t("run.approvalReadAsked")} onClick={() => setReading("asked")}>
                   {t("run.approvalReadAll")}
                 </Button>
@@ -339,30 +456,37 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             <p className="selectable break-words">{askedGist.text}</p>
           </ApprovalRow>
         )}
-        <ApprovalRow
-          label={t("run.whatItDid")}
-          note={explaining.length > 0 ? t("run.generated") : undefined}
-          action={
-            !empty &&
-            hasMore && (
-              <Button variant="ghost" onClick={() => setReading("explanation")}>
-                {t("run.approvalReadAll")}
-              </Button>
-            )
-          }
-        >
-          {explaining.length === 0 && <p>{t("run.noResult")}</p>}
-          {empty ? (
-            <Explanations attempts={explaining} />
-          ) : (
-            gists.map((g) => (
-              <p key={g.attempt.id} className="selectable mb-1 break-words last:mb-0">
-                {g.attempt.round > 0 && <span className="mr-1.5 font-medium text-warning">{t("run.round", { number: g.attempt.round + 1 })}</span>}
-                {g.text}
-              </p>
-            ))
-          )}
-        </ApprovalRow>
+        {spec && spec.decided.length > 0 && (
+          <ApprovalRow label={t("run.decidedTitle")} note={t("run.generated")}>
+            <DecidedList attemptId={attempt.id} decided={spec.decided} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
+          </ApprovalRow>
+        )}
+        {!nothingToExplain && (
+          <ApprovalRow
+            label={t("run.whatItDid")}
+            note={explaining.length > 0 ? t("run.generated") : undefined}
+            action={
+              !empty &&
+              hasMore && (
+                <Button variant="ghost" onClick={() => setReading("explanation")}>
+                  {t("run.approvalReadAll")}
+                </Button>
+              )
+            }
+          >
+            {explaining.length === 0 && <p>{t("run.noResult")}</p>}
+            {empty ? (
+              <Explanations attempts={explaining} />
+            ) : (
+              gists.map((g) => (
+                <p key={g.attempt.id} className="selectable mb-1 break-words last:mb-0">
+                  {g.attempt.round > 0 && <span className="mr-1.5 font-medium text-warning">{t("run.round", { number: g.attempt.round + 1 })}</span>}
+                  {g.text}
+                </p>
+              ))
+            )}
+          </ApprovalRow>
+        )}
         {!empty && (
           <ApprovalRow
             label={t("run.whatChanged")}
@@ -469,13 +593,131 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
         {reading === "reviews" ? (
           <ReviewsList attempts={attempts} round={run.round} />
         ) : reading === "asked" ? (
-          <p className="selectable text-[13px] leading-relaxed whitespace-pre-wrap">{asked}</p>
+          spec ? <SpecView spec={spec} /> : <p className="selectable text-[13px] leading-relaxed whitespace-pre-wrap">{asked}</p>
         ) : (
           <div className="text-[13px] leading-relaxed">
             <Explanations attempts={explaining} />
           </div>
         )}
       </Modal>
+    </Card>
+  );
+}
+
+function QuestionBlock({ question, pick, name, autoFocus, disabled, onPick }: { question: SpecQuestion; pick: QuestionPick; name: string; autoFocus: boolean; disabled: boolean; onPick: (pick: QuestionPick) => void }) {
+  const { t } = useTranslation();
+  const missing = needsText(pick);
+  return (
+    <fieldset className="min-w-0 rounded-md border border-border p-3">
+      {/* Floated, or a question on two lines would sit across the border. */}
+      <legend className="selectable float-left mb-1.5 w-full p-0 text-[13px] leading-snug font-medium break-words">{question.text}</legend>
+      <div className="clear-both space-y-1">
+        {question.options.map((option) => (
+          <label key={option.label} className="flex items-start gap-2 text-[12.5px] leading-5">
+            <input type="radio" name={name} className="mt-1 shrink-0" autoFocus={autoFocus && pick.option === option.label} checked={pick.option === option.label} disabled={disabled} onChange={() => onPick({ ...pick, option: option.label })} />
+            <span className="min-w-0 break-words">
+              {option.label}
+              {option.recommended && <span className="ml-1.5 rounded border border-accent/40 px-1 text-[11px] whitespace-nowrap text-accent">{t("run.questionRecommended")}</span>}
+            </span>
+          </label>
+        ))}
+        <label className="flex items-start gap-2 text-[12.5px] leading-5">
+          <input type="radio" name={name} className="mt-1 shrink-0" checked={pick.option === null} disabled={disabled} onChange={() => onPick({ ...pick, option: null })} />
+          {t("run.questionOther")}
+        </label>
+      </div>
+      {pick.option === null && (
+        <div className="mt-1.5 pl-5">
+          <textarea autoFocus rows={2} aria-label={t("run.questionOtherLabel", { question: question.text })} value={pick.own} disabled={disabled} onChange={(e) => onPick({ ...pick, own: e.target.value })} className={`${inputClass} resize-y`} />
+          {missing && <p className="mt-0.5 text-[11.5px] text-warning">{t("run.questionOtherNeeded")}</p>}
+        </div>
+      )}
+      <label className="mt-2 flex items-start gap-2 border-t border-border pt-2 text-[12px] text-muted">
+        <input type="checkbox" className="mt-0.5 shrink-0" checked={pick.remember} disabled={disabled} onChange={(e) => onPick({ ...pick, remember: e.target.checked })} />
+        {t("run.questionRemember")}
+      </label>
+    </fieldset>
+  );
+}
+
+/**
+ * What only the person can decide, in one place, so nobody has to scroll to find out. The focus
+ * starts on the first question's recommended option, where Enter does nothing and the arrows move
+ * between options. Enter never answers, and what answers arms after a moment, as on an approval.
+ */
+export function QuestionsCard({ attempt, attempts, onError }: { attempt: Attempt; attempts: Attempt[]; onError: (message: string) => void }) {
+  const { t } = useTranslation();
+  const spec = specOf(attempt);
+  const questions = spec?.questions ?? [];
+  const drafts = useApp((s) => s.questionDrafts[attempt.id]);
+  const setDraft = useApp((s) => s.setQuestionDraft);
+  const clearDrafts = useApp((s) => s.clearQuestionDrafts);
+  const armed = useArmed();
+  const [busy, setBusy] = useState(false);
+  const picks = questions.map((question) => drafts?.[question.id] ?? startingPick(question));
+  const anyDifferent = questions.some((question, index) => differsFromRecommended(question, picks[index]));
+  const complete = !picks.some(needsText);
+
+  const answer = (answers: QuestionAnswer[]) => {
+    setBusy(true);
+    api.questionsAnswer(attempt.id, answers).then(
+      () => clearDrafts(attempt.id),
+      (e) => {
+        setBusy(false);
+        onError(errorText(t, e));
+      },
+    );
+  };
+  const cancel = () => {
+    setBusy(true);
+    api.attemptAbandon(attempt.id).then(
+      () => clearDrafts(attempt.id),
+      (e) => {
+        setBusy(false);
+        onError(errorText(t, e));
+      },
+    );
+  };
+
+  return (
+    // Short enough for its buttons to show without scrolling: the window less the same as on the
+    // approval card. The questions are what gives way, and they scroll on their own.
+    <Card role="alert" className="flex max-h-[calc(100vh-164px)] flex-col overflow-y-auto border-warning/40 p-4">
+      <p className="shrink-0 text-[14px] font-semibold">{t("run.questionsTitle")}</p>
+      <p className="mt-1 shrink-0 text-[12.5px] text-muted">{t("run.questionsBody")}</p>
+      {spec?.summary && (
+        <p className="selectable mt-2 shrink-0 text-[12.5px] leading-5 break-words">
+          <span className="font-semibold text-muted">{t("run.questionsWillChange")}:</span> {spec.summary}
+        </p>
+      )}
+      <div className="mt-3 min-h-28 space-y-2.5 overflow-y-auto">
+        {questions.map((question, index) => (
+          <QuestionBlock key={question.id} question={question} pick={picks[index]} name={`${attempt.id}-${question.id}`} autoFocus={index === 0} disabled={busy} onPick={(pick) => setDraft(attempt.id, question.id, pick)} />
+        ))}
+      </div>
+      <p className="mt-2 shrink-0 text-[11.5px] text-subtle">{t("run.questionRememberHint")}</p>
+      {roundsAnswered(attempts, attempt) > 0 && <p className="mt-1 shrink-0 text-[11.5px] text-warning">{t("run.questionsLastRound")}</p>}
+      <div className="mt-3 grid shrink-0 grid-cols-3 gap-4 border-t border-border pt-3">
+        <div>
+          <Button variant={anyDifferent ? "secondary" : "primary"} disabled={!armed || busy} onKeyDown={ignoreEnter} onClick={() => answer(recommendedAnswers(questions, picks))}>
+            {t("run.questionsUseRecommended")}
+          </Button>
+          <p className="mt-1 text-[11.5px] text-muted">{t("run.questionsUseRecommendedHint")}</p>
+        </div>
+        <div>
+          <Button variant={anyDifferent ? "primary" : "secondary"} disabled={!armed || busy || !anyDifferent || !complete} onKeyDown={ignoreEnter} onClick={() => answer(questions.map((question, index) => answerFrom(question, picks[index])))}>
+            {t("run.questionsAnswer")}
+          </Button>
+          <p className="mt-1 text-[11.5px] text-muted">{t("run.questionsAnswerHint")}</p>
+          {!anyDifferent && <p className="mt-0.5 text-[11.5px] text-muted">{t("run.questionsAnswerSame")}</p>}
+        </div>
+        <div>
+          <Button variant="ghost" disabled={!armed || busy} onKeyDown={ignoreEnter} onClick={cancel}>
+            {t("run.questionsCancel")}
+          </Button>
+          <p className="mt-1 text-[11.5px] text-muted">{t("run.questionsCancelHint")}</p>
+        </div>
+      </div>
     </Card>
   );
 }
@@ -529,7 +771,7 @@ function Actions({ attempt, onError }: { attempt: Attempt; onError: (message: st
       </div>
     );
   }
-  if (attempt.state === "succeeded" || attempt.state === "abandoned" || attempt.state === "rejected" || attempt.state === "skipped") return null;
+  if (attempt.state === "succeeded" || attempt.state === "abandoned" || attempt.state === "rejected" || attempt.state === "skipped" || attempt.state === "returned") return null;
   const canResume = attempt.kind === "agent" && ["interrupted", "blocked", "stopped", "failed"].includes(attempt.state);
   return (
     <Card className="p-4">
@@ -558,7 +800,7 @@ function Output({ text, truncated }: { text: string; truncated?: boolean }) {
   );
 }
 
-function ActivityEntry({ item }: { item: ActivityItem }) {
+function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role"] }) {
   const { t } = useTranslation();
   const { event, result } = item;
   const data = event.data;
@@ -567,6 +809,8 @@ function ActivityEntry({ item }: { item: ActivityItem }) {
     case "text":
       return <p className="selectable text-[13px] leading-relaxed whitespace-pre-wrap">{data.text}</p>;
     case "toolCall": {
+      // Its answer has a tab of its own, as text to read.
+      if (role === "specifier" && data.name === "StructuredOutput") return line(t("activity.specAnswer"), "text-subtle");
       const failed = result?.data.isError === true;
       return (
         <div>
@@ -596,6 +840,30 @@ function ActivityEntry({ item }: { item: ActivityItem }) {
       return line(t("activity.reworkLimit"), "text-warning");
     case "reworkLimitAnswer":
       return line(data.anotherRound ? t("activity.reworkLimitAnswerRound") : t("activity.reworkLimitAnswerApproval"));
+    case "questionsAsked":
+      return line(t("activity.questionsAsked", { count: (data.questions ?? []).length }), "text-warning");
+    case "answers":
+      return (
+        <div>
+          {line(t("activity.answers"), "font-medium")}
+          <ul className="selectable mt-0.5 space-y-0.5 text-[12.5px] text-muted">
+            {(data.answers ?? []).map((answer: { question: string; asked: string; answer: string }) => (
+              <li key={answer.question}>{t("activity.answersLine", { asked: answer.asked, answer: answer.answer })}</li>
+            ))}
+          </ul>
+        </div>
+      );
+    case "questionsTaken":
+      return line(t("activity.questionsTaken", { rounds: data.rounds }), "text-warning");
+    case "specCorrected":
+      return line(t("activity.specCorrected"), "text-warning");
+    case "returned":
+      return (
+        <div>
+          {line(t("activity.returned", { round: data.round + 1 }), "font-medium")}
+          <p className="selectable mt-0.5 text-[12.5px] text-muted">{data.instructions}</p>
+        </div>
+      );
     case "services":
       return line(t("activity.services", { names: (data.services ?? []).map((service: { name: string }) => service.name).join(", ") }), "text-subtle");
     case "servicesLost":
@@ -657,7 +925,7 @@ function ActivityEntry({ item }: { item: ActivityItem }) {
   }
 }
 
-function ActivityTab({ events }: { events: AuditEvent[] }) {
+function ActivityTab({ events, role }: { events: AuditEvent[]; role: Attempt["role"] }) {
   const { t } = useTranslation();
   const items = useMemo(() => activityFrom(events), [events]);
   if (items.length === 0) return <p className="text-[12.5px] text-subtle">{t("activity.empty")}</p>;
@@ -665,7 +933,7 @@ function ActivityTab({ events }: { events: AuditEvent[] }) {
     <ol className="space-y-3">
       {items.map((item) => (
         <li key={item.key}>
-          <ActivityEntry item={item} />
+          <ActivityEntry item={item} role={role} />
         </li>
       ))}
     </ol>
@@ -1031,7 +1299,8 @@ export function RunDetail({ runId }: { runId: string }) {
 
   if (!latest || !run) return null;
 
-  const kindTabs: Tab[] = !attempt ? [] : attempt.state === "skipped" ? ["activity", "prompt"] : attempt.kind === "agent" ? ["activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
+  const understood = attempt ? specOf(attempt) : null;
+  const kindTabs: Tab[] = !attempt ? [] : attempt.state === "skipped" ? ["activity", "prompt"] : attempt.kind === "agent" ? [...(understood ? (["understood"] as const) : []), "activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
   const shownTab: Tab = kindTabs.includes(tab) ? tab : kindTabs[0];
   // Of the attempt on show, which may be an earlier one than the node's own.
   const shownModel = attempt?.kind === "agent" ? (attempt.modelActual ?? attempt.modelRequested) : shownNode?.model;
@@ -1075,6 +1344,8 @@ export function RunDetail({ runId }: { runId: string }) {
         )}
         {latest.state === "waitingApproval" ? (
           <ApprovalCard key={latest.id} attempt={latest} run={run} attempts={attempts} files={files} commands={allCommands} rawCheck={rawCheck} onShowChanges={showChanges} onError={setError} />
+        ) : latest.state === "waitingAnswers" ? (
+          <QuestionsCard key={latest.id} attempt={latest} attempts={attempts} onError={setError} />
         ) : (
           <>
             <Actions attempt={latest} onError={setError} />
@@ -1121,7 +1392,8 @@ export function RunDetail({ runId }: { runId: string }) {
             <>
               <Segmented<Tab> arrows label={t("tabs.details")} value={shownTab} onChange={setTab} options={kindTabs.map((value) => ({ value, label: t(`tabs.${value}`) }))} />
               <div className="mt-4">
-                {shownTab === "activity" && <ActivityTab events={events} />}
+                {shownTab === "understood" && understood && <SpecView spec={understood} />}
+                {shownTab === "activity" && <ActivityTab events={events} role={attempt.role} />}
                 {shownTab === "commands" && <CommandsTab commands={commands} />}
                 {shownTab === "changes" && <ChangesTab attempt={attempt} revision={revision} />}
                 {shownTab === "output" && <OutputTab events={events} attempt={attempt} />}

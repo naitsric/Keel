@@ -11,7 +11,7 @@ use keel_store::Attempt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{brain, prompts};
+use crate::{brain, prompts, specs};
 
 /// How much of a diff goes into a prompt. A reviewer can still read any file it wants.
 const DIFF_LIMIT: usize = 200 * 1024;
@@ -27,6 +27,7 @@ pub fn schema_for(role: &StepRole) -> Option<&'static str> {
         StepRole::Approver { .. } => Some(DECISION_SCHEMA),
         StepRole::Mapper => Some(brain::MAP_SCHEMA),
         StepRole::Learner => Some(brain::LEARNINGS_SCHEMA),
+        StepRole::Specifier => Some(specs::SPEC_SCHEMA),
     }
 }
 
@@ -186,15 +187,44 @@ pub fn find_step(steps: &[WorkflowStep], id: &str) -> Option<WorkflowStep> {
     })
 }
 
-/// Where the approver's rework starts: everything from here on runs again each round.
+/// Where rework starts: everything from here on runs again each round. An approver says where, and
+/// without one it's the last worker that can change files. One after the last approval doesn't
+/// count, since nobody is left to send work back to it.
 pub fn rework_index(steps: &[WorkflowStep]) -> Option<usize> {
-    steps.iter().find_map(|step| match step {
-        WorkflowStep::Agent(StepSpec {
-            role: StepRole::Approver { rework_to, .. },
-            ..
-        }) => steps.iter().position(|s| s.id() == rework_to),
-        _ => None,
-    })
+    steps
+        .iter()
+        .find_map(|step| match step {
+            WorkflowStep::Agent(StepSpec {
+                role: StepRole::Approver { rework_to, .. },
+                ..
+            }) => steps.iter().position(|s| s.id() == rework_to),
+            _ => None,
+        })
+        .or_else(|| {
+            let end = steps
+                .iter()
+                .rposition(|step| matches!(step, WorkflowStep::Approval { .. }))
+                .unwrap_or(steps.len());
+            steps[..end].iter().rposition(|step| {
+                matches!(step, WorkflowStep::Agent(spec)
+                    if spec.role == StepRole::Worker && spec.tools == ToolProfile::Build)
+            })
+        })
+}
+
+/// Whether a person at this approval can send the work back: what would do it again has to come
+/// before them, or they'd only be sent straight back to the same question.
+pub fn can_send_back(steps: &[WorkflowStep], approval_id: &str) -> bool {
+    let at = steps.iter().position(|step| step.id() == approval_id);
+    matches!((rework_index(steps), at), (Some(from), Some(at)) if from < at)
+}
+
+/// Rounds that happened because a person asked for them. They don't count against the approver.
+pub fn rounds_asked_by_a_person(attempts: &[Attempt]) -> i64 {
+    attempts
+        .iter()
+        .filter(|a| a.state == AttemptState::Returned.as_str())
+        .count() as i64
 }
 
 pub fn next_number(attempts: &[Attempt], step_id: &str) -> i64 {
@@ -270,13 +300,18 @@ pub fn specifying_attempt(attempts: &[Attempt]) -> Option<&Attempt> {
     latest(|a| a.role == "specifier").or_else(|| latest(|a| a.step_id == "spec"))
 }
 
-/// What that attempt says, in words a person can read.
-pub fn asked_text(attempt: &Attempt) -> Option<&str> {
+/// What that attempt says, in words a person can read: its structured answer as text, or else what
+/// it wrote.
+pub fn asked_text(attempt: &Attempt) -> Option<String> {
+    if let Some(spec) = specs::of_attempt(attempt) {
+        return Some(spec.readable(&attempt.language));
+    }
     attempt
         .result_text
         .as_deref()
         .map(str::trim)
         .filter(|text| !text.is_empty())
+        .map(str::to_owned)
 }
 
 pub fn wants_rework(attempt: &Attempt) -> bool {
@@ -288,30 +323,74 @@ pub fn wants_rework(attempt: &Attempt) -> bool {
         == Some("rework")
 }
 
-/// What the approver asked for last time, for whoever works on or reviews this round. Reviewers
-/// need it too: a real run went in circles when one called out of scope what the approver had
-/// just asked for.
+fn instructions_of(attempt: &Attempt) -> Option<String> {
+    attempt
+        .output
+        .as_ref()?
+        .get("instructions")?
+        .as_str()
+        .map(str::to_owned)
+}
+
+/// What was asked for last time, by the approver or by a person, for whoever works on or reviews
+/// this round. Reviewers need it too: a real run went in circles when one called out of scope what
+/// the approver had just asked for.
 pub fn rework_text(attempts: &[Attempt], round: i64, language: &str) -> String {
     if round == 0 {
         return String::new();
     }
-    let instructions = attempts
-        .iter()
-        .rev()
-        .filter(|a| a.role == "approver" && a.round == round - 1)
-        .find_map(|a| {
-            a.output
-                .as_ref()?
-                .get("instructions")?
-                .as_str()
-                .map(str::to_owned)
+    let es = language.starts_with("es");
+    let last_round = || attempts.iter().rev().filter(|a| a.round == round - 1);
+    // An approver that approved may still have written something here, and a person sent it back
+    // for their own reason.
+    let from_approver = last_round()
+        .filter(|a| a.role == "approver" && wants_rework(a))
+        .find_map(instructions_of)
+        .map(|text| {
+            let intro = if es {
+                "El aprobador devolvió este trabajo. Esto es lo único que debe cambiar en esta ronda, y cuenta como parte del alcance:"
+            } else {
+                "The approver sent this work back. This is the only thing to change in this round, and it counts as part of the scope:"
+            };
+            format!("{intro}\n{text}")
         });
+    let from_person = last_round()
+        .filter(|a| a.state == AttemptState::Returned.as_str())
+        .find_map(instructions_of)
+        .map(|text| {
+            let intro = if es {
+                "Una persona devolvió este trabajo. Esto es lo único que debe cambiar en esta ronda, y cuenta como parte del alcance:"
+            } else {
+                "A person sent this work back. This is the only thing to change in this round, and it counts as part of the scope:"
+            };
+            format!("{intro}\n{text}")
+        });
+    [from_person, from_approver]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// Whether a person sent the work back in the round before this one.
+pub fn returned_last_round(attempts: &[Attempt], round: i64) -> bool {
+    attempts
+        .iter()
+        .any(|a| a.round == round - 1 && a.state == AttemptState::Returned.as_str())
+}
+
+/// What a person answered in this run, for `{{answers}}`. Empty if nothing.
+pub fn answers_text(attempts: &[Attempt], language: &str) -> String {
+    let given = specs::answered_in_run(attempts);
+    if given.is_empty() {
+        return String::new();
+    }
     let intro = if language.starts_with("es") {
-        "El aprobador devolvió este trabajo. Esto es lo único que debe cambiar en esta ronda, y cuenta como parte del alcance:"
+        "La persona ya respondió esto:"
     } else {
-        "The approver sent this work back. This is the only thing to change in this round, and it counts as part of the scope:"
+        "The person has already answered this:"
     };
-    instructions.map_or_else(String::new, |text| format!("{intro}\n{text}"))
+    format!("{intro}\n{}", specs::answer_lines(&given))
 }
 
 pub fn cap_diff(diff: String) -> String {
@@ -407,14 +486,6 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
         })
         .cloned()
         .collect();
-    for step in &mut full {
-        if let WorkflowStep::Agent(spec) = step
-            && spec.id == "builder"
-        {
-            // What the approver sent back, the second time around.
-            spec.prompt.push_str("\n\n{{rework}}");
-        }
-    }
     full.push(WorkflowStep::Parallel {
         id: "reviews".into(),
         steps: vec![
@@ -649,9 +720,7 @@ mod tests {
 
     fn asked(rows: &[Row]) -> Option<String> {
         let attempts = recorded(rows);
-        specifying_attempt(&attempts)
-            .and_then(asked_text)
-            .map(str::to_owned)
+        specifying_attempt(&attempts).and_then(asked_text)
     }
 
     use AttemptState::{Failed, Succeeded};
@@ -791,7 +860,197 @@ mod tests {
             panic!()
         };
         assert_eq!(spec.model, "opus");
-        assert!(spec.prompt.contains("especificación"));
+        // It says what happens and asks what only a person can decide, in the run's language.
+        assert_eq!(spec.role, StepRole::Specifier);
+        assert_eq!(spec.tools, ToolProfile::ReadOnly);
+        assert!(spec.prompt.contains("¿qué debe pasar?"));
+    }
+
+    #[test]
+    fn both_built_in_workflows_ask_with_the_specifier_and_can_take_work_back() {
+        for language in ["en", "es"] {
+            for workflow in builtin(language, Some("make test")) {
+                let spec = find_step(&workflow.steps, "spec").unwrap();
+                let WorkflowStep::Agent(spec) = spec else {
+                    panic!()
+                };
+                assert_eq!(spec.role, StepRole::Specifier, "{}", workflow.id);
+                let WorkflowStep::Agent(builder) = find_step(&workflow.steps, "builder").unwrap()
+                else {
+                    panic!()
+                };
+                for token in ["{{rework}}", "{{answers}}", "{{steps.spec.output}}"] {
+                    assert!(builder.prompt.contains(token), "{} {token}", workflow.id);
+                }
+            }
+        }
+    }
+
+    fn approver(rework_to: &str) -> StepSpec {
+        agent(
+            "approver",
+            "opus",
+            ToolProfile::ReadOnly,
+            StepRole::Approver {
+                rework_to: rework_to.into(),
+                max_rounds: 2,
+            },
+            &[],
+            "decide",
+        )
+    }
+
+    fn step_of(spec: StepSpec) -> WorkflowStep {
+        WorkflowStep::Agent(spec)
+    }
+
+    #[test]
+    fn rework_starts_where_the_approver_says_or_else_at_the_last_worker_that_builds() {
+        let reader = || step_of(worker("reader", ToolProfile::ReadOnly));
+        let first = || step_of(worker("first", ToolProfile::Build));
+        let second = || step_of(worker("second", ToolProfile::Build));
+        let human = || WorkflowStep::Approval { id: "h".into() };
+        let check = || WorkflowStep::Check {
+            id: "c".into(),
+            run: "x".into(),
+        };
+        assert_eq!(
+            rework_index(&[first(), second(), step_of(approver("first")), human()]),
+            Some(0),
+            "an approver decides"
+        );
+        assert_eq!(
+            rework_index(&[reader(), first(), second(), check(), human()]),
+            Some(2),
+            "the last that builds"
+        );
+        assert_eq!(rework_index(&[reader(), human()]), None, "nothing builds");
+        assert_eq!(
+            rework_index(&[first(), human(), second()]),
+            Some(0),
+            "nobody can send work back to what comes after the last approval"
+        );
+        let mut judge = worker("judge", ToolProfile::Build);
+        judge.role = StepRole::Reviewer;
+        assert_eq!(
+            rework_index(&[step_of(judge), human()]),
+            None,
+            "only a worker does the work again"
+        );
+    }
+
+    #[test]
+    fn a_person_can_only_send_back_what_comes_before_them() {
+        let builder = || step_of(worker("b", ToolProfile::Build));
+        let human = || WorkflowStep::Approval { id: "h".into() };
+        assert!(can_send_back(&[builder(), human()], "h"));
+        assert!(!can_send_back(&[human(), builder()], "h"));
+        assert!(!can_send_back(
+            &[step_of(worker("r", ToolProfile::ReadOnly)), human()],
+            "h"
+        ));
+        assert!(!can_send_back(&[builder(), human()], "missing"));
+        // An approver's target after the person asking takes nothing back either.
+        assert!(!can_send_back(
+            &[human(), builder(), step_of(approver("b"))],
+            "h"
+        ));
+    }
+
+    fn with_output(attempts: &mut [Attempt], index: usize, state: &str, output: Value) {
+        attempts[index].state = state.into();
+        attempts[index].output = Some(output);
+    }
+
+    #[test]
+    fn what_comes_back_says_who_asked_and_never_what_an_approver_only_noted() {
+        let mut attempts = recorded(&[
+            ("approver", "agent", "approver", Succeeded, ""),
+            ("human", "approval", "worker", Succeeded, ""),
+        ]);
+        with_output(
+            &mut attempts,
+            0,
+            "succeeded",
+            serde_json::json!({ "decision": "approve", "instructions": "Nothing to do" }),
+        );
+        with_output(
+            &mut attempts,
+            1,
+            "returned",
+            serde_json::json!({ "instructions": "Return 0 instead" }),
+        );
+        let text = rework_text(&attempts, 1, "en");
+        assert!(text.starts_with("A person sent this work back."), "{text}");
+        assert!(text.ends_with("Return 0 instead"), "{text}");
+        assert!(!text.contains("Nothing to do"), "{text}");
+        assert!(rework_text(&attempts, 1, "es").starts_with("Una persona devolvió"));
+        assert_eq!(rework_text(&attempts, 0, "en"), "", "the first round");
+        assert_eq!(rework_text(&attempts, 2, "en"), "", "only the last round");
+        assert!(returned_last_round(&attempts, 1));
+        assert!(!returned_last_round(&attempts, 2));
+        assert_eq!(rounds_asked_by_a_person(&attempts), 1);
+
+        with_output(
+            &mut attempts,
+            0,
+            "succeeded",
+            serde_json::json!({ "decision": "rework", "instructions": "Fix it" }),
+        );
+        with_output(&mut attempts, 1, "succeeded", serde_json::json!({}));
+        let text = rework_text(&attempts, 1, "en");
+        assert!(
+            text.starts_with("The approver sent this work back."),
+            "{text}"
+        );
+        assert!(text.ends_with("Fix it"), "{text}");
+    }
+
+    #[test]
+    fn a_person_answers_reach_a_prompt_as_plain_text_and_no_answers_as_nothing() {
+        let mut attempts = recorded(&[("spec", "agent", "specifier", Succeeded, "")]);
+        assert_eq!(answers_text(&attempts, "en"), "");
+        attempts[0].output = Some(serde_json::json!({
+            "answered": [{ "question": "Q1", "asked": "If it is 0?", "answer": "Return 0", "recommended": false, "remember": false }],
+        }));
+        assert_eq!(
+            answers_text(&attempts, "en"),
+            "The person has already answered this:\n- If it is 0? Return 0"
+        );
+    }
+
+    #[test]
+    fn what_a_structured_answer_asked_reads_as_text_and_a_broken_one_as_what_it_wrote() {
+        let mut attempts = recorded(&[("spec", "agent", "specifier", Succeeded, "Plain words")]);
+        assert_eq!(asked_text(&attempts[0]).as_deref(), Some("Plain words"));
+        attempts[0].output = Some(serde_json::json!({
+            "summary": "add returns the sum",
+            "criteria": [{ "id": "C1", "when": "add(1, 2)", "then": "3" }],
+        }));
+        let text = asked_text(&attempts[0]).unwrap();
+        assert!(text.starts_with("add returns the sum"), "{text}");
+        assert!(text.contains("C1: add(1, 2) → 3"), "{text}");
+        // A plain worker's output says nothing about what was asked.
+        attempts[0].role = "worker".into();
+        assert_eq!(asked_text(&attempts[0]).as_deref(), Some("Plain words"));
+    }
+
+    #[test]
+    fn a_specifier_has_to_stay_read_only_and_alone() {
+        let mut spec = worker("spec", ToolProfile::Build);
+        spec.role = StepRole::Specifier;
+        assert_eq!(
+            validate(&[WorkflowStep::Agent(spec.clone())]),
+            Err(problem("reviewerMustReadOnly", "spec"))
+        );
+        spec.tools = ToolProfile::ReadOnly;
+        assert_eq!(
+            validate(&[WorkflowStep::Parallel {
+                id: "g".into(),
+                steps: vec![spec],
+            }]),
+            Err(problem("groupRole", "spec"))
+        );
     }
 
     #[test]

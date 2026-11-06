@@ -44,7 +44,8 @@ fn write_script(path: &Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Read-only steps answer with a spec. Build steps also change a file, unless told not to.
+/// A step asked for a structured answer gives a spec. Other read-only steps just say something, and
+/// build steps also change a file, unless told not to.
 fn fake_claude(log: &Path, flags: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -53,17 +54,24 @@ case "$1" in
 auth) echo '{{"loggedIn":true,"subscriptionType":"max","email":"a@example.com"}}'; exit 0;;
 esac
 prompt="$(cat)"
-system=""; tools=""; prev=""
+system=""; tools=""; schema=""; prev=""
 for a in "$@"; do
   [ "$prev" = "--append-system-prompt-file" ] && system="$a"
   [ "$prev" = "--tools" ] && tools="$a"
+  [ "$prev" = "--json-schema" ] && schema="$a"
   prev="$a"
 done
 {{ echo "=== CLAUDE tools=$tools"; echo "$prompt"; echo "--- system"; cat "$system"; }} >> "{log}/claude.log"
 list=$(printf '%s' "$tools" | sed 's/,/","/g')
+[ -n "$schema" ] && list="$list\",\"StructuredOutput"
 echo "{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake\",\"tools\":[\"$list\"],\"apiKeySource\":\"none\"}}"
 secret=""
 [ -f "{flags}/secret" ] && secret=" $(cat "{flags}/secret")"
+if [ -n "$schema" ]; then
+  output="{{\"summary\":\"SPEC-OUTPUT: criteria 1 and 2$secret\",\"criteria\":[{{\"id\":\"C1\",\"when\":\"it runs\",\"then\":\"it works\"}}],\"changes\":[],\"limits\":[],\"decided\":[],\"questions\":[]}}"
+  echo "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"num_turns\":1,\"total_cost_usd\":0.01,\"structured_output\":$output,\"usage\":{{\"input_tokens\":10,\"output_tokens\":2}},\"modelUsage\":{{\"claude-fake\":{{}}}}}}"
+  exit 0
+fi
 if [ "$tools" = "Read,Grep,Glob" ]; then
   text="SPEC-OUTPUT: criteria 1 and 2$secret"
 else

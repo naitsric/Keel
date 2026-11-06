@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { WorkflowResults } from "./api";
-import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE } from "./results";
+import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE, matchedShare } from "./results";
 
-const results = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "w", workflowName: "W", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, ...fields });
+const results = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "w", workflowName: "W", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, ...fields });
 
 describe("averages", () => {
   it("wait for enough merged pull requests or finished runs", () => {
@@ -18,6 +18,13 @@ describe("averages", () => {
     const unmerged = results({ merged: 0, finished: 10, averageRounds: 1 });
     expect(costPerMerged(unmerged)).toBeNull();
     expect(averageRounds(unmerged)).toBe(1);
+  });
+});
+
+describe("how often answers took the recommended option", () => {
+  it("says nothing until there are enough answers to go on", () => {
+    expect(matchedShare(results({ answers: ENOUGH_FOR_AN_AVERAGE - 1, answersRecommended: 1 }))).toBeNull();
+    expect(matchedShare(results({ answers: 4, answersRecommended: 3 }))).toBe(0.75);
   });
 });
 

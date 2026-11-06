@@ -254,6 +254,12 @@ const MIGRATIONS: &[&str] = &[
     alter table run add column pr_state_at text;
     alter table run add column pr_checked_at text;
 "#,
+    // 11: What a person was asked, on a decision that came from answering it. Older ones have null.
+    r#"
+    alter table decision add column question text;
+    create trigger decision_question_fixed before update of question on decision
+    begin select raise(abort, 'decisions are never rewritten'); end;
+"#,
 ];
 
 /// The attempt that says where a run stands, for a query that calls its run `r`. Of each step's
@@ -265,7 +271,7 @@ const ATTEMPT_THAT_MATTERS: &str = "select b.rowid from attempt b where b.run_id
                     where later.run_id = b.run_id and later.step_id = b.step_id and later.rowid > b.rowid)
     order by case when b.role = 'learner' and b.state not in ('queued', 'preparing', 'running', 'stalled') then 4
                   when b.state in ('rejected', 'abandoned') then 0
-                  when b.state in ('stalled', 'blocked', 'waitingApproval', 'interrupted', 'failed', 'stopped') then 1
+                  when b.state in ('stalled', 'blocked', 'waitingApproval', 'waitingAnswers', 'interrupted', 'failed', 'stopped') then 1
                   when b.state in ('queued', 'preparing', 'running') then 2 else 3 end,
              b.rowid desc
     limit 1";
@@ -509,7 +515,8 @@ fn brain_note_from(r: &rusqlite::Row) -> rusqlite::Result<BrainNote> {
     })
 }
 
-/// What a person said at an approval step. These reach later runs of the project.
+/// What a person said at an approval step, or answered and asked to remember. These reach later
+/// runs of the project. `answer` is `approve`, `reject` or `answered`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Decision {
@@ -521,6 +528,8 @@ pub struct Decision {
     pub answer: String,
     pub text: String,
     pub retired: bool,
+    /// What they were asked, when `answer` is `answered`.
+    pub question: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -666,6 +675,15 @@ pub struct WorkflowResults {
     /// How many times a finished run was sent back on average. None if none finished, since an open
     /// run's count isn't final.
     pub average_rounds: Option<f64>,
+    /// Runs that stopped to ask a person something.
+    pub stopped_to_ask: i64,
+    /// Questions a person answered, and how many of those got the recommended option. A high share
+    /// means it asks too much.
+    pub answers: i64,
+    pub answers_recommended: i64,
+    /// How many times a person sent work back from what it decided alone. A high count means it
+    /// asks too little.
+    pub sent_back: i64,
 }
 
 /// A card on the board, with what its column depends on. The issue is a copy taken on import.
@@ -1252,7 +1270,17 @@ impl Store {
                     coalesce(sum(case when r.pr_state = 'merged'
                                       then (select coalesce(sum(a.cost_usd), 0) from attempt a where a.run_id = r.id)
                                       end), 0),
-                    coalesce(sum(case when r.finished_at is not null then r.round end), 0)
+                    coalesce(sum(case when r.finished_at is not null then r.round end), 0),
+                    coalesce(sum(exists (select 1 from event e join attempt a on a.id = e.attempt_id
+                                         where a.run_id = r.id and e.kind = 'questionsAsked')), 0),
+                    coalesce(sum((select coalesce(sum(json_extract(e.data, '$.total')), 0) from event e
+                                  join attempt a on a.id = e.attempt_id
+                                  where a.run_id = r.id and e.kind = 'answers')), 0),
+                    coalesce(sum((select coalesce(sum(json_extract(e.data, '$.recommended')), 0) from event e
+                                  join attempt a on a.id = e.attempt_id
+                                  where a.run_id = r.id and e.kind = 'answers')), 0),
+                    coalesce(sum((select count(*) from attempt a
+                                  where a.run_id = r.id and a.state = 'returned')), 0)
              from run r
              where r.project_id = ?1 and r.workflow_id is not null
              group by r.workflow_id
@@ -1274,6 +1302,10 @@ impl Store {
                 closed: r.get(5)?,
                 cost_per_merged_usd: (merged > 0).then(|| merged_cost / merged as f64),
                 average_rounds: (finished > 0).then(|| rounds as f64 / finished as f64),
+                stopped_to_ask: r.get(8)?,
+                answers: r.get(9)?,
+                answers_recommended: r.get(10)?,
+                sent_back: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1319,11 +1351,28 @@ impl Store {
         Ok(())
     }
 
+    /// What a person answered to a question, and asked to have remembered.
+    pub fn add_answered_decision(
+        &self,
+        project_id: &str,
+        run_id: &str,
+        attempt_id: &str,
+        question: &str,
+        answer: &str,
+    ) -> Result<()> {
+        self.lock().execute(
+            "insert into decision (project_id, run_id, attempt_id, at, answer, text, question)
+             values (?1, ?2, ?3, ?4, 'answered', ?5, ?6)",
+            params![project_id, run_id, attempt_id, now(), answer, question],
+        )?;
+        Ok(())
+    }
+
     /// A project's decisions still in force, newest first.
     pub fn decisions(&self, project_id: &str) -> Result<Vec<Decision>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "select seq, project_id, run_id, attempt_id, at, answer, text, retired from decision
+            "select seq, project_id, run_id, attempt_id, at, answer, text, retired, question from decision
              where project_id = ?1 and retired = 0 order by seq desc",
         )?;
         let rows = stmt.query_map([project_id], |r| {
@@ -1336,6 +1385,7 @@ impl Store {
                 answer: r.get(5)?,
                 text: r.get(6)?,
                 retired: r.get(7)?,
+                question: r.get(8)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1468,6 +1518,51 @@ impl Store {
             params![id, state.as_str(), reason],
         )?;
         Ok(())
+    }
+
+    /// Moves an attempt on only if it's still where the caller found it. False if it isn't, which
+    /// is how a second answer to the same question loses.
+    pub fn change_state(&self, id: &str, from: AttemptState, to: AttemptState) -> Result<bool> {
+        let changed = self.lock().execute(
+            "update attempt set state = ?3, reason = null where id = ?1 and state = ?2",
+            params![id, from.as_str(), to.as_str()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// A person sends the work back from an approval: its attempt says so, with what they want, and
+    /// the run moves to its next round. All or nothing, because an attempt that says it went back
+    /// in a round that never moved on would hold the run forever. False if it wasn't waiting.
+    pub fn return_attempt(&self, id: &str, run_id: &str, instructions: &str) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let at = now();
+        let output = serde_json::json!({ "instructions": instructions }).to_string();
+        let changed = tx.execute(
+            "update attempt set state = 'returned', reason = null, output = ?2, finished_at = ?3
+             where id = ?1 and state = 'waitingApproval'",
+            params![id, output, at],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "update run set round = round + 1 where id = ?1",
+            params![run_id],
+        )?;
+        let round: i64 = tx.query_row("select round from run where id = ?1", [run_id], |r| {
+            r.get(0)
+        })?;
+        tx.execute(
+            "insert into event (attempt_id, at, kind, data) values (?1, ?2, 'returned', ?3)",
+            params![
+                id,
+                at,
+                serde_json::json!({ "instructions": instructions, "round": round }).to_string()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Updates progress columns. Column names come from this crate's callers, never from data.
@@ -1847,7 +1942,7 @@ impl Store {
                    and (exists (select 1 from attempt x where x.run_id = r.id
                                   and x.state in ('queued', 'preparing', 'running', 'stalled'))
                         or coalesce((select a.state from attempt a where a.rowid = ({ATTEMPT_THAT_MATTERS})), 'none')
-                           in ('none', 'succeeded', 'skipped'))"
+                           in ('none', 'succeeded', 'skipped', 'returned'))"
             ),
             [],
             |r| r.get(0),
@@ -1880,7 +1975,7 @@ impl Store {
             "select
                 coalesce(sum(state in ('preparing', 'running') and number = 1), 0),
                 coalesce(sum(state in ('preparing', 'running') and number > 1), 0),
-                coalesce(sum(state in ('stalled', 'blocked', 'interrupted', 'waitingApproval')
+                coalesce(sum(state in ('stalled', 'blocked', 'interrupted', 'waitingApproval', 'waitingAnswers')
                     and not exists (select 1 from attempt later
                                     where later.run_id = attempt.run_id and later.step_id = attempt.step_id and later.rowid > attempt.rowid)), 0),
                 coalesce(sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)), 0),
@@ -2043,6 +2138,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 drop trigger decision_question_fixed;
+                 alter table decision drop column question;
                  alter table run drop column workflow_id;
                  alter table run drop column workflow_name;
                  alter table run drop column pr_state;
@@ -2666,6 +2763,10 @@ mod tests {
                 closed: 1,
                 cost_per_merged_usd: Some(2.0),
                 average_rounds: Some(1.0),
+                stopped_to_ask: 0,
+                answers: 0,
+                answers_recommended: 0,
+                sent_back: 0,
             }
         );
         assert_eq!(of("builtin:simple").merged, 0);
@@ -2674,6 +2775,96 @@ mod tests {
         assert_eq!(of("mine").workflow_name, "New name");
         assert_eq!(of("mine").average_rounds, None, "none has finished");
         assert!(store.workflow_results("nobody").unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_state_only_changes_from_where_the_caller_found_it() {
+        let (_dir, store) = store();
+        let id = seeded(&store);
+        store
+            .set_state(&id, AttemptState::WaitingAnswers, Some(&Reason::AgentLost))
+            .unwrap();
+        assert!(
+            store
+                .change_state(&id, AttemptState::WaitingAnswers, AttemptState::Succeeded)
+                .unwrap()
+        );
+        let attempt = store.attempt(&id).unwrap();
+        assert_eq!(
+            (attempt.state.as_str(), attempt.reason),
+            ("succeeded", None)
+        );
+        assert!(
+            !store
+                .change_state(&id, AttemptState::WaitingAnswers, AttemptState::Abandoned)
+                .unwrap(),
+            "the second one finds it moved"
+        );
+        assert_eq!(store.attempt(&id).unwrap().state, "succeeded");
+    }
+
+    #[test]
+    fn sending_back_moves_the_attempt_and_the_round_together_and_only_once() {
+        let (_dir, store) = store();
+        let id = seeded(&store);
+        assert!(!store.return_attempt(&id, "r", "Change it").unwrap());
+        assert_eq!(store.run("r").unwrap().round, 0, "it wasn't waiting");
+
+        store
+            .set_state(&id, AttemptState::WaitingApproval, None)
+            .unwrap();
+        assert!(store.return_attempt(&id, "r", "Change it").unwrap());
+        let attempt = store.attempt(&id).unwrap();
+        assert_eq!(attempt.state, "returned");
+        assert_eq!(attempt.output.unwrap()["instructions"], "Change it");
+        assert!(attempt.finished_at.is_some());
+        assert_eq!(store.run("r").unwrap().round, 1);
+        let events = store.events(&id, 0).unwrap();
+        assert_eq!(events[0].kind, "returned");
+        assert_eq!(events[0].data["round"], 1);
+
+        assert!(!store.return_attempt(&id, "r", "Again").unwrap());
+        assert_eq!(store.run("r").unwrap().round, 1);
+    }
+
+    #[test]
+    fn an_answer_kept_as_a_decision_says_what_was_asked_and_cannot_be_rewritten() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_answered_decision("p", "r", "a", "If it's 0?", "Show an error")
+            .unwrap();
+        store
+            .add_decision("p", "r", "a", "approve", "Fine")
+            .unwrap();
+        let decisions = store.decisions("p").unwrap();
+        assert_eq!(decisions[0].answer, "approve");
+        assert_eq!(decisions[0].question, None);
+        assert_eq!(decisions[1].answer, "answered");
+        assert_eq!(decisions[1].question.as_deref(), Some("If it's 0?"));
+        assert_eq!(decisions[1].text, "Show an error");
+        assert!(
+            store
+                .lock()
+                .execute("update decision set question = 'other'", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn waiting_for_answers_counts_as_waiting_for_a_person_and_shows_on_the_home_table() {
+        let (_dir, store) = store();
+        let id = seeded(&store);
+        store
+            .set_state(&id, AttemptState::WaitingAnswers, None)
+            .unwrap();
+        assert_eq!(store.totals().unwrap().blocked, 1);
+        // A step that finished later doesn't take its place.
+        store
+            .add_attempt(&new_attempt("later", "r", "other", AttemptState::Succeeded))
+            .unwrap();
+        assert_eq!(store.runs(10).unwrap()[0].state, "waitingAnswers");
+        assert_eq!(store.working_runs().unwrap(), 0);
     }
 
     #[test]
@@ -2798,6 +2989,11 @@ mod tests {
             (AttemptState::Running, false, BoardColumn::InProgress),
             (
                 AttemptState::WaitingApproval,
+                false,
+                BoardColumn::HumanReview,
+            ),
+            (
+                AttemptState::WaitingAnswers,
                 false,
                 BoardColumn::HumanReview,
             ),
@@ -2959,7 +3155,11 @@ mod tests {
             // Between two steps: the next one is on its way.
             (AttemptState::Succeeded, 1),
             (AttemptState::Skipped, 1),
+            // The work went back and the next step is on its way.
+            (AttemptState::Returned, 1),
             (AttemptState::WaitingApproval, 0),
+            // Nothing is running, and it could wait for days.
+            (AttemptState::WaitingAnswers, 0),
             (AttemptState::Blocked, 0),
             (AttemptState::Failed, 0),
             (AttemptState::Stopped, 0),
@@ -3432,6 +3632,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 drop trigger decision_question_fixed;
+                 alter table decision drop column question;
                  alter table run drop column workflow_id;
                  alter table run drop column workflow_name;
                  alter table run drop column pr_state;

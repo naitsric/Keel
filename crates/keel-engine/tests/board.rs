@@ -105,6 +105,7 @@ case "$schema" in
     fi;;
   esac
   output='{"verdict":"approved","findings":[],"summary":"fine"}';;
+*criteria*) output='{"summary":"It gets fixed","criteria":[{"id":"C1","when":"it runs","then":"it works"}],"changes":[],"limits":[],"decided":[],"questions":[]}';;
 *decision*) output='{"decision":"approve","risk":"low","reasons":"fine","instructions":""}';;
 *learnings*)
   [ -f "@FLAGS@/fail-learner" ] && failure "no proposals today"

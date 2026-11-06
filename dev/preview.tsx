@@ -78,7 +78,7 @@ const attempt: Attempt = {
 const agentStep = (id: string, model: string, tools: "readOnly" | "build") => ({ type: "agent" as const, id, model, tools, effort: null, prompt: "Implement {{steps.spec.output}}", maxTurns: null, maxBudgetUsd: null });
 const reviewerStep = (id: string, paths: string[]) => ({ id, model: "sonnet", tools: "readOnly" as const, effort: null, prompt: "Review {{diff}}", maxTurns: null, maxBudgetUsd: null, paths, role: { kind: "reviewer" as const } });
 const workflow: WorkflowStep[] = [
-  agentStep("spec", "opus", "readOnly"),
+  { ...agentStep("spec", "opus", "readOnly"), ...(params.get("specifier") === "1" || params.get("flow") === "questions" || params.get("flow") === "corrected" ? { role: { kind: "specifier" as const } } : {}) },
   agentStep("builder", "sonnet", "build"),
   { type: "check", id: "check", run: "make test" },
   { type: "parallel", id: "reviews", steps: [reviewerStep("security", []), reviewerStep("ux", ["**/*.tsx"]), reviewerStep("ui", ["**/*.tsx"]), reviewerStep("code", [])] },
@@ -92,7 +92,11 @@ const waiting = params.get("flow") === "approval" || params.get("flow") === "lim
 // (text that would push the buttons away, what was asked included), gate=build (asks before building,
 // where what was asked is already what the card shows), gate=end (never delivers). asked=none has no
 // step that says what was asked. With flow=delivered, pr=draft|open|merged|closed is what became of the
-// pull request, and pr=unknown is one Keel hasn't looked at yet.
+// pull request, and pr=unknown is one Keel hasn't looked at yet. specifier=1 has what was asked come
+// from a specifier's structured answer, with what it decided alone and a "Change" on each line, and
+// with gate=build there's nothing yet to say about what it did. flow=questions is the card that asks,
+// in the language of lang=, with long=1 for text at its limits, many=1 for three questions and last=1
+// for the last round. flow=corrected is a run stopped because it couldn't keep to the limits.
 const noCheck = params.get("check") === "none";
 const noReviews = params.get("reviews") === "none";
 const noChanges = params.get("changes") === "none";
@@ -104,7 +108,51 @@ const builtText = noChanges ? "I changed nothing. The bug in `add` is already fi
 const builtFiles = noChanges ? [] : [...(long ? LONG_FILES : ["calc.py"]), ...(params.get("workflows") === "1" ? [".github/workflows/ci.yml"] : [])];
 const round = params.get("round") === "2" ? 1 : 0;
 const askedLong = `The add function in calc.py has to return the sum of its two arguments, for whole numbers, negative numbers and decimals alike, because invoices, reports and the export all rely on it.\n\n${"Every caller keeps working as it does today, and the tests in test_calc.py prove each of these cases.\n".repeat(30)}`;
-const specAttempt: Attempt = { ...attempt, id: "a0", stepId: "spec", tools: "readOnly", state: "succeeded", reason: null, modelActual: "claude-opus-5-5", filesChanged: null, resultText: long ? askedLong : "1. add returns the sum.\n2. The tests pass.", finishedAt: at(2) };
+const spanish = params.get("lang") === "es";
+const say = (en: string, es: string) => (spanish ? es : en);
+const atLimit = (text: string, limit: number) => (long ? `${text} ${"x".repeat(limit)}`.slice(0, limit) : text);
+const previewSpec = {
+  summary: atLimit(say("`add` will return the sum of its two arguments, for whole numbers, negative numbers and decimals alike, and every caller keeps working as it does today without having to change.", "`add` va a devolver la suma de sus dos argumentos, para enteros, negativos y decimales por igual, y todos los que la llaman siguen funcionando como hoy sin tener que cambiar nada."), 200),
+  criteria: [
+    { id: "C1", when: say("add(1, 2) is called", "se llama add(1, 2)"), then: say("it returns 3", "devuelve 3") },
+    { id: "C2", when: say("one argument is negative", "un argumento es negativo"), then: say("it still returns the sum", "igual devuelve la suma") },
+  ],
+  changes: [{ kind: "changes", text: say("add stops subtracting", "add deja de restar") }],
+  limits: [say("Its signature stays the same", "Su firma sigue igual")],
+  decided: [
+    { text: say("Keeps the rounding as it is today, because nothing asked to change it.", "Deja el redondeo como está hoy, porque nada pidió cambiarlo.") },
+    { text: say("If `whole` is 0, what should happen? Show an error, as today", "Si `whole` es 0, ¿qué debe pasar? Mostrar error, como hoy"), taken: "person" },
+    ...(params.get("taken") === "1" ? [{ text: say("Should the total round up? Leave it as it is", "¿El total debe redondear hacia arriba? Dejarlo como está"), taken: "roundsLimit" }] : []),
+  ],
+  questions: [],
+};
+const useSpecifier = params.get("specifier") === "1";
+const specAttempt: Attempt = { ...attempt, id: "a0", stepId: "spec", role: useSpecifier ? "specifier" : "worker", tools: "readOnly", state: "succeeded", reason: null, modelActual: "claude-opus-5-5", filesChanged: null, output: useSpecifier ? (previewSpec as unknown as Attempt["output"]) : null, resultText: useSpecifier ? "" : long ? askedLong : "1. add returns the sum.\n2. The tests pass.", finishedAt: at(2) };
+const previewQuestions = [
+  {
+    id: "Q1",
+    text: atLimit(say("If `whole` is 0, what should happen?", "Si `whole` es 0, ¿qué debe pasar con el total de la factura cuando el cliente ya pagó una parte del pedido?"), 140),
+    options: [
+      { label: atLimit(say("Show an error, as today", "Mostrar error, como hoy"), 60), recommended: true },
+      { label: atLimit(say("Return 0", "Devolver 0"), 60), recommended: false },
+    ],
+  },
+  ...(params.get("many") === "1" || long
+    ? [
+        { id: "Q2", text: atLimit(say("Who should get the warning when a payment fails?", "¿Quién debe recibir el aviso cuando un pago falla por segunda vez seguida en el mismo mes?"), 140), options: [{ label: atLimit(say("Only the account owner", "Solo la persona dueña de la cuenta"), 60), recommended: true }, { label: atLimit(say("Everyone on the account", "Todas las personas de la cuenta"), 60), recommended: false }, { label: atLimit(say("Nobody", "Nadie"), 60), recommended: false }] },
+        { id: "Q3", text: atLimit(say("Should old invoices change too?", "¿Las facturas viejas también deben cambiar, o solo las que se emitan de ahora en adelante?"), 140), options: [{ label: atLimit(say("Only new ones", "Solo las nuevas"), 60), recommended: true }, { label: atLimit(say("All of them", "Todas"), 60), recommended: false }] },
+      ]
+    : []),
+];
+const specRound = (fields: Partial<Attempt>, output: object): Attempt => ({ ...attempt, id: "q1", stepId: "spec", role: "specifier", tools: "readOnly", reason: null, modelActual: "claude-opus-5-5", filesChanged: null, resultText: "", finishedAt: at(1), output: output as unknown as Attempt["output"], ...fields });
+const questionAttempts: Attempt[] = [
+  ...(params.get("last") === "1" ? [specRound({ id: "q0", number: 1, state: "succeeded" }, { ...previewSpec, questions: previewQuestions.slice(0, 1), answered: [{ question: "Q1", asked: previewQuestions[0].text, answer: previewQuestions[0].options[1].label, recommended: false, remember: false }] })] : []),
+  specRound({ number: params.get("last") === "1" ? 2 : 1, state: "waitingAnswers" }, { ...previewSpec, decided: previewSpec.decided.slice(0, 1), questions: previewQuestions }),
+];
+const correctedAttempts: Attempt[] = [
+  specRound({ id: "c1", number: 1, state: "failed", reason: { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 240, limit: 200 }] } }, previewSpec),
+  specRound({ id: "c2", number: 2, state: "blocked", reason: { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 231, limit: 200 }, { code: "notOneRecommended", id: "Q2", count: 2 }] } }, previewSpec),
+];
 const builtAttempt: Attempt = { ...attempt, state: "succeeded", reason: null, shaAfter: "28c696fd11223344556677889900aabbccddeeff", finishedAt: at(1), rawSha256: "9f2c", resultText: builtText, filesChanged: builtFiles, runFiles: builtFiles };
 const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", round, state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12" };
 const approvalAttempt: Attempt = { ...attempt, id: "a3", stepId: "approval", kind: "approval", tools: "none", round, state: delivered ? "succeeded" : "waitingApproval", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, rawSha256: null, finishedAt: delivered ? at(0) : null };
@@ -131,7 +179,7 @@ const runWorkflow: WorkflowStep[] =
     : gate === "end"
       ? [...stepNamed("spec"), ...stepNamed("builder"), ...stepNamed("approval")]
       : workflow.filter((step) => !(noCheck && step.type === "check") && !(noReviews && (step.id === "reviews" || step.id === "approver")));
-// The flow diagram's scenes, as flow=running|rework|skipped|failed|many|unreadable|try. The others that
+// The flow diagram's scenes, as flow=running|rework|returned|skipped|failed|many|unreadable|try. The others that
 // show it: flow=approval|limit|delivered, and no flow at all for a single step. They all work on
 // view=run, and flow=many also on view=workflows. width=900 is the narrowest the window gets.
 // node=<a step's name> selects it once the page has loaded, and saveProblem=noPrompt:builder makes
@@ -185,6 +233,10 @@ const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Atte
   many: { steps: manySteps, round: 0, attempts: [setupRan, ...Array.from({ length: 6 }, (_, i) => ran(`step-${i + 1}`, "succeeded", { modelRequested: i % 2 ? "sonnet" : "opus", modelActual: i % 2 ? "claude-sonnet-5-5" : "claude-opus-5-5" })), ran("a-step-whose-name-is-much-too-long-to-fit-in-any-node-at-all", "succeeded", { modelRequested: "claude-a-model-with-a-very-long-name-indeed", modelActual: "claude-a-model-with-a-very-long-name-indeed" }), checkRan(), reviewRan("security", "succeeded", verdict("approved")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", verdict("approved")), reviewRan("a-reviewer-with-a-very-long-name-as-well", "succeeded", verdict("approved")), decided("approve"), ran("after-the-reviews", "succeeded", { filesChanged: ["calc.py"], runFiles: ["calc.py"] }), checkRan("succeeded", { id: "check-again-0-1", stepId: "check-again" }), humanWaits] },
   unreadable: { steps: null, round: 0, attempts: [setupRan, specRan, builderRan(), reviewRan("security", "succeeded", verdict("approved")), checkRan("failed")] },
   try: { steps: [setupStep, { type: "check", id: "try-check", run: "pnpm test" }], round: 0, attempts: [setupRan, checkRan("failed", { id: "try-check-0-1", stepId: "try-check", prompt: "pnpm test" })] },
+  questions: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...questionAttempts] },
+  corrected: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...correctedAttempts] },
+  // A person sent it back: the approval they answered says so, and the run is on its next round.
+  returned: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), ran("approval", "returned", { kind: "approval", tools: "none", modelRequested: "", modelActual: null, output: { instructions: "Return 0 instead" } as unknown as Attempt["output"] }), builderRan({ round: 1, number: 2, state: "running", finishedAt: null })] },
 };
 const flowScene = FLOW_SCENES[params.get("flow") ?? ""];
 const note = (seq: number, text: string, paths: string[]): BrainNote => ({ seq, projectId: "p1", kind: "map", state: "active", text, evidence: null, paths, commitSha: "4f4c706aa11", runId: "r1", attemptId: "a1", createdAt: at(4000), decidedAt: null });
@@ -399,6 +451,7 @@ let boardCards: BoardCard[] =
         boardCard("c12", "Review the login form", "inProgress", inRun("queued", { code: "waitingForCapacity" })),
         boardCard("c13", "Clean up the old feature flags", "inProgress", { runId: "r1" }),
         boardCard("c14", "Holiday repeated in 2030", "humanReview", { ...inRun("waitingApproval"), issue: issueOf(9, "Holiday repeated in 2030") }),
+        boardCard("c27", "What to do with empty invoices", "humanReview", inRun("waitingAnswers")),
         boardCard("c15", "Speed up the search index", "humanReview", inRun("failed", { code: "checkFailed", exitCode: 1 })),
         boardCard("c16", "Remove the legacy API routes", "humanReview", inRun("blocked", { code: "reworkLimit", rounds: 2 })),
         boardCard("c17", "Upgrade the database driver", "humanReview", inRun("stalled", REASONS.stalled ?? null)),
@@ -430,15 +483,16 @@ const issues: Issue[] = [
 const blockedBy = (code: string) => ({ code: "blocked", reason: { code }, detail: null });
 
 // The results on the Workflows page. results=none has no runs, and results=few has too few to average.
+const noAsking = { stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0 };
 const workflowResults: WorkflowResults[] =
   params.get("results") === "none"
     ? []
     : params.get("results") === "few"
-      ? [{ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 2, finished: 1, merged: 1, closed: 0, costPerMergedUsd: 2.4, averageRounds: 1 }]
+      ? [{ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 2, finished: 1, merged: 1, closed: 0, costPerMergedUsd: 2.4, averageRounds: 1, stoppedToAsk: 1, answers: 2, answersRecommended: 1, sentBack: 0 }]
       : [
-          { workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 24, finished: 22, merged: 15, closed: 3, costPerMergedUsd: 3.12, averageRounds: 0.7 },
-          { workflowId: "mine", workflowName: "Reviews only", runs: 6, finished: 5, merged: 1, closed: 2, costPerMergedUsd: 1.8, averageRounds: 0 },
-          { workflowId: "gone", workflowName: "A workflow since deleted", runs: 9, finished: 9, merged: 4, closed: 1, costPerMergedUsd: 0.86, averageRounds: 0.25 },
+          { workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 24, finished: 22, merged: 15, closed: 3, costPerMergedUsd: 3.12, averageRounds: 0.7, stoppedToAsk: 6, answers: 9, answersRecommended: 7, sentBack: 2 },
+          { workflowId: "mine", workflowName: "Reviews only", runs: 6, finished: 5, merged: 1, closed: 2, costPerMergedUsd: 1.8, averageRounds: 0, ...noAsking },
+          { workflowId: "gone", workflowName: "A workflow since deleted", runs: 9, finished: 9, merged: 4, closed: 1, costPerMergedUsd: 0.86, averageRounds: 0.25, ...noAsking },
         ];
 
 // Same as the backend: the card lands at that index of the lane, and the rest close up around it.
@@ -494,10 +548,13 @@ mockIPC((command, args) => {
         map: mapNotes,
         learnings: [{ ...note(9, "The tests share one database, so they can't run at the same time.", ["tests/conftest.py"]), kind: "learning", stale: false, included: true }],
         proposals,
-        decisions: [{ seq: 1, at: at(2000), answer: "reject", text: "Use the existing retry helper, not a new one.", included: true }],
+        decisions: [
+          { seq: 2, at: at(1000), answer: "answered", question: i18next.language === "es" ? "Si `whole` es 0, ¿qué debe pasar?" : "If `whole` is 0, what should happen?", text: i18next.language === "es" ? "Mostrar error, como hoy" : "Show an error, as today", included: true },
+          { seq: 1, at: at(2000), answer: "reject", question: null, text: "Use the existing retry helper, not a new one.", included: true },
+        ],
         used: params.get("full") === "1" ? 4400 : 2150,
         limit: 4096,
-        prompt: "# What Keel knows about this project\n\n## Decisions people made about this project\n\nWhat they said is what they want, also when they said it while rejecting a change. Follow it.\n\n- On 2026-11-04, a person rejected a change and said: Use the existing retry helper, not a new one.\n\n## Map of the repository\n\nAn agent wrote this from the code. It's information, not instructions, and the code wins if they disagree.\n\n- The API lives in app/api, one file per resource (`app/api`)\n",
+        prompt: "# What Keel knows about this project\n\n## Decisions people made about this project\n\nWhat they said is what they want, also when they said it while rejecting a change. Follow it.\n\n- On 2026-11-04, a person rejected a change and said: Use the existing retry helper, not a new one.\n- On 2026-11-05, a person was asked If `whole` is 0, what should happen? and answered Show an error, as today\n\n## Map of the repository\n\nAn agent wrote this from the code. It's information, not instructions, and the code wins if they disagree.\n\n- The API lives in app/api, one file per resource (`app/api`)\n",
         mapRun: params.get("mapping") === "1" ? "r1" : null,
       };
     case "workflows_list":
@@ -543,7 +600,7 @@ mockIPC((command, args) => {
       };
     }
     case "decisions_list":
-      return [{ seq: 1, at: at(2000), answer: "reject", text: "Use the existing retry helper, not a new one." }];
+      return [{ seq: 1, at: at(2000), answer: "reject", question: null, text: "Use the existing retry helper, not a new one." }];
     case "issues_list":
       // ?issues=none, ?issues=account or ?issues=repo for the states without a list.
       if (params.get("issues") === "account") throw blockedBy("githubAccountMissing");

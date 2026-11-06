@@ -72,7 +72,8 @@ function DecisionRow({ decision, onRetire }: { decision: DecisionView; onRetire:
   return (
     <li className="flex items-start gap-3 rounded-md border border-border p-2.5">
       <div className="min-w-0 flex-1">
-        <p className="selectable text-[12.5px]">{decision.text}</p>
+        {decision.answer === "answered" && decision.question && <p className="selectable text-[12px] text-muted">{t("brain.answeredQuestion", { question: decision.question })}</p>}
+        <p className="selectable text-[12.5px]">{decision.answer === "answered" ? t("brain.answeredAnswer", { answer: decision.text }) : decision.text}</p>
         <p className="mt-0.5 text-[11px] text-subtle">{formatDateTime(decision.at)}</p>
         {!decision.included && <p className="mt-0.5 text-[11.5px] text-warning">{t("brain.leftOut")}</p>}
       </div>

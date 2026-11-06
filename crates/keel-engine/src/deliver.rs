@@ -298,6 +298,15 @@ impl Inner {
         let asked =
             crate::workflows::specifying_attempt(&attempts).and_then(crate::workflows::asked_text);
 
+        let answered = crate::specs::answered_in_run(&attempts);
+        if !answered.is_empty() {
+            body.push_str(&format!(
+                "### {}\n\n{}\n\n",
+                label("What the person answered", "Lo que respondió la persona"),
+                crate::specs::answer_lines(&answered)
+            ));
+        }
+
         let files = crate::workflows::files_changed(&attempts);
         body.push_str(&format!("### {}\n\n", label("What changed", "Qué cambió")));
         for file in &files {
@@ -396,7 +405,7 @@ impl Inner {
         // Masked before anything is cut: half a secret is one that masking no longer recognizes.
         Ok(fit_body(
             &mask_secrets(&top),
-            asked.map(mask_secrets).as_deref(),
+            asked.as_deref().map(mask_secrets).as_deref(),
             &mask_secrets(&body),
             spanish,
         ))

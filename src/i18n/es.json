@@ -111,7 +111,9 @@
     "blocked": "Bloqueado",
     "abandoned": "Abandonado",
     "waitingApproval": "Te espera",
+    "waitingAnswers": "Te espera",
     "rejected": "Rechazado",
+    "returned": "Devuelto",
     "skipped": "Omitido"
   },
   "reasons": {
@@ -154,7 +156,11 @@
     "defaultWorkflowMissing": "El workflow que este proyecto usa por defecto ya no existe. Elige otro en Ajustes.",
     "projectHasOpenRuns": "Este proyecto no se puede quitar todavía, porque «{{title}}» no ha terminado. Termínala o abandónala primero.",
     "projectHasOpenRunsMany": "Este proyecto no se puede quitar todavía, porque «{{title}}» y {{others}} más no han terminado. Termínalas o abandónalas primero.",
-    "projectRemoved": "Este proyecto se quitó de Keel. Agrega su carpeta de nuevo para trabajar en él."
+    "projectRemoved": "Este proyecto se quitó de Keel. Agrega su carpeta de nuevo para trabajar en él.",
+    "specNotUsable": "No pudo escribir esto dentro de lo que Keel te puede mostrar, ni después de que se le pidió corregirlo: {{problems}}.",
+    "invalidAnswer": "Esa respuesta no corresponde a estas preguntas.",
+    "sendBackNeedsInstructions": "Para devolverlo, di qué debe cambiar.",
+    "nothingToSendBackTo": "Nada antes de esta aprobación puede volver a hacer el trabajo."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
@@ -261,6 +267,7 @@
     "fromIssue": "Del issue #{{number}}",
     "base": "Basado en {{base}}",
     "decideApproval": "Aprueba o rechaza arriba.",
+    "decideAnswers": "Responde sus preguntas arriba.",
     "decideDelivered": "Revisa y mergea el borrador en GitHub. Keel no mergea.",
     "decideOpen": "Revísalo y mergéalo en GitHub. Keel no mergea.",
     "decideMerged": "Nada. El pull request se mergeó.",
@@ -323,10 +330,46 @@
     "decideMap": "Nada. Léelo en el Brain y retira cualquier línea que esté mal.",
     "accountClaude": "Claude Code: {{account}}",
     "accountGithub": "GitHub: {{account}}",
-    "startedBy": "Lanzada por {{client}}"
+    "startedBy": "Lanzada por {{client}}",
+    "questionsTitle": "Keel necesita una decisión para continuar",
+    "questionsBody": "Elige qué debe pasar. La opción recomendada ya está seleccionada.",
+    "questionsWillChange": "Qué va a cambiar",
+    "questionsLastRound": "Esta es la última ronda de preguntas. Si después todavía tiene alguna, Keel toma las opciones recomendadas.",
+    "questionRecommended": "Recomendada",
+    "questionOther": "Otra",
+    "questionOtherLabel": "Tu respuesta a: {{question}}",
+    "questionOtherNeeded": "Escribe tu respuesta, o elige una de las opciones.",
+    "questionRemember": "Recordar para este proyecto",
+    "questionRememberHint": "Si no la recuerdas, una respuesta solo cuenta para esta ejecución. Las recordadas se pueden retirar en el Brain.",
+    "questionsUseRecommended": "Usar lo recomendado",
+    "questionsUseRecommendedHint": "Gratis e inmediato: no corre ningún agente.",
+    "questionsAnswer": "Responder",
+    "questionsAnswerHint": "El agente sigue con tus respuestas, lo que gasta tu uso de Claude.",
+    "questionsAnswerSame": "Elige otra opción para responder distinto.",
+    "questionsCancel": "Cancelar",
+    "questionsCancelHint": "Termina esta ejecución. Si tiene una tarjeta en el tablero, vuelve al backlog.",
+    "decidedTitle": "Lo que decidió por su cuenta",
+    "decidedChange": "Cambiar",
+    "decidedChangeThis": "Cambiar: {{text}}",
+    "decidedYouChose": "Esto lo elegiste tú.",
+    "decidedKeelTook": "Después de dos rondas de preguntas, Keel dejó de preguntar y tomó la opción recomendada.",
+    "sendBackLabel": "¿Qué debe cambiar?",
+    "sendBackHint": "Vuelve al paso que hace el trabajo, sin empezar de nuevo, y regresa a ti aquí. Tus palabras se quedan en esta ejecución.",
+    "sendBackAction": "Devolverlo",
+    "sendBackKeep": "Dejarlo así",
+    "sendBackAbout": "Sobre “{{decided}}”: {{instruction}}",
+    "specHolds": "Lo que tiene que cumplirse",
+    "specChanges": "Qué cambia",
+    "specAdds": "Agrega",
+    "specAlters": "Cambia",
+    "specRemoves": "Quita",
+    "specLimits": "Qué se queda igual",
+    "specAsked": "Lo que te preguntó",
+    "specAnswered": "Lo que respondiste"
   },
   "tabs": {
     "activity": "Actividad",
+    "understood": "Lo que entendió",
     "commands": "Comandos",
     "changes": "Cambios",
     "prompt": "Prompt",
@@ -374,7 +417,15 @@
     "brainNote_active": "Aceptaste: {{text}}",
     "brainNote_dismissed": "Descartaste: {{text}}",
     "brainNote_retired": "Retiraste: {{text}}",
-    "brainFailed": "No se pudo guardar esto en el Brain: {{error}}"
+    "brainFailed": "No se pudo guardar esto en el Brain: {{error}}",
+    "questionsAsked_one": "Te hizo una pregunta",
+    "questionsAsked_other": "Te hizo {{count}} preguntas",
+    "answers": "Respondiste",
+    "answersLine": "{{asked}} {{answer}}",
+    "questionsTaken": "Después de {{rounds}} rondas de preguntas, Keel dejó de preguntar y tomó las opciones recomendadas",
+    "specCorrected": "Lo que escribió no cabía en lo que Keel te puede mostrar, así que Keel le pidió corregirlo",
+    "specAnswer": "Escribió lo que entendió",
+    "returned": "Lo devolviste para la ronda {{round}}"
   },
   "commands": {
     "empty": "No corrió ningún comando.",
@@ -569,6 +620,7 @@
     "stepId": "Nombre del paso",
     "role": "Rol",
     "roleWorker": "Hace el trabajo",
+    "roleSpecifier": "Define el cambio",
     "roleReviewer": "Revisa",
     "roleApprover": "Aprueba",
     "reworkTo": "Devuelve el trabajo a",
@@ -614,7 +666,13 @@
       "cost": "Costo promedio por pull request mergeado",
       "rounds": "Veces devuelto, en promedio",
       "notEnough": "Aún no hay datos suficientes",
-      "enoughNote": "Los promedios aparecen a partir de {{min}} pull requests mergeados o {{min}} ejecuciones terminadas. Menos que eso dice poco."
+      "enoughNote": "Los promedios aparecen a partir de {{min}} pull requests mergeados, {{min}} ejecuciones terminadas o {{min}} respuestas. Menos que eso dice poco.",
+      "stoppedToAsk": "Ejecuciones que pararon a preguntar",
+      "matched": "Respuestas que tomaron la opción recomendada",
+      "matchedNote": "Si es alto, pregunta de más.",
+      "matchedValue": "{{percent}}% ({{matched}} de {{total}})",
+      "sentBack": "Veces que se usó “Cambiar”",
+      "sentBackNote": "Si es alto, pregunta de menos."
     }
   },
   "flow": {
@@ -665,12 +723,14 @@
     "learningsHint": "Las propuestas que aceptaste.",
     "learningsEmpty": "Nada todavía.",
     "decisions": "Decisiones",
-    "decisionsHint": "Lo que dijiste al aprobar o rechazar. Van primero, y los agentes las siguen.",
+    "decisionsHint": "Lo que dijiste al aprobar o rechazar, y las respuestas que pediste recordar. Van primero, y los agentes las siguen.",
     "decisionsEmpty": "Todavía no hay decisiones.",
     "prompt": "Lo que recibirá el próximo agente",
     "promptHint": "El texto exacto, aquí con los secretos conocidos ocultos. La auditoría de cada paso guarda lo que recibió ese paso.",
     "staleCount_one": "1 línea puede estar desactualizada. Escribirlo de nuevo reemplaza todo el mapa.",
-    "staleCount_other": "{{count}} líneas pueden estar desactualizadas. Escribirlo de nuevo reemplaza todo el mapa."
+    "staleCount_other": "{{count}} líneas pueden estar desactualizadas. Escribirlo de nuevo reemplaza todo el mapa.",
+    "answeredQuestion": "Te preguntaron: {{question}}",
+    "answeredAnswer": "Respondiste: {{answer}}"
   },
   "board": {
     "title": "Tablero",
@@ -710,6 +770,7 @@
     "dismiss": "Cerrar",
     "labels": {
       "waitingApproval": "Falta tu aprobación",
+      "waitingAnswers": "Falta tu decisión",
       "failed": "Falló",
       "blocked": "Bloqueada",
       "stalled": "Parece atascada",
@@ -727,6 +788,7 @@
     },
     "needed": {
       "waitingApproval": "Ábrela para aprobar o rechazar.",
+      "waitingAnswers": "Ábrela para responder.",
       "failed": "Ábrela para intentarlo de nuevo o dejarla.",
       "blocked": "Ábrela para ver qué la está frenando.",
       "stalled": "Ábrela y elige qué hacer.",
@@ -860,5 +922,33 @@
     "cancel": "Cancelar",
     "confirm": "Quitar de Keel",
     "openRun": "Abrir esa ejecución"
+  },
+  "specProblems": {
+    "unreadable": "lo que escribió no viene en la forma que Keel pidió",
+    "noSummary": "no dijo qué va a cambiar",
+    "summaryTooLong": "la frase que dice qué va a cambiar tiene {{chars}} caracteres y el límite es {{limit}}",
+    "noCriteria": "no dijo cómo saber que el cambio funciona",
+    "tooManyCriteria": "lista {{count}} cosas que tienen que cumplirse y el límite es {{limit}}",
+    "criterionTooLong": "{{id}} tiene {{chars}} caracteres y el límite es {{limit}}",
+    "criterionNeedsId": "el punto {{position}} de lo que tiene que cumplirse no tiene nombre",
+    "repeatedCriterion": "dos cosas que tienen que cumplirse se llaman {{id}}",
+    "tooManyDecided": "lista {{count}} cosas que decidió por su cuenta y el límite es {{limit}}",
+    "decidedTooLong": "algo que decidió por su cuenta tiene {{chars}} caracteres y el límite es {{limit}}",
+    "tooManyQuestions": "tiene {{count}} preguntas para ti y el límite es {{limit}}",
+    "questionTooLong": "la pregunta {{id}} tiene {{chars}} caracteres y el límite es {{limit}}",
+    "questionNeedsId": "la pregunta {{position}} no tiene nombre",
+    "repeatedQuestion": "dos preguntas se llaman {{id}}",
+    "wrongNumberOfOptions": "la pregunta {{id}} tiene {{count}} opciones y necesita de {{min}} a {{max}}",
+    "optionTooLong": "una opción de la pregunta {{id}} tiene {{chars}} caracteres y el límite es {{limit}}",
+    "repeatedOption": "la pregunta {{id}} tiene opciones vacías o repetidas",
+    "notOneRecommended": "la pregunta {{id}} tiene {{count}} opciones recomendadas y necesita exactamente una",
+    "leftUnresolved": "dejó algo sin decidir"
+  },
+  "invalidAnswers": {
+    "unknownQuestion": "Esa respuesta es para una pregunta que este paso no hizo.",
+    "repeatedQuestion": "La pregunta {{question}} tiene dos respuestas.",
+    "unanswered": "Falta responder la pregunta {{question}}.",
+    "optionNotOffered": "Esa opción no está entre las de la pregunta {{question}}.",
+    "emptyText": "Escribe tu respuesta a la pregunta {{question}}, o elige una de sus opciones."
   }
 }

@@ -3,10 +3,10 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18next from "../i18n";
-import type { Attempt, Run } from "../lib/api";
+import type { Attempt, Run, SpecOutput } from "../lib/api";
 import type { CommandRun } from "../lib/audit";
 import { useApp } from "../lib/store";
-import { ApprovalCard } from "./RunDetail";
+import { ApprovalCard, QuestionsCard } from "./RunDetail";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -15,6 +15,8 @@ const human = attempt({ id: "human", stepId: "human", kind: "approval", tools: "
 const builder = (files: string[], resultText = "I fixed add in calc.py.") => attempt({ id: "builder", stepId: "builder", tools: "build", resultText, filesChanged: files, runFiles: files });
 const check = attempt({ id: "check", stepId: "check", kind: "check", tools: "check", prompt: "make test" });
 const spec = (resultText: string) => attempt({ id: "spec", stepId: "spec", resultText });
+const specOutput = (fields: Partial<SpecOutput> = {}): SpecOutput => ({ summary: "add returns the sum of its arguments.", criteria: [{ id: "C1", when: "add(1, 2)", then: "it returns 3" }], changes: [{ kind: "changes", text: "add stops subtracting" }], limits: ["Its signature stays"], decided: [], questions: [], ...fields });
+const specifier = (fields: Partial<SpecOutput> = {}, state: Attempt["state"] = "succeeded") => attempt({ id: "spec", stepId: "spec", role: "specifier", state, resultText: "", output: specOutput(fields) as unknown as Attempt["output"] });
 const reviewer = attempt({ id: "code", stepId: "code", role: "reviewer", output: { verdict: "approved", findings: [], summary: "Meets each criterion." } as unknown as Attempt["output"] });
 
 const deliverNext = [
@@ -27,6 +29,7 @@ const runWith = (workflow: unknown[]) => ({ id: "r1", projectId: "p1", branch: "
 describe("the approval card", () => {
   let root: Root;
   let answers: unknown[];
+  let sentBack: unknown[];
   let addsSecret: boolean;
   let answerFails: boolean;
 
@@ -50,12 +53,17 @@ describe("the approval card", () => {
     vi.useFakeTimers();
     await i18next.changeLanguage("en");
     answers = [];
+    sentBack = [];
     addsSecret = false;
     answerFails = false;
     mockIPC((command, args) => {
       if (command === "approval_answer") {
         if (answerFails) throw { code: "invalidState", reason: null, detail: null };
         answers.push(args);
+      }
+      if (command === "approval_send_back") {
+        if (answerFails) throw { code: "invalidState", reason: null, detail: null };
+        sentBack.push(args);
       }
       if (command === "run_adds_secret") return addsSecret;
       return null;
@@ -305,6 +313,131 @@ describe("the approval card", () => {
     });
   });
 
+  describe("with a structured answer from the specifier", () => {
+    const building = [{ type: "agent", id: "spec", tools: "readOnly", role: { kind: "specifier" } }, { type: "agent", id: "builder", tools: "build" }, { type: "approval", id: "human" }, { type: "deliver", id: "pr" }];
+    const gate = [{ type: "agent", id: "spec", tools: "readOnly", role: { kind: "specifier" } }, { type: "approval", id: "human" }, { type: "agent", id: "builder", tools: "build" }, { type: "deliver", id: "pr" }];
+
+    it("sums up what was asked, with the rest one click away and never as JSON", () => {
+      show([specifier(), builder(["calc.py"]), human], ["calc.py"], building);
+      expect(page()).toContain("What was asked");
+      expect(page()).toContain("add returns the sum of its arguments.");
+      expect(page()).not.toContain("add stops subtracting");
+      const readAll = document.querySelector<HTMLButtonElement>('button[aria-label="Read all of what was asked"]');
+      act(() => readAll?.click());
+      const dialog = document.querySelector('[role="dialog"]')?.textContent ?? "";
+      expect(dialog).toContain("What has to be true");
+      expect(dialog).toContain("add(1, 2) → it returns 3");
+      expect(dialog).toContain("Changes: add stops subtracting");
+      expect(dialog).toContain("What stays as it is");
+      expect(dialog).not.toContain("{");
+    });
+
+    it("shows what was asked and nothing false at an approval right after it", () => {
+      show([specifier(), human], [], gate);
+      expect(page()).toContain("What was asked");
+      expect(page()).toContain("add returns the sum of its arguments.");
+      expect(page()).not.toContain("What it did");
+      expect(page()).not.toContain("without an explanation");
+    });
+
+    it("still says it, once a worker has something to say", () => {
+      show([specifier(), builder(["calc.py"]), human], ["calc.py"], building);
+      expect(page()).toContain("What it did");
+      expect(page()).toContain("I fixed add in calc.py.");
+    });
+
+    it("still says when a worker did something and explained nothing", () => {
+      show([specifier(), attempt({ id: "builder", stepId: "builder", tools: "build", resultText: null, filesChanged: ["calc.py"], runFiles: ["calc.py"] }), human], ["calc.py"], building);
+      expect(page()).toContain("What it did");
+      expect(page()).toContain("It finished without an explanation.");
+    });
+
+    describe("what it decided alone", () => {
+      const decided = [{ text: "Keeps the rounding as it is" }, { text: "If it's 0? Show an error", taken: "person" as const }, { text: "Round up? Leave it", taken: "roundsLimit" as const }];
+      const change = (text: string) => document.querySelector<HTMLButtonElement>(`button[aria-label="Change: ${text}"]`);
+      const open = () => {
+        show([specifier({ decided }), builder(["calc.py"]), human], ["calc.py"], building);
+        act(() => change("Keeps the rounding as it is")?.click());
+      };
+
+      it("is a short list, each line with a way to change it, saying who settled what", () => {
+        show([specifier({ decided }), builder(["calc.py"]), human], ["calc.py"], building);
+        expect(page()).toContain("What it decided alone");
+        for (const item of decided) {
+          expect(page()).toContain(item.text);
+          expect(change(item.text)).not.toBeNull();
+        }
+        expect(page()).toContain("You chose this.");
+        expect(page()).toContain("After two rounds of questions, Keel stopped asking and took the recommended option.");
+      });
+
+      it("isn't there if it decided nothing", () => {
+        show([specifier(), builder(["calc.py"]), human], ["calc.py"], building);
+        expect(page()).not.toContain("What it decided alone");
+      });
+
+      it("offers no way to change it where nothing could do the work again", () => {
+        show([specifier({ decided }), human], [], gate);
+        expect(page()).toContain("Keeps the rounding as it is");
+        expect(change("Keeps the rounding as it is")).toBeNull();
+      });
+
+      it("asks what should change, and won't go without it", () => {
+        open();
+        expect(page()).toContain("What should change?");
+        expect(document.activeElement).toBe(document.querySelector("li textarea"));
+        act(() => vi.advanceTimersByTime(800));
+        expect(button("Send it back")?.disabled).toBe(true);
+      });
+
+      it("sends the person's words, with which line they're about, and doesn't read as an approval", async () => {
+        open();
+        act(() => vi.advanceTimersByTime(800));
+        write("Round it to two decimals");
+        press("Send it back");
+        await settle();
+        expect(sentBack).toEqual([{ attemptId: "human", instructions: "About “Keeps the rounding as it is”: Round it to two decimals" }]);
+        expect(answers).toEqual([]);
+      });
+
+      it("never sends on Enter, and a window coming back can't send it either", () => {
+        open();
+        act(() => vi.advanceTimersByTime(800));
+        write("Round it");
+        const send = button("Send it back") as HTMLButtonElement;
+        expect(send.onkeydown).toBeNull();
+        const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+        act(() => void send.dispatchEvent(enter));
+        expect(enter.defaultPrevented).toBe(true);
+        act(() => void window.dispatchEvent(new Event("blur")));
+        expect(button("Send it back")?.disabled).toBe(true);
+      });
+
+      it("can be left as it is, keeping what was written for later", () => {
+        open();
+        write("Round it");
+        press("Leave it");
+        expect(page()).not.toContain("What should change?");
+        act(() => change("Keeps the rounding as it is")?.click());
+        expect((document.querySelector("li textarea") as HTMLTextAreaElement).value).toBe("Round it");
+      });
+
+      it("keeps the words when sending fails, and says why", async () => {
+        const errors: string[] = [];
+        answerFails = true;
+        act(() => root.render(<ApprovalCard attempt={human} run={runWith(building)} attempts={[specifier({ decided }), builder(["calc.py"]), human]} files={["calc.py"]} commands={[]} rawCheck="intact" onShowChanges={() => {}} onError={(message) => errors.push(message)} />));
+        act(() => change("Keeps the rounding as it is")?.click());
+        act(() => vi.advanceTimersByTime(800));
+        write("Round it");
+        press("Send it back");
+        await settle();
+        expect(errors).toHaveLength(1);
+        expect((document.querySelector("li textarea") as HTMLTextAreaElement).value).toBe("Round it");
+        expect(button("Send it back")?.disabled).toBe(false);
+      });
+    });
+  });
+
   it("offers nothing to approve when the run changed nothing, and closes it as a rejection with no note", () => {
     show([builder([], "I changed nothing: it's already fixed on main."), human], []);
     act(() => vi.advanceTimersByTime(800));
@@ -347,5 +480,275 @@ describe("the approval card", () => {
     write("Keep changes small.");
     press("Approve and open a draft");
     expect(answers).toEqual([{ attemptId: "human", approve: true, text: "Keep changes small." }]);
+  });
+});
+
+describe("the card that asks", () => {
+  let root: Root;
+  let calls: { command: string; args: unknown }[];
+  let errors: string[];
+  let answerFails: boolean;
+
+  const question = (id: string, text: string) => ({ id, text, options: [{ label: "Show an error", recommended: true }, { label: "Return 0", recommended: false }] });
+  const waiting = (questions = [question("Q1", "If `whole` is 0, what should happen?")]) => specifier({ questions }, "waitingAnswers");
+  const show = (asking = waiting(), attempts: Attempt[] = [asking]) => {
+    act(() => root.render(<QuestionsCard attempt={asking} attempts={attempts} onError={(message) => errors.push(message)} />));
+  };
+  const button = (text: string) => [...document.querySelectorAll("button")].find((b) => b.textContent === text);
+  const press = (text: string) => act(() => button(text)?.click());
+  const page = () => document.body.textContent ?? "";
+  const label = (fieldset: number, text: string) => [...document.querySelectorAll("fieldset")[fieldset].querySelectorAll("label")].find((l) => l.textContent?.startsWith(text)) as HTMLLabelElement;
+  const input = (fieldset: number, text: string) => label(fieldset, text).querySelector("input") as HTMLInputElement;
+  const pick = (fieldset: number, text: string) => act(() => input(fieldset, text).click());
+  const write = (text: string) => {
+    const textarea = document.querySelector("textarea") as HTMLTextAreaElement;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, text);
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+  const arm = () => act(() => vi.advanceTimersByTime(800));
+  const settle = () => act(() => vi.advanceTimersByTimeAsync(0));
+  const answered = () => calls.filter((c) => c.command === "questions_answer").map((c) => c.args);
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    await i18next.changeLanguage("en");
+    calls = [];
+    errors = [];
+    answerFails = false;
+    mockIPC((command, args) => {
+      calls.push({ command, args });
+      if (answerFails && command === "questions_answer") throw { code: "blocked", reason: { code: "invalidAnswer", problem: "unanswered", question: "Q1" }, detail: null };
+      return null;
+    });
+    useApp.setState({ questionDrafts: {} });
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.replaceChildren();
+    vi.useRealTimers();
+  });
+
+  it("says what's going on, what will change, and what it needs to know", () => {
+    show();
+    expect(page()).toContain("Keel needs a decision to continue");
+    expect(page()).toContain("add returns the sum of its arguments.");
+    expect(page()).toContain("If `whole` is 0, what should happen?");
+    expect(page()).not.toMatch(/\bspec\b|criteria|\[TBC\]/i);
+  });
+
+  it("starts with the recommended option selected, marked and focused", () => {
+    show();
+    expect(input(0, "Show an error").checked).toBe(true);
+    expect(input(0, "Return 0").checked).toBe(false);
+    expect(document.activeElement).toBe(input(0, "Show an error"));
+    expect(label(0, "Show an error").textContent).toContain("Recommended");
+    expect(label(0, "Return 0").textContent).not.toContain("Recommended");
+  });
+
+  it("has an Other that takes the person's own words, and a way to remember each answer", () => {
+    show(waiting([question("Q1", "One?"), question("Q2", "Two?")]));
+    expect(document.querySelector("textarea")).toBeNull();
+    pick(1, "Other");
+    expect(document.activeElement).toBe(document.querySelector("textarea"));
+    expect(document.querySelectorAll('input[type="checkbox"]')).toHaveLength(2);
+    expect(label(0, "Remember for this project")).toBeTruthy();
+  });
+
+  describe("using the recommended", () => {
+    it("is free, and says so", () => {
+      show();
+      expect(page()).toContain("Free and instant: no agent runs.");
+    });
+
+    it("only goes once it has armed, and a window coming back can't press it", () => {
+      show();
+      expect(button("Use the recommended")?.disabled).toBe(true);
+      arm();
+      expect(button("Use the recommended")?.disabled).toBe(false);
+      act(() => void window.dispatchEvent(new Event("blur")));
+      expect(button("Use the recommended")?.disabled).toBe(true);
+      act(() => void window.dispatchEvent(new Event("focus")));
+      press("Use the recommended");
+      expect(answered()).toEqual([]);
+    });
+
+    it("sends the recommended option for every question", async () => {
+      show(waiting([question("Q1", "One?"), question("Q2", "Two?")]));
+      pick(1, "Return 0");
+      arm();
+      press("Use the recommended");
+      await settle();
+      expect(answered()).toEqual([
+        {
+          attemptId: "spec",
+          answers: [
+            { question: "Q1", choice: { kind: "option", label: "Show an error" }, remember: false },
+            { question: "Q2", choice: { kind: "option", label: "Show an error" }, remember: false },
+          ],
+        },
+      ]);
+    });
+
+    it("keeps Remember where the person had it on the answer that goes", async () => {
+      show();
+      act(() => input(0, "Remember").click());
+      arm();
+      press("Use the recommended");
+      await settle();
+      expect(answered()).toEqual([{ attemptId: "spec", answers: [{ question: "Q1", choice: { kind: "option", label: "Show an error" }, remember: true }] }]);
+    });
+  });
+
+  describe("answering", () => {
+    it("has nothing to send until the person chooses something else, and says so", () => {
+      show();
+      arm();
+      expect(button("Answer")?.disabled).toBe(true);
+      expect(page()).toContain("Choose another option to answer differently.");
+      pick(0, "Return 0");
+      expect(button("Answer")?.disabled).toBe(false);
+      expect(page()).not.toContain("Choose another option");
+    });
+
+    it("sends the option chosen, with what to remember", async () => {
+      show();
+      arm();
+      pick(0, "Return 0");
+      act(() => input(0, "Remember").click());
+      press("Answer");
+      await settle();
+      expect(answered()).toEqual([{ attemptId: "spec", answers: [{ question: "Q1", choice: { kind: "option", label: "Return 0" }, remember: true }] }]);
+    });
+
+    it("won't send Other with nothing written, and says what's missing", () => {
+      show();
+      arm();
+      pick(0, "Other");
+      expect(button("Answer")?.disabled).toBe(true);
+      expect(page()).toContain("Write your answer, or choose one of the options.");
+      write("   ");
+      expect(button("Answer")?.disabled).toBe(true);
+      press("Answer");
+      expect(answered()).toEqual([]);
+      write("Neither");
+      expect(button("Answer")?.disabled).toBe(false);
+      expect(page()).not.toContain("Write your answer");
+    });
+
+    it("sends the person's own words, trimmed", async () => {
+      show();
+      arm();
+      pick(0, "Other");
+      write("  Neither of those  ");
+      press("Answer");
+      await settle();
+      expect(answered()).toEqual([{ attemptId: "spec", answers: [{ question: "Q1", choice: { kind: "own", text: "Neither of those" }, remember: false }] }]);
+    });
+
+    it("sends once however fast it's pressed", async () => {
+      show();
+      arm();
+      pick(0, "Return 0");
+      press("Answer");
+      press("Answer");
+      await settle();
+      expect(answered()).toHaveLength(1);
+    });
+
+    it("never answers on Enter", () => {
+      show();
+      arm();
+      pick(0, "Return 0");
+      for (const text of ["Answer", "Use the recommended", "Cancel"]) {
+        const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+        act(() => void button(text)?.dispatchEvent(enter));
+        expect(enter.defaultPrevented).toBe(true);
+      }
+      expect(answered()).toEqual([]);
+    });
+
+    it("says what went wrong and can be tried again", async () => {
+      answerFails = true;
+      show();
+      arm();
+      pick(0, "Return 0");
+      press("Answer");
+      await settle();
+      expect(errors).toEqual(["Question Q1 still needs an answer."]);
+      expect(button("Answer")?.disabled).toBe(false);
+    });
+  });
+
+  describe("cancelling", () => {
+    it("can't go from a click that brings the window back", () => {
+      show();
+      expect(button("Cancel")?.disabled).toBe(true);
+      press("Cancel");
+      expect(calls.filter((c) => c.command === "attempt_abandon")).toEqual([]);
+    });
+
+    it("needs no reason and sends nothing else", async () => {
+      show();
+      arm();
+      press("Cancel");
+      await settle();
+      expect(calls.filter((c) => c.command === "attempt_abandon").map((c) => c.args)).toEqual([{ attemptId: "spec" }]);
+      expect(answered()).toEqual([]);
+    });
+  });
+
+  describe("what's been chosen", () => {
+    it("survives leaving the page and coming back", () => {
+      show();
+      pick(0, "Other");
+      write("Neither");
+      act(() => root.unmount());
+      root = createRoot(document.body.firstElementChild as HTMLElement);
+      show();
+      expect(input(0, "Other").checked).toBe(true);
+      expect((document.querySelector("textarea") as HTMLTextAreaElement).value).toBe("Neither");
+    });
+
+    it("is gone once it's answered", async () => {
+      show();
+      arm();
+      pick(0, "Return 0");
+      press("Answer");
+      await settle();
+      expect(useApp.getState().questionDrafts).toEqual({});
+    });
+  });
+
+  it("warns when this is the last time it can ask", () => {
+    const earlier = attempt({ id: "first", stepId: "spec", role: "specifier", output: specOutput({ answered: [{ question: "Q1", asked: "?", answer: "!", recommended: false, remember: false }] }) as unknown as Attempt["output"] });
+    show();
+    expect(page()).not.toContain("the last round");
+    const last = waiting();
+    show(last, [earlier, last]);
+    expect(page()).toContain("This is the last round of questions.");
+  });
+
+  it("keeps its buttons in view: the questions scroll, and the buttons sit outside them", () => {
+    const three = waiting([question("Q1", "One?"), question("Q2", "Two?"), question("Q3", "Three?")]);
+    show(three);
+    const list = document.querySelector("fieldset")?.parentElement as HTMLElement;
+    expect(list.className).toContain("overflow-y-auto");
+    expect(list.className).not.toContain("shrink-0");
+    expect(list.contains(button("Answer") as HTMLElement)).toBe(false);
+    expect(list.querySelectorAll("fieldset")).toHaveLength(3);
+  });
+
+  it("is all in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    show();
+    for (const text of ["Keel necesita una decisión para continuar", "Recomendada", "Otra", "Recordar para este proyecto", "Usar lo recomendado", "Responder", "Cancelar"]) {
+      expect(page()).toContain(text);
+    }
   });
 });

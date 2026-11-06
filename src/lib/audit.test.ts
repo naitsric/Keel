@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuditEvent } from "./api";
-import { accountsOf, activityFrom, approvalOutcome, askedText, commandsFrom, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, specifyingAttempt, stillGoing, toolSummary, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, commandsFrom, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, specifyingAttempt, specOf, stillGoing, toolSummary, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -139,10 +139,37 @@ describe("what was asked", () => {
     expect(specifyingAttempt([agent("spec", { kind: "check" })])).toBeUndefined();
   });
 
+  it("reads a specifier's structured answer by the sentence that sums it up, not as JSON", () => {
+    const output = { summary: " add returns the sum ", criteria: [{ id: "C1", when: "add(1, 2)", then: "it returns 3" }] };
+    expect(askedText({ role: "specifier", output, resultText: "" })).toBe("add returns the sum");
+    expect(specOf({ role: "specifier", output })).toMatchObject({ criteria: output.criteria, decided: [], questions: [], limits: [], changes: [] });
+  });
+
+  it("doesn't take anything else for a structured answer", () => {
+    expect(specOf({ role: "reviewer", output: { summary: "fine", verdict: "approved" } })).toBeNull();
+    expect(specOf({ role: "specifier", output: { nothing: "useful" } })).toBeNull();
+    expect(specOf({ role: "specifier", output: null })).toBeNull();
+    expect(askedText({ role: "specifier", output: { nothing: "useful" }, resultText: "What it wrote" })).toBe("What it wrote");
+  });
+
   it("has no text if the agent wrote none", () => {
     expect(askedText({ resultText: "  add returns the sum\n" })).toBe("add returns the sum");
     expect(askedText({ resultText: " \n" })).toBeNull();
     expect(askedText({ resultText: null })).toBeNull();
+  });
+});
+
+describe("what a person answered", () => {
+  const answered = (id: string) => ({ summary: "s", answered: [{ question: id, asked: "Why?", answer: "Because", recommended: false, remember: false }] });
+  const step = (output: unknown, round = 0, stepId = "spec") => ({ stepId, round, role: "specifier", output });
+
+  it("is kept in order, and only a specifier has any", () => {
+    expect(answersIn([step(answered("Q1")), step({ summary: "s" }), { role: "worker", output: answered("Q9") }, step(answered("Q2"))]).map((a) => a.question)).toEqual(["Q1", "Q2"]);
+  });
+
+  it("counts as a round for that step, in that round of work", () => {
+    const attempts = [step(answered("Q1")), step({ summary: "s" }), step(answered("Q2"), 1), step(answered("Q3"), 0, "other")];
+    expect(roundsAnswered(attempts, { stepId: "spec", round: 0 })).toBe(1);
   });
 });
 
@@ -219,6 +246,7 @@ describe("a run with several steps", () => {
     expect(focusAttempt([a("security", "running"), a("code", "failed"), a("ux", "running")])?.stepId).toBe("code");
     expect(focusAttempt([a("security", "succeeded"), a("ux", "running")])?.stepId).toBe("ux");
     expect(focusAttempt([a("builder", "succeeded"), a("human", "waitingApproval")])?.stepId).toBe("human");
+    expect(focusAttempt([a("setup", "succeeded"), a("spec", "waitingAnswers")])?.stepId).toBe("spec");
     expect(focusAttempt([a("pr", "succeeded")])?.stepId).toBe("pr");
   });
 
@@ -241,6 +269,8 @@ describe("stillGoing", () => {
 
   it("is true while something works, between two steps, and through a stall", () => {
     expect(stillGoing(open, [{ stepId: "a", state: "running" }])).toBe(true);
+    expect(stillGoing(open, [{ stepId: "a", state: "waitingAnswers" }])).toBe(false);
+    expect(stillGoing(open, [{ stepId: "a", state: "returned" }])).toBe(true);
     expect(stillGoing(open, [{ stepId: "a", state: "succeeded" }])).toBe(true);
     expect(stillGoing(open, [{ stepId: "a", state: "stalled" }])).toBe(true);
   });

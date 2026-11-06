@@ -6,7 +6,7 @@ import i18next from "../i18n";
 import type { AttemptState, McpOverview, Preflight } from "../lib/api";
 import { useApp, type View } from "../lib/store";
 
-const STATES: AttemptState[] = ["queued", "preparing", "running", "stalled", "succeeded", "failed", "stopped", "interrupted", "blocked", "waitingApproval", "rejected", "skipped", "abandoned"];
+const STATES: AttemptState[] = ["queued", "preparing", "running", "stalled", "succeeded", "failed", "stopped", "interrupted", "blocked", "waitingApproval", "waitingAnswers", "rejected", "returned", "skipped", "abandoned"];
 const RUNS = [row("r1", "running"), row("r2", "waitingApproval"), row("r3", "succeeded"), row("r4", "blocked"), row("r5", "queued")];
 
 const bar = () => document.querySelector("footer") as HTMLElement;

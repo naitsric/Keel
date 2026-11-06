@@ -15,7 +15,7 @@ import { WorkflowResultsCard } from "./WorkflowResultsCard";
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 const DEFAULT_EFFORT = "__default__";
-const PROMPT_TOKENS = "{{request}}, {{diff}}, {{rework}}, {{steps.spec.output}}";
+const PROMPT_TOKENS = "{{request}}, {{diff}}, {{rework}}, {{answers}}, {{steps.spec.output}}";
 
 /** A step's name that isn't taken yet. */
 export function freshId(base: string, taken: string[]): string {
@@ -90,7 +90,7 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
   const role = spec.role ?? { kind: "worker" };
   const setRole = (kind: StepRole["kind"]) => {
     if (kind === "approver") onChange({ ...spec, tools: "readOnly", role: { kind, reworkTo: earlier[earlier.length - 1] ?? "", maxRounds: 2 } });
-    else if (kind === "reviewer" || kind === "learner" || kind === "mapper") onChange({ ...spec, tools: "readOnly", role: { kind } });
+    else if (kind === "reviewer" || kind === "learner" || kind === "mapper" || kind === "specifier") onChange({ ...spec, tools: "readOnly", role: { kind } });
     else onChange({ ...spec, role: { kind } });
   };
   const judges = role.kind !== "worker";
@@ -121,6 +121,7 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
             onChange={setRole}
             options={inGroup ? [{ value: "reviewer", label: t("workflows.roleReviewer") }, { value: "worker", label: t("workflows.roleWorker") }] : [
               { value: "worker", label: t("workflows.roleWorker") },
+              { value: "specifier", label: t("workflows.roleSpecifier") },
               { value: "reviewer", label: t("workflows.roleReviewer") },
               { value: "approver", label: t("workflows.roleApprover") },
               { value: "learner", label: t("workflows.roleLearner") },

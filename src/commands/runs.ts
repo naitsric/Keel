@@ -7,7 +7,7 @@ import { useApp } from "../lib/store";
  * fewer. Rejected and abandoned count on the board only if the run is still open, which is rare,
  * and a row doesn't say.
  */
-const WAITING_FOR_YOU: AttemptState[] = ["waitingApproval", "blocked", "stalled", "failed", "stopped", "interrupted"];
+const WAITING_FOR_YOU: AttemptState[] = ["waitingApproval", "waitingAnswers", "blocked", "stalled", "failed", "stopped", "interrupted"];
 
 export const isWaitingForYou = (state: AttemptState) => WAITING_FOR_YOU.includes(state);
 

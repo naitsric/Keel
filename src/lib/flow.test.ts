@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AttemptState, StepRole, StepSpec, WorkflowStep } from "./api";
-import { allNodes, attemptChoices, type FlowAttempt, flowOf, layoutFlow, nextItem, nodeOfAttempt, nodeWithKey, parseSteps, pathKey, pathOfKey, problemKeys, scrollToShow } from "./flow";
+import { allNodes, attemptChoices, type FlowAttempt, flowOf, layoutFlow, nextItem, nodeOfAttempt, nodeWithKey, parseSteps, pathKey, pathOfKey, problemKeys, scrollToShow, canSendBack, reworkIndex } from "./flow";
 
 const spec = (id: string, model = "sonnet", role?: StepRole): StepSpec => ({ id, model, effort: null, tools: "readOnly", prompt: "p", maxTurns: null, maxBudgetUsd: null, ...(role ? { role } : {}) });
 const agent = (id: string, model = "sonnet", role?: StepRole): WorkflowStep => ({ type: "agent", ...spec(id, model, role) });
@@ -80,7 +80,7 @@ describe("what attempts say about a node", () => {
   });
 
   it("takes the state of the latest attempt, of every state the app has", () => {
-    const states: AttemptState[] = ["queued", "preparing", "running", "stalled", "succeeded", "failed", "stopped", "interrupted", "blocked", "waitingApproval", "rejected", "skipped", "abandoned"];
+    const states: AttemptState[] = ["queued", "preparing", "running", "stalled", "succeeded", "failed", "stopped", "interrupted", "blocked", "waitingApproval", "waitingAnswers", "rejected", "returned", "skipped", "abandoned"];
     for (const state of states) {
       expect(nodeWithKey(flowOf(FULL, [attempt("spec", "failed"), attempt("spec", state, { number: 2 })]), "0")?.state).toBe(state);
     }
@@ -125,6 +125,41 @@ describe("what attempts say about a node", () => {
   });
 });
 
+describe("where work goes back to", () => {
+  const worker = (id: string) => ({ type: "agent", id, model: "sonnet", tools: "build", prompt: "p", effort: null, maxTurns: null, maxBudgetUsd: null }) as WorkflowStep;
+  const reader = (id: string) => ({ ...worker(id), tools: "readOnly" }) as WorkflowStep;
+  const human = { type: "approval", id: "human" } as WorkflowStep;
+
+  it("is what the approver names, or else the last worker that builds, as in the engine", () => {
+    expect(reworkIndex(FULL)).toBe(1);
+    expect(reworkIndex([reader("spec"), worker("first"), worker("second"), human])).toBe(2);
+    expect(reworkIndex([reader("spec"), human])).toBeNull();
+    expect(reworkIndex([worker("first"), human, worker("after")])).toBe(0);
+  });
+
+  it("has to come before the person sending it back", () => {
+    expect(canSendBack([worker("builder"), human], "human")).toBe(true);
+    expect(canSendBack([human, worker("builder")], "human")).toBe(false);
+    expect(canSendBack([reader("spec"), human], "human")).toBe(false);
+    expect(canSendBack([worker("builder"), human], "missing")).toBe(false);
+  });
+
+  it("marks what ran before as out of date in a workflow with no approver too", () => {
+    const steps = [reader("spec"), worker("builder"), { type: "check", id: "check", run: "x" } as WorkflowStep, human];
+    const before = [attempt("spec", "succeeded"), attempt("builder", "succeeded"), attempt("check", "succeeded", { kind: "check" }), attempt("human", "returned", { kind: "approval" })];
+    const flow = flowOf(steps, [...before, attempt("builder", "running", { round: 1, number: 2 })], 1);
+    expect(nodeWithKey(flow, "0")).toMatchObject({ outdated: false });
+    expect(nodeWithKey(flow, "2")).toMatchObject({ outdated: true });
+    expect(nodeWithKey(flow, "3")).toMatchObject({ state: "returned", outdated: true });
+  });
+
+  it("doesn't count what a person sent back as the approver's doing", () => {
+    const attempts = [attempt("approver", "succeeded", { output: { decision: "approve" } }), attempt("human", "returned", { kind: "approval" })];
+    expect(flowOf(FULL, attempts, 1).reworks[0].times).toBe(0);
+    expect(flowOf(FULL, [...attempts, attempt("approver", "succeeded", { round: 1, output: { decision: "rework" } })], 2).reworks[0].times).toBe(1);
+  });
+});
+
 describe("a step that ran before the run went back", () => {
   const roundOne = [attempt("spec", "succeeded"), attempt("builder", "succeeded"), attempt("check", "succeeded", { kind: "check" }), attempt("security", "succeeded"), attempt("ux", "skipped"), attempt("approver", "succeeded", { output: { decision: "rework" } })];
   const flow = flowOf(FULL, [...roundOne, attempt("builder", "running", { round: 1, number: 2 })], 1);
@@ -156,7 +191,7 @@ describe("a step that ran before the run went back", () => {
   });
 
   it("never hides something under way or waiting for the person, whatever round it's from", () => {
-    const states: AttemptState[] = ["queued", "preparing", "running", "stalled", "waitingApproval", "blocked", "failed", "interrupted", "stopped", "rejected", "abandoned"];
+    const states: AttemptState[] = ["queued", "preparing", "running", "stalled", "waitingApproval", "waitingAnswers", "blocked", "failed", "interrupted", "stopped", "rejected", "abandoned"];
     for (const state of states) {
       const node = nodeWithKey(flowOf(FULL, [attempt("human", state, { kind: "approval" }), attempt("builder", "running", { round: 1, number: 2 })], 1), "5");
       expect(node, state).toMatchObject({ state, outdated: false });

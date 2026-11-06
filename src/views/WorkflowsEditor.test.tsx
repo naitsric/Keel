@@ -706,6 +706,17 @@ describe("the workflow editor", () => {
       expect(ids()).toContain("reviewer");
     });
 
+    it("offers a step that works out the change, which can't edit anything", async () => {
+      await open();
+      await click(node("builder"));
+      const roles = () => [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Role"] [role="radio"]')];
+      expect(roles().map((r) => r.textContent)).toContain("Works out the change");
+      await click(roles().find((r) => r.textContent === "Works out the change") as HTMLButtonElement);
+      const edited = roles().find((r) => r.getAttribute("aria-checked") === "true");
+      expect(edited?.textContent).toBe("Works out the change");
+      expect(document.querySelector('[role="radiogroup"][aria-label="What can it do?"]')).toBeNull();
+    });
+
     it("offers the roles a group allows", async () => {
       await open();
       await click(node("ux"));
@@ -965,8 +976,8 @@ describe("the workflow editor", () => {
     });
   });
   describe("the results", () => {
-    const of = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, ...fields });
-    const cells = (row: string) => [...document.querySelectorAll("tr")].find((tr) => tr.querySelector("th")?.textContent === row)?.querySelectorAll("td");
+    const of = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, ...fields });
+    const cells = (row: string) => [...document.querySelectorAll("tr")].find((tr) => tr.querySelector("th")?.textContent?.startsWith(row))?.querySelectorAll("td");
 
     it("say plainly that there's nothing to go on yet", async () => {
       await open();
@@ -995,6 +1006,22 @@ describe("the workflow editor", () => {
       expect(cells("Average times sent back")?.[0].textContent).toBe("Not enough data yet");
       expect(page()).toContain("Averages show from 3 merged pull requests");
       expect(page()).not.toContain("$9");
+    });
+
+    it("say how often it stopped to ask, and what a high number would mean", async () => {
+      results = [of({ runs: 10, stoppedToAsk: 4, answers: 8, answersRecommended: 6, sentBack: 2 })];
+      await open();
+      expect(cells("Runs that stopped to ask")?.[0].textContent).toBe("4");
+      expect(cells("Answers that took the recommended option")?.[0].textContent).toBe("75% (6 of 8)");
+      expect(cells("Times “Change” was used")?.[0].textContent).toBe("2");
+      expect(page()).toContain("High means it asks too much.");
+      expect(page()).toContain("High means it asks too little.");
+    });
+
+    it("don't work out a share from too few answers", async () => {
+      results = [of({ runs: 2, stoppedToAsk: 1, answers: 2, answersRecommended: 2 })];
+      await open();
+      expect(cells("Answers that took the recommended option")?.[0].textContent).toBe("Not enough data yet");
     });
 
     it("keep a workflow since deleted, under the name its runs knew", async () => {

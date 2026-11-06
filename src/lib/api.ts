@@ -12,7 +12,9 @@ export type AttemptState =
   | "interrupted"
   | "blocked"
   | "waitingApproval"
+  | "waitingAnswers"
   | "rejected"
+  | "returned"
   | "skipped"
   | "abandoned";
 
@@ -170,11 +172,13 @@ export interface Issue {
 export interface Decision {
   seq: number;
   at: string;
-  answer: "approve" | "reject";
+  answer: "approve" | "reject" | "answered";
   text: string;
+  /** What they were asked, when it's an answer they asked to have remembered. */
+  question: string | null;
 }
 
-export type StepRole = { kind: "worker" } | { kind: "reviewer" } | { kind: "approver"; reworkTo: string; maxRounds: number } | { kind: "mapper" } | { kind: "learner" };
+export type StepRole = { kind: "worker" } | { kind: "reviewer" } | { kind: "approver"; reworkTo: string; maxRounds: number } | { kind: "mapper" } | { kind: "learner" } | { kind: "specifier" };
 
 export interface BrainNote {
   seq: number;
@@ -248,6 +252,46 @@ export interface WorkflowDraft {
   createdAt: string;
 }
 
+export interface SpecQuestion {
+  id: string;
+  text: string;
+  options: { label: string; recommended: boolean }[];
+}
+
+export interface SpecDecided {
+  text: string;
+  /** Who settled it, if it was once a question: a person, or Keel after two rounds of them. */
+  taken?: "person" | "roundsLimit";
+}
+
+/** An answer to a question, as the engine keeps it. */
+export interface GivenAnswer {
+  question: string;
+  asked: string;
+  answer: string;
+  recommended: boolean;
+  remember: boolean;
+}
+
+/** A specifier's answer. */
+export interface SpecOutput {
+  summary: string;
+  criteria: { id: string; when: string; then: string }[];
+  changes: { kind: "adds" | "changes" | "removes"; text: string }[];
+  limits: string[];
+  decided: SpecDecided[];
+  questions: SpecQuestion[];
+  /** What a person said to `questions`. Only the engine writes this. */
+  answered?: GivenAnswer[];
+}
+
+/** How a person answers one question. */
+export interface QuestionAnswer {
+  question: string;
+  choice: { kind: "option"; label: string } | { kind: "own"; text: string };
+  remember: boolean;
+}
+
 /** A reviewer's answer. */
 export interface Verdict {
   verdict: "approved" | "changes";
@@ -305,6 +349,13 @@ export interface WorkflowResults {
   costPerMergedUsd: number | null;
   /** Null if no run finished. */
   averageRounds: number | null;
+  /** Runs that stopped to ask a person something. */
+  stoppedToAsk: number;
+  /** Questions a person answered, and how many of those got the recommended option. */
+  answers: number;
+  answersRecommended: number;
+  /** How many times a person sent work back from what it decided alone. */
+  sentBack: number;
 }
 
 export type WorkflowChoice =
@@ -352,7 +403,7 @@ export interface Attempt {
   runId: string;
   stepId: string;
   kind: "agent" | "setup" | "check" | "approval" | "deliver";
-  role: "worker" | "reviewer" | "approver" | "mapper" | "learner";
+  role: "worker" | "reviewer" | "approver" | "mapper" | "learner" | "specifier";
   round: number;
   output: (Verdict & Decision_ & { lines?: unknown[] }) | null;
   runFiles: string[] | null;
@@ -492,6 +543,8 @@ export const api = {
   decisionsList: (projectId: string) => invoke<Decision[]>("decisions_list", { projectId }),
   decisionRetire: (seq: number) => invoke<void>("decision_retire", { seq }),
   approvalAnswer: (attemptId: string, approve: boolean, text: string) => invoke<void>("approval_answer", { attemptId, approve, text }),
+  approvalSendBack: (attemptId: string, instructions: string) => invoke<void>("approval_send_back", { attemptId, instructions }),
+  questionsAnswer: (attemptId: string, answers: QuestionAnswer[]) => invoke<void>("questions_answer", { attemptId, answers }),
   openGithubUrl: (url: string) => invoke<void>("open_github_url", { url }),
   attemptEvents: (attemptId: string, afterSeq: number) => invoke<AuditEvent[]>("attempt_events", { attemptId, afterSeq }),
   attemptDiff: (attemptId: string) => invoke<string>("attempt_diff", { attemptId }),

@@ -26,6 +26,35 @@ describe("reasonText", () => {
   });
 });
 
+describe("what a specifier got wrong", () => {
+  const JARGON = /\bspec\b|\[TBC\]|acceptance criteria|\bscope\b|edge case|assumption|\bdelta\b|criteria/i;
+
+  it("says what's wrong in plain words, in both languages", () => {
+    const reason = { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 240, limit: 200 }, { code: "notOneRecommended", id: "Q2", count: 2 }, { code: "leftUnresolved" }] };
+    const english = reasonText(i18next.getFixedT("en"), reason);
+    expect(english).toContain("has 240 characters, and the limit is 200");
+    expect(english).toContain("question Q2 has 2 recommended options");
+    expect(english).not.toMatch(JARGON);
+    const spanish = reasonText(i18next.getFixedT("es"), reason);
+    expect(spanish).toContain("tiene 240 caracteres y el límite es 200");
+    expect(spanish).not.toMatch(JARGON);
+  });
+
+  it("has a sentence for everything that can go wrong, with no jargon in it", () => {
+    for (const language of ["en", "es"]) {
+      const problems = i18next.getResource(language, "translation", "specProblems") as Record<string, string>;
+      expect(Object.keys(problems)).toEqual(["unreadable", "noSummary", "summaryTooLong", "noCriteria", "tooManyCriteria", "criterionTooLong", "criterionNeedsId", "repeatedCriterion", "tooManyDecided", "decidedTooLong", "tooManyQuestions", "questionTooLong", "questionNeedsId", "repeatedQuestion", "wrongNumberOfOptions", "optionTooLong", "repeatedOption", "notOneRecommended", "leftUnresolved"]);
+      for (const text of Object.values(problems)) expect(text).not.toMatch(JARGON);
+    }
+  });
+
+  it("says when an answer doesn't belong to the questions", () => {
+    const t = i18next.getFixedT("en");
+    expect(errorText(t, { code: "blocked", reason: { code: "invalidAnswer", problem: "unanswered", question: "Q2" }, detail: null })).toBe("Question Q2 still needs an answer.");
+    expect(reasonText(t, { code: "invalidAnswer", problem: "somethingNew", question: "Q2" })).toBe("That answer doesn't belong to these questions.");
+  });
+});
+
 describe("errorText", () => {
   it("turns a backend error into a sentence", () => {
     expect(errorText(t("es"), { code: "blocked", reason: { code: "claudeLoggedOut" }, detail: null })).toContain("No has iniciado sesión");

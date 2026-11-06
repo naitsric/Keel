@@ -1,4 +1,4 @@
-import { AlertTriangle, Bot, CheckCircle2, Eye, GitPullRequest, Layers, Lightbulb, Map as MapIcon, Plus, ShieldCheck, UserCheck, Wrench } from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, Eye, FileText, GitPullRequest, Layers, Lightbulb, Map as MapIcon, Plus, ShieldCheck, UserCheck, Wrench } from "lucide-react";
 import type { TFunction } from "i18next";
 import { type FocusEvent, Fragment, type KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -19,6 +19,7 @@ const ROLE_LABELS: Record<StepRole["kind"], string> = {
   approver: "workflows.roleApprover",
   mapper: "flow.roleMapper",
   learner: "workflows.roleLearner",
+  specifier: "workflows.roleSpecifier",
 };
 
 const NODE_TONES: Partial<Record<AttemptState | "pending", string>> = {
@@ -27,6 +28,7 @@ const NODE_TONES: Partial<Record<AttemptState | "pending", string>> = {
   running: "border-accent/60",
   // Whatever waits for the person stands out from the rest.
   waitingApproval: "border-warning/70 bg-warning/10",
+  waitingAnswers: "border-warning/70 bg-warning/10",
   stalled: "border-warning/70 bg-warning/10",
   blocked: "border-warning/70 bg-warning/10",
   interrupted: "border-warning/70 bg-warning/10",
@@ -34,6 +36,7 @@ const NODE_TONES: Partial<Record<AttemptState | "pending", string>> = {
   skipped: "border-dashed opacity-70",
   abandoned: "opacity-70",
   rejected: "opacity-70",
+  returned: "opacity-70",
   stopped: "opacity-70",
 };
 
@@ -49,6 +52,7 @@ function StepIcon({ node }: { node: FlowNode<FlowAttempt> }) {
     if (node.role === "approver") return <ShieldCheck size={12} />;
     if (node.role === "learner") return <Lightbulb size={12} />;
     if (node.role === "mapper") return <MapIcon size={12} />;
+    if (node.role === "specifier") return <FileText size={12} />;
     return <Bot size={12} />;
   };
   return <span className="shrink-0 text-subtle">{icon()}</span>;

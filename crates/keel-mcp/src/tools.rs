@@ -30,15 +30,17 @@ const WAIT_MAX_SECS: u64 = 50;
 const WAIT_TICK: Duration = Duration::from_millis(300);
 
 /// A person, not a client, moves a run on from these.
-const NEEDS_PERSON: [&str; 6] = [
+const NEEDS_PERSON: [&str; 7] = [
     "waitingApproval",
+    "waitingAnswers",
     "stalled",
     "blocked",
     "interrupted",
     "failed",
     "stopped",
 ];
-/// What stop_run may stop. A step waiting for approval isn't working, and only a person answers it.
+/// What stop_run may stop. A step waiting for an approval or for answers isn't working, and only a
+/// person answers it.
 const STOPPABLE: [&str; 4] = ["queued", "preparing", "running", "stalled"];
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -237,6 +239,9 @@ pub enum DraftRole {
     },
     /// Says what the run taught, for the person to accept. Read-only, and only as the last step.
     Learner,
+    /// Works out what a request will change, and may ask the person what only they can decide, in
+    /// Keel. Read-only.
+    Specifier,
 }
 
 impl McpServer {
@@ -832,6 +837,7 @@ impl DraftAgent {
                     max_rounds,
                 },
                 Some(DraftRole::Learner) => StepRole::Learner,
+                Some(DraftRole::Specifier) => StepRole::Specifier,
             },
         })
     }

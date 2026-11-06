@@ -111,7 +111,9 @@
     "blocked": "Blocked",
     "abandoned": "Abandoned",
     "waitingApproval": "Waiting for you",
+    "waitingAnswers": "Waiting for you",
     "rejected": "Rejected",
+    "returned": "Sent back",
     "skipped": "Skipped"
   },
   "reasons": {
@@ -154,7 +156,11 @@
     "defaultWorkflowMissing": "The workflow this project uses by default no longer exists. Choose another one in Settings.",
     "projectHasOpenRuns": "This project can't be removed yet, because “{{title}}” hasn't finished. Finish it or abandon it first.",
     "projectHasOpenRunsMany": "This project can't be removed yet, because “{{title}}” and {{others}} more haven't finished. Finish them or abandon them first.",
-    "projectRemoved": "This project was removed from Keel. Add its folder again to work on it."
+    "projectRemoved": "This project was removed from Keel. Add its folder again to work on it.",
+    "specNotUsable": "It couldn't write this within what Keel can show you, even after being asked to fix it: {{problems}}.",
+    "invalidAnswer": "That answer doesn't belong to these questions.",
+    "sendBackNeedsInstructions": "To send it back, say what should change.",
+    "nothingToSendBackTo": "Nothing before this approval can do the work again."
   },
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",
@@ -261,6 +267,7 @@
     "fromIssue": "From issue #{{number}}",
     "base": "Based on {{base}}",
     "decideApproval": "Approve or reject above.",
+    "decideAnswers": "Answer its questions above.",
     "decideDelivered": "Review and merge the draft on GitHub. Keel doesn't merge.",
     "decideOpen": "Review and merge it on GitHub. Keel doesn't merge.",
     "decideMerged": "Nothing. The pull request was merged.",
@@ -323,10 +330,46 @@
     "decideMap": "Nothing. Read it in the Brain, and retire any line that's wrong.",
     "accountClaude": "Claude Code: {{account}}",
     "accountGithub": "GitHub: {{account}}",
-    "startedBy": "Started by {{client}}"
+    "startedBy": "Started by {{client}}",
+    "questionsTitle": "Keel needs a decision to continue",
+    "questionsBody": "Choose what should happen. The recommended option is already selected.",
+    "questionsWillChange": "What will change",
+    "questionsLastRound": "This is the last round of questions. If it still has any after this, Keel takes the recommended options.",
+    "questionRecommended": "Recommended",
+    "questionOther": "Other",
+    "questionOtherLabel": "Your answer to: {{question}}",
+    "questionOtherNeeded": "Write your answer, or choose one of the options.",
+    "questionRemember": "Remember for this project",
+    "questionRememberHint": "An answer only counts for this run unless you remember it. You can retire remembered ones in the Brain.",
+    "questionsUseRecommended": "Use the recommended",
+    "questionsUseRecommendedHint": "Free and instant: no agent runs.",
+    "questionsAnswer": "Answer",
+    "questionsAnswerHint": "The agent goes on with your answers, which uses your Claude usage.",
+    "questionsAnswerSame": "Choose another option to answer differently.",
+    "questionsCancel": "Cancel",
+    "questionsCancelHint": "Ends this run. If it has a card on the board, the card goes back to the backlog.",
+    "decidedTitle": "What it decided alone",
+    "decidedChange": "Change",
+    "decidedChangeThis": "Change: {{text}}",
+    "decidedYouChose": "You chose this.",
+    "decidedKeelTook": "After two rounds of questions, Keel stopped asking and took the recommended option.",
+    "sendBackLabel": "What should change?",
+    "sendBackHint": "It goes back to the step that does the work, without starting over, and comes back to you here. Your words stay in this run.",
+    "sendBackAction": "Send it back",
+    "sendBackKeep": "Leave it",
+    "sendBackAbout": "About “{{decided}}”: {{instruction}}",
+    "specHolds": "What has to be true",
+    "specChanges": "What changes",
+    "specAdds": "Adds",
+    "specAlters": "Changes",
+    "specRemoves": "Removes",
+    "specLimits": "What stays as it is",
+    "specAsked": "What it asked you",
+    "specAnswered": "What you answered"
   },
   "tabs": {
     "activity": "Activity",
+    "understood": "What it understood",
     "commands": "Commands",
     "changes": "Changes",
     "prompt": "Prompt",
@@ -374,7 +417,15 @@
     "brainNote_active": "You accepted: {{text}}",
     "brainNote_dismissed": "You dismissed: {{text}}",
     "brainNote_retired": "You retired: {{text}}",
-    "brainFailed": "Couldn't save this in the Brain: {{error}}"
+    "brainFailed": "Couldn't save this in the Brain: {{error}}",
+    "questionsAsked_one": "It asked you a question",
+    "questionsAsked_other": "It asked you {{count}} questions",
+    "answers": "You answered",
+    "answersLine": "{{asked}} {{answer}}",
+    "questionsTaken": "After {{rounds}} rounds of questions, Keel stopped asking and took the recommended options",
+    "specCorrected": "What it wrote didn't fit what Keel can show you, so Keel asked it to fix that",
+    "specAnswer": "It wrote down what it understood",
+    "returned": "You sent it back for round {{round}}"
   },
   "commands": {
     "empty": "No commands ran.",
@@ -569,6 +620,7 @@
     "stepId": "Step name",
     "role": "Role",
     "roleWorker": "Does the work",
+    "roleSpecifier": "Works out the change",
     "roleReviewer": "Reviews",
     "roleApprover": "Approves",
     "reworkTo": "Sends work back to",
@@ -614,7 +666,13 @@
       "cost": "Average cost per merged pull request",
       "rounds": "Average times sent back",
       "notEnough": "Not enough data yet",
-      "enoughNote": "Averages show from {{min}} merged pull requests or {{min}} finished runs. Fewer than that says little."
+      "enoughNote": "Averages show from {{min}} merged pull requests, {{min}} finished runs or {{min}} answers. Fewer than that says little.",
+      "stoppedToAsk": "Runs that stopped to ask",
+      "matched": "Answers that took the recommended option",
+      "matchedNote": "High means it asks too much.",
+      "matchedValue": "{{percent}}% ({{matched}} of {{total}})",
+      "sentBack": "Times “Change” was used",
+      "sentBackNote": "High means it asks too little."
     }
   },
   "flow": {
@@ -665,12 +723,14 @@
     "learningsHint": "Proposals you accepted.",
     "learningsEmpty": "Nothing yet.",
     "decisions": "Decisions",
-    "decisionsHint": "What you said when approving or rejecting. These come first, and agents follow them.",
+    "decisionsHint": "What you said when approving or rejecting, and answers you asked to remember. These come first, and agents follow them.",
     "decisionsEmpty": "No decisions yet.",
     "prompt": "What the next agent will get",
     "promptHint": "The exact text, with known secrets hidden here. Each step's audit record has what that step got.",
     "staleCount_one": "1 line may be out of date. Writing it again replaces the whole map.",
-    "staleCount_other": "{{count}} lines may be out of date. Writing it again replaces the whole map."
+    "staleCount_other": "{{count}} lines may be out of date. Writing it again replaces the whole map.",
+    "answeredQuestion": "You were asked: {{question}}",
+    "answeredAnswer": "You answered: {{answer}}"
   },
   "board": {
     "title": "Board",
@@ -710,6 +770,7 @@
     "dismiss": "Dismiss",
     "labels": {
       "waitingApproval": "Needs your approval",
+      "waitingAnswers": "Needs your decision",
       "failed": "Failed",
       "blocked": "Blocked",
       "stalled": "Looks stuck",
@@ -727,6 +788,7 @@
     },
     "needed": {
       "waitingApproval": "Open it to approve or reject.",
+      "waitingAnswers": "Open it to answer.",
       "failed": "Open it to try again or leave it.",
       "blocked": "Open it to see what's in the way.",
       "stalled": "Open it and choose what to do.",
@@ -860,5 +922,33 @@
     "cancel": "Cancel",
     "confirm": "Remove from Keel",
     "openRun": "Open that run"
+  },
+  "specProblems": {
+    "unreadable": "what it wrote isn't in the form Keel asked for",
+    "noSummary": "it didn't say what will change",
+    "summaryTooLong": "the sentence saying what will change has {{chars}} characters, and the limit is {{limit}}",
+    "noCriteria": "it didn't say how to tell the change works",
+    "tooManyCriteria": "it lists {{count}} things that have to be true, and the limit is {{limit}}",
+    "criterionTooLong": "{{id}} has {{chars}} characters, and the limit is {{limit}}",
+    "criterionNeedsId": "item {{position}} of what has to be true has no name",
+    "repeatedCriterion": "two things that have to be true are both called {{id}}",
+    "tooManyDecided": "it lists {{count}} things it decided alone, and the limit is {{limit}}",
+    "decidedTooLong": "something it decided alone has {{chars}} characters, and the limit is {{limit}}",
+    "tooManyQuestions": "it has {{count}} questions for you, and the limit is {{limit}}",
+    "questionTooLong": "question {{id}} has {{chars}} characters, and the limit is {{limit}}",
+    "questionNeedsId": "question {{position}} has no name",
+    "repeatedQuestion": "two questions are both called {{id}}",
+    "wrongNumberOfOptions": "question {{id}} has {{count}} options, and it needs {{min}} to {{max}}",
+    "optionTooLong": "an option of question {{id}} has {{chars}} characters, and the limit is {{limit}}",
+    "repeatedOption": "question {{id}} has empty or repeated options",
+    "notOneRecommended": "question {{id}} has {{count}} recommended options, and it needs exactly one",
+    "leftUnresolved": "it left something undecided"
+  },
+  "invalidAnswers": {
+    "unknownQuestion": "That answer is for a question this step didn't ask.",
+    "repeatedQuestion": "Question {{question}} got two answers.",
+    "unanswered": "Question {{question}} still needs an answer.",
+    "optionNotOffered": "That option isn't one of those on offer for question {{question}}.",
+    "emptyText": "Write your answer to question {{question}}, or choose one of its options."
   }
 }

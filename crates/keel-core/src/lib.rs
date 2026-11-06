@@ -62,6 +62,9 @@ pub enum StepRole {
     Mapper,
     /// Says what this run taught. Nothing it proposes reaches an agent until a person accepts it.
     Learner,
+    /// Works out what a request will change, and may ask a person what only they can decide. It
+    /// can't edit anything.
+    Specifier,
 }
 
 impl StepRole {
@@ -72,6 +75,7 @@ impl StepRole {
             Self::Approver { .. } => "approver",
             Self::Mapper => "mapper",
             Self::Learner => "learner",
+            Self::Specifier => "specifier",
         }
     }
 
@@ -211,8 +215,12 @@ pub enum AttemptState {
     Blocked,
     /// An approval step waiting for an answer. Nothing is running.
     WaitingApproval,
+    /// A step that asked a person something and waits for what they say. Nothing is running.
+    WaitingAnswers,
     /// A person rejected it at an approval step. The run ends here.
     Rejected,
+    /// A person sent the work back at an approval step, with what to change. The run goes on.
+    Returned,
     /// Not needed for this change: nothing it covers was touched.
     Skipped,
     Abandoned,
@@ -233,7 +241,9 @@ impl AttemptState {
             Self::Interrupted => "interrupted",
             Self::Blocked => "blocked",
             Self::WaitingApproval => "waitingApproval",
+            Self::WaitingAnswers => "waitingAnswers",
             Self::Rejected => "rejected",
+            Self::Returned => "returned",
             Self::Skipped => "skipped",
             Self::Abandoned => "abandoned",
         }
@@ -251,7 +261,9 @@ impl AttemptState {
             "interrupted" => Self::Interrupted,
             "blocked" => Self::Blocked,
             "waitingApproval" => Self::WaitingApproval,
+            "waitingAnswers" => Self::WaitingAnswers,
             "rejected" => Self::Rejected,
+            "returned" => Self::Returned,
             "skipped" => Self::Skipped,
             "abandoned" => Self::Abandoned,
             _ => return None,
@@ -380,6 +392,99 @@ pub enum Reason {
     },
     /// The project was removed from Keel, so nothing new can start on it until it's added again.
     ProjectRemoved,
+    /// A specifier's answer broke its limits, and so did the answer it was given a chance to fix.
+    SpecNotUsable {
+        problems: Vec<SpecProblem>,
+    },
+    /// An answer to a step's questions doesn't belong to them. `problem` is a code the UI
+    /// translates: `unknownQuestion`, `repeatedQuestion`, `unanswered`, `optionNotOffered` or
+    /// `emptyText`. `question` is the one it's about.
+    InvalidAnswer {
+        problem: String,
+        question: String,
+    },
+    /// Work can't be sent back without saying what to change.
+    SendBackNeedsInstructions,
+    /// This approval has nothing before it that could do the work again.
+    NothingToSendBackTo,
+}
+
+/// What's wrong with a specifier's answer. The UI and the prompt asking for a fix each put it in
+/// their own words, so these only hold the facts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "code",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SpecProblem {
+    /// It isn't in the structure it was asked for.
+    Unreadable,
+    NoSummary,
+    SummaryTooLong {
+        chars: usize,
+        limit: usize,
+    },
+    NoCriteria,
+    TooManyCriteria {
+        count: usize,
+        limit: usize,
+    },
+    CriterionTooLong {
+        id: String,
+        chars: usize,
+        limit: usize,
+    },
+    CriterionNeedsId {
+        position: usize,
+    },
+    RepeatedCriterion {
+        id: String,
+    },
+    TooManyDecided {
+        count: usize,
+        limit: usize,
+    },
+    DecidedTooLong {
+        position: usize,
+        chars: usize,
+        limit: usize,
+    },
+    TooManyQuestions {
+        count: usize,
+        limit: usize,
+    },
+    QuestionTooLong {
+        id: String,
+        chars: usize,
+        limit: usize,
+    },
+    QuestionNeedsId {
+        position: usize,
+    },
+    RepeatedQuestion {
+        id: String,
+    },
+    WrongNumberOfOptions {
+        id: String,
+        count: usize,
+        min: usize,
+        max: usize,
+    },
+    OptionTooLong {
+        id: String,
+        chars: usize,
+        limit: usize,
+    },
+    RepeatedOption {
+        id: String,
+    },
+    NotOneRecommended {
+        id: String,
+        count: usize,
+    },
+    /// Something was left marked as still to be decided.
+    LeftUnresolved,
 }
 
 impl Reason {
@@ -438,7 +543,11 @@ impl Reason {
             | Self::NoMatchingPaths { .. }
             | Self::NothingToDeliver
             | Self::RejectionNeedsReason
-            | Self::UnsafeBranch { .. } => false,
+            | Self::UnsafeBranch { .. }
+            | Self::SpecNotUsable { .. }
+            | Self::InvalidAnswer { .. }
+            | Self::SendBackNeedsInstructions
+            | Self::NothingToSendBackTo => false,
         }
     }
 }
@@ -521,7 +630,8 @@ pub enum BoardColumn {
 /// run. A person has to look at it, and it mustn't hold a place in the queue forever.
 pub fn card_column(lane: CardLane, run_finished: bool, state: Option<AttemptState>) -> BoardColumn {
     use AttemptState::{
-        Abandoned, Blocked, Failed, Interrupted, Rejected, Stalled, Stopped, WaitingApproval,
+        Abandoned, Blocked, Failed, Interrupted, Rejected, Stalled, Stopped, WaitingAnswers,
+        WaitingApproval,
     };
     match lane {
         CardLane::Backlog => BoardColumn::Backlog,
@@ -532,8 +642,8 @@ pub fn card_column(lane: CardLane, run_finished: bool, state: Option<AttemptStat
             (
                 false,
                 Some(
-                    WaitingApproval | Blocked | Stalled | Failed | Stopped | Interrupted | Rejected
-                    | Abandoned,
+                    WaitingApproval | WaitingAnswers | Blocked | Stalled | Failed | Stopped
+                    | Interrupted | Rejected | Abandoned,
                 ),
             ) => BoardColumn::HumanReview,
             (false, _) => BoardColumn::InProgress,
@@ -548,7 +658,7 @@ mod tests {
     use BoardColumn::{Backlog as InBacklog, Done, HumanReview, InProgress, Todo as InTodo};
 
     /// Every state, with the run open and then finished.
-    const STARTED: [(AttemptState, BoardColumn, BoardColumn); 13] = [
+    const STARTED: [(AttemptState, BoardColumn, BoardColumn); 15] = [
         (Queued, InProgress, Done),
         (Preparing, InProgress, Done),
         (Running, InProgress, Done),
@@ -559,7 +669,10 @@ mod tests {
         (Interrupted, HumanReview, Done),
         (Blocked, HumanReview, Done),
         (WaitingApproval, HumanReview, Done),
+        (WaitingAnswers, HumanReview, Done),
         (Rejected, HumanReview, InBacklog),
+        // The work went back, and the next step is on its way.
+        (Returned, InProgress, Done),
         (Skipped, InProgress, Done),
         (Abandoned, HumanReview, InBacklog),
     ];
@@ -588,7 +701,8 @@ mod tests {
             // Adding a state stops this compiling until it's in the table.
             match parsed {
                 Queued | Preparing | Running | Stalled | Succeeded | Failed | Stopped
-                | Interrupted | Blocked | WaitingApproval | Rejected | Skipped | Abandoned => {}
+                | Interrupted | Blocked | WaitingApproval | WaitingAnswers | Rejected
+                | Returned | Skipped | Abandoned => {}
             }
         }
         let mut unique = states.clone();
@@ -724,6 +838,16 @@ mod tests {
                 false,
             ),
             (Reason::ProjectRemoved, false),
+            (Reason::SpecNotUsable { problems: vec![] }, false),
+            (
+                Reason::InvalidAnswer {
+                    problem: text(),
+                    question: text(),
+                },
+                false,
+            ),
+            (Reason::SendBackNeedsInstructions, false),
+            (Reason::NothingToSendBackTo, false),
         ]
     }
 
@@ -767,6 +891,10 @@ mod tests {
             Reason::ClaudeNotResponding => 34,
             Reason::ProjectHasOpenRuns { .. } => 35,
             Reason::ProjectRemoved => 36,
+            Reason::SpecNotUsable { .. } => 37,
+            Reason::InvalidAnswer { .. } => 38,
+            Reason::SendBackNeedsInstructions => 39,
+            Reason::NothingToSendBackTo => 40,
         }
     }
 
@@ -780,7 +908,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=36).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=40).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]
@@ -804,6 +932,15 @@ mod tests {
             assert_eq!(serde_json::to_value(state).unwrap(), state.as_str());
         }
         assert_eq!(PrState::parse("MERGED"), None);
+    }
+
+    #[test]
+    fn a_specifier_is_a_role_of_its_own_and_states_read_back_as_themselves() {
+        assert_eq!(StepRole::Specifier.as_str(), "specifier");
+        for state in [AttemptState::WaitingAnswers, AttemptState::Returned] {
+            assert_eq!(AttemptState::parse(state.as_str()), Some(state));
+            assert!(!state.is_active(), "nothing is running");
+        }
     }
 
     #[test]

@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18next from "../i18n";
-import type { Attempt, AttemptState, Run, WorkflowStep } from "../lib/api";
+import type { Attempt, AttemptState, AuditEvent, Run, WorkflowStep } from "../lib/api";
 import { useApp } from "../lib/store";
 import { RunDetail } from "./RunDetail";
 
@@ -33,6 +33,7 @@ const READS = ["run_get", "run_look_at_pr", "run_attempts", "attempt_events", "a
 describe("the run page's flow", () => {
   let root: Root;
   let attempts: Attempt[];
+  let events: Record<string, AuditEvent[]>;
   let run: Partial<Run>;
   let calls: string[];
   let lookFails: boolean;
@@ -71,15 +72,16 @@ describe("the run page's flow", () => {
     vi.useFakeTimers();
     await i18next.changeLanguage("en");
     attempts = [...built(), human()];
+    events = {};
     run = { id: "r1", projectId: "p1", title: "Fix add", round: 0, workflow: WORKFLOW, branch: "keel/abc", finishedAt: null, prUrl: null };
     calls = [];
     lookFails = false;
-    mockIPC((command) => {
+    mockIPC((command, args) => {
       calls.push(command);
       if (command === "run_look_at_pr" && lookFails) throw { code: "internal", reason: null, detail: "no" };
       if (command === "run_get") return run;
       if (command === "run_attempts") return attempts;
-      if (command === "attempt_events") return [];
+      if (command === "attempt_events") return events[(args as { attemptId: string }).attemptId] ?? [];
       if (command === "attempt_raw_check") return "intact";
       if (command === "run_adds_secret") return false;
       if (command === "run_proposals") return [];
@@ -572,5 +574,55 @@ describe("the run page's flow", () => {
     expect(page()).toContain("Devuelto una vez");
     await choose(node("pr"));
     expect(page()).toContain("Este paso aún no empieza.");
+  });
+  describe("a step that works out what's asked", () => {
+    const output = { summary: "add returns the sum", criteria: [{ id: "C1", when: "add(1, 2)", then: "it returns 3" }], changes: [], limits: ["Its signature stays"], decided: [{ text: "Keeps the rounding" }], questions: [] };
+    const specifier = (state: AttemptState, fields: Partial<Attempt> = {}) => attempt("spec", state, { role: "specifier", output: output as unknown as Attempt["output"], ...fields });
+
+    it("reads as text in its details, and not as raw JSON", async () => {
+      attempts = [specifier("succeeded"), attempt("builder", "running")];
+      await open();
+      await choose(node("spec"));
+      await choose(radio("What it understood"));
+      expect(page()).toContain("add(1, 2) → it returns 3");
+      expect(page()).toContain("Its signature stays");
+      expect(page()).not.toContain('"criteria"');
+    });
+
+    it("says it gave its answer in the activity, instead of printing it", async () => {
+      const spec = specifier("succeeded");
+      attempts = [spec, attempt("builder", "running")];
+      events = { [spec.id]: [{ seq: 1, attemptId: spec.id, at: "2026-11-06T10:00:00Z", kind: "toolCall", data: { id: "t1", name: "StructuredOutput", input: output } }] };
+      await open();
+      await choose(node("spec"));
+      expect(page()).toContain("It wrote down what it understood");
+      expect(page()).not.toContain('"summary"');
+    });
+
+    it("asks with its card in place of what a finished step would show", async () => {
+      attempts = [specifier("waitingAnswers", { output: { ...output, questions: [{ id: "Q1", text: "What then?", options: [{ label: "Yes", recommended: true }, { label: "No", recommended: false }] }] } as unknown as Attempt["output"] })];
+      await open();
+      expect(page()).toContain("Keel needs a decision to continue");
+      expect(page()).toContain("What then?");
+      expect(page()).not.toContain("What you need to decide");
+    });
+
+    it("finishing with nothing built says what it understood, not that it explained nothing", async () => {
+      attempts = [specifier("succeeded")];
+      run = { ...run, finishedAt: "2026-11-06T10:00:00Z" };
+      await open();
+      expect(page()).toContain("add returns the sum");
+      expect(page()).not.toContain("It finished without an explanation.");
+    });
+
+    it("a person's return reads as that in the activity", async () => {
+      const returned = attempt("human", "returned", { kind: "approval", tools: "none", output: { instructions: "Return 0" } as unknown as Attempt["output"] });
+      attempts = [...built(), returned];
+      events = { [returned.id]: [{ seq: 1, attemptId: returned.id, at: "2026-11-06T10:00:00Z", kind: "returned", data: { instructions: "Return 0", round: 1 } }] };
+      await open();
+      await choose(node("human"));
+      expect(page()).toContain("You sent it back for round 2");
+      expect(page()).toContain("Return 0");
+    });
   });
 });

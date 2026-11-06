@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use keel_core::{StepSpec, ToolProfile, WorkflowStep};
+use keel_core::{StepRole, StepSpec, ToolProfile, WorkflowStep};
 use keel_harness::github::Issue;
 use serde_json::json;
 
@@ -57,8 +57,9 @@ pub fn system_prompt(
     (text, json!(sources))
 }
 
-/// Fills in `{{request}}`, `{{diff}}`, `{{rework}}` and `{{steps.<id>.output}}`. One pass only: text
-/// that comes from an agent or an issue is never expanded again, so it can't reach other values.
+/// Fills in `{{request}}`, `{{diff}}`, `{{rework}}`, `{{answers}}` and `{{steps.<id>.output}}`. One
+/// pass only: text that comes from an agent, an issue or a person is never expanded again, so it
+/// can't reach other values.
 pub fn render(template: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
     let mut result = String::with_capacity(template.len());
     let mut rest = template;
@@ -107,6 +108,54 @@ pub fn request_from_issue(issue: &Issue, extra: &str) -> String {
     text
 }
 
+const SPEC_PROMPT_EN: &str = r#"Work out what this request will change, without editing anything, and answer in the structure you were given. Read the code involved first. Whoever reads your answer asked for the change and may not know the code, so say what happens, in plain words, and not how it's built.
+
+- summary: one sentence saying what will change, up to 200 characters.
+- criteria: up to 7, with ids C1, C2 and so on. Each says when something happens and what must then be true, so that a test could prove it. Its `when` and `then` together take up to 200 characters.
+- changes: what this adds, changes or removes in what people can see today.
+- limits: what must not change.
+- decided: up to 5, each up to 140 characters: what you decided on your own because it wasn't worth asking.
+- questions: up to 3, with ids Q1, Q2 and so on. Usually none.
+
+Ask only when all three hold: the answer changes what gets built, it can't be found in the code, in what Keel knows about this project or in earlier decisions, and being wrong costs more than asking. Otherwise decide, and put it in `decided`. Technical uncertainty is yours to investigate, not something to ask a person.
+
+Write `criteria` as if the person picks the recommended option.
+
+Each question is one decision, in one line of up to 140 characters, about what happens rather than how it's built. It has 2 to 4 options of up to 60 characters each, and exactly one is recommended.
+Bad: "Should this go in a helper, or should the view check it?" That's how it's built, and it's yours to decide.
+Good: "If `whole` is 0, what should happen?" with "Show an error, as today" (recommended) and "Return 0".
+
+Leave nothing marked as still to be decided: decide it or ask.
+
+Request:
+{{request}}
+
+{{answers}}"#;
+
+const SPEC_PROMPT_ES: &str = r#"Averigua qué va a cambiar este pedido, sin editar nada, y responde con la estructura que te dieron. Lee primero el código involucrado. Quien lea tu respuesta pidió el cambio y puede no conocer el código, así que di qué pasa, en palabras simples, y no cómo se construye. Responde en español.
+
+- summary: una frase que diga qué va a cambiar, hasta 200 caracteres.
+- criteria: hasta 7, con ids C1, C2 y así. Cada uno dice cuándo pasa algo y qué debe ser cierto entonces, de modo que una prueba lo pueda demostrar. Su `when` y su `then` juntos llegan hasta 200 caracteres.
+- changes: lo que esto agrega, cambia o quita en lo que la gente puede ver hoy.
+- limits: lo que no debe cambiar.
+- decided: hasta 5, cada uno hasta 140 caracteres: lo que decidiste por tu cuenta porque no valía la pena preguntarlo.
+- questions: hasta 3, con ids Q1, Q2 y así. Normalmente ninguna.
+
+Pregunta solo cuando se cumplan las tres cosas: la respuesta cambia lo que se construye, no se puede averiguar en el código, en lo que Keel sabe de este proyecto ni en decisiones anteriores, y equivocarse cuesta más que preguntar. Si no, decide y ponlo en `decided`. La incertidumbre técnica te toca investigarla a ti, no preguntársela a una persona.
+
+Escribe `criteria` como si la persona eligiera la opción recomendada.
+
+Cada pregunta es una sola decisión, en una línea de hasta 140 caracteres, sobre qué pasa y no sobre cómo se construye. Tiene de 2 a 4 opciones de hasta 60 caracteres cada una, y exactamente una recomendada.
+Mal: "¿Esto va en un helper, o lo valida la vista?" Eso es cómo se construye, y te toca decidirlo a ti.
+Bien: "Si `whole` es 0, ¿qué debe pasar?" con "Mostrar error, como hoy" (recomendada) y "Devolver 0".
+
+No dejes nada marcado como pendiente de decidir: decídelo o pregúntalo.
+
+Pedido:
+{{request}}
+
+{{answers}}"#;
+
 /// The default workflow from the user's diagram, without what later stages add.
 pub fn full_workflow(
     language: &str,
@@ -116,16 +165,16 @@ pub fn full_workflow(
 ) -> Vec<WorkflowStep> {
     let spanish = language.starts_with("es");
     let spec_prompt = if spanish {
-        "Convierte este pedido en una especificación corta, sin editar nada. Lee el código involucrado. Incluye: el problema, criterios de aceptación numerados y verificables, y los límites de lo que no se toca. No inventes reglas de negocio: márcalas como [TBC].\n\nPedido:\n{{request}}"
+        SPEC_PROMPT_ES
     } else {
-        "Turn this request into a short specification, without editing anything. Read the code involved. Include: the problem, numbered and verifiable acceptance criteria, and the limits of what must not change. Don't invent business rules: mark them [TBC].\n\nRequest:\n{{request}}"
+        SPEC_PROMPT_EN
     };
     let builder_prompt = if spanish {
-        "Implementa esta especificación. Escribe primero la prueba que falla, respeta sus límites y deja el trabajo en un commit.\n\nPedido original:\n{{request}}\n\nEspecificación:\n{{steps.spec.output}}"
+        "Implementa esta especificación. Escribe primero la prueba que falla, respeta sus límites y deja el trabajo en un commit. Si algo no queda claro mientras construyes, no te detengas a preguntar: elige la opción más conservadora y di cuál en tu mensaje final.\n\nPedido original:\n{{request}}\n\nEspecificación:\n{{steps.spec.output}}\n\n{{answers}}\n\n{{rework}}"
     } else {
-        "Implement this specification. Write the failing test first, respect its limits, and leave your work in a commit.\n\nOriginal request:\n{{request}}\n\nSpecification:\n{{steps.spec.output}}"
+        "Implement this specification. Write the failing test first, respect its limits, and leave your work in a commit. If something is unclear while you build, don't stop to ask: choose the most conservative option and say which in your final message.\n\nOriginal request:\n{{request}}\n\nSpecification:\n{{steps.spec.output}}\n\n{{answers}}\n\n{{rework}}"
     };
-    let agent = |id: &str, model: &str, tools, prompt: &str| {
+    let agent = |id: &str, model: &str, tools, role, prompt: &str| {
         WorkflowStep::Agent(StepSpec {
             id: id.into(),
             model: model.into(),
@@ -135,12 +184,24 @@ pub fn full_workflow(
             max_turns: None,
             max_budget_usd: None,
             paths: Vec::new(),
-            role: Default::default(),
+            role,
         })
     };
     let mut steps = vec![
-        agent("spec", spec_model, ToolProfile::ReadOnly, spec_prompt),
-        agent("builder", builder_model, ToolProfile::Build, builder_prompt),
+        agent(
+            "spec",
+            spec_model,
+            ToolProfile::ReadOnly,
+            StepRole::Specifier,
+            spec_prompt,
+        ),
+        agent(
+            "builder",
+            builder_model,
+            ToolProfile::Build,
+            StepRole::Worker,
+            builder_prompt,
+        ),
     ];
     if let Some(run) = check.map(str::trim).filter(|c| !c.is_empty()) {
         steps.push(WorkflowStep::Check {
@@ -237,6 +298,62 @@ mod tests {
     }
 
     #[test]
+    fn the_specifier_is_told_when_to_ask_and_how_with_a_bad_and_a_good_example() {
+        for (language, musts) in [
+            (
+                "en",
+                [
+                    "Ask only when all three hold",
+                    "Technical uncertainty is yours to investigate",
+                    "as if the person picks the recommended option",
+                    "Bad:",
+                    "Good: \"If `whole` is 0, what should happen?\"",
+                    "{{request}}",
+                ],
+            ),
+            (
+                "es",
+                [
+                    "Pregunta solo cuando se cumplan las tres cosas",
+                    "La incertidumbre técnica te toca investigarla a ti",
+                    "como si la persona eligiera la opción recomendada",
+                    "Mal:",
+                    "Bien: \"Si `whole` es 0, ¿qué debe pasar?\" con \"Mostrar error, como hoy\"",
+                    "{{request}}",
+                ],
+            ),
+        ] {
+            let steps = full_workflow(language, "o", "s", None);
+            let WorkflowStep::Agent(spec) = &steps[0] else {
+                panic!()
+            };
+            for must in musts {
+                assert!(spec.prompt.contains(must), "{language}: {must}");
+            }
+            assert!(
+                !spec.prompt.contains("[TBC]"),
+                "it's told not to, in plain words"
+            );
+        }
+    }
+
+    #[test]
+    fn the_builder_is_told_not_to_stop_and_where_answers_and_rework_go() {
+        for (language, conservative) in [
+            ("en", "choose the most conservative option"),
+            ("es", "elige la opción más conservadora"),
+        ] {
+            let steps = full_workflow(language, "o", "s", None);
+            let WorkflowStep::Agent(builder) = &steps[1] else {
+                panic!()
+            };
+            assert!(builder.prompt.contains(conservative));
+            assert!(builder.prompt.contains("{{answers}}"));
+            assert!(builder.prompt.contains("{{rework}}"));
+        }
+    }
+
+    #[test]
     fn the_workflow_follows_the_language_and_each_step_has_its_model() {
         let steps = full_workflow("es", "opus", "sonnet", Some("make test"));
         let ids: Vec<&str> = steps.iter().map(WorkflowStep::id).collect();
@@ -249,11 +366,13 @@ mod tests {
         };
         assert_eq!(spec.model, "opus");
         assert_eq!(spec.tools, ToolProfile::ReadOnly);
-        assert!(spec.prompt.contains("especificación"));
+        assert_eq!(spec.role, StepRole::Specifier);
+        assert!(spec.prompt.contains("¿qué debe pasar?"));
         let WorkflowStep::Agent(builder) = &steps[1] else {
             panic!()
         };
         assert_eq!(builder.model, "sonnet");
+        assert_eq!(builder.role, StepRole::Worker);
         assert!(builder.prompt.contains("{{steps.spec.output}}"));
         assert!(
             full_workflow("en", "o", "s", None)

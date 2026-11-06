@@ -354,6 +354,7 @@ describe("cardLabel", () => {
 
   it("says what Human Review needs, for each state", () => {
     expect(review("waitingApproval")).toEqual({ state: "waitingApproval", label: "Needs your approval", detail: "Open it to approve or reject." });
+    expect(review("waitingAnswers")).toEqual({ state: "waitingAnswers", label: "Needs your decision", detail: "Open it to answer." });
     expect(review("failed")?.label).toBe("Failed");
     expect(review("blocked")?.label).toBe("Blocked");
     expect(review("stalled")?.label).toBe("Looks stuck");

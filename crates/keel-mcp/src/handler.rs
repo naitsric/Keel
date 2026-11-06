@@ -2,9 +2,9 @@
 //! Each call goes to the matching method of [`McpServer`] with the client the HTTP layer
 //! authenticated. Nothing is decided here.
 //!
-//! There is deliberately no tool to approve, reject, retry or abandon a step, to merge, to change a
-//! project's settings or saved workflows, or to let anything into the Brain. Those stay with the
-//! person, in the app. A client can propose a workflow, and only the person can save it.
+//! There is deliberately no tool to approve, reject, return, answer, retry or abandon a step, to
+//! merge, to change a project's settings or saved workflows, or to let anything into the Brain. Those
+//! stay with the person, in the app. A client can propose a workflow, and only the person can save it.
 //! `tests/http.rs` fails if the list of tools grows without someone deciding so.
 
 use std::sync::Arc;
@@ -50,15 +50,15 @@ const START_RUN: &str = "Start a run of a saved workflow, from `request` text, a
                          It appears in Keel at once, marked as started by this client, with a card on the \
                          project's board, and the person sees it advance there. An issue that already has a run \
                          open is refused. It spends the person's Claude usage. A workflow that delivers stops for \
-                         the person's approval before any pull request, and you can't approve. Refused if this \
-                         client may only read, or already has 3 runs open.";
+                         the person's approval before any pull request, and you can't approve or answer what a step \
+                         asks them. Refused if this client may only read, or already has 3 runs open.";
 const DRAFT_WORKFLOW: &str = "Propose a workflow for a project, as a draft the person reviews on Keel's Workflows \
                               page. Nothing runs: start_run can't see it until the person saves it, and they may \
                               change it or discard it first. Saving is theirs alone, so tell them it's there. \
                               list_workflows shows it under `drafts` while it waits, and under `workflows` once \
                               saved, with a new id. A draft can't replace a workflow that exists. The steps have \
                               to follow Keel's rules, and a refusal names the problem and the step: a `deliver` \
-                              needs an `approval` earlier, ids are unique, reviewers, approvers and learners are \
+                              needs an `approval` earlier, ids are unique, reviewers, approvers, learners and specifiers are \
                               read-only, members of a `parallel` are read-only workers or reviewers, a learner \
                               can only be the last step, and an approver's `reworkTo` is an earlier step outside \
                               a group. A draft can't ask for network, other folders or anything in the project's \

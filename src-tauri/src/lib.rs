@@ -12,8 +12,8 @@ use keel_core::{
     serialize_masked,
 };
 use keel_engine::{
-    AddedProject, Board, BrainView, Config, Engine, Error as EngineError, GithubStatus, Preflight,
-    ProjectSetup, RawCheck, StartRun, Workflow, WorkflowDraft, request_from_issue,
+    AddedProject, Answer, Board, BrainView, Config, Engine, Error as EngineError, GithubStatus,
+    Preflight, ProjectSetup, RawCheck, StartRun, Workflow, WorkflowDraft, request_from_issue,
     title_from_issue,
 };
 use keel_harness::Tools;
@@ -561,6 +561,24 @@ fn approval_answer(
     Ok(state.engine.answer_approval(&attempt_id, approve, &text)?)
 }
 
+#[tauri::command(async)]
+fn questions_answer(
+    state: State<'_, AppState>,
+    attempt_id: String,
+    answers: Vec<Answer>,
+) -> CommandResult<()> {
+    Ok(state.engine.answer_questions(&attempt_id, &answers)?)
+}
+
+#[tauri::command(async)]
+fn approval_send_back(
+    state: State<'_, AppState>,
+    attempt_id: String,
+    instructions: String,
+) -> CommandResult<()> {
+    Ok(state.engine.send_back(&attempt_id, &instructions)?)
+}
+
 /// Opens a pull request in the browser. Only GitHub URLs, so a value from a run can't open anything else.
 #[tauri::command(async)]
 fn open_github_url(url: String) -> CommandResult<()> {
@@ -899,6 +917,8 @@ pub fn run() {
             decisions_list,
             decision_retire,
             approval_answer,
+            questions_answer,
+            approval_send_back,
             open_github_url,
             attempt_events,
             attempt_diff,

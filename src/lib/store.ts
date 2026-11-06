@@ -2,6 +2,7 @@ import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
 import i18next, { type Language, systemLanguage } from "../i18n";
 import { api, type McpOverview, type Overview, type Preflight, type ProjectAdded } from "./api";
+import type { QuestionPick } from "./questions";
 
 export type View = { name: "home" } | { name: "run"; runId: string; backTo?: View } | { name: "settings" } | { name: "workflows" } | { name: "brain" } | { name: "board"; projectId?: string };
 
@@ -26,6 +27,8 @@ interface AppState {
   quitOpen: boolean;
   /** Notes on approvals not answered yet, per attempt, so leaving the page doesn't drop them. */
   approvalDrafts: Record<string, string>;
+  /** What's chosen on questions not answered yet, per attempt and question, for the same reason. */
+  questionDrafts: Record<string, Record<string, QuestionPick>>;
   /** Bumps whenever the backend reports a change, so open views can refetch. */
   revision: number;
   /** Whether the MCP server is up, for the status bar. Null until the first answer. */
@@ -36,6 +39,8 @@ interface AppState {
   closeProjectSetup: () => void;
   setQuitOpen: (open: boolean) => void;
   setApprovalDraft: (attemptId: string, text: string) => void;
+  setQuestionDraft: (attemptId: string, questionId: string, pick: QuestionPick) => void;
+  clearQuestionDrafts: (attemptId: string) => void;
   refreshOverview: () => Promise<void>;
   refreshSession: () => Promise<void>;
   refreshMcp: () => Promise<void>;
@@ -52,6 +57,7 @@ export const useApp = create<AppState>((set, get) => ({
   brainProjectId: null,
   quitOpen: false,
   approvalDrafts: {},
+  questionDrafts: {},
   revision: 0,
   mcp: null,
   navigate: (view) => set({ view }),
@@ -72,6 +78,13 @@ export const useApp = create<AppState>((set, get) => ({
       const approvalDrafts = { ...s.approvalDrafts, [attemptId]: text };
       if (!text) delete approvalDrafts[attemptId];
       return { approvalDrafts };
+    }),
+  setQuestionDraft: (attemptId, questionId, pick) => set((s) => ({ questionDrafts: { ...s.questionDrafts, [attemptId]: { ...s.questionDrafts[attemptId], [questionId]: pick } } })),
+  clearQuestionDrafts: (attemptId) =>
+    set((s) => {
+      const questionDrafts = { ...s.questionDrafts };
+      delete questionDrafts[attemptId];
+      return { questionDrafts };
     }),
   refreshOverview: async () => set({ overview: await api.overview(), overviewLoaded: true }),
   refreshSession: async () => set({ preflight: await api.refreshSession() }),

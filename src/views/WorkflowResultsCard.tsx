@@ -1,14 +1,14 @@
 import { useTranslation } from "react-i18next";
 import type { Workflow, WorkflowResults } from "../lib/api";
 import { formatCost, formatNumber } from "../lib/format";
-import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE } from "../lib/results";
+import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE, matchedShare } from "../lib/results";
 import { Card } from "../ui/primitives";
 
 /** Workflows side by side, one row per measure, so a new measure is one more line here. */
 export function WorkflowResultsCard({ results, workflows }: { results: WorkflowResults[]; workflows: Pick<Workflow, "id" | "name">[] }) {
   const { t } = useTranslation();
   const notEnough = t("workflows.results.notEnough");
-  const rows: { label: string; value: (r: WorkflowResults) => string }[] = [
+  const rows: { label: string; note?: string; value: (r: WorkflowResults) => string }[] = [
     { label: t("workflows.results.runs"), value: (r) => formatNumber(r.runs) },
     { label: t("workflows.results.merged"), value: (r) => formatNumber(r.merged) },
     { label: t("workflows.results.closed"), value: (r) => formatNumber(r.closed) },
@@ -26,6 +26,16 @@ export function WorkflowResultsCard({ results, workflows }: { results: WorkflowR
         return rounds === null ? notEnough : formatNumber(Math.round(rounds * 10) / 10);
       },
     },
+    { label: t("workflows.results.stoppedToAsk"), value: (r) => formatNumber(r.stoppedToAsk) },
+    {
+      label: t("workflows.results.matched"),
+      note: t("workflows.results.matchedNote"),
+      value: (r) => {
+        const share = matchedShare(r);
+        return share === null ? notEnough : t("workflows.results.matchedValue", { percent: Math.round(share * 100), matched: formatNumber(r.answersRecommended), total: formatNumber(r.answers) });
+      },
+    },
+    { label: t("workflows.results.sentBack"), note: t("workflows.results.sentBackNote"), value: (r) => formatNumber(r.sentBack) },
   ];
   const compared = comparedResults(results, workflows);
   return (
@@ -56,6 +66,7 @@ export function WorkflowResultsCard({ results, workflows }: { results: WorkflowR
                   <tr key={row.label} className="border-t border-border">
                     <th scope="row" className="px-1 py-1 pr-3 align-top font-normal text-muted">
                       {row.label}
+                      {row.note && <span className="block text-[11px] text-subtle">{row.note}</span>}
                     </th>
                     {compared.map((r) => {
                       const value = row.value(r);

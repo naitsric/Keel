@@ -10,6 +10,7 @@ mod prompts;
 mod pull_requests;
 mod runner;
 mod services;
+mod specs;
 mod workflows;
 
 use std::collections::{HashMap, HashSet};
@@ -33,6 +34,7 @@ use keel_store::{
 };
 pub use prompts::full_workflow;
 use serde_json::json;
+pub use specs::{Answer, AnswerChoice};
 pub use workflows::{Workflow, WorkflowDraft};
 
 const RESUME_PROMPT: &str = "Continue where you left off.";
@@ -236,6 +238,15 @@ struct Slots {
     active: HashSet<String>,
     /// Projects with a step that can run commands. Only one at a time per project.
     command_steps: HashSet<String>,
+}
+
+/// Continuing a session rather than starting one.
+pub(crate) struct Resume {
+    pub session: String,
+    /// The attempt it continues from.
+    pub from: String,
+    /// What it's told, if not simply to go on.
+    pub prompt: Option<String>,
 }
 
 #[derive(Default)]
@@ -792,6 +803,15 @@ impl Engine {
             }
         }
         let answer = if approve { "approve" } else { "reject" };
+        let state = if approve {
+            AttemptState::Succeeded
+        } else {
+            AttemptState::Rejected
+        };
+        // Whichever answer gets here first is the answer. See `send_back`.
+        if !store.change_state(attempt_id, AttemptState::WaitingApproval, state)? {
+            return Err(Error::InvalidState);
+        }
         let project_id = store.project_of_run(&attempt.run_id)?;
         if !text.trim().is_empty() {
             store.add_decision(
@@ -808,18 +828,115 @@ impl Engine {
             &json!({ "answer": answer, "text": text.trim() }),
         )?;
         store.patch_attempt(attempt_id, &[("finished_at", Value::Text(now()))])?;
-        let state = if approve {
-            AttemptState::Succeeded
-        } else {
-            AttemptState::Rejected
-        };
-        store.set_state(attempt_id, state, None)?;
         store.append_event(attempt_id, "finished", &json!({ "state": state.as_str() }))?;
         if approve {
             self.inner.advance(&attempt.run_id)?;
         } else {
             store.patch_run(&attempt.run_id, &[("finished_at", Value::Text(now()))])?;
         }
+        (self.inner.on_change)(&attempt.run_id);
+        Ok(())
+    }
+
+    /// Answers a step's questions. If all of them got the recommended option, no agent runs: they
+    /// go in with what it decided alone, and the run moves on. Otherwise the same session resumes
+    /// with the answers, so it doesn't reread the repo, and what it says then is judged again.
+    /// Answers that don't belong to the questions are refused with nothing changed.
+    pub fn answer_questions(&self, attempt_id: &str, answers: &[Answer]) -> Result<()> {
+        let store = &self.inner.store;
+        // Held from looking at the state until it has changed, so a second answer finds it changed
+        // and nothing can move the run on in between.
+        let guard = locked(&self.inner.advancing);
+        let attempt = store.attempt(attempt_id)?;
+        if attempt.state != AttemptState::WaitingAnswers.as_str() {
+            return Err(Error::InvalidState);
+        }
+        let mut spec = specs::of_attempt(&attempt).ok_or(Error::InvalidState)?;
+        let given = specs::check_answers(&spec.questions, answers).map_err(Error::Blocked)?;
+        let matched = given.iter().filter(|answer| answer.recommended).count();
+        let every_one_matched = matched == given.len();
+
+        let project_id = store.project_of_run(&attempt.run_id)?;
+        for answer in given.iter().filter(|answer| answer.remember) {
+            let (question, text) = specs::decision_parts(answer);
+            store.add_answered_decision(
+                &project_id,
+                &attempt.run_id,
+                attempt_id,
+                &question,
+                &text,
+            )?;
+        }
+        store.append_event(
+            attempt_id,
+            "answers",
+            &json!({ "answers": given, "total": given.len(), "recommended": matched }),
+        )?;
+
+        let keeping = |output: serde_json::Value| -> Result<()> {
+            let mut output = output;
+            output["answered"] = json!(given);
+            store.patch_attempt(attempt_id, &[("output", Value::Text(output.to_string()))])?;
+            Ok(())
+        };
+        if every_one_matched {
+            spec.take_recommended(specs::Taken::Person);
+            keeping(json!(spec))?;
+        } else {
+            // On the record before the agent starts, so it counts as a round when its result comes.
+            keeping(attempt.output.clone().unwrap_or_else(|| json!({})))?;
+            let run = store.run(&attempt.run_id)?;
+            let steps: Vec<WorkflowStep> = serde_json::from_value(run.workflow).unwrap_or_default();
+            let step = workflows::find_step(&steps, &attempt.step_id).ok_or(Error::InvalidState)?;
+            let attempts = store.attempts_of_run(&attempt.run_id)?;
+            self.inner.start_step(
+                &attempt.run_id,
+                &step,
+                workflows::next_number(&attempts, &attempt.step_id),
+                Some(Resume {
+                    session: attempt.session_id.clone(),
+                    from: attempt.id.clone(),
+                    prompt: Some(specs::answered_prompt(&given, &attempt.language)),
+                }),
+            )?;
+        }
+        store.set_state(attempt_id, AttemptState::Succeeded, None)?;
+        store.append_event(
+            attempt_id,
+            "finished",
+            &json!({ "state": AttemptState::Succeeded.as_str() }),
+        )?;
+        drop(guard);
+        if every_one_matched {
+            self.inner.advance(&attempt.run_id)?;
+        }
+        (self.inner.on_change)(&attempt.run_id);
+        Ok(())
+    }
+
+    /// A person sends the work back from an approval, with what they want changed. It doesn't start
+    /// over: everything from the rework point runs again, the check included, and the approval comes
+    /// round again after it. Their words stay in this run and don't become a decision, and the round
+    /// doesn't count against the approver, since a person asked for it.
+    pub fn send_back(&self, attempt_id: &str, instructions: &str) -> Result<()> {
+        let store = &self.inner.store;
+        let attempt = store.attempt(attempt_id)?;
+        if attempt.state != AttemptState::WaitingApproval.as_str() {
+            return Err(Error::InvalidState);
+        }
+        let instructions = instructions.trim();
+        if instructions.is_empty() {
+            return Err(Error::Blocked(Reason::SendBackNeedsInstructions));
+        }
+        let steps: Vec<WorkflowStep> =
+            serde_json::from_value(store.run(&attempt.run_id)?.workflow).unwrap_or_default();
+        if !workflows::can_send_back(&steps, &attempt.step_id) {
+            return Err(Error::Blocked(Reason::NothingToSendBackTo));
+        }
+        if !store.return_attempt(attempt_id, &attempt.run_id, instructions)? {
+            return Err(Error::InvalidState);
+        }
+        self.inner.advance(&attempt.run_id)?;
         (self.inner.on_change)(&attempt.run_id);
         Ok(())
     }
@@ -910,7 +1027,15 @@ impl Engine {
         let store = &self.inner.store;
         let attempt = store.attempt(attempt_id)?;
         let state = AttemptState::parse(&attempt.state).ok_or(Error::InvalidState)?;
-        if state.is_active() || state == AttemptState::WaitingApproval {
+        // Those that wait for a person get answered, and one sent back has already moved on.
+        if state.is_active()
+            || matches!(
+                state,
+                AttemptState::WaitingApproval
+                    | AttemptState::WaitingAnswers
+                    | AttemptState::Returned
+            )
+        {
             return Err(Error::InvalidState);
         }
         let run = store.run(&attempt.run_id)?;
@@ -928,26 +1053,27 @@ impl Engine {
         let steps: Vec<WorkflowStep> =
             serde_json::from_value(run.workflow.clone()).unwrap_or_default();
         let step = workflows::find_step(&steps, &attempt.step_id).ok_or(Error::InvalidState)?;
-        let resume_session =
-            (resume && attempt.kind == "agent").then(|| attempt.session_id.clone());
+        let resume = (resume && attempt.kind == "agent").then(|| Resume {
+            session: attempt.session_id.clone(),
+            from: attempt.id.clone(),
+            prompt: resumed_prompt(&attempt),
+        });
         // Before the step starts: a quick one can be over, and have closed the run, by the time
         // `start_step` returns.
         if run.finished_at.is_some() {
             store.patch_run(&attempt.run_id, &[("finished_at", Value::Null)])?;
         }
-        self.inner.start_step(
-            &attempt.run_id,
-            &step,
-            number,
-            resume_session.clone(),
-            resume_session.is_some().then(|| attempt.id.clone()),
-        )
+        self.inner
+            .start_step(&attempt.run_id, &step, number, resume)
     }
 
     pub fn abandon(&self, attempt_id: &str) -> Result<()> {
+        // So that cancelling and answering the same question can't both go through.
+        let guard = locked(&self.inner.advancing);
         let attempt = self.inner.store.attempt(attempt_id)?;
         let state = AttemptState::parse(&attempt.state).ok_or(Error::InvalidState)?;
-        if state.is_active() {
+        // What worked has moved on, and leaving it would close the run under whatever came next.
+        if state.is_active() || matches!(state, AttemptState::Succeeded | AttemptState::Returned) {
             return Err(Error::InvalidState);
         }
         self.inner
@@ -959,12 +1085,14 @@ impl Engine {
         self.inner
             .store
             .patch_run(&attempt.run_id, &[("finished_at", Value::Text(now()))])?;
+        drop(guard);
         (self.inner.on_change)(&attempt.run_id);
         Ok(())
     }
 
     /// Run once at startup. Reconnects to steps that outlived the app, closes out the rest, and
-    /// continues any run that stopped between two steps. Approvals simply keep waiting.
+    /// continues any run that stopped between two steps. Approvals and questions simply keep
+    /// waiting: nothing is running for them.
     pub fn recover(&self) -> Result<()> {
         self.inner.store.release_claimed_cards()?;
         for attempt in self.inner.store.active_attempts()? {
@@ -1167,6 +1295,20 @@ impl Engine {
     }
 }
 
+/// What an attempt being resumed by hand is told. A limit it broke has to be said again, and answers
+/// it may never have got shouldn't be lost to a bare "go on".
+fn resumed_prompt(attempt: &keel_store::Attempt) -> Option<String> {
+    if let Some(Reason::SpecNotUsable { problems }) = attempt
+        .reason
+        .clone()
+        .and_then(|reason| serde_json::from_value(reason).ok())
+    {
+        return Some(specs::correction_prompt(&problems, &attempt.language));
+    }
+    (attempt.resumed_from.is_some() && attempt.prompt != RESUME_PROMPT)
+        .then(|| attempt.prompt.clone())
+}
+
 fn restrict_dir(dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
@@ -1231,8 +1373,7 @@ impl Inner {
         run_id: &str,
         step: &WorkflowStep,
         number: i64,
-        resume: Option<String>,
-        resumed_from: Option<String>,
+        resume: Option<Resume>,
     ) -> Result<String> {
         let run = self.store.run(run_id)?;
         let project = self.store.project(&run.project_id)?;
@@ -1244,10 +1385,10 @@ impl Inner {
         let id = new_id();
         let (model, effort, tools, turns, budget, prompt, settings_json, raw_name) = match step {
             WorkflowStep::Agent(spec) => {
-                let text = if resume.is_some() {
-                    RESUME_PROMPT.to_owned()
-                } else {
-                    self.render_prompt(&spec.prompt, &run)?
+                let text = match &resume {
+                    Some(Resume { prompt: Some(prompt), .. }) => prompt.clone(),
+                    Some(_) => RESUME_PROMPT.to_owned(),
+                    None => self.agent_prompt(spec, &run)?,
                 };
                 (
                     spec.model.clone(),
@@ -1302,7 +1443,7 @@ impl Inner {
                 format!("{stem}.log"),
             ),
         };
-        let session_id = resume.clone().unwrap_or_else(new_id);
+        let session_id = resume.as_ref().map_or_else(new_id, |r| r.session.clone());
         self.store.add_attempt(&NewAttempt {
             id: id.clone(),
             run_id: run_id.to_owned(),
@@ -1329,7 +1470,7 @@ impl Inner {
             system_prompt_sources: "[]".to_owned(),
             settings: settings_json,
             session_id,
-            resumed_from,
+            resumed_from: resume.as_ref().map(|r| r.from.clone()),
             workspace: workspace.to_string_lossy().into_owned(),
             raw_path: dir.join(raw_name).to_string_lossy().into_owned(),
             started_at: now(),
@@ -1344,8 +1485,25 @@ impl Inner {
         let step = step.clone();
         let attempt_id = id.clone();
         let project_id = project.id.clone();
+        let resume = resume.map(|r| r.session);
         std::thread::spawn(move || inner.execute(attempt_id, project_id, step, resume));
         Ok(id)
+    }
+
+    /// An agent's prompt. What a person sent back has to reach whoever does the work, whatever a
+    /// saved workflow's prompt leaves out.
+    fn agent_prompt(&self, spec: &StepSpec, run: &keel_store::Run) -> Result<String> {
+        let mut text = self.render_prompt(&spec.prompt, run)?;
+        if spec.role == StepRole::Worker && spec.tools == keel_core::ToolProfile::Build {
+            let attempts = self.store.attempts_of_run(&run.id)?;
+            if workflows::returned_last_round(&attempts, run.round) {
+                let rework = workflows::rework_text(&attempts, run.round, &run.language);
+                if !text.contains(&rework) {
+                    text.push_str(&format!("\n\n{rework}"));
+                }
+            }
+        }
+        Ok(text)
     }
 
     /// What a step's prompt becomes right now. The answers come from this run's latest round.
@@ -1366,6 +1524,7 @@ impl Inner {
                 Some(workflows::cap_diff(diff))
             }
             "rework" => Some(workflows::rework_text(&attempts, run.round, &run.language)),
+            "answers" => Some(workflows::answers_text(&attempts, &run.language)),
             _ => {
                 let id = name.strip_prefix("steps.")?.strip_suffix(".output")?;
                 Some(workflows::output_of(&attempts, id))
@@ -1374,7 +1533,7 @@ impl Inner {
     }
 
     /// Moves the run on as far as it can. Anything that isn't a success needs a person, and an
-    /// approver can send the work back, which reruns everything from the step it names.
+    /// approver or a person can send the work back, which reruns everything from the rework point.
     fn advance(self: &Arc<Self>, run_id: &str) -> Result<()> {
         let _guard = locked(&self.advancing);
         'round: loop {
@@ -1386,7 +1545,7 @@ impl Inner {
                 serde_json::from_value(run.workflow.clone()).unwrap_or_default();
             let attempts = self.store.attempts_of_run(run_id)?;
             let rework_from = workflows::rework_index(&steps);
-            // Steps the approver can send work back to run again each round. Earlier ones don't.
+            // Steps that work can be sent back to run again each round. Earlier ones don't.
             let latest = |id: &str, index: usize| {
                 let round = if rework_from.is_some_and(|from| index >= from) {
                     run.round
@@ -1414,7 +1573,6 @@ impl Inner {
                                     &WorkflowStep::Agent(spec.clone()),
                                     number,
                                     None,
-                                    None,
                                 )?;
                                 pending = true;
                             }
@@ -1431,7 +1589,7 @@ impl Inner {
                 }
                 let Some(attempt) = latest(step.id(), index) else {
                     let number = workflows::next_number(&attempts, step.id());
-                    self.start_step(run_id, step, number, None, None)?;
+                    self.start_step(run_id, step, number, None)?;
                     return Ok(());
                 };
                 if attempt.state != AttemptState::Succeeded.as_str() {
@@ -1448,7 +1606,9 @@ impl Inner {
                     && attempt.round == run.round
                     && workflows::wants_rework(attempt)
                 {
-                    if run.round < i64::from(*max_rounds) {
+                    // A round a person asked for isn't the approver's to count.
+                    let its_rounds = run.round - workflows::rounds_asked_by_a_person(&attempts);
+                    if its_rounds < i64::from(*max_rounds) {
                         self.store
                             .patch_run(run_id, &[("round", Value::Integer(run.round + 1))])?;
                         self.store.append_event(

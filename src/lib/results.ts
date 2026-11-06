@@ -9,6 +9,9 @@ export const costPerMerged = (results: WorkflowResults) => (results.merged >= EN
 /** Null until there are enough finished runs to go on. */
 export const averageRounds = (results: WorkflowResults) => (results.finished >= ENOUGH_FOR_AN_AVERAGE ? results.averageRounds : null);
 
+/** The share of answers that took the recommended option, from 0 to 1. Null until there are enough to go on. */
+export const matchedShare = (results: WorkflowResults) => (results.answers >= ENOUGH_FOR_AN_AVERAGE ? results.answersRecommended / results.answers : null);
+
 /**
  * The workflows to compare, in the order of the list beside them and under the name they have now.
  * One that's been deleted comes last, under the name its latest run knew.

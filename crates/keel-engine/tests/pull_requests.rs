@@ -45,7 +45,8 @@ fn write_script(path: &Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Read-only steps answer with what's in `spec-text`. Build steps change a file.
+/// Steps asked for a structure answer with what's in `spec-json`, or with no proposals. Other
+/// read-only steps answer with what's in `spec-text`, and build steps change a file.
 fn fake_claude(flags: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -54,10 +55,23 @@ case "$1" in
 auth) echo '{{"loggedIn":true,"subscriptionType":"max","email":"a@example.com"}}'; exit 0;;
 esac
 cat > /dev/null
-tools=""; prev=""
-for a in "$@"; do [ "$prev" = "--tools" ] && tools="$a"; prev="$a"; done
+tools=""; schema=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "--tools" ] && tools="$a"
+  [ "$prev" = "--json-schema" ] && schema="$a"
+  prev="$a"
+done
 list=$(printf '%s' "$tools" | sed 's/,/","/g')
+[ -n "$schema" ] && list="$list\",\"StructuredOutput"
 echo "{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake\",\"tools\":[\"$list\"],\"apiKeySource\":\"none\"}}"
+if [ -n "$schema" ]; then
+  case "$schema" in
+  *criteria*) output="$(cat "{flags}/spec-json")";;
+  *) output='{{"learnings":[]}}';;
+  esac
+  echo "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"num_turns\":1,\"structured_output\":$output}}"
+  exit 0
+fi
 if [ "$tools" = "Read,Grep,Glob" ]; then
   text="$(cat "{flags}/spec-text")"
 else
@@ -313,6 +327,127 @@ fn a_saved_workflow_with_a_plain_spec_step_still_gets_its_text_into_the_pull_req
         body.find("### What changed").unwrap(),
     );
     assert!(done < asked && asked < changed, "{body}");
+}
+
+const QUESTION: &str = r#"{"id":"Q1","text":"If whole is 0, what then?","options":[{"label":"Show an error","recommended":true},{"label":"Return 0","recommended":false}]}"#;
+
+fn structured(questions: &str) -> String {
+    format!(
+        r#"{{"summary":"add returns the sum","criteria":[{{"id":"C1","when":"add(1, 2)","then":"it returns 3"}}],"changes":[{{"kind":"changes","text":"add stops subtracting"}}],"limits":["Its signature stays"],"decided":[{{"text":"Keeps the rounding"}}],"questions":[{questions}]}}"#
+    )
+}
+
+impl World {
+    /// The built-in one with nothing but a person between the work and the pull request.
+    fn start_simple(&self) -> String {
+        let workflow = self
+            .engine
+            .workflow(&self.project_id, "builtin:simple", "en")
+            .unwrap()
+            .unwrap();
+        self.start(&workflow)
+    }
+}
+
+#[test]
+fn a_structured_answer_reads_as_text_and_the_pull_request_says_what_the_person_answered() {
+    let w = world();
+    std::fs::write(w.flags.join("spec-json"), structured(QUESTION)).unwrap();
+    let run = w.start_simple();
+    let waiting = w.wait_step(&run, "spec", AttemptState::WaitingAnswers);
+    assert_eq!(waiting.role, "specifier");
+
+    // Put together here, so no secret scanner trips on this file.
+    let secret = format!("{}{}", "ghp_", "x".repeat(36));
+    std::fs::write(w.flags.join("spec-json"), structured("")).unwrap();
+    w.engine
+        .answer_questions(
+            &waiting.id,
+            &[keel_engine::Answer {
+                question: "Q1".into(),
+                choice: keel_engine::AnswerChoice::Own {
+                    text: format!("Return 0 with {secret}"),
+                },
+                remember: false,
+            }],
+        )
+        .unwrap();
+    let human = w.wait_step(&run, "approval", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&human.id, true, "").unwrap();
+    w.until("the run finishing", || {
+        w.store.run(&run).unwrap().finished_at.is_some()
+    });
+
+    let body = w.body();
+    assert!(
+        body.starts_with("Fixed it."),
+        "a specifier isn't what explains the run: {body}"
+    );
+    assert!(body.contains("<summary>What was asked</summary>"), "{body}");
+    assert!(body.contains("add returns the sum"), "{body}");
+    assert!(body.contains("**What has to be true**"), "{body}");
+    assert!(body.contains("- C1: add(1, 2) → it returns 3"), "{body}");
+    assert!(!body.contains("\"criteria\""), "no JSON: {body}");
+    assert!(body.contains("### What the person answered"), "{body}");
+    assert!(
+        body.contains("- If whole is 0, what then? Return 0 with"),
+        "{body}"
+    );
+    assert!(!body.contains(&secret), "masked: {body}");
+
+    // The step after everything else took the structured answer in its stride.
+    let learner = w.step(&run, "learnings").unwrap();
+    assert_eq!(learner.state, "succeeded", "{:?}", learner.reason);
+}
+
+#[test]
+fn a_run_where_nobody_was_asked_lists_no_answers() {
+    let w = world();
+    std::fs::write(w.flags.join("spec-json"), structured("")).unwrap();
+    let run = w.start_simple();
+    let human = w.wait_step(&run, "approval", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&human.id, true, "").unwrap();
+    w.wait_step(&run, "pull-request", AttemptState::Succeeded);
+    let body = w.body();
+    assert!(!body.contains("What the person answered"), "{body}");
+    assert!(body.contains("add returns the sum"), "{body}");
+}
+
+#[test]
+fn the_simple_built_in_workflow_can_send_work_back_though_it_has_no_approver() {
+    let w = world();
+    std::fs::write(w.flags.join("spec-json"), structured("")).unwrap();
+    let run = w.start_simple();
+    let first = w.wait_step(&run, "approval", AttemptState::WaitingApproval);
+
+    w.engine.send_back(&first.id, "Return 0 instead").unwrap();
+    w.until("the approval coming round again", || {
+        w.step(&run, "approval")
+            .is_some_and(|a| a.id != first.id && a.state == "waitingApproval")
+    });
+    let builder = w.step(&run, "builder").unwrap();
+    assert_eq!(builder.round, 1);
+    assert!(
+        builder.prompt.contains("Return 0 instead"),
+        "{}",
+        builder.prompt
+    );
+    assert_eq!(w.store.run(&run).unwrap().round, 1);
+    let specs = w
+        .store
+        .attempts_of_run(&run)
+        .unwrap()
+        .into_iter()
+        .filter(|a| a.step_id == "spec")
+        .count();
+    assert_eq!(specs, 1, "what was asked stands");
+
+    let again = w.step(&run, "approval").unwrap();
+    w.engine.answer_approval(&again.id, true, "").unwrap();
+    w.wait_step(&run, "pull-request", AttemptState::Succeeded);
+    let body = w.body();
+    assert!(body.contains("**Round 2**"), "{body}");
+    assert!(w.engine.decisions(&w.project_id).unwrap().is_empty());
 }
 
 #[test]
