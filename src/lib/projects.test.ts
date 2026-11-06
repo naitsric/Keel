@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import type { Attempt, AttemptState, Project } from "./api";
-import { accountToSelect, commandNotFound, needsSetup, shortPath, trialOutcome, withSetup } from "./projects";
+import type { Attempt, AttemptState, Guess, Project } from "./api";
+import { accountToSelect, checkOptionsLeft, commandNotFound, needsSetup, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withSetup, withSetupOption } from "./projects";
 
 const project = (fields: Partial<Project>) => ({ id: "p", name: "demo", path: "/w", githubAccount: null, githubRepo: null, setupCommand: null, checkCommand: null, allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, ...fields }) as Project;
 
@@ -92,5 +92,43 @@ describe("a path as a person says it", () => {
     expect(shortPath("/Users/you/www/demo")).toBe("~/www/demo");
     expect(shortPath("/Users/you")).toBe("~");
     expect(shortPath("/opt/demo")).toBe("/opt/demo");
+  });
+});
+
+describe("what the repo offers to add to a command", () => {
+  const uv: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: [], setupOptions: ["--group stubs", "--group test", "--group test-uv"], checkOptions: [] };
+  const pnpm: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: [], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"] };
+
+  it("leaves out what the command already has, as whole words", () => {
+    expect(setupOptionsLeft("uv sync --frozen --group test", uv)).toEqual(["--group stubs", "--group test-uv"]);
+    expect(setupOptionsLeft("uv sync --frozen --group test-uv", uv)).toEqual(["--group stubs", "--group test"]);
+    expect(setupOptionsLeft("uv  sync   --frozen  --group   stubs ", { ...uv, setupOptions: ["--group stubs"] })).toEqual([]);
+  });
+
+  it("offers a project saved without the group that has pytest what it's missing", () => {
+    expect(setupOptionsLeft("uv sync --frozen", uv)).toEqual(uv.setupOptions);
+  });
+
+  it("offers flags only on a single uv sync", () => {
+    for (const other of ["make deps", "uv sync --frozen && make deps", "uv sync; make deps", "uv pip install x", "uv syncing"]) {
+      expect(setupOptionsLeft(other, uv)).toEqual([]);
+    }
+  });
+
+  it("starts an empty field from the guess", () => {
+    expect(setupOptionsLeft("", uv)).toEqual(["--group stubs", "--group test-uv"]);
+    expect(withSetupOption("  ", uv, "--group stubs")).toBe("uv sync --frozen --group test --group stubs");
+    expect(setupOptionsLeft("", { ...uv, setup: null })).toEqual([]);
+  });
+
+  it("adds a flag to the end of the command", () => {
+    expect(withSetupOption("uv sync --frozen ", uv, "--group stubs")).toBe("uv sync --frozen --group stubs");
+  });
+
+  it("makes every check have to pass", () => {
+    expect(checkOptionsLeft("pnpm test", pnpm)).toEqual(["pnpm run lint"]);
+    expect(checkOptionsLeft("pnpm test && pnpm run lint", pnpm)).toEqual([]);
+    expect(withCheckOption("pnpm test ", "pnpm run lint")).toBe("pnpm test && pnpm run lint");
+    expect(withCheckOption("", "pnpm run lint")).toBe("pnpm run lint");
   });
 });

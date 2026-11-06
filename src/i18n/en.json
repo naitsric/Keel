@@ -809,6 +809,8 @@
     "hideOutput": "Hide the output",
     "noOutput": "It printed nothing.",
     "openRun": "Open the run",
+    "canAdd": "You can also add:",
+    "addOption": "Add {{option}}",
     "guessed": "Guessed from {{files}}.",
     "noGuess": "Keel couldn't tell how this project tests itself, so these are empty.",
     "tryNote": "Trying it uses no tokens.",

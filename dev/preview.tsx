@@ -12,7 +12,7 @@ import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
 import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
-import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, Project, ProjectAdded, Reason, Run, RunRow, WorkflowStep, WorkflowDraft } from "../src/lib/api";
+import type { BrainNote, Guess, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, Project, ProjectAdded, Reason, Run, RunRow, WorkflowStep, WorkflowDraft } from "../src/lib/api";
 import { useApp } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -318,15 +318,15 @@ const projects = view === "board" || palette || params.get("drafts") === "1" ? [
 // keeps the runs of projects that are all gone.
 const freshProject: Project = { ...otherProject, id: "p3", name: "shop", path: "/Users/you/www/shop", githubAccount: null, githubRepo: params.get("repo") === "none" ? null : "acme/shop", setupCommand: null, checkCommand: null, allowedDomains: ["pypi.org"], allowedRead: [], services: [{ type: "bridge", name: "db", port: 5432, socket: null }], env: [{ name: "DB_HOST", value: "{{socketDir:db}}" }] };
 let listedProjects: Project[] = params.get("empty") === "1" ? [] : [...projects, ...(params.get("projects") === "mixed" || params.get("dialog") === "setup" ? [freshProject] : [])];
-const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[] }> = {
-  pnpm: { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"] },
-  npm: { check: "npm test", setup: "npm ci", from: ["package.json", "package-lock.json"] },
-  yarn: { check: "yarn test", setup: "yarn install --frozen-lockfile", from: ["package.json", "yarn.lock"] },
-  uv: { check: "uv run --frozen pytest", setup: "uv sync --frozen", from: ["uv.lock"] },
-  cargo: { check: "cargo test", setup: "cargo fetch", from: ["Cargo.toml"] },
-  go: { check: "go test ./...", setup: "go mod download", from: ["go.mod"] },
-  make: { check: "make test", setup: null, from: ["Makefile"] },
-  unknown: { check: null, setup: null, from: [] },
+const GUESSES: Record<string, Guess> = {
+  pnpm: { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run check:i18n", "pnpm run lint", "pnpm test", "pnpm run typecheck"] },
+  npm: { check: "npm test", setup: "npm ci", from: ["package.json", "package-lock.json"], setupOptions: [], checkOptions: [] },
+  yarn: { check: "yarn test", setup: "yarn install --frozen-lockfile", from: ["package.json", "yarn.lock"], setupOptions: [], checkOptions: [] },
+  uv: { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: ["uv.lock", "pyproject.toml"], setupOptions: ["--group notebook", "--group stubs", "--group test", "--group test-uv"], checkOptions: [] },
+  cargo: { check: "cargo test", setup: "cargo fetch", from: ["Cargo.toml"], setupOptions: [], checkOptions: [] },
+  go: { check: "go test ./...", setup: "go mod download", from: ["go.mod"], setupOptions: [], checkOptions: [] },
+  make: { check: "make test", setup: null, from: ["Makefile"], setupOptions: [], checkOptions: [] },
+  unknown: { check: null, setup: null, from: [], setupOptions: [], checkOptions: [] },
 };
 const addedAnswer = (): { project: Project; outcome: string; map: unknown } => {
   const outcome = params.get("added") ?? "new";

@@ -1,4 +1,4 @@
-import { type Attempt, isActive, type Project, type ProjectSettings } from "./api";
+import { type Attempt, type Guess, isActive, type Project, type ProjectSettings } from "./api";
 
 /**
  * Whether a project still has setup to finish, worked out from the project so it clears itself
@@ -34,3 +34,29 @@ export const commandNotFound = (attempt: Attempt) => attempt.exitCode === 126 ||
 
 /** A path as a person says it. */
 export const shortPath = (path: string) => path.replace(/^\/Users\/[^/]+(?=\/|$)/, "~");
+
+/** Whole words, since `--group test` isn't in `--group test-uv`. */
+const hasOption = (command: string, option: string) => ` ${command.trim().replace(/\s+/g, " ")} `.includes(` ${option} `);
+
+/** A flag only means something on a single `uv sync`, not on `make deps` or the end of a longer line. */
+const BARE_UV_SYNC = /^uv sync\b[^;&|]*$/;
+
+/** The flags left to offer for this setup command. An empty one starts from the guess. */
+export function setupOptionsLeft(setup: string, guess: Guess): string[] {
+  const command = setup.trim() || (guess.setup ?? "");
+  if (!BARE_UV_SYNC.test(command)) return [];
+  return guess.setupOptions.filter((option) => !hasOption(command, option));
+}
+
+export function withSetupOption(setup: string, guess: Guess, option: string): string {
+  return `${setup.trim() || guess.setup} ${option}`;
+}
+
+export function checkOptionsLeft(check: string, guess: Guess): string[] {
+  return guess.checkOptions.filter((option) => !hasOption(check, option));
+}
+
+/** Each one has to pass, so a failure anywhere fails the check. */
+export function withCheckOption(check: string, option: string): string {
+  return check.trim() ? `${check.trim()} && ${option}` : option;
+}
