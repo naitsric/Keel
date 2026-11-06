@@ -86,11 +86,19 @@ fn profile(
         None => path.to_owned(),
     };
     // Node and uv look up each folder on the way to a file as they work out its real path, and stop
-    // when one is refused. This says only that these folders exist, not what's in them.
-    let way_in: String = workspace
-        .ancestors()
-        .skip(1)
-        .filter(|folder| folder.starts_with(home) && *folder != home)
+    // when one is refused. This says only that these folders exist, not what's in them. A setup
+    // step's cache sits apart from its workspace, so the way to it needs the same.
+    let to_cache = setup_cache
+        .into_iter()
+        .flat_map(|cache| cache.ancestors().skip(1));
+    let mut folders: Vec<&Path> = Vec::new();
+    for folder in workspace.ancestors().skip(1).chain(to_cache) {
+        if folder.starts_with(home) && folder != home && !folders.contains(&folder) {
+            folders.push(folder);
+        }
+    }
+    let way_in: String = folders
+        .iter()
         .map(|folder| format!(" (literal \"{}\")", quote(&folder.to_string_lossy())))
         .collect();
     let workspace = quote(&workspace.to_string_lossy());
@@ -198,6 +206,51 @@ mod tests {
             settings["sandbox"]["network"]["allowedDomains"],
             json!(["pypi.org"])
         );
+    }
+
+    /// The folders a command may know exist. `with_own_output` adds a line of its own later on.
+    fn way_in(profile: &str) -> &str {
+        profile
+            .lines()
+            .find(|line| line.starts_with("(allow file-read-metadata"))
+            .unwrap()
+    }
+
+    #[test]
+    fn setup_gets_the_way_to_its_cache_and_a_check_does_not() {
+        let home = Path::new("/h");
+        let workspace = Path::new("/h/data/runs/r1/workspace");
+        // Each folder once, though both paths go through `/h/data`, and never the cache itself:
+        // that already has a rule of its own, with more in it.
+        assert_eq!(
+            way_in(&setup_profile(
+                workspace,
+                home,
+                &[],
+                &[],
+                Path::new("/h/data/projects/p1/cache")
+            )),
+            "(allow file-read-metadata (literal \"/h\") (literal \"/h/data/runs/r1\") \
+             (literal \"/h/data/runs\") (literal \"/h/data\") \
+             (literal \"/h/data/projects/p1\") (literal \"/h/data/projects\"))"
+        );
+        assert_eq!(
+            way_in(&check_profile(workspace, home, &[], &[])),
+            "(allow file-read-metadata (literal \"/h\") (literal \"/h/data/runs/r1\") \
+             (literal \"/h/data/runs\") (literal \"/h/data\"))"
+        );
+    }
+
+    #[test]
+    fn a_cache_outside_the_home_folder_adds_no_way_in() {
+        let home = Path::new("/users/me");
+        let workspace = Path::new("/users/me/w/workspace");
+        let without = check_profile(workspace, home, &[], &[]);
+        // `/users/me2` starts with the same letters, and isn't inside the home folder.
+        for cache in ["/opt/keel/cache", "/users/me2/keel/cache"] {
+            let with = setup_profile(workspace, home, &[], &[], Path::new(cache));
+            assert_eq!(way_in(&with), way_in(&without), "{cache}");
+        }
     }
 
     #[test]
