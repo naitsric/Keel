@@ -12,7 +12,7 @@ use keel_core::{AttemptState, BoardColumn, CardLane, MASK, StepSpec, ToolProfile
 use keel_engine::{Config, Engine, Workflow};
 use keel_harness::Tools;
 use keel_mcp::{MAX_DRAFTS, MAX_OPEN_RUNS, MCP_PATH, McpServer, StartError};
-use keel_store::{ProjectSettings, Store};
+use keel_store::Store;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::RunningService;
@@ -696,48 +696,6 @@ async fn a_run_it_starts_shows_who_started_it_and_waits_for_the_person() {
 }
 
 #[tokio::test]
-async fn a_failed_setup_says_why_with_its_secrets_masked() {
-    let w = world().await;
-    let client = w.client(&w.token(true)).await;
-    // Put together here, so no secret scanner trips on this file.
-    let secret = format!("{}{}", "ghp_", "x".repeat(36));
-    w.engine
-        .update_project(
-            &w.project_id,
-            &ProjectSettings {
-                setup_command: Some(format!(
-                    "echo installing; echo 'token {secret}' >&2; echo 'error: no space left' >&2; exit 3"
-                )),
-                ..ProjectSettings::default()
-            },
-        )
-        .unwrap();
-
-    let started = ok(&call(&client, "start_run", w.start_args("Fix the bug")).await);
-    let run = started["id"].as_str().unwrap().to_owned();
-    let mut view = json!({});
-    for _ in 0..20 {
-        view = ok(&call(&client, "wait_for_run", json!({ "run": run, "seconds": 5 })).await);
-        if view["state"] != "working" {
-            break;
-        }
-    }
-    assert_eq!(view["state"], "waitingForPerson", "{view}");
-    assert_eq!(view["waitingFor"]["step"], "setup", "{view}");
-
-    let attempt = view["waitingFor"]["attemptId"].as_str().unwrap();
-    let step = ok(&call(&client, "get_step", json!({ "attempt": attempt })).await);
-    let output = &step["commandOutput"];
-    assert_eq!(output["exitCode"], 3, "{step}");
-    assert_eq!(output["stdout"], "installing\n", "{step}");
-    let stderr = output["stderr"].as_str().unwrap();
-    assert!(stderr.contains("error: no space left"), "{stderr}");
-    assert!(stderr.contains(MASK), "{stderr}");
-    assert!(!step.to_string().contains(&secret), "{step}");
-    client.cancel().await.unwrap();
-}
-
-#[tokio::test]
 async fn a_run_it_starts_counts_as_working_and_the_board_never_holds_it_back() {
     let w = world().await;
     let client = w.client(&w.token(true)).await;
@@ -890,6 +848,48 @@ async fn a_client_gets_secrets_masked_and_the_record_keeps_them() {
         refused.error.as_deref().unwrap().contains(&secret),
         "{refused:?}"
     );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_setup_says_why_with_its_secrets_masked() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    // Put together here, so no secret scanner trips on this file.
+    let secret = format!("{}{}", "ghp_", "x".repeat(36));
+    w.engine
+        .update_project(
+            &w.project_id,
+            &keel_store::ProjectSettings {
+                setup_command: Some(format!(
+                    "echo installing; echo 'token {secret}' >&2; echo 'error: no space left' >&2; exit 3"
+                )),
+                ..keel_store::ProjectSettings::default()
+            },
+        )
+        .unwrap();
+
+    let started = ok(&call(&client, "start_run", w.start_args("Fix the bug")).await);
+    let run = started["id"].as_str().unwrap().to_owned();
+    let mut view = json!({});
+    for _ in 0..20 {
+        view = ok(&call(&client, "wait_for_run", json!({ "run": run, "seconds": 5 })).await);
+        if view["state"] != "working" {
+            break;
+        }
+    }
+    assert_eq!(view["state"], "waitingForPerson", "{view}");
+    assert_eq!(view["waitingFor"]["step"], "setup", "{view}");
+
+    let attempt = view["waitingFor"]["attemptId"].as_str().unwrap();
+    let step = ok(&call(&client, "get_step", json!({ "attempt": attempt })).await);
+    let output = &step["commandOutput"];
+    assert_eq!(output["exitCode"], 3, "{step}");
+    assert_eq!(output["stdout"], "installing\n", "{step}");
+    let stderr = output["stderr"].as_str().unwrap();
+    assert!(stderr.contains("error: no space left"), "{stderr}");
+    assert!(stderr.contains(MASK), "{stderr}");
+    assert!(!step.to_string().contains(&secret), "{step}");
     client.cancel().await.unwrap();
 }
 

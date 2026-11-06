@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use keel_core::{StepRole, StepSpec, ToolProfile, WorkflowStep, mask_secrets, mask_value};
 use keel_engine::{Error, StartRun, request_from_issue};
-use keel_store::{Attempt, Event, McpClient, NewMcpCall, Project};
+use keel_store::{Attempt, McpClient, NewMcpCall, Project};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
@@ -753,7 +753,7 @@ fn attempt_view(attempt: &Attempt) -> Json {
 
 /// What a setup or check printed, which is how a client learns why it failed. Masked before it's
 /// cut, because a cut can part a value from the name that gets it masked.
-fn command_output(events: &[Event]) -> Option<Json> {
+fn command_output(events: &[keel_store::Event]) -> Option<Json> {
     let result = &events
         .iter()
         .find(|event| event.kind == "checkResult")?
@@ -986,7 +986,7 @@ mod tests {
             "-----BEGIN RSA PRIVATE KEY-----\n{body}-----END RSA PRIVATE KEY-----\nerror: boom\n"
         );
         assert!(stderr.len() > MAX_TEXT);
-        let events = [Event {
+        let events = [keel_store::Event {
             seq: 1,
             attempt_id: "a".into(),
             at: String::new(),
