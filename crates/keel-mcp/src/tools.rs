@@ -375,6 +375,18 @@ impl McpServer {
             view["prompt"] = json!(capped(&attempt.prompt, MAX_TEXT));
             view["brainReceived"] = attempt.system_prompt_sources.clone();
             view["diff"] = json!(diff.as_deref().map(|text| capped(text, MAX_DIFF)));
+            // An agent's events can be many, and only a command has this.
+            if matches!(attempt.kind.as_str(), "setup" | "check")
+                && let Some(output) = server
+                    .0
+                    .store
+                    .events(&attempt.id, 0)
+                    .ok()
+                    .as_deref()
+                    .and_then(command_output)
+            {
+                view["commandOutput"] = output;
+            }
             Ok((view, Some(attempt.run_id.clone())))
         })
         .await
@@ -739,6 +751,26 @@ fn attempt_view(attempt: &Attempt) -> Json {
     })
 }
 
+/// What a setup or check printed, which is how a client learns why it failed. Masked before it's
+/// cut, because a cut can part a value from the name that gets it masked.
+fn command_output(events: &[keel_store::Event]) -> Option<Json> {
+    let result = &events
+        .iter()
+        .find(|event| event.kind == "checkResult")?
+        .data;
+    let text = |name: &str| {
+        capped_end(
+            &mask_secrets(result[name].as_str().unwrap_or_default()),
+            MAX_TEXT,
+        )
+    };
+    Some(json!({
+        "exitCode": result["exitCode"],
+        "stdout": text("stdout"),
+        "stderr": text("stderr"),
+    }))
+}
+
 fn project_view(project: &Project) -> Json {
     json!({
         "id": project.id,
@@ -888,6 +920,20 @@ fn capped(text: &str, limit: usize) -> String {
     format!("{kept}\n… [cut at {limit} bytes]")
 }
 
+/// Like `capped` but keeping the end, where a command says what went wrong. It starts on a whole
+/// line, since Keel keeps only the end of what a command prints and the first line may be half of one.
+fn capped_end(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+    let mut start = text.len() - limit;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let kept = text[start..].split_once('\n').map_or("", |(_, rest)| rest);
+    format!("… [only the last {limit} bytes]\n{kept}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -921,6 +967,42 @@ mod tests {
         let cut = capped("ñññ", 3);
         assert!(cut.starts_with('ñ'), "{cut}");
         assert!(cut.contains("[cut at 3 bytes]"), "{cut}");
+    }
+
+    #[test]
+    fn the_end_of_long_output_stays_and_starts_on_a_whole_line() {
+        assert_eq!(capped_end("hola", 10), "hola");
+        let cut = capped_end(&format!("{}\nthe error\n", "x".repeat(100)), 20);
+        assert_eq!(cut, "… [only the last 20 bytes]\nthe error\n");
+        // Right after a character's first byte, then with nothing whole left to show.
+        assert!(capped_end("ñññ\nfin", 5).ends_with("]\nfin"));
+        assert_eq!(capped_end("ñññ", 3), "… [only the last 3 bytes]\n");
+    }
+
+    #[test]
+    fn output_is_masked_before_a_cut_could_part_a_key_from_its_header() {
+        let body = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo\n".repeat(1000);
+        let stderr = format!(
+            "-----BEGIN RSA PRIVATE KEY-----\n{body}-----END RSA PRIVATE KEY-----\nerror: boom\n"
+        );
+        assert!(stderr.len() > MAX_TEXT);
+        let events = [keel_store::Event {
+            seq: 1,
+            attempt_id: "a".into(),
+            at: String::new(),
+            kind: "checkResult".into(),
+            data: json!({ "exitCode": 3, "stdout": "", "stderr": stderr }),
+        }];
+        let output = command_output(&events).unwrap();
+        assert_eq!(output["exitCode"], 3);
+        let stderr = output["stderr"].as_str().unwrap();
+        assert!(!stderr.contains("QUJD"), "{stderr}");
+        assert!(stderr.ends_with("error: boom\n"), "{stderr}");
+    }
+
+    #[test]
+    fn a_step_that_ran_no_command_has_no_command_output() {
+        assert_eq!(command_output(&[]), None);
     }
 
     #[test]
