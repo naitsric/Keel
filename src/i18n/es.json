@@ -823,6 +823,8 @@
     "hideOutput": "Ocultar la salida",
     "noOutput": "No imprimió nada.",
     "openRun": "Abrir la ejecución",
+    "canAdd": "También puedes agregar:",
+    "addOption": "Agregar {{option}}",
     "guessed": "Deducido de {{files}}.",
     "noGuess": "Keel no pudo saber cómo se prueba este proyecto, así que esto queda vacío.",
     "tryNote": "Probarlo no gasta tokens.",

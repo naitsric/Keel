@@ -88,6 +88,10 @@ export interface Guess {
   check: string | null;
   setup: string | null;
   from: string[];
+  /** What else the setup command can be told to install, for a person to add. */
+  setupOptions: string[];
+  /** Other commands that check something here, for a person to add. */
+  checkOptions: string[];
 }
 
 export interface ProjectSetup {
