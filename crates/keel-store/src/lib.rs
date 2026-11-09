@@ -4,6 +4,7 @@
 //! Triggers enforce both, so a bug in the app can't rewrite history. This isn't protection
 //! against someone who owns the machine: the raw stream file and its SHA-256 back it up.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -269,7 +270,49 @@ const MIGRATIONS: &[&str] = &[
     alter table mcp_client add column can_steer integer not null default 0;
     alter table mcp_client add column max_open_runs integer not null default 3;
 "#,
+    // 14: A change that touches several projects. The card where it's agreed shares its id, and
+    // each project that changes gets a card of its own, in order, waiting for the one before it.
+    // What only works with every part in place is tried by a person. A part keeps which commit it
+    // read of the ones before, and a run the commit its pull request had last time Keel looked.
+    r#"
+    create table joint_change (
+        id text primary key,
+        projects text not null default '[]',
+        agreed text,
+        created_at text not null
+    );
+    create trigger joint_change_agreed_fixed before update of projects, agreed on joint_change
+    when old.agreed is not null
+    begin select raise(abort, 'an agreed change is never rewritten'); end;
+    create table joint_check (
+        change_id text not null references joint_change (id),
+        seq integer not null,
+        text text not null,
+        confirmed_at text,
+        primary key (change_id, seq)
+    );
+    alter table card add column joint_change_id text;
+    alter table card add column joint_position integer;
+    alter table card add column waits_for_card text;
+    alter table card add column basis text not null default '{}';
+    create index card_by_joint_change on card (joint_change_id, joint_position);
+    alter table run add column pr_head text;
+"#,
 ];
+
+/// Whether the card a query calls `card` can start as far as other cards go: it waits for none,
+/// the one it waits for is gone, or that one's run has a pull request that isn't closed. Finishing
+/// isn't enough, since a rejected run finishes too. A state nobody has looked at yet counts as open:
+/// a delivery that was tried again has none until the next look.
+fn ready(card: &str) -> String {
+    format!(
+        "({card}.waits_for_card is null
+          or not exists (select 1 from card prev where prev.id = {card}.waits_for_card)
+          or exists (select 1 from card prev join run prev_run on prev_run.id = prev.run_id
+                     where prev.id = {card}.waits_for_card and prev_run.pr_url is not null
+                       and coalesce(prev_run.pr_state, '') <> 'closed'))"
+    )
+}
 
 /// The attempt that says where a run stands, for a query that calls its run `r`. Of each step's
 /// latest attempt: how the run was ended, then whatever needs a person, then what's running, then
@@ -444,6 +487,8 @@ pub struct Run {
     /// When that happened, going by GitHub.
     pub pr_state_at: Option<String>,
     pub pr_checked_at: Option<String>,
+    /// The commit its pull request had, as of `pr_checked_at`. None until Keel knows.
+    pub pr_head: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -461,7 +506,7 @@ pub struct NewRun {
     pub started_by: Option<String>,
 }
 
-const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by, workflow_id, workflow_name, pr_state, pr_state_at, pr_checked_at";
+const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by, workflow_id, workflow_name, pr_state, pr_state_at, pr_checked_at, pr_head";
 
 fn pr_state_from(text: Option<String>) -> Option<PrState> {
     text.as_deref().and_then(PrState::parse)
@@ -491,6 +536,7 @@ fn run_from(r: &Row) -> rusqlite::Result<Run> {
         pr_state: pr_state_from(r.get(17)?),
         pr_state_at: r.get(18)?,
         pr_checked_at: r.get(19)?,
+        pr_head: r.get(20)?,
     })
 }
 
@@ -762,6 +808,17 @@ pub struct Card {
     pub pr_state_at: Option<String>,
     /// What the person wrote when rejecting it. Empty if they wrote nothing.
     pub rejection: Option<String>,
+    /// The change across several projects it belongs to, as the card where it's agreed or as one
+    /// of its parts.
+    pub joint_change_id: Option<String>,
+    /// Which part it is, from 1. None on the card where it's agreed.
+    pub joint_position: Option<i64>,
+    /// The part it starts after, once that one's pull request is open.
+    pub waits_for_card: Option<String>,
+    /// Whether it's still waiting for that.
+    pub waiting: bool,
+    /// Which commit it read of each earlier part, by that part's run.
+    pub basis: BTreeMap<String, String>,
 }
 
 impl Card {
@@ -785,11 +842,46 @@ pub struct NewCard {
     pub issue_number: Option<i64>,
 }
 
+/// A change across several projects. The card where it's agreed has the same id.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JointChange {
+    pub id: String,
+    /// What else it touches, as the person chose. The agreeing card's own project isn't among them.
+    pub projects: Vec<String>,
+    /// What was approved. None until the parts are open, and fixed from then on.
+    pub agreed: Option<serde_json::Value>,
+    pub created_at: String,
+    /// The card of each part, first to last. A part that was deleted is no longer here.
+    pub parts: Vec<String>,
+    /// What only works with every part in place, which only a person can try.
+    pub checks: Vec<JointCheck>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JointCheck {
+    pub seq: i64,
+    pub text: String,
+    /// When a person said it works. None until then.
+    pub confirmed_at: Option<String>,
+}
+
+/// One project's part of an agreed change.
+#[derive(Debug, Clone)]
+pub struct NewPart {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub body: String,
+}
+
 fn card_from(r: &Row) -> rusqlite::Result<Card> {
     let lane: String = r.get("lane")?;
     let state: Option<String> = r.get("attempt_state")?;
     let run_state = state.as_deref().and_then(AttemptState::parse);
     let rejection: Option<String> = r.get("rejection")?;
+    let basis: String = r.get("basis")?;
     Ok(Card {
         id: r.get("id")?,
         project_id: r.get("project_id")?,
@@ -814,6 +906,11 @@ fn card_from(r: &Row) -> rusqlite::Result<Card> {
         // A rejection with nothing written leaves no decision, and is still a rejection.
         rejection: (run_state == Some(AttemptState::Rejected))
             .then(|| rejection.unwrap_or_default()),
+        joint_change_id: r.get("joint_change_id")?,
+        joint_position: r.get("joint_position")?,
+        waits_for_card: r.get("waits_for_card")?,
+        waiting: !r.get::<_, bool>("is_ready")?,
+        basis: serde_json::from_str(&basis).unwrap_or_default(),
     })
 }
 
@@ -823,10 +920,11 @@ fn read_cards<P: rusqlite::Params>(
     filter: &str,
     params: P,
 ) -> rusqlite::Result<Vec<Card>> {
+    let ready = ready("c");
     let mut stmt = conn.prepare(&format!(
         "select c.*, r.created_at as run_started_at, r.finished_at as run_finished_at, r.pr_url as run_pr_url,
                 r.pr_state as run_pr_state, r.pr_state_at as run_pr_state_at,
-                a.state as attempt_state, a.reason as attempt_reason,
+                a.state as attempt_state, a.reason as attempt_reason, {ready} as is_ready,
                 (select d.text from decision d where d.attempt_id = a.id and d.answer = 'reject'
                  order by d.seq desc limit 1) as rejection
          from card c
@@ -859,12 +957,62 @@ fn board_order(a: &Card, b: &Card) -> std::cmp::Ordering {
 
 /// One past the last card showing in the backlog, which includes rejected ones still on their run.
 fn bottom_of_backlog(conn: &Connection, project_id: &str) -> rusqlite::Result<i64> {
+    bottom_of(conn, project_id, BoardColumn::Backlog)
+}
+
+fn bottom_of(conn: &Connection, project_id: &str, column: BoardColumn) -> rusqlite::Result<i64> {
     Ok(read_cards(conn, "c.project_id = ?1", [project_id])?
         .iter()
-        .filter(|c| c.column() == BoardColumn::Backlog)
+        .filter(|c| c.column() == column)
         .map(|c| c.position + 1)
         .max()
         .unwrap_or(0))
+}
+
+fn read_joint_change(conn: &Connection, id: &str) -> Result<JointChange> {
+    let found = conn
+        .query_row(
+            "select projects, agreed, created_at from joint_change where id = ?1",
+            [id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((projects, agreed, created_at)) = found else {
+        return Err(Error::NotFound(format!("joint change {id}")));
+    };
+    let mut parts = conn.prepare(
+        "select id from card where joint_change_id = ?1 and joint_position is not null
+         order by joint_position",
+    )?;
+    let parts = parts
+        .query_map([id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut checks = conn.prepare(
+        "select seq, text, confirmed_at from joint_check where change_id = ?1 order by seq",
+    )?;
+    let checks = checks
+        .query_map([id], |r| {
+            Ok(JointCheck {
+                seq: r.get(0)?,
+                text: r.get(1)?,
+                confirmed_at: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(JointChange {
+        id: id.to_owned(),
+        projects: serde_json::from_str(&projects).unwrap_or_default(),
+        agreed: agreed.and_then(|text| serde_json::from_str(&text).ok()),
+        created_at,
+        parts,
+        checks,
+    })
 }
 
 fn insert_run(conn: &Connection, run: &NewRun) -> rusqlite::Result<()> {
@@ -1935,16 +2083,193 @@ impl Store {
     }
 
     /// Removes a card, unless Keel or a person still has work to do on it. `false` if so. Its run
-    /// stays in history.
+    /// stays in history. A part that waited for it waits for what it waited for instead. A change
+    /// not agreed yet goes with the card where it would be. An agreed one stays for its parts.
     pub fn delete_card(&self, id: &str) -> Result<bool> {
-        let conn = self.lock();
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let card = read_card(&tx, id)?;
         if matches!(
-            read_card(&conn, id)?.column(),
+            card.column(),
             BoardColumn::InProgress | BoardColumn::HumanReview
         ) {
             return Ok(false);
         }
-        conn.execute("delete from card where id = ?1", [id])?;
+        tx.execute(
+            "update card set waits_for_card = ?2 where waits_for_card = ?1",
+            params![id, card.waits_for_card],
+        )?;
+        if card.joint_change_id.as_deref() == Some(id) {
+            tx.execute(
+                "delete from joint_change where id = ?1 and agreed is null",
+                [id],
+            )?;
+        }
+        tx.execute("delete from card where id = ?1", [id])?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Says which other projects a card's request touches, which makes it the card where the change
+    /// is agreed. None makes it an ordinary card again. `false`, with nothing changed, once Keel has
+    /// the card, on a part, or once the parts are open. A project that's missing or removed is an
+    /// error, and the card's own isn't counted.
+    pub fn set_joint_projects(&self, card_id: &str, projects: &[String]) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let card = read_card(&tx, card_id)?;
+        if !card.is_waiting() || card.joint_position.is_some() {
+            return Ok(false);
+        }
+        let agreed: Option<bool> = tx
+            .query_row(
+                "select agreed is not null from joint_change where id = ?1",
+                [card_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if agreed == Some(true) {
+            return Ok(false);
+        }
+        let mut chosen: Vec<&String> = Vec::new();
+        for project in projects {
+            if *project == card.project_id || chosen.contains(&project) {
+                continue;
+            }
+            let there: bool = tx.query_row(
+                "select exists (select 1 from project where id = ?1 and removed_at is null)",
+                [project],
+                |r| r.get(0),
+            )?;
+            if !there {
+                return Err(Error::NotFound(format!("project {project}")));
+            }
+            chosen.push(project);
+        }
+        if chosen.is_empty() {
+            tx.execute("delete from joint_change where id = ?1", [card_id])?;
+            tx.execute(
+                "update card set joint_change_id = null where id = ?1",
+                [card_id],
+            )?;
+        } else {
+            let chosen = serde_json::to_string(&chosen).unwrap_or_default();
+            tx.execute(
+                "insert into joint_change (id, projects, created_at) values (?1, ?2, ?3)
+                 on conflict (id) do update set projects = excluded.projects",
+                params![card_id, chosen, now()],
+            )?;
+            tx.execute(
+                "update card set joint_change_id = ?1 where id = ?1",
+                [card_id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    pub fn joint_change(&self, id: &str) -> Result<JointChange> {
+        read_joint_change(&self.lock(), id)
+    }
+
+    /// Opens the parts of an approved change: a card in Todo for each, in order, each waiting for
+    /// the one before. They carry the issue but not its number, which belongs to another repo or
+    /// to the card where it was agreed. Answers a person asked to have remembered there go to the
+    /// Brain of each project with a part. Once is all it does: on a change already agreed it
+    /// changes nothing, and gives back the parts it has.
+    pub fn open_joint_parts(
+        &self,
+        id: &str,
+        agreed: &serde_json::Value,
+        parts: &[NewPart],
+        checks: &[String],
+    ) -> Result<Vec<String>> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let change = read_joint_change(&tx, id)?;
+        if change.agreed.is_some() {
+            return Ok(change.parts);
+        }
+        let card = read_card(&tx, id)?;
+        let at = now();
+        let mut opened: Vec<String> = Vec::new();
+        for part in parts {
+            tx.execute(
+                "insert into card (id, project_id, title, body, issue, lane, position, language, todo_at,
+                                   joint_change_id, joint_position, waits_for_card, created_at)
+                 values (?1, ?2, ?3, ?4, (select issue from card where id = ?5), 'todo', ?6, ?7, ?8,
+                         ?5, ?9, ?10, ?8)",
+                params![
+                    part.id,
+                    part.project_id,
+                    part.title,
+                    part.body,
+                    id,
+                    bottom_of(&tx, &part.project_id, BoardColumn::Todo)?,
+                    card.language,
+                    at,
+                    opened.len() as i64 + 1,
+                    opened.last(),
+                ],
+            )?;
+            opened.push(part.id.clone());
+        }
+        for (seq, text) in checks.iter().enumerate() {
+            tx.execute(
+                "insert into joint_check (change_id, seq, text) values (?1, ?2, ?3)",
+                params![id, seq as i64 + 1, text],
+            )?;
+        }
+        if let Some(run_id) = &card.run_id {
+            let mut copied: Vec<&str> = Vec::new();
+            for part in parts {
+                if part.project_id == card.project_id || copied.contains(&part.project_id.as_str())
+                {
+                    continue;
+                }
+                tx.execute(
+                    "insert into decision (project_id, run_id, attempt_id, at, answer, text, question)
+                     select ?1, run_id, attempt_id, ?2, answer, text, question from decision
+                     where run_id = ?3 and project_id = ?4 and answer = 'answered' and retired = 0
+                     order by seq",
+                    params![part.project_id, at, run_id, card.project_id],
+                )?;
+                copied.push(&part.project_id);
+            }
+        }
+        tx.execute(
+            "update joint_change set agreed = ?2 where id = ?1",
+            params![id, agreed.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(opened)
+    }
+
+    /// Marks something that only works with every part in place as tried, or not tried after all.
+    /// `false` if there's no such thing. Trying it again keeps when it was first said to work.
+    pub fn confirm_joint_check(&self, id: &str, seq: i64, works: bool) -> Result<bool> {
+        let changed = self.lock().execute(
+            "update joint_check set confirmed_at = case when ?3 then coalesce(confirmed_at, ?4) end
+             where change_id = ?1 and seq = ?2",
+            params![id, seq, works, now()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Lets a part start without the one before it. `false`, with nothing changed, once Keel has
+    /// it or if it waits for nothing.
+    pub fn stop_waiting(&self, card_id: &str) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let card = read_card(&tx, card_id)?;
+        if !card.is_waiting() || card.waits_for_card.is_none() {
+            return Ok(false);
+        }
+        tx.execute(
+            "update card set waits_for_card = null where id = ?1",
+            [card_id],
+        )?;
+        tx.commit()?;
         Ok(true)
     }
 
@@ -2004,11 +2329,15 @@ impl Store {
         Ok(true)
     }
 
-    /// Cards that could start now. A removed project's wait where they are until it comes back.
+    /// Cards that could start now. A removed project's wait where they are until it comes back, and
+    /// a part until the one before it has a pull request.
     pub fn has_todo_cards(&self) -> Result<bool> {
         Ok(self.lock().query_row(
-            "select exists (select 1 from card c join project p on p.id = c.project_id
-                            where c.lane = 'todo' and p.removed_at is null)",
+            &format!(
+                "select exists (select 1 from card c join project p on p.id = c.project_id
+                                where c.lane = 'todo' and p.removed_at is null and {})",
+                ready("c")
+            ),
             [],
             |r| r.get(0),
         )?)
@@ -2016,17 +2345,22 @@ impl Store {
 
     /// Takes the card to start next out of Todo, and returns it as it is at that moment: the top
     /// one of each project's Todo, and of those, whichever has waited longest. After this nobody
-    /// can drag it away or edit it, and it can't start twice. Never a removed project's.
+    /// can drag it away or edit it, and it can't start twice. Never a removed project's, nor a part
+    /// still waiting for the one before it, which doesn't hold up the cards below it either.
     pub fn claim_next_todo_card(&self) -> Result<Option<Card>> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let tops = read_cards(
             &tx,
-            "c.lane = 'todo'
-             and c.project_id in (select id from project where removed_at is null)
-             and not exists (
-                select 1 from card o where o.project_id = c.project_id and o.lane = 'todo'
-                  and (o.position, o.created_at, o.id) < (c.position, c.created_at, c.id))",
+            &format!(
+                "c.lane = 'todo' and {}
+                 and c.project_id in (select id from project where removed_at is null)
+                 and not exists (
+                    select 1 from card o where o.project_id = c.project_id and o.lane = 'todo' and {}
+                      and (o.position, o.created_at, o.id) < (c.position, c.created_at, c.id))",
+                ready("c"),
+                ready("o")
+            ),
             [],
         )?;
         let Some(mut card) = tops
@@ -2343,6 +2677,10 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 alter table run drop column pr_head;
+                 drop table joint_check;
+                 drop trigger joint_change_agreed_fixed;
+                 drop table joint_change;
                  alter table project drop column sensitive_paths;
                  drop trigger decision_question_fixed;
                  alter table decision drop column question;
@@ -4088,6 +4426,15 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table run drop column pr_head;
+                 drop index card_by_joint_change;
+                 alter table card drop column basis;
+                 alter table card drop column waits_for_card;
+                 alter table card drop column joint_position;
+                 alter table card drop column joint_change_id;
+                 drop table joint_check;
+                 drop trigger joint_change_agreed_fixed;
+                 drop table joint_change;
                  alter table mcp_client drop column max_open_runs;
                  alter table mcp_client drop column can_steer;
                  alter table project drop column sensitive_paths;
@@ -4360,5 +4707,399 @@ mod tests {
             .unwrap();
         assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
         assert_eq!(ids("c1"), ["task", "r"], "finished ones stay theirs");
+    }
+
+    /// A project next to the seeded one.
+    fn other_project(store: &Store, id: &str) {
+        let mut project = store.project("p").unwrap();
+        project.id = id.into();
+        project.name = id.into();
+        project.path = format!("/{id}");
+        store.add_project(&project).unwrap();
+    }
+
+    fn part(id: &str, project: &str) -> NewPart {
+        NewPart {
+            id: id.into(),
+            project_id: project.into(),
+            title: id.into(),
+            body: String::new(),
+        }
+    }
+
+    /// A card in `p` where a change across `q` and `s` is agreed, with `parts` open.
+    fn agreed(store: &Store, parts: &[(&str, &str)]) {
+        other_project(store, "q");
+        other_project(store, "s");
+        card(store, "plan");
+        assert!(
+            store
+                .set_joint_projects("plan", &["q".into(), "s".into()])
+                .unwrap()
+        );
+        let parts: Vec<NewPart> = parts.iter().map(|(id, p)| part(id, p)).collect();
+        store
+            .open_joint_parts("plan", &serde_json::json!({}), &parts, &[])
+            .unwrap();
+    }
+
+    /// Gives a card a finished run, with a pull request if `pr` says so: in that state, or in one
+    /// Keel hasn't looked at yet.
+    fn ran(store: &Store, card: &str, run: &str, pr: Option<Option<&str>>) {
+        store
+            .add_run(&NewRun {
+                id: run.into(),
+                project_id: store.card(card).unwrap().project_id,
+                title: run.into(),
+                request: run.into(),
+                workflow: "[]".into(),
+                language: "en".into(),
+                source_issue: None,
+                workflow_id: None,
+                workflow_name: None,
+                started_by: None,
+            })
+            .unwrap();
+        let mut fields = vec![("finished_at", Value::Text(now()))];
+        if let Some(state) = pr {
+            fields.push((
+                "pr_url",
+                Value::Text(format!("https://github.com/acme/{run}/pull/1")),
+            ));
+            fields.push((
+                "pr_state",
+                state.map_or(Value::Null, |s| Value::Text(s.into())),
+            ));
+        }
+        store.patch_run(run, &fields).unwrap();
+        store
+            .lock()
+            .execute(
+                "update card set lane = 'started', run_id = ?2 where id = ?1",
+                params![card, run],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_change_across_projects_is_agreed_on_one_card_and_opens_its_parts_once() {
+        let (_dir, store) = store();
+        seeded(&store);
+        other_project(&store, "q");
+        other_project(&store, "s");
+        let issue = r#"{"number":434,"title":"Log in","body":"","url":"https://github.com/acme/back/issues/434"}"#;
+        store
+            .add_card(&NewCard {
+                id: "plan".into(),
+                project_id: "p".into(),
+                title: "Log in".into(),
+                body: String::new(),
+                issue: Some(issue.into()),
+                issue_number: Some(434),
+            })
+            .unwrap();
+
+        // The card's own project and repeats don't count, and a project that isn't there is refused.
+        let chosen = ["q", "p", "q", "s"].map(String::from);
+        assert!(store.set_joint_projects("plan", &chosen).unwrap());
+        assert_eq!(store.joint_change("plan").unwrap().projects, ["q", "s"]);
+        assert!(matches!(
+            store.set_joint_projects("plan", &["nope".into()]),
+            Err(Error::NotFound(_))
+        ));
+        assert_eq!(store.joint_change("plan").unwrap().projects, ["q", "s"]);
+        let plan = store.card("plan").unwrap();
+        assert_eq!(plan.joint_change_id.as_deref(), Some("plan"));
+        assert_eq!(plan.joint_position, None);
+
+        // It runs as any card does, and the person answers a question there.
+        assert!(store.move_card("plan", CardLane::Todo, 0, "es").unwrap());
+        assert_eq!(claim(&store).as_deref(), Some("plan"));
+        store
+            .lock()
+            .execute("update card set run_id = 'r' where id = 'plan'", [])
+            .unwrap();
+        store
+            .add_answered_decision(
+                "p",
+                "r",
+                "a",
+                "Which channel carries the token?",
+                "A header",
+            )
+            .unwrap();
+        store
+            .add_decision("p", "r", "a", "approve", "go ahead")
+            .unwrap();
+
+        let agreed = serde_json::json!({"summary": "log in through Valora"});
+        let opened = store
+            .open_joint_parts(
+                "plan",
+                &agreed,
+                &[part("valora", "q"), part("back", "p")],
+                &["Log in end to end".into()],
+            )
+            .unwrap();
+        assert_eq!(opened, ["valora", "back"]);
+        let first = store.card("valora").unwrap();
+        let second = store.card("back").unwrap();
+        for (card, position) in [(&first, 1), (&second, 2)] {
+            assert_eq!(card.column(), BoardColumn::Todo);
+            assert_eq!(card.joint_change_id.as_deref(), Some("plan"));
+            assert_eq!(card.joint_position, Some(position));
+            assert_eq!(card.language.as_deref(), Some("es"));
+            // The issue comes along, but its number belongs to another card.
+            assert_eq!(card.issue, plan.issue);
+            assert_eq!(card.issue_number, None);
+            assert!(card.basis.is_empty());
+        }
+        assert_eq!(first.waits_for_card, None);
+        assert!(!first.waiting);
+        assert_eq!(second.waits_for_card.as_deref(), Some("valora"));
+        assert!(second.waiting);
+
+        let change = store.joint_change("plan").unwrap();
+        assert_eq!(change.agreed, Some(agreed.clone()));
+        assert_eq!(change.parts, ["valora", "back"]);
+        assert_eq!(
+            change.checks,
+            [JointCheck {
+                seq: 1,
+                text: "Log in end to end".into(),
+                confirmed_at: None,
+            }]
+        );
+
+        // The answer they asked to have remembered reaches the other project, and nothing else does.
+        let elsewhere = store.decisions("q").unwrap();
+        assert_eq!(elsewhere.len(), 1);
+        assert_eq!(elsewhere[0].answer, "answered");
+        assert_eq!(elsewhere[0].text, "A header");
+        assert_eq!(
+            elsewhere[0].question.as_deref(),
+            Some("Which channel carries the token?")
+        );
+        assert!(store.decisions("s").unwrap().is_empty(), "s has no part");
+        assert_eq!(
+            store.decisions("p").unwrap().len(),
+            2,
+            "nothing copied twice"
+        );
+
+        // Opening again changes nothing, and what was agreed stays as it was.
+        let again = store
+            .open_joint_parts("plan", &serde_json::json!({}), &[part("more", "s")], &[])
+            .unwrap();
+        assert_eq!(again, ["valora", "back"]);
+        assert!(matches!(store.card("more"), Err(Error::NotFound(_))));
+        assert_eq!(store.decisions("q").unwrap().len(), 1);
+        assert_eq!(store.joint_change("plan").unwrap().agreed, Some(agreed));
+        assert!(
+            store
+                .lock()
+                .execute("update joint_change set projects = '[]'", [])
+                .is_err()
+        );
+        // A part is never where a change is agreed.
+        assert!(!store.set_joint_projects("back", &["s".into()]).unwrap());
+    }
+
+    #[test]
+    fn only_a_person_says_what_works_together_and_can_take_it_back() {
+        let (_dir, store) = store();
+        seeded(&store);
+        other_project(&store, "q");
+        card(&store, "plan");
+        store.set_joint_projects("plan", &["q".into()]).unwrap();
+        store
+            .open_joint_parts(
+                "plan",
+                &serde_json::json!({}),
+                &[part("one", "q")],
+                &["first".into(), "second".into()],
+            )
+            .unwrap();
+
+        assert!(store.confirm_joint_check("plan", 2, true).unwrap());
+        let checks = store.joint_change("plan").unwrap().checks;
+        assert_eq!(checks[0].confirmed_at, None);
+        let when = checks[1].confirmed_at.clone().expect("confirmed");
+        assert!(store.confirm_joint_check("plan", 2, true).unwrap());
+        assert_eq!(
+            store.joint_change("plan").unwrap().checks[1].confirmed_at,
+            Some(when),
+            "trying it again keeps when it first worked"
+        );
+        assert!(store.confirm_joint_check("plan", 2, false).unwrap());
+        assert_eq!(
+            store.joint_change("plan").unwrap().checks[1].confirmed_at,
+            None
+        );
+        assert!(!store.confirm_joint_check("plan", 3, true).unwrap());
+    }
+
+    #[test]
+    fn a_part_starts_once_the_one_before_has_a_pull_request_nobody_closed() {
+        let (_dir, store) = store();
+        seeded(&store);
+        agreed(&store, &[("one", "q"), ("two", "p")]);
+        // An ordinary card under the waiting part, in the same project.
+        card(&store, "later");
+        assert!(store.move_card("later", CardLane::Todo, 1, "en").unwrap());
+        assert_eq!(ids(&store, BoardColumn::Todo), ["two", "later"]);
+
+        // The part waiting doesn't hold up the card below it.
+        let mut claimed = vec![claim(&store).unwrap(), claim(&store).unwrap()];
+        claimed.sort();
+        assert_eq!(claimed, ["later", "one"]);
+        assert!(!store.has_todo_cards().unwrap());
+        assert_eq!(claim(&store), None);
+
+        // Finishing isn't enough: a rejected run finishes too.
+        ran(&store, "one", "r1", None);
+        assert!(store.card("two").unwrap().waiting);
+        assert!(!store.has_todo_cards().unwrap());
+
+        // Tried again, it has a pull request whose state nobody has looked at yet.
+        ran(&store, "one", "r2", Some(None));
+        assert!(!store.card("two").unwrap().waiting);
+        assert!(store.has_todo_cards().unwrap());
+
+        for (state, waiting) in [
+            ("closed", true),
+            ("open", false),
+            ("draft", false),
+            ("merged", false),
+        ] {
+            store
+                .patch_run("r2", &[("pr_state", Value::Text(state.into()))])
+                .unwrap();
+            assert_eq!(store.card("two").unwrap().waiting, waiting, "{state}");
+            assert_eq!(store.has_todo_cards().unwrap(), !waiting, "{state}");
+        }
+        assert_eq!(claim(&store).as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn deleting_a_part_or_not_waiting_keeps_the_rest_in_order() {
+        let (_dir, store) = store();
+        seeded(&store);
+        agreed(&store, &[("one", "q"), ("two", "q"), ("three", "q")]);
+
+        assert!(store.delete_card("two").unwrap());
+        let last = store.card("three").unwrap();
+        assert_eq!(last.waits_for_card.as_deref(), Some("one"));
+        assert!(last.waiting);
+        assert_eq!(store.joint_change("plan").unwrap().parts, ["one", "three"]);
+
+        assert!(store.stop_waiting("three").unwrap());
+        let last = store.card("three").unwrap();
+        assert_eq!(last.waits_for_card, None);
+        assert!(!last.waiting);
+        assert!(
+            !store.stop_waiting("three").unwrap(),
+            "it waits for nothing"
+        );
+
+        // Once Keel has it, it's too late.
+        assert!(store.delete_card("three").unwrap());
+        assert!(store.delete_card("one").unwrap());
+        agreed_again(&store);
+        assert_eq!(claim(&store).as_deref(), Some("first"));
+        store
+            .lock()
+            .execute(
+                "update card set waits_for_card = 'gone' where id = 'first'",
+                [],
+            )
+            .unwrap();
+        assert!(!store.stop_waiting("first").unwrap());
+    }
+
+    fn agreed_again(store: &Store) {
+        card(store, "plan2");
+        store.set_joint_projects("plan2", &["q".into()]).unwrap();
+        store
+            .open_joint_parts("plan2", &serde_json::json!({}), &[part("first", "q")], &[])
+            .unwrap();
+    }
+
+    #[test]
+    fn a_part_whose_part_before_is_gone_doesnt_wait() {
+        let (_dir, store) = store();
+        seeded(&store);
+        agreed(&store, &[("one", "q"), ("two", "q")]);
+        store
+            .lock()
+            .execute("delete from card where id = 'one'", [])
+            .unwrap();
+        assert!(!store.card("two").unwrap().waiting);
+        assert_eq!(claim(&store).as_deref(), Some("two"));
+    }
+
+    #[test]
+    fn a_change_not_agreed_goes_with_its_card_and_an_agreed_one_stays() {
+        let (_dir, store) = store();
+        seeded(&store);
+        other_project(&store, "q");
+        card(&store, "plan");
+        store.set_joint_projects("plan", &["q".into()]).unwrap();
+        assert!(store.delete_card("plan").unwrap());
+        assert!(matches!(
+            store.joint_change("plan"),
+            Err(Error::NotFound(_))
+        ));
+
+        // Choosing nothing makes it an ordinary card again.
+        card(&store, "undecided");
+        store
+            .set_joint_projects("undecided", &["q".into()])
+            .unwrap();
+        assert!(store.set_joint_projects("undecided", &[]).unwrap());
+        assert_eq!(store.card("undecided").unwrap().joint_change_id, None);
+        assert!(store.joint_change("undecided").is_err());
+
+        agreed_again(&store);
+        assert!(store.delete_card("plan2").unwrap());
+        assert_eq!(store.joint_change("plan2").unwrap().parts, ["first"]);
+    }
+
+    #[test]
+    fn parts_arrive_on_a_database_people_already_have() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        // Exactly what the version before left, with a card waiting in Todo and a delivered run.
+        let before = 13;
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..before] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.pragma_update(None, "user_version", before as i64)
+                .unwrap();
+            conn.execute_batch(
+                "insert into project (id, name, path, created_at) values ('p', 'demo', '/demo', 'then');
+                 insert into run (id, project_id, title, created_at, pr_url, pr_number, pr_state, finished_at)
+                     values ('r', 'p', 'old', 'then', 'https://github.com/acme/app/pull/3', 3, 'open', 'then');
+                 insert into card (id, project_id, title, lane, position, run_id, created_at)
+                     values ('done', 'p', 'old', 'started', 0, 'r', 'then');
+                 insert into card (id, project_id, title, lane, position, language, todo_at, created_at)
+                     values ('next', 'p', 'next', 'todo', 0, 'en', 'then', 'then');",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.run("r").unwrap().pr_head, None);
+        for card in store.cards("p").unwrap() {
+            assert_eq!(card.joint_change_id, None);
+            assert_eq!(card.joint_position, None);
+            assert_eq!(card.waits_for_card, None);
+            assert!(!card.waiting);
+            assert!(card.basis.is_empty());
+        }
+        assert!(store.has_todo_cards().unwrap());
+        assert_eq!(claim(&store).as_deref(), Some("next"));
     }
 }
