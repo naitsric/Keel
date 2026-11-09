@@ -5,8 +5,9 @@ define the workflow and pick the model for each step. Keel runs the agents in is
 what each step did, and keeps an audit record you can check. A person always decides what ships.
 
 **Status: early, macOS only.** Keel takes a request from the app or a GitHub issue and works out
-what it will change. If something can only be decided by you, the run stops and asks, with an option
-it recommends, and taking that option costs nothing. A builder does the work and a check runs. Then
+what it will change. If something can only be decided by you, the run stops and asks. It recommends
+an option only when the code or the request backs one up, and taking it costs nothing. When nothing
+does, such as an amount or a business rule, it recommends none and you choose. A builder does the work and a check runs. Then
 an agent goes through what was asked and says what a test really proves and what nothing does.
 Reviewers look at the change at the same time, and an approver can send the work back, at most
 twice, and every review runs again. Then a person approves, and Keel opens a draft pull request. At

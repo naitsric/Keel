@@ -23,6 +23,9 @@ const PASS: Duration = Duration::from_secs(5 * 60);
 const AT_ONCE: i64 = 20;
 /// Opening a run looks right away, unless Keel looked this recently.
 const WHEN_OPENED_LOOK_AGAIN: Duration = Duration::from_secs(60);
+/// A pull request closed this long ago stops being looked at in the background. It could still be
+/// reopened, and opening its run in Keel looks again.
+const CLOSED_LOOK_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// The same format as `now`, so the store can compare the two as text.
 fn time_ago(duration: Duration) -> String {
@@ -46,7 +49,8 @@ impl Engine {
     }
 
     /// A person opened this run, so they may be wondering. Returns at once: what it finds arrives as
-    /// a change, and a run with no pull request, or a merged one, has nothing to find.
+    /// a change, and a run with no pull request, or a merged one, has nothing to find. One closed
+    /// long ago is looked at too, since this is the only way Keel finds out it was reopened.
     pub fn look_at_pr(&self, run_id: &str) {
         let Ok(run) = self.inner.store.run(run_id) else {
             return;
@@ -66,7 +70,11 @@ impl Engine {
 impl Inner {
     fn look_at_due_prs(&self) {
         let before = time_ago(self.config.pr_look_again);
-        let Ok(runs) = self.store.runs_with_pr_due(&before, AT_ONCE) else {
+        let closed_before = time_ago(CLOSED_LOOK_FOR);
+        let Ok(runs) = self
+            .store
+            .runs_with_pr_due(&before, &closed_before, AT_ONCE)
+        else {
             return;
         };
         for run in runs {

@@ -1266,18 +1266,27 @@ impl Store {
     /// Runs with a pull request that could still change and that nobody has looked at since `before`,
     /// the longest waiting first. A merged one can't change. A closed one can still be reopened. A
     /// removed project's runs wait until it's back.
-    pub fn runs_with_pr_due(&self, before: &str, limit: i64) -> Result<Vec<Run>> {
+    /// Pull requests last looked at before `before`, longest waiting first. A merged one is done, and
+    /// one closed before `closed_before` is left alone: it could still be reopened, but asking about
+    /// it forever would crowd out the ones that are moving.
+    pub fn runs_with_pr_due(
+        &self,
+        before: &str,
+        closed_before: &str,
+        limit: i64,
+    ) -> Result<Vec<Run>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
             "select {RUN_COLUMNS} from run
              where pr_url is not null
                and coalesce(pr_state, '') <> 'merged'
+               and not (pr_state = 'closed' and pr_state_at is not null and pr_state_at < ?2)
                and (pr_checked_at is null or pr_checked_at < ?1)
                and project_id in (select id from project where removed_at is null)
              order by pr_checked_at is not null, pr_checked_at, created_at
-             limit ?2"
+             limit ?3"
         ))?;
-        let rows = stmt.query_map(params![before, limit], run_from)?;
+        let rows = stmt.query_map(params![before, closed_before, limit], run_from)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -2684,12 +2693,23 @@ mod tests {
             "it doesn't say which workflow it used, so it counts for none"
         );
         // It can still find out what became of its pull request.
-        let due = store.runs_with_pr_due(&now(), 10).unwrap();
+        let due = store.runs_with_pr_due(&now(), "0", 10).unwrap();
         assert_eq!(due.len(), 1);
     }
 
     /// A run in project `p` with a pull request Keel last looked at then, or not yet.
     fn run_with_pr(store: &Store, id: &str, state: Option<&str>, checked: Option<&str>) {
+        run_with_pr_at(store, id, state, None, checked);
+    }
+
+    /// The same, saying when it got to that state.
+    fn run_with_pr_at(
+        store: &Store,
+        id: &str,
+        state: Option<&str>,
+        state_at: Option<&str>,
+        checked: Option<&str>,
+    ) {
         store
             .add_run(&NewRun {
                 id: id.into(),
@@ -2714,6 +2734,7 @@ mod tests {
                         Value::Text(format!("https://github.com/acme/app/pull/{id}")),
                     ),
                     ("pr_state", text(state)),
+                    ("pr_state_at", text(state_at)),
                     ("pr_checked_at", text(checked)),
                 ],
             )
@@ -2737,11 +2758,19 @@ mod tests {
             Some("open"),
             Some("2025-01-01T00:00:00.000Z"),
         );
-        run_with_pr(
+        run_with_pr_at(
             &store,
             "closed",
             Some("closed"),
+            Some("2026-05-20T00:00:00Z"),
             Some("2026-02-01T00:00:00.000Z"),
+        );
+        run_with_pr_at(
+            &store,
+            "closedLongAgo",
+            Some("closed"),
+            Some("2026-04-01T00:00:00Z"),
+            Some("2025-01-01T00:00:00.000Z"),
         );
         run_with_pr(
             &store,
@@ -2757,15 +2786,17 @@ mod tests {
         );
 
         let before = "2026-06-01T00:00:00.000Z";
+        let closed_before = "2026-05-01T00:00:00.000Z";
         let due = |limit| -> Vec<String> {
             store
-                .runs_with_pr_due(before, limit)
+                .runs_with_pr_due(before, closed_before, limit)
                 .unwrap()
                 .into_iter()
                 .map(|run| run.id)
                 .collect()
         };
-        // Never looked at first, then the longest waiting. `r` has no pull request at all.
+        // Never looked at first, then the longest waiting. `r` has no pull request at all, and one
+        // closed long enough ago isn't looked at however long it has waited.
         assert_eq!(due(10), ["never", "oldest", "older", "closed"]);
         assert_eq!(due(2), ["never", "oldest"]);
 

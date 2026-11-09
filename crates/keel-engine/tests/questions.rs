@@ -245,6 +245,20 @@ fn asking(id: &str, text: &str) -> Value {
     output
 }
 
+/// A question only the person can answer: nothing says which option it should be.
+fn only_they_know(id: &str, text: &str) -> Value {
+    let mut output = good();
+    output["questions"] = json!([{
+        "id": id,
+        "text": text,
+        "options": [
+            { "label": "5 %", "recommended": false },
+            { "label": "10 %", "recommended": false },
+        ],
+    }]);
+    output
+}
+
 fn too_long() -> Value {
     let mut output = good();
     output["summary"] = json!("x".repeat(201));
@@ -639,6 +653,68 @@ fn a_third_round_of_questions_takes_the_recommended_options_and_says_so() {
         "{built}"
     );
     assert!(!built.contains("- Third?"), "{built}");
+}
+
+#[test]
+fn what_only_a_person_can_answer_is_asked_once_more_and_then_the_step_stops() {
+    let w = world();
+    w.answers(&[
+        asking("Q1", "First?"),
+        asking("Q2", "Second?"),
+        only_they_know("Q3", "How much?"),
+        only_they_know("Q4", "And how much now?"),
+    ]);
+    let run = w.start(no_approver());
+    let first = w.wait_for(&run, "spec", AttemptState::WaitingAnswers);
+    w.engine
+        .answer_questions(&first.id, &[option("Q1", "Return 0")])
+        .unwrap();
+    let second = w.wait_for_attempts(&run, "spec", 2, AttemptState::WaitingAnswers);
+    w.engine
+        .answer_questions(&second.id, &[own("Q2", "Neither")])
+        .unwrap();
+
+    // Past the rounds, Keel doesn't pick one of these for the person: it asks them.
+    let third = w.wait_for_attempts(&run, "spec", 3, AttemptState::WaitingAnswers);
+    let output = third.output.as_ref().unwrap();
+    assert_eq!(output["questions"][0]["id"], "Q3");
+    assert!(
+        !output.to_string().contains("roundsLimit"),
+        "nothing taken: {output}"
+    );
+    w.engine
+        .answer_questions(&third.id, &[option("Q3", "10 %")])
+        .unwrap();
+    assert!(
+        w.step(&run, "spec").prompt.contains("How much? 10 %"),
+        "the answer reached it"
+    );
+
+    // And asking again after that ends the step, rather than going round forever.
+    let fourth = w.wait_for_attempts(&run, "spec", 4, AttemptState::Blocked);
+    assert_eq!(reason_of(&fourth), Reason::KeptAsking { rounds: 3 });
+    assert_eq!(
+        fourth.output.as_ref().unwrap()["questions"][0]["id"],
+        "Q4",
+        "what it wanted to ask can still be read"
+    );
+    assert!(w.all(&run, "builder").is_empty());
+    assert_eq!(w.call_count(), 4);
+}
+
+#[test]
+fn a_question_with_none_recommended_always_runs_the_agent_with_the_answer() {
+    let w = world();
+    w.answers(&[only_they_know("Q1", "How much?"), good()]);
+    let run = w.start(no_approver());
+    let asked = w.wait_for(&run, "spec", AttemptState::WaitingAnswers);
+    // Every answer is one the person chose, so none of them is the recommended one.
+    w.engine
+        .answer_questions(&asked.id, &[option("Q1", "5 %")])
+        .unwrap();
+    assert_eq!(w.event(&asked.id, "answers")["recommended"], 0);
+    w.wait_for(&run, "builder", AttemptState::Succeeded);
+    assert_eq!(w.all(&run, "spec").len(), 2, "the same session went on");
 }
 
 #[test]

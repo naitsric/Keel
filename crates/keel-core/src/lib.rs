@@ -438,6 +438,11 @@ pub enum Reason {
     NothingToSendBackTo,
     /// Nothing was skipped for being a small change, so there's nothing to run now.
     NothingSkippedToRun,
+    /// A specifier went on asking something with no recommended option after this many rounds of
+    /// questions, the extra one included. Keel doesn't answer that for a person, so it stops.
+    KeptAsking {
+        rounds: usize,
+    },
 }
 
 /// Why a run doesn't count as small. Each is a fact the engine checked for itself, and any one is
@@ -570,7 +575,8 @@ pub enum SpecProblem {
     RepeatedOption {
         id: String,
     },
-    NotOneRecommended {
+    /// A question can recommend one option, or none when nothing backs one up.
+    TooManyRecommended {
         id: String,
         count: usize,
     },
@@ -640,7 +646,8 @@ impl Reason {
             | Self::SendBackNeedsInstructions
             | Self::NothingToSendBackTo
             | Self::TreatedAsSmall { .. }
-            | Self::NothingSkippedToRun => false,
+            | Self::NothingSkippedToRun
+            | Self::KeptAsking { .. } => false,
         }
     }
 }
@@ -945,6 +952,7 @@ mod tests {
             (Reason::NothingToSendBackTo, false),
             (Reason::TreatedAsSmall { lines: 1, files: 1 }, false),
             (Reason::NothingSkippedToRun, false),
+            (Reason::KeptAsking { rounds: 3 }, false),
         ]
     }
 
@@ -994,6 +1002,7 @@ mod tests {
             Reason::NothingToSendBackTo => 40,
             Reason::TreatedAsSmall { .. } => 41,
             Reason::NothingSkippedToRun => 42,
+            Reason::KeptAsking { .. } => 43,
         }
     }
 
@@ -1007,7 +1016,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=42).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=43).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]

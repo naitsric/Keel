@@ -53,6 +53,11 @@ describe("what's said about a verifier", () => {
         say("invalidSettings.sensitivePaths", { value: "x" }),
         say("reasons.treatedAsSmall"),
         say("reasons.nothingSkippedToRun"),
+        say("reasons.keptAsking", { rounds: 3 }),
+        say("run.questionNoneRecommended"),
+        say("run.questionsUseRecommendedNone"),
+        say("run.questionsExtraRound"),
+        say("run.questionsAnswerEach"),
         say("workflows.results.criteriaMet"),
         say("workflows.results.criteriaUnmet"),
         say("workflows.results.criteriaUnverified"),
@@ -69,7 +74,7 @@ describe("what a specifier got wrong", () => {
   const JARGON = /\bspec\b|\[TBC\]|acceptance criteria|\bscope\b|edge case|assumption|\bdelta\b|criteria/i;
 
   it("says what's wrong in plain words, in both languages", () => {
-    const reason = { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 240, limit: 200 }, { code: "notOneRecommended", id: "Q2", count: 2 }, { code: "leftUnresolved" }] };
+    const reason = { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 240, limit: 200 }, { code: "tooManyRecommended", id: "Q2", count: 2 }, { code: "leftUnresolved" }] };
     const english = reasonText(i18next.getFixedT("en"), reason);
     expect(english).toContain("has 240 characters, and the limit is 200");
     expect(english).toContain("question Q2 has 2 recommended options");
@@ -82,7 +87,7 @@ describe("what a specifier got wrong", () => {
   it("has a sentence for everything that can go wrong, with no jargon in it", () => {
     for (const language of ["en", "es"]) {
       const problems = i18next.getResource(language, "translation", "specProblems") as Record<string, string>;
-      expect(Object.keys(problems)).toEqual(["criterionNeedsText", "questionNeedsText", "tooManyChanges", "tooManyLimits", "unreadable", "noSummary", "summaryTooLong", "noCriteria", "tooManyCriteria", "criterionTooLong", "criterionNeedsId", "repeatedCriterion", "tooManyDecided", "decidedTooLong", "tooManyQuestions", "questionTooLong", "questionNeedsId", "repeatedQuestion", "wrongNumberOfOptions", "optionTooLong", "repeatedOption", "notOneRecommended", "leftUnresolved"]);
+      expect(Object.keys(problems)).toEqual(["criterionNeedsText", "questionNeedsText", "tooManyChanges", "tooManyLimits", "unreadable", "noSummary", "summaryTooLong", "noCriteria", "tooManyCriteria", "criterionTooLong", "criterionNeedsId", "repeatedCriterion", "tooManyDecided", "decidedTooLong", "tooManyQuestions", "questionTooLong", "questionNeedsId", "repeatedQuestion", "wrongNumberOfOptions", "optionTooLong", "repeatedOption", "tooManyRecommended", "leftUnresolved"]);
       for (const text of Object.values(problems)) expect(text).not.toMatch(JARGON);
     }
   });

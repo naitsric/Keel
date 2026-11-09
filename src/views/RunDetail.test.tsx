@@ -592,7 +592,7 @@ describe("the approval card", () => {
           expect(change(item.text)).not.toBeNull();
         }
         expect(page()).toContain("You chose this.");
-        expect(page()).toContain("After two rounds of questions, Keel stopped asking and took the recommended option.");
+        expect(page()).toContain("The rounds of questions ran out, so Keel stopped asking and took the recommended option.");
       });
 
       it("isn't there if it decided nothing", () => {
@@ -949,13 +949,67 @@ describe("the card that asks", () => {
     });
   });
 
-  it("warns when this is the last time it can ask", () => {
-    const earlier = attempt({ id: "first", stepId: "spec", role: "specifier", output: specOutput({ answered: [{ question: "Q1", asked: "?", answer: "!", recommended: false, remember: false }] }) as unknown as Attempt["output"] });
+  it("warns when this is the last time it can ask, and says why there's a round after that", () => {
+    const earlier = (id: string) => attempt({ id, stepId: "spec", role: "specifier", output: specOutput({ answered: [{ question: "Q1", asked: "?", answer: "!", recommended: false, remember: false }] }) as unknown as Attempt["output"] });
     show();
     expect(page()).not.toContain("the last round");
     const last = waiting();
-    show(last, [earlier, last]);
+    show(last, [earlier("first"), last]);
     expect(page()).toContain("This is the last round of questions.");
+    const extra = waiting();
+    show(extra, [earlier("first"), earlier("second"), extra]);
+    expect(page()).toContain("An extra round, because something has no recommended option.");
+    expect(page()).not.toContain("This is the last round");
+  });
+
+  describe("with a question nothing recommends an answer to", () => {
+    const onlyTheyKnow = { id: "Q2", text: "What discount do frequent customers get?", options: [{ label: "5 %", recommended: false }, { label: "10 %", recommended: false }] };
+    const both = () => waiting([question("Q1", "If `whole` is 0, what should happen?"), onlyTheyKnow]);
+
+    it("starts with nothing chosen there, says it's the person's to decide, and focuses the first question as before", () => {
+      show(both());
+      expect(input(1, "5 %").checked).toBe(false);
+      expect(input(1, "10 %").checked).toBe(false);
+      expect(page()).toContain("None recommended: neither the code nor the request says.");
+      expect(page()).not.toContain("Recommended5 %");
+      expect(document.activeElement).toBe(input(0, "Show an error"));
+    });
+
+    it("focuses its first option without choosing it when it comes first", () => {
+      show(waiting([onlyTheyKnow]));
+      expect(document.activeElement).toBe(input(0, "5 %"));
+      expect(input(0, "5 %").checked).toBe(false);
+    });
+
+    it("can't be answered with the recommended, and says so", () => {
+      show(both());
+      arm();
+      expect(button("Use the recommended")?.disabled).toBe(true);
+      expect(page()).toContain("Not here: a question has no recommended option.");
+      expect(page()).not.toContain("Free and instant");
+    });
+
+    it("needs every question answered, and then goes with the agent", async () => {
+      show(both());
+      arm();
+      expect(button("Answer")?.disabled).toBe(true);
+      expect(page()).toContain("Answer every question to go on.");
+      expect(page()).not.toContain("Choose another option to answer differently.");
+      pick(1, "10 %");
+      expect(button("Answer")?.disabled).toBe(false);
+      expect(page()).not.toContain("Answer every question to go on.");
+      press("Answer");
+      await settle();
+      expect(answered()).toEqual([
+        {
+          attemptId: "spec",
+          answers: [
+            { question: "Q1", choice: { kind: "option", label: "Show an error" }, remember: false },
+            { question: "Q2", choice: { kind: "option", label: "10 %" }, remember: false },
+          ],
+        },
+      ]);
+    });
   });
 
   it("keeps its buttons in view: the questions scroll, and the buttons sit outside them", () => {

@@ -23,13 +23,14 @@ const MAX_QUESTION_TEXT: usize = 140;
 const MIN_OPTIONS: usize = 2;
 const MAX_OPTIONS: usize = 4;
 const MAX_OPTION_LABEL: usize = 60;
-/// After this many, the engine takes the recommended options rather than asking a third time.
+/// After this many, the engine takes the recommended options rather than asking a third time. A
+/// question with none recommended can only be answered by a person, so it gets one round more.
 pub const MAX_QUESTION_ROUNDS: usize = 2;
 
 /// `size` and `risks` are a prediction, for a workflow with steps that depend on the change. The schema
 /// says what small means as well as the prompt, since any specifier gets asked for it, whatever its
 /// prompt says. Its words keep clear of those the test fakes tell schemas apart by.
-pub const SPEC_SCHEMA: &str = r#"{"type":"object","properties":{"size":{"type":"string","enum":["small","normal"],"description":"small only if it is understood with nothing left to ask, its risk is contained, and someone could pick the work up from just the request and the change. How much code it touches does not decide this: one changed line in permissions is not small. If in doubt, normal."},"risks":{"type":"array","items":{"type":"string","enum":["security","money","personalData","irreversibleData","sharedContracts","concurrency","environment","noRegressionTest"]}},"summary":{"type":"string"},"criteria":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"when":{"type":"string"},"then":{"type":"string"}},"required":["id","when","then"],"additionalProperties":false}},"changes":{"type":"array","items":{"type":"object","properties":{"kind":{"type":"string","enum":["adds","changes","removes"]},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}},"limits":{"type":"array","items":{"type":"string"}},"decided":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}},"questions":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"recommended":{"type":"boolean"}},"required":["label","recommended"],"additionalProperties":false}}},"required":["id","text","options"],"additionalProperties":false}}},"required":["size","risks","summary","criteria","changes","limits","decided","questions"],"additionalProperties":false}"#;
+pub const SPEC_SCHEMA: &str = r#"{"type":"object","properties":{"size":{"type":"string","enum":["small","normal"],"description":"small only if it is understood with nothing left to ask, its risk is contained, and someone could pick the work up from just the request and the change. How much code it touches does not decide this: one changed line in permissions is not small. If in doubt, normal."},"risks":{"type":"array","items":{"type":"string","enum":["security","money","personalData","irreversibleData","sharedContracts","concurrency","environment","noRegressionTest"]}},"summary":{"type":"string"},"criteria":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"when":{"type":"string"},"then":{"type":"string"}},"required":["id","when","then"],"additionalProperties":false}},"changes":{"type":"array","items":{"type":"object","properties":{"kind":{"type":"string","enum":["adds","changes","removes"]},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}},"limits":{"type":"array","items":{"type":"string"}},"decided":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}},"questions":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"recommended":{"type":"boolean","description":"true for one option at most, and only when the code or the request backs it up. When only the person can know, such as an amount, a date or a business rule, none is: never make up a value."}},"required":["label","recommended"],"additionalProperties":false}}},"required":["id","text","options"],"additionalProperties":false}}},"required":["size","risks","summary","criteria","changes","limits","decided","questions"],"additionalProperties":false}"#;
 
 /// How big a specifier expects a change to be. Only ever a claim: it can stop a run from counting as
 /// small, and never makes one so by itself.
@@ -340,8 +341,8 @@ impl Spec {
             }
         }
         let recommended = question.options.iter().filter(|o| o.recommended).count();
-        if recommended != 1 {
-            problems.push(SpecProblem::NotOneRecommended {
+        if recommended > 1 {
+            problems.push(SpecProblem::TooManyRecommended {
                 id: id(),
                 count: recommended,
             });
@@ -361,8 +362,16 @@ impl Spec {
         serde_json::to_value(self).is_ok_and(|value| any_string(&value))
     }
 
+    /// Whether every question recommends an option, so that Keel could take them all.
+    fn all_recommend(&self) -> bool {
+        self.questions
+            .iter()
+            .all(|question| question.options.iter().any(|o| o.recommended))
+    }
+
     /// Moves the questions into what's decided, going with the recommended options. Each one keeps
-    /// its criteria: those were written as if the person picks that option.
+    /// its criteria: those were written as if the person picks that option. Only for questions that
+    /// all recommend one: one with none would be dropped.
     pub fn take_recommended(&mut self, taken: Taken) -> Vec<Value> {
         let mut settled = Vec::new();
         for question in std::mem::take(&mut self.questions) {
@@ -433,8 +442,8 @@ impl Spec {
                         "{} {}",
                         decided.text,
                         say(
-                            "(Keel took the recommended option after two rounds of questions)",
-                            "(Keel tomó la opción recomendada después de dos rondas de preguntas)",
+                            "(Keel took the recommended option when the rounds of questions ran out)",
+                            "(Keel tomó la opción recomendada al acabarse las rondas de preguntas)",
                         )
                     ),
                     _ => decided.text.clone(),
@@ -508,18 +517,29 @@ pub enum Verdict {
         output: Value,
         questions: Vec<Question>,
     },
-    /// It would have asked a third time. The engine took the recommended options.
-    TookRecommended { output: Value, settled: Vec<Value> },
+    /// It would have asked again after `rounds`. The engine took the recommended options.
+    TookRecommended {
+        output: Value,
+        settled: Vec<Value>,
+        rounds: usize,
+    },
     /// It broke a limit, and can have one try at fixing it.
     Correct(Vec<SpecProblem>),
     /// It broke a limit on the try it had at fixing one.
     Stop(Vec<SpecProblem>),
+    /// It still asked something with no recommended option after `rounds`, the extra one included.
+    /// The output is kept, so a person can read what it wanted to know.
+    KeptAsking { output: Value, rounds: usize },
 }
 
 /// `after_correction` is whether this result was itself the fix for a broken limit, and
 /// `rounds_answered` how many rounds of questions a person has already answered. They're separate
 /// on purpose: fixing a limit doesn't use up the person's chance to be asked, and being asked doesn't
 /// use up the fix a later result gets.
+///
+/// Once the rounds run out, Keel only answers for the person when every question recommends an
+/// option. A question with none goes to the person once more, and asking past that stops the step,
+/// so it can't go on asking forever and Keel never makes up an answer.
 pub fn judge(output: Option<&Value>, after_correction: bool, rounds_answered: usize) -> Verdict {
     let spec = match output.map(validate_spec) {
         Some(Ok(spec)) => spec,
@@ -531,10 +551,19 @@ pub fn judge(output: Option<&Value>, after_correction: bool, rounds_answered: us
     if spec.questions.is_empty() {
         return Verdict::Ready(json!(spec));
     }
-    if rounds_answered < MAX_QUESTION_ROUNDS {
+    let only_a_person = !spec.all_recommend();
+    if rounds_answered < MAX_QUESTION_ROUNDS
+        || only_a_person && rounds_answered == MAX_QUESTION_ROUNDS
+    {
         return Verdict::Ask {
             output: json!(spec),
             questions: spec.questions,
+        };
+    }
+    if only_a_person {
+        return Verdict::KeptAsking {
+            output: json!(spec),
+            rounds: rounds_answered,
         };
     }
     let mut spec = spec;
@@ -542,6 +571,7 @@ pub fn judge(output: Option<&Value>, after_correction: bool, rounds_answered: us
     Verdict::TookRecommended {
         output: json!(spec),
         settled,
+        rounds: rounds_answered,
     }
 }
 
@@ -766,13 +796,13 @@ fn problem_line(problem: &SpecProblem, es: bool) -> String {
             format!("La pregunta {id} tiene opciones vacías o repetidas.")
         }
         RepeatedOption { id } => format!("Question {id} has empty or repeated options."),
-        NotOneRecommended { id, count } if es => {
+        TooManyRecommended { id, count } if es => {
             format!(
-                "La pregunta {id} tiene {count} opciones recomendadas, y debe tener exactamente una."
+                "La pregunta {id} tiene {count} opciones recomendadas, y puede tener una como máximo."
             )
         }
-        NotOneRecommended { id, count } => {
-            format!("Question {id} has {count} recommended options, and it needs exactly one.")
+        TooManyRecommended { id, count } => {
+            format!("Question {id} has {count} recommended options, and it can have one at most.")
         }
         LeftUnresolved if es => {
             "Dejaste algo marcado como [TBC]. Decídelo o pregúntalo.".to_owned()
@@ -921,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn questions_have_their_limits_and_exactly_one_recommended_option() {
+    fn questions_have_their_limits_and_at_most_one_recommended_option() {
         let good = [("Yes", true), ("No", false)];
         let of = |questions: Value| problems(with("questions", questions));
         assert!(validate_spec(&with("questions", json!([question("Q1", "Why?", &good)]))).is_ok());
@@ -975,16 +1005,17 @@ mod tests {
                 limit: 60
             }]
         );
-        assert_eq!(
-            of(json!([question("Q1", "a?", &[("a", false), ("b", false)])])),
-            [SpecProblem::NotOneRecommended {
-                id: "Q1".into(),
-                count: 0
-            }]
+        // When nothing backs one up, none is recommended, rather than a made-up one.
+        assert!(
+            validate_spec(&with(
+                "questions",
+                json!([question("Q1", "a?", &[("a", false), ("b", false)])])
+            ))
+            .is_ok()
         );
         assert_eq!(
             of(json!([question("Q1", "a?", &[("a", true), ("b", true)])])),
-            [SpecProblem::NotOneRecommended {
+            [SpecProblem::TooManyRecommended {
                 id: "Q1".into(),
                 count: 2
             }]
@@ -1094,6 +1125,39 @@ mod tests {
     }
 
     #[test]
+    fn what_recommends_nothing_goes_to_a_person_once_more_and_then_stops() {
+        let only_a_person = with(
+            "questions",
+            json!([
+                question("Q1", "a?", &[("Yes", true), ("No", false)]),
+                question("Q2", "How much?", &[("5 %", false), ("10 %", false)]),
+            ]),
+        );
+        assert!(matches!(
+            judge(Some(&only_a_person), false, 1),
+            Verdict::Ask { .. }
+        ));
+        // Keel can't answer for the person, so it asks them rather than take what it can.
+        let Verdict::Ask { questions, .. } = judge(Some(&only_a_person), false, 2) else {
+            panic!()
+        };
+        assert_eq!(questions.len(), 2);
+        assert!(matches!(
+            judge(Some(&only_a_person), false, 3),
+            Verdict::KeptAsking { rounds: 3, .. }
+        ));
+        // Asking past that something Keel can take is taken as before, and says how many rounds.
+        let recommends = with(
+            "questions",
+            json!([question("Q1", "a?", &[("Yes", true), ("No", false)])]),
+        );
+        assert!(matches!(
+            judge(Some(&recommends), false, 3),
+            Verdict::TookRecommended { rounds: 3, .. }
+        ));
+    }
+
+    #[test]
     fn taking_the_recommended_options_keeps_the_criteria_and_says_who_took_them() {
         let asks = with(
             "questions",
@@ -1103,7 +1167,12 @@ mod tests {
                 &[("Show an error", true), ("Return 0", false)]
             )]),
         );
-        let Verdict::TookRecommended { output, settled } = judge(Some(&asks), false, 2) else {
+        let Verdict::TookRecommended {
+            output,
+            settled,
+            rounds: 2,
+        } = judge(Some(&asks), false, 2)
+        else {
             panic!()
         };
         let spec: Spec = serde_json::from_value(output).unwrap();
@@ -1215,7 +1284,7 @@ mod tests {
                 chars: 240,
                 limit: 200,
             },
-            SpecProblem::NotOneRecommended {
+            SpecProblem::TooManyRecommended {
                 id: "Q2".into(),
                 count: 2,
             },

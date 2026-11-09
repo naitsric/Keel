@@ -8,7 +8,7 @@ import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText
 import { attemptChoices, canSendBack, type FlowNode, flowOf, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
-import { answerFrom, differsFromRecommended, needsText, type QuestionPick, recommendedAnswers, startingPick } from "../lib/questions";
+import { allRecommend, answerFrom, differsFromRecommended, isAnswered, needsText, type QuestionPick, recommendedAnswers, recommendedOption, startingPick } from "../lib/questions";
 import { latestSizeDecision, type SizeDecision, skippedAsSmall, skippedSteps, whyNotSmallText } from "../lib/size";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
@@ -730,10 +730,12 @@ function QuestionBlock({ question, pick, name, autoFocus, disabled, onPick }: { 
     <fieldset className="min-w-0 rounded-md border border-border p-3">
       {/* Floated, or a question on two lines would sit across the border. */}
       <legend className="selectable float-left mb-1.5 w-full p-0 text-[13px] leading-snug font-medium break-words">{question.text}</legend>
+      {recommendedOption(question) === undefined && <p className="clear-both mb-1.5 text-[11.5px] text-warning">{t("run.questionNoneRecommended")}</p>}
       <div className="clear-both space-y-1">
-        {question.options.map((option) => (
+        {question.options.map((option, index) => (
           <label key={option.label} className="flex items-start gap-2 text-[12.5px] leading-5">
-            <input type="radio" name={name} className="mt-1 shrink-0" autoFocus={autoFocus && pick.option === option.label} checked={pick.option === option.label} disabled={disabled} onChange={() => onPick({ ...pick, option: option.label })} />
+            {/* With nothing chosen yet, the focus goes to the first option without choosing it. */}
+            <input type="radio" name={name} className="mt-1 shrink-0" autoFocus={autoFocus && (pick.option === undefined ? index === 0 : pick.option === option.label)} checked={pick.option === option.label} disabled={disabled} onChange={() => onPick({ ...pick, option: option.label })} />
             <span className="min-w-0 break-words">
               {option.label}
               {option.recommended && <span className="ml-1.5 rounded border border-accent/40 px-1 text-[11px] whitespace-nowrap text-accent">{t("run.questionRecommended")}</span>}
@@ -763,6 +765,8 @@ function QuestionBlock({ question, pick, name, autoFocus, disabled, onPick }: { 
  * What only the person can decide, in one place, so nobody has to scroll to find out. The focus
  * starts on the first question's recommended option, where Enter does nothing and the arrows move
  * between options. Enter never answers, and what answers arms after a moment, as on an approval.
+ * A question with no recommended option starts with nothing chosen, and then the recommended
+ * can't answer for the person: they have to choose.
  */
 export function QuestionsCard({ attempt, attempts, onError }: { attempt: Attempt; attempts: Attempt[]; onError: (message: string) => void }) {
   const { t } = useTranslation();
@@ -775,7 +779,9 @@ export function QuestionsCard({ attempt, attempts, onError }: { attempt: Attempt
   const [busy, setBusy] = useState(false);
   const picks = questions.map((question) => drafts?.[question.id] ?? startingPick(question));
   const anyDifferent = questions.some((question, index) => differsFromRecommended(question, picks[index]));
-  const complete = !picks.some(needsText);
+  const complete = picks.every(isAnswered);
+  const recommends = allRecommend(questions);
+  const rounds = roundsAnswered(attempts, attempt);
 
   const answer = (answers: QuestionAnswer[]) => {
     setBusy(true);
@@ -815,20 +821,20 @@ export function QuestionsCard({ attempt, attempts, onError }: { attempt: Attempt
         ))}
       </div>
       <p className="mt-2 shrink-0 text-[11.5px] text-subtle">{t("run.questionRememberHint")}</p>
-      {roundsAnswered(attempts, attempt) > 0 && <p className="mt-1 shrink-0 text-[11.5px] text-warning">{t("run.questionsLastRound")}</p>}
+      {rounds > 0 && <p className="mt-1 shrink-0 text-[11.5px] text-warning">{t(rounds > 1 ? "run.questionsExtraRound" : "run.questionsLastRound")}</p>}
       <div className="mt-3 grid shrink-0 grid-cols-3 gap-4 border-t border-border pt-3">
         <div>
-          <Button variant={anyDifferent ? "secondary" : "primary"} disabled={!armed || busy} onKeyDown={ignoreEnter} onClick={() => answer(recommendedAnswers(questions, picks))}>
+          <Button variant={anyDifferent || !recommends ? "secondary" : "primary"} disabled={!armed || busy || !recommends} onKeyDown={ignoreEnter} onClick={() => answer(recommendedAnswers(questions, picks))}>
             {t("run.questionsUseRecommended")}
           </Button>
-          <p className="mt-1 text-[11.5px] text-muted">{t("run.questionsUseRecommendedHint")}</p>
+          <p className="mt-1 text-[11.5px] text-muted">{t(recommends ? "run.questionsUseRecommendedHint" : "run.questionsUseRecommendedNone")}</p>
         </div>
         <div>
-          <Button variant={anyDifferent ? "primary" : "secondary"} disabled={!armed || busy || !anyDifferent || !complete} onKeyDown={ignoreEnter} onClick={() => answer(questions.map((question, index) => answerFrom(question, picks[index])))}>
+          <Button variant={anyDifferent || !recommends ? "primary" : "secondary"} disabled={!armed || busy || !anyDifferent || !complete} onKeyDown={ignoreEnter} onClick={() => answer(questions.map((question, index) => answerFrom(question, picks[index])))}>
             {t("run.questionsAnswer")}
           </Button>
           <p className="mt-1 text-[11.5px] text-muted">{t("run.questionsAnswerHint")}</p>
-          {!anyDifferent && <p className="mt-0.5 text-[11.5px] text-muted">{t("run.questionsAnswerSame")}</p>}
+          {!complete ? <p className="mt-0.5 text-[11.5px] text-muted">{t("run.questionsAnswerEach")}</p> : !anyDifferent && <p className="mt-0.5 text-[11.5px] text-muted">{t("run.questionsAnswerSame")}</p>}
         </div>
         <div>
           <Button variant="ghost" disabled={!armed || busy} onKeyDown={ignoreEnter} onClick={cancel}>

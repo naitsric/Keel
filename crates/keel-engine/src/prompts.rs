@@ -119,11 +119,12 @@ const SPEC_PROMPT_EN: &str = r#"Work out what this request will change, without 
 
 Ask only when all three hold: the answer changes what gets built, it can't be found in the code, in what Keel knows about this project or in earlier decisions, and being wrong costs more than asking. Otherwise decide, and put it in `decided`. Technical uncertainty is yours to investigate, not something to ask a person.
 
-Write `criteria` as if the person picks the recommended option.
+Write `criteria` as if the person picks the recommended option. Where none is recommended, write only the ones that don't depend on the answer.
 
-Each question is one decision, in one line of up to 140 characters, about what happens rather than how it's built. It has 2 to 4 options of up to 60 characters each, and exactly one is recommended.
+Each question is one decision, in one line of up to 140 characters, about what happens rather than how it's built. It has 2 to 4 options of up to 60 characters each. Recommend one only if the code or the request backs it up. When only the person can know, such as an amount, a date or a business rule, recommend none: never make up a value.
 Bad: "Should this go in a helper, or should the view check it?" That's how it's built, and it's yours to decide.
 Good: "If `whole` is 0, what should happen?" with "Show an error, as today" (recommended) and "Return 0".
+Good, with none recommended: "What discount do frequent customers get?" with "5 %", "10 %" and "15 %", when nothing in the code or the request says.
 
 Leave nothing marked as still to be decided: decide it or ask.
 
@@ -143,11 +144,12 @@ const SPEC_PROMPT_ES: &str = r#"Averigua qué va a cambiar este pedido, sin edit
 
 Pregunta solo cuando se cumplan las tres cosas: la respuesta cambia lo que se construye, no se puede averiguar en el código, en lo que Keel sabe de este proyecto ni en decisiones anteriores, y equivocarse cuesta más que preguntar. Si no, decide y ponlo en `decided`. La incertidumbre técnica te toca investigarla a ti, no preguntársela a una persona.
 
-Escribe `criteria` como si la persona eligiera la opción recomendada.
+Escribe `criteria` como si la persona eligiera la opción recomendada. Donde no recomiendes ninguna, escribe solo los que no dependen de la respuesta.
 
-Cada pregunta es una sola decisión, en una línea de hasta 140 caracteres, sobre qué pasa y no sobre cómo se construye. Tiene de 2 a 4 opciones de hasta 60 caracteres cada una, y exactamente una recomendada.
+Cada pregunta es una sola decisión, en una línea de hasta 140 caracteres, sobre qué pasa y no sobre cómo se construye. Tiene de 2 a 4 opciones de hasta 60 caracteres cada una. Recomienda una solo si el código o el pedido la respaldan. Cuando solo la persona puede saberlo, como un monto, una fecha o una regla del negocio, no recomiendes ninguna: nunca inventes un valor.
 Mal: "¿Esto va en un helper, o lo valida la vista?" Eso es cómo se construye, y te toca decidirlo a ti.
 Bien: "Si `whole` es 0, ¿qué debe pasar?" con "Mostrar error, como hoy" (recomendada) y "Devolver 0".
+Bien, sin recomendada: "¿Qué descuento reciben los clientes frecuentes?" con "5 %", "10 %" y "15 %", cuando ni el código ni el pedido lo dicen.
 
 No dejes nada marcado como pendiente de decidir: decídelo o pregúntalo.
 
@@ -377,6 +379,7 @@ mod tests {
                     "Ask only when all three hold",
                     "Technical uncertainty is yours to investigate",
                     "as if the person picks the recommended option",
+                    "recommend none: never make up a value",
                     "Bad:",
                     "Good: \"If `whole` is 0, what should happen?\"",
                     "{{request}}",
@@ -388,6 +391,7 @@ mod tests {
                     "Pregunta solo cuando se cumplan las tres cosas",
                     "La incertidumbre técnica te toca investigarla a ti",
                     "como si la persona eligiera la opción recomendada",
+                    "no recomiendes ninguna: nunca inventes un valor",
                     "Mal:",
                     "Bien: \"Si `whole` es 0, ¿qué debe pasar?\" con \"Mostrar error, como hoy\"",
                     "{{request}}",

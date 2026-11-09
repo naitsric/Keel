@@ -1023,12 +1023,16 @@ impl Inner {
                         &json!({ "questions": questions }),
                     );
                 }
-                Verdict::TookRecommended { output, settled } => {
+                Verdict::TookRecommended {
+                    output,
+                    settled,
+                    rounds,
+                } => {
                     self.keep_output(&m, &output);
                     let _ = store.append_event(
                         &m.attempt_id,
                         "questionsTaken",
-                        &json!({ "settled": settled, "rounds": specs::MAX_QUESTION_ROUNDS }),
+                        &json!({ "settled": settled, "rounds": rounds }),
                     );
                 }
                 Verdict::Correct(problems) => {
@@ -1041,6 +1045,11 @@ impl Inner {
                 Verdict::Stop(problems) => {
                     state = AttemptState::Blocked;
                     reason = Some(Reason::SpecNotUsable { problems });
+                }
+                Verdict::KeptAsking { output, rounds } => {
+                    self.keep_output(&m, &output);
+                    state = AttemptState::Blocked;
+                    reason = Some(Reason::KeptAsking { rounds });
                 }
             }
         }

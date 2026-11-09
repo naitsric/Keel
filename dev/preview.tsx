@@ -116,8 +116,9 @@ const waiting = params.get("flow") === "approval" || params.get("flow") === "lim
 // pull request, and pr=unknown is one Keel hasn't looked at yet. specifier=1 has what was asked come
 // from a specifier's structured answer, with what it decided alone and a "Change" on each line, and
 // with gate=build there's nothing yet to say about what it did. flow=questions is the card that asks,
-// in the language of lang=, with long=1 for text at its limits, many=1 for three questions and last=1
-// for the last round. flow=corrected is a run stopped because it couldn't keep to the limits.
+// in the language of lang=, with long=1 for text at its limits, many=1 for three questions, none=1 for
+// one with no recommended option, last=1 for the last round and extra=1 for the round after it.
+// flow=corrected is a run stopped because it couldn't keep to the limits.
 const noCheck = params.get("check") === "none";
 const noReviews = params.get("reviews") === "none";
 const noChanges = params.get("changes") === "none";
@@ -164,15 +165,17 @@ const previewQuestions = [
         { id: "Q3", text: atLimit(say("Should old invoices change too?", "¿Las facturas viejas también deben cambiar, o solo las que se emitan de ahora en adelante?"), 140), options: [{ label: atLimit(say("Only new ones", "Solo las nuevas"), 60), recommended: true }, { label: atLimit(say("All of them", "Todas"), 60), recommended: false }] },
       ]
     : []),
+  ...(params.get("none") === "1" ? [{ id: "Q4", text: say("What discount do frequent customers get?", "¿Qué descuento reciben los clientes frecuentes?"), options: ["5 %", "10 %", "15 %"].map((label) => ({ label, recommended: false })) }] : []),
 ];
 const specRound = (fields: Partial<Attempt>, output: object): Attempt => ({ ...attempt, id: "q1", stepId: "spec", role: "specifier", tools: "readOnly", reason: null, modelActual: "claude-opus-5-5", filesChanged: null, resultText: "", finishedAt: at(1), output: output as unknown as Attempt["output"], ...fields });
+const answeredRounds = params.get("extra") === "1" ? 2 : params.get("last") === "1" ? 1 : 0;
 const questionAttempts: Attempt[] = [
-  ...(params.get("last") === "1" ? [specRound({ id: "q0", number: 1, state: "succeeded" }, { ...previewSpec, questions: previewQuestions.slice(0, 1), answered: [{ question: "Q1", asked: previewQuestions[0].text, answer: previewQuestions[0].options[1].label, recommended: false, remember: false }] })] : []),
-  specRound({ number: params.get("last") === "1" ? 2 : 1, state: "waitingAnswers" }, { ...previewSpec, decided: previewSpec.decided.slice(0, 1), questions: previewQuestions }),
+  ...Array.from({ length: answeredRounds }, (_, index) => specRound({ id: `q0-${index}`, number: index + 1, state: "succeeded" }, { ...previewSpec, questions: previewQuestions.slice(0, 1), answered: [{ question: "Q1", asked: previewQuestions[0].text, answer: previewQuestions[0].options[1].label, recommended: false, remember: false }] })),
+  specRound({ number: answeredRounds + 1, state: "waitingAnswers" }, { ...previewSpec, decided: previewSpec.decided.slice(0, 1), questions: previewQuestions }),
 ];
 const correctedAttempts: Attempt[] = [
   specRound({ id: "c1", number: 1, state: "failed", reason: { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 240, limit: 200 }] } }, previewSpec),
-  specRound({ id: "c2", number: 2, state: "blocked", reason: { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 231, limit: 200 }, { code: "notOneRecommended", id: "Q2", count: 2 }] } }, previewSpec),
+  specRound({ id: "c2", number: 2, state: "blocked", reason: { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 231, limit: 200 }, { code: "tooManyRecommended", id: "Q2", count: 2 }] } }, previewSpec),
 ];
 const builtAttempt: Attempt = { ...attempt, state: "succeeded", reason: null, shaAfter: "28c696fd11223344556677889900aabbccddeeff", finishedAt: at(1), rawSha256: "9f2c", resultText: builtText, filesChanged: builtFiles, runFiles: builtFiles };
 const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", round, state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12" };

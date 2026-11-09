@@ -838,7 +838,7 @@ fn a_pull_request_that_was_already_there_is_unknown_until_keel_looks() {
         found.pr_checked_at, None,
         "so it's the first to be looked at"
     );
-    assert_eq!(w.store.runs_with_pr_due("0", 10).unwrap().len(), 1);
+    assert_eq!(w.store.runs_with_pr_due("0", "0", 10).unwrap().len(), 1);
 
     w.set_pr_view("OPEN", false, "2026-11-06T09:00:00Z");
     w.engine.look_at_pr(&run);
@@ -855,7 +855,9 @@ fn the_background_look_follows_a_pull_request_until_it_is_merged() {
     let w = world_with(|config| config.pr_look_again = Duration::from_millis(30));
     let run = w.delivered();
     assert_eq!(w.asked_about_prs(), 0, "nothing looks until it's started");
-    w.set_pr_view("CLOSED", false, "2026-11-06T09:00:00Z");
+    // Closed just now: one closed long ago is no longer watched.
+    let closed_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    w.set_pr_view("CLOSED", false, &closed_at);
     w.engine.start_pr_watch();
     w.wait_pr_state(&run, PrState::Closed);
     // A closed one can be reopened, so it stays watched.
@@ -872,6 +874,31 @@ fn the_background_look_follows_a_pull_request_until_it_is_merged() {
     assert_eq!(w.asked_about_prs(), asked, "merged is the end of it");
     let found = w.store.run(&run).unwrap();
     assert_eq!(found.pr_state_at.as_deref(), Some("2026-11-06T10:00:00Z"));
+}
+
+#[test]
+fn one_closed_long_ago_is_left_alone_until_a_person_opens_its_run() {
+    let w = world_with(|config| config.pr_look_again = Duration::from_millis(30));
+    let run = w.delivered();
+    w.set_pr_view("CLOSED", false, "2020-01-01T00:00:00Z");
+    w.engine.start_pr_watch();
+    w.wait_pr_state(&run, PrState::Closed);
+
+    std::thread::sleep(Duration::from_millis(100));
+    let asked = w.asked_about_prs();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(w.asked_about_prs(), asked, "it stopped asking");
+
+    // Opening it still looks, and that's how a reopened one comes back.
+    w.set_pr_view("OPEN", false, "2026-11-06T09:00:00Z");
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.wait_pr_state(&run, PrState::Open);
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        w.asked_about_prs() > asked + 1,
+        "open again, so the background looks again"
+    );
 }
 
 #[test]
