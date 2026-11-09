@@ -747,4 +747,90 @@ describe("the run page's flow", () => {
       expect(page()).toContain("Return 0");
     });
   });
+
+  describe("what an assistant did in the person's place", () => {
+    const event = (attemptId: string, kind: string, data: Record<string, unknown>, seq = 1): AuditEvent => ({ seq, attemptId, at: "2026-11-06T10:00:00Z", kind, data });
+    const returned = (by?: string) => attempt("human", "returned", { kind: "approval", tools: "none", output: { instructions: "Return 0", ...(by ? { by } : {}) } as unknown as Attempt["output"] });
+    const left = () => attempt("human", "abandoned", { kind: "approval", tools: "none" });
+
+    it("says which assistant sent the work back, with what it asked", async () => {
+      const back = returned("Claude Code");
+      attempts = [...built(), back];
+      events = { [back.id]: [event(back.id, "returned", { instructions: "Return 0", round: 1, by: "Claude Code" })] };
+      await open();
+      await choose(node("human"));
+      expect(page()).toContain("Claude Code sent it back for round 2");
+      expect(page()).toContain("Return 0");
+      expect(page()).not.toContain("You sent it back");
+    });
+
+    it("says which assistant closed the run, in its activity and in what's left to decide", async () => {
+      const closed = left();
+      attempts = [...built(), closed];
+      run = { ...run, finishedAt: "2026-11-06T10:00:00Z" };
+      events = { [closed.id]: [event(closed.id, "abandoned", { by: "Claude Code" })] };
+      await open();
+      expect(page()).toContain("Claude Code closed this run");
+      expect(page()).toContain("Nothing. Claude Code closed this run.");
+      expect(page()).not.toContain("You left this run");
+      expect(page()).not.toContain("You closed this run");
+    });
+
+    it("says which assistant tried a step again, on the attempt it tried again", async () => {
+      const failed = attempt("builder", "failed");
+      attempts = [attempt("spec", "succeeded"), failed, attempt("builder", "running", { number: 2 })];
+      events = { [failed.id]: [event(failed.id, "finished", { state: "failed" }), event(failed.id, "retryRequested", { by: "Claude Code", resume: true }, 2)] };
+      await open();
+      await choose(radio("Attempt 1"));
+      expect(page()).toContain("Claude Code tried it again");
+    });
+
+    it("looks just as before when it was the person", async () => {
+      const failed = attempt("builder", "failed");
+      const closed = left();
+      attempts = [attempt("spec", "succeeded"), failed, attempt("builder", "succeeded", { number: 2 }), closed];
+      run = { ...run, finishedAt: "2026-11-06T10:00:00Z" };
+      events = { [failed.id]: [event(failed.id, "finished", { state: "failed" })], [closed.id]: [event(closed.id, "abandoned", {})] };
+      await open();
+      expect(page()).toContain("You left this run");
+      expect(page()).toContain("Nothing. You closed this run.");
+      await choose(node("builder"));
+      await choose(radio("Attempt 1"));
+      expect(page()).toContain("Final state: Failed");
+      expect(page()).not.toContain("tried it again");
+    });
+
+    it("says it in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      const back = returned("Claude Code");
+      attempts = [...built(), back];
+      events = { [back.id]: [event(back.id, "returned", { instructions: "Devuelve 0", round: 1, by: "Claude Code" })] };
+      await open();
+      await choose(node("human"));
+      expect(page()).toContain("Claude Code lo devolvió para la ronda 2");
+    });
+
+    describe("a task it started only to read", () => {
+      const task = { workflow: [agent("task")] as unknown as WorkflowStep[], workflowId: null, startedBy: "Claude Code" };
+
+      it("says it's read-only", async () => {
+        run = { ...run, ...task };
+        attempts = [attempt("task", "running")];
+        await open();
+        expect(page()).toContain("Read-only");
+        expect(page()).toContain("Started by Claude Code");
+      });
+
+      it.each([
+        ["a person's single step", { ...task, startedBy: null }],
+        ["a run from a saved workflow", { ...task, workflowId: "builtin:full" }],
+        ["a single step that builds", { ...task, workflow: [{ ...agent("task"), tools: "build" }] as unknown as WorkflowStep[] }],
+      ])("doesn't say so for %s", async (_, fields) => {
+        run = { ...run, ...fields };
+        attempts = [attempt("task", "running")];
+        await open();
+        expect(page()).not.toContain("Read-only");
+      });
+    });
+  });
 });

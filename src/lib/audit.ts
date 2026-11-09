@@ -162,6 +162,18 @@ export function gist(text: string, limit = 240): { text: string; cut: boolean } 
   return { text: short, cut: short !== flat(body) };
 }
 
+/**
+ * What an assistant asked for when it sent the work back into this round. Nothing when a person did,
+ * or when something else started this round since: they know why.
+ */
+export function sentBackByAssistant(attempts: { state: string; round: number; output: unknown }[], round: number): { by: string; instructions: string } | null {
+  // Each return moves the run to the next round, so only one can have started this one.
+  const returned = attempts.find((a) => a.state === "returned" && a.round === round - 1);
+  const output = returned?.output as { by?: unknown; instructions?: unknown } | null | undefined;
+  if (typeof output?.by !== "string" || !output.by) return null;
+  return { by: output.by, instructions: typeof output.instructions === "string" ? output.instructions : "" };
+}
+
 /** What a round's reviewers said, and what the approver made of it. */
 export function reviewsOfRound<T extends { role: string; round: number; output: unknown }>(attempts: T[], round: number): { reviewers: T[]; approver: T | undefined } {
   const current = attempts.filter((a) => a.round === round);

@@ -97,6 +97,15 @@ export function reworkIndex(steps: WorkflowStep[]): number | null {
   return null;
 }
 
+/**
+ * A task an assistant started to read or look into something: one agent that only reads, with no
+ * saved workflow behind it. It can't change files or open a pull request.
+ */
+export function isReadOnlyTask(run: { startedBy: string | null; workflowId: string | null; workflow: unknown }): boolean {
+  const steps = parseSteps(run.workflow);
+  return !!run.startedBy && !run.workflowId && steps?.length === 1 && steps[0].type === "agent" && steps[0].tools === "readOnly";
+}
+
 /** Whether a person at this approval can send the work back: what does it again has to come before them. */
 export function canSendBack(steps: WorkflowStep[], approvalId: string): boolean {
   const from = reworkIndex(steps);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AttemptState, StepRole, StepSpec, WorkflowStep } from "./api";
-import { allNodes, attemptChoices, type FlowAttempt, flowOf, layoutFlow, nextItem, nodeOfAttempt, nodeWithKey, parseSteps, pathKey, pathOfKey, problemKeys, scrollToShow, canSendBack, reworkIndex } from "./flow";
+import { allNodes, attemptChoices, type FlowAttempt, flowOf, layoutFlow, nextItem, nodeOfAttempt, nodeWithKey, parseSteps, pathKey, pathOfKey, problemKeys, scrollToShow, canSendBack, reworkIndex, isReadOnlyTask } from "./flow";
 
 const spec = (id: string, model = "sonnet", role?: StepRole): StepSpec => ({ id, model, effort: null, tools: "readOnly", prompt: "p", maxTurns: null, maxBudgetUsd: null, ...(role ? { role } : {}) });
 const agent = (id: string, model = "sonnet", role?: StepRole): WorkflowStep => ({ type: "agent", ...spec(id, model, role) });
@@ -338,6 +338,25 @@ describe("a run's copy of its workflow", () => {
     ["a group with a nameless member", [{ type: "parallel", id: "g", steps: [{}] }]],
   ])("refuses %s", (_, value) => {
     expect(parseSteps(value)).toBeNull();
+  });
+});
+
+describe("a task an assistant started only to read", () => {
+  const task = { startedBy: "Claude Code", workflowId: null, workflow: [agent("task")] };
+
+  it("is one agent that only reads, with no saved workflow, that an assistant started", () => {
+    expect(isReadOnlyTask(task)).toBe(true);
+  });
+
+  it.each([
+    ["a person started it", { startedBy: null }],
+    ["it came from a saved workflow", { workflowId: "builtin:full" }],
+    ["it builds", { workflow: [{ ...agent("task"), tools: "build" }] }],
+    ["it has more steps", { workflow: [agent("task"), agent("other")] }],
+    ["its single step isn't an agent", { workflow: [{ type: "check", id: "check", run: "make test" }] }],
+    ["its workflow can't be read", { workflow: null }],
+  ])("isn't one when %s", (_, fields) => {
+    expect(isReadOnlyTask({ ...task, ...fields })).toBe(false);
   });
 });
 

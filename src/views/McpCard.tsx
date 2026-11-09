@@ -11,12 +11,45 @@ import { Button, Card, cx, Field, inputClass, Segmented } from "../ui/primitives
 const REFRESH_MS = 3000;
 const CLAUDE_CLIENT = "Claude Code";
 
+/** What the person can let a client keep open, as the store keeps it. */
+const MIN_OPEN_RUNS = 1;
+const MAX_OPEN_RUNS = 10;
+
+/** Saved when the person is done with it, so typing 10 doesn't save 1 first. */
+function OpenRunsField({ client, disabled, onSave }: { client: McpClient; disabled: boolean; onSave: (max: number) => void }) {
+  const { t } = useTranslation();
+  const [value, setValue] = useState(String(client.maxOpenRuns));
+  useEffect(() => setValue(String(client.maxOpenRuns)), [client.maxOpenRuns]);
+  const commit = () => {
+    const typed = Number.parseInt(value, 10);
+    if (Number.isNaN(typed)) return setValue(String(client.maxOpenRuns));
+    const max = Math.min(MAX_OPEN_RUNS, Math.max(MIN_OPEN_RUNS, typed));
+    setValue(String(max));
+    if (max !== client.maxOpenRuns) onSave(max);
+  };
+  return (
+    <label className={cx("flex items-center gap-1.5 text-[12px] text-muted", disabled && "opacity-60")}>
+      {t("mcp.maxOpenRuns")}
+      <input
+        inputMode="numeric"
+        value={value}
+        disabled={disabled}
+        onChange={(e) => setValue(e.target.value.replace(/\D/g, "").slice(0, 2))}
+        onBlur={commit}
+        onKeyDown={(e) => e.key === "Enter" && commit()}
+        className={cx(inputClass, "w-10 px-1.5 py-0.5 text-center font-mono")}
+      />
+      <span className="text-subtle">{t("mcp.maxOpenRunsHint", { max: MAX_OPEN_RUNS })}</span>
+    </label>
+  );
+}
+
 function ClientRow({ client, onChanged, onError }: { client: McpClient; onChanged: () => void; onError: (message: string) => void }) {
   const { t } = useTranslation();
   const act = (action: Promise<void>) => action.then(onChanged).catch((e) => onError(errorText(t, e)));
   const revoked = client.revokedAt !== null;
   return (
-    <li className={cx("flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-border px-3 py-2 first:border-t-0", revoked && "opacity-60")}>
+    <li className={cx("flex flex-wrap items-start gap-x-3 gap-y-1 border-t border-border px-3 py-2 first:border-t-0", revoked && "opacity-60")}>
       <div className="min-w-0 flex-1">
         <p className="truncate text-[12.5px] font-medium">{client.name}</p>
         <p className="font-mono text-[11px] text-subtle">
@@ -28,10 +61,19 @@ function ClientRow({ client, onChanged, onError }: { client: McpClient; onChange
       </div>
       {!revoked && (
         <>
-          <label className="flex items-center gap-1.5 text-[12px] text-muted">
-            <input type="checkbox" checked={client.canRun} onChange={(e) => void act(api.mcpClientSetCanRun(client.id, e.target.checked))} />
-            {t("mcp.canRun")}
-          </label>
+          <div className="space-y-1">
+            <label className="flex items-center gap-1.5 text-[12px] text-muted">
+              <input type="checkbox" checked={client.canRun} onChange={(e) => void act(api.mcpClientSetCanRun(client.id, e.target.checked))} />
+              {t("mcp.canRun")}
+            </label>
+            {/* It only acts on runs it started, so without starting any there's nothing to act on. */}
+            <label className={cx("flex items-center gap-1.5 text-[12px] text-muted", !client.canRun && "opacity-60")}>
+              <input type="checkbox" checked={client.canRun && client.canSteer} disabled={!client.canRun} onChange={(e) => void act(api.mcpClientSetCanSteer(client.id, e.target.checked))} />
+              {t("mcp.canSteer")}
+            </label>
+            {!client.canRun && <p className="pl-5 text-[11px] text-subtle">{t("mcp.canSteerNeedsRun")}</p>}
+            <OpenRunsField client={client} disabled={!client.canRun} onSave={(max) => void act(api.mcpClientSetMaxOpenRuns(client.id, max))} />
+          </div>
           <Button variant="ghost" onClick={() => void act(api.mcpClientRevoke(client.id))}>
             {t("mcp.revoke")}
           </Button>

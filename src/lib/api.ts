@@ -136,6 +136,10 @@ export interface McpClient {
   name: string;
   tokenPrefix: string;
   canRun: boolean;
+  /** May send work back, retry and close the runs it started. Only with `canRun`. */
+  canSteer: boolean;
+  /** How many of its runs may be open at once, counting those that wait for the person. */
+  maxOpenRuns: number;
   createdAt: string;
   lastSeenAt: string | null;
   revokedAt: string | null;
@@ -462,7 +466,8 @@ export interface Attempt {
   kind: "agent" | "setup" | "check" | "approval" | "deliver";
   role: "worker" | "reviewer" | "approver" | "mapper" | "learner" | "specifier" | "verifier";
   round: number;
-  output: (Verdict & Decision_ & { lines?: unknown[] }) | null;
+  /** A returned approval has the `instructions` it went back with, and `by` if an assistant sent it. */
+  output: (Verdict & Decision_ & { lines?: unknown[]; by?: string }) | null;
   runFiles: string[] | null;
   exitCode: number | null;
   number: number;
@@ -597,6 +602,8 @@ export const api = {
   mcpSettingsSave: (settings: McpSettings) => invoke<McpOverview>("mcp_settings_save", { settings }),
   mcpClientCreate: (name: string, canRun: boolean) => invoke<{ client: McpClient; token: string }>("mcp_client_create", { name, canRun }),
   mcpClientSetCanRun: (id: string, canRun: boolean) => invoke<void>("mcp_client_set_can_run", { id, canRun }),
+  mcpClientSetCanSteer: (id: string, canSteer: boolean) => invoke<void>("mcp_client_set_can_steer", { id, canSteer }),
+  mcpClientSetMaxOpenRuns: (id: string, max: number) => invoke<void>("mcp_client_set_max_open_runs", { id, max }),
   mcpClientRevoke: (id: string) => invoke<void>("mcp_client_revoke", { id }),
   mcpConnectClaude: (canRun: boolean) => invoke<McpOverview>("mcp_connect_claude", { canRun }),
   issuesList: (projectId: string) => invoke<Issue[]>("issues_list", { projectId }),

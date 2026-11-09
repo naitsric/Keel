@@ -4,8 +4,8 @@ import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Run, type SpecDecided, type SpecOutput, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
-import { attemptChoices, canSendBack, type FlowNode, flowOf, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
 import { allRecommend, answerFrom, differsFromRecommended, isAnswered, needsText, type QuestionPick, recommendedAnswers, recommendedOption, startingPick } from "../lib/questions";
@@ -84,7 +84,7 @@ function Explanations({ attempts }: { attempts: Attempt[] }) {
 const auditKey = (rawCheck: RawCheck) => `run.audit${rawCheck[0].toUpperCase()}${rawCheck.slice(1)}`;
 
 /** The rule of the product: never just "finished". What it did, changed, proved, and what's next. */
-function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: { run: Run | null; attempts: Attempt[]; current: Attempt; commands: CommandRun[]; rawCheck: RawCheck; onShowChanges: () => void }) {
+function Summary({ run, attempts, current, commands, rawCheck, closedBy, onShowChanges }: { run: Run | null; attempts: Attempt[]; current: Attempt; commands: CommandRun[]; rawCheck: RawCheck; closedBy: string | null; onShowChanges: () => void }) {
   const { t } = useTranslation();
   const files = filesChangedBy(attempts);
   const explaining = explainingAttempts(attempts);
@@ -147,7 +147,7 @@ function Summary({ run, attempts, current, commands, rawCheck, onShowChanges }: 
           </p>
         </SummaryBlock>
         <SummaryBlock title={t("run.whatToDecide")}>
-          <p>{t(decision)}</p>
+          <p>{decision === "run.decideAbandoned" && closedBy ? t("run.decideAbandonedBy", { client: closedBy }) : t(decision)}</p>
         </SummaryBlock>
       </div>
     </Card>
@@ -549,6 +549,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const reviewed = reviewers.some((review) => review.state !== "skipped") || approver != null;
   const skippedForSize = skippedSteps(attempts);
   const hiddenFiles = files.length - SHOWN_FILES;
+  const sentBack = sentBackByAssistant(attempts, run.round);
 
   return (
     // Short enough for its buttons to show without scrolling: the window less the top bar (38), the
@@ -576,6 +577,12 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
         {spec && spec.decided.length > 0 && (
           <ApprovalRow label={t("run.decidedTitle")} note={t("run.generated")}>
             <DecidedList attemptId={attempt.id} decided={spec.decided} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
+          </ApprovalRow>
+        )}
+        {sentBack && (
+          <ApprovalRow label={t("run.whyThisRound")}>
+            <p className="font-medium">{t("run.sentBackBy", { client: sentBack.by })}</p>
+            <p className="selectable break-words whitespace-pre-wrap text-muted">{sentBack.instructions}</p>
           </ApprovalRow>
         )}
         {!nothingToExplain && (
@@ -1015,7 +1022,7 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
     case "returned":
       return (
         <div>
-          {line(t("activity.returned", { round: data.round + 1 }), "font-medium")}
+          {line(data.by ? t("activity.returnedBy", { client: data.by, round: data.round + 1 }) : t("activity.returned", { round: data.round + 1 }), "font-medium")}
           <p className="selectable mt-0.5 text-[12.5px] text-muted">{data.instructions}</p>
         </div>
       );
@@ -1062,7 +1069,10 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
     case "commandKilled":
       return line(t("activity.commandKilled", { command: data.command }));
     case "abandoned":
-      return line(t("activity.abandoned"));
+      return line(data.by ? t("activity.abandonedBy", { client: data.by }) : t("activity.abandoned"));
+    // Only an assistant's retry leaves one, so the person sees it wasn't them.
+    case "retryRequested":
+      return data.by ? line(t("activity.retryRequested", { client: data.by })) : null;
     case "recovered":
       return line(t("activity.recovered"), "text-subtle");
     case "snapshotFailed":
@@ -1458,6 +1468,9 @@ export function RunDetail({ runId }: { runId: string }) {
 
   if (!latest || !run) return null;
 
+  // An assistant that closed the run says so on the step it closed.
+  const closedBy: string | null = latest.state === "abandoned" ? ((eventsByAttempt[latest.id] ?? []).find((e) => e.kind === "abandoned")?.data.by ?? null) : null;
+
   const understood = attempt ? specOf(attempt) : null;
   const found = attempt ? verificationOf(attempt) : null;
   const kindTabs: Tab[] = !attempt ? [] : attempt.state === "skipped" ? ["activity", "prompt"] : attempt.kind === "agent" ? [...(understood ? (["understood"] as const) : []), ...(found ? (["found"] as const) : []), "activity", "commands", "changes", "prompt", "details"] : attempt.kind === "check" || attempt.kind === "setup" ? ["output", "activity", "details"] : ["activity", "details"];
@@ -1468,7 +1481,7 @@ export function RunDetail({ runId }: { runId: string }) {
   const going = stillGoing(run, attempts);
   const outcome = (
     <>
-      <Summary run={run} attempts={attempts} current={latest} commands={allCommands} rawCheck={rawCheck} onShowChanges={showChanges} />
+      <Summary run={run} attempts={attempts} current={latest} commands={allCommands} rawCheck={rawCheck} closedBy={closedBy} onShowChanges={showChanges} />
       <ReviewsCard attempts={attempts} round={run.round} />
     </>
   );
@@ -1481,6 +1494,7 @@ export function RunDetail({ runId }: { runId: string }) {
             <h1 className="selectable text-[17px] leading-snug font-semibold">{run?.title}</h1>
             <p className="mt-0.5 flex flex-wrap gap-x-3 text-[12px] text-subtle">
               {run?.prUrl && run.prState && <PrStatus state={run.prState} at={run.prStateAt} />}
+              {isReadOnlyTask(run) && <span className="rounded border border-border px-1 text-[11px] text-muted">{t("run.readOnly")}</span>}
               {run?.startedBy && <span>{t("run.startedBy", { client: run.startedBy })}</span>}
               {run?.sourceIssue && <span>{t("run.fromIssue", { number: run.sourceIssue.number })}</span>}
               {accounts.claude && <span>{t("run.accountClaude", { account: accounts.claude })}</span>}

@@ -705,6 +705,39 @@ describe("the approval card", () => {
     press("Approve and open a draft");
     expect(answers).toEqual([{ attemptId: "human", approve: true, text: "Keep changes small." }]);
   });
+
+  describe("back after the work was sent back", () => {
+    const returned = (output: Record<string, unknown>) => attempt({ id: "human-0", stepId: "human", kind: "approval", tools: "none", state: "returned", output: output as unknown as Attempt["output"] });
+    const again = { ...human, round: 1 };
+    const showRound = (attempts: Attempt[], round = 1) => act(() => root.render(<ApprovalCard attempt={again} run={{ ...runWith(deliverNext), round }} attempts={attempts} files={["calc.py"]} commands={[]} rawCheck="intact" onShowChanges={() => {}} onError={() => {}} />));
+
+    it("says which assistant sent it back, and what it asked for", () => {
+      showRound([builder(["calc.py"]), returned({ instructions: "Return 0 for an empty list.", by: "Claude Code" }), { ...builder(["calc.py"]), id: "builder-1", round: 1 }, again]);
+      expect(page()).toContain("Why this round");
+      expect(page()).toContain("Claude Code sent it back:");
+      expect(page()).toContain("Return 0 for an empty list.");
+    });
+
+    it("looks just as before when the person sent it back", () => {
+      showRound([builder(["calc.py"]), { ...builder(["calc.py"]), id: "builder-1", round: 1 }, again]);
+      const before = page();
+      showRound([builder(["calc.py"]), returned({ instructions: "Return 0 for an empty list." }), { ...builder(["calc.py"]), id: "builder-1", round: 1 }, again]);
+      expect(page()).toBe(before);
+      expect(page()).not.toContain("Why this round");
+    });
+
+    it("says nothing once something else started a later round", () => {
+      showRound([builder(["calc.py"]), returned({ instructions: "Return 0 for an empty list.", by: "Claude Code" }), again], 2);
+      expect(page()).not.toContain("Claude Code sent it back");
+    });
+
+    it("says it in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      showRound([builder(["calc.py"]), returned({ instructions: "Devuelve 0.", by: "Claude Code" }), again]);
+      expect(page()).toContain("Por qué esta ronda");
+      expect(page()).toContain("Claude Code lo devolvió:");
+    });
+  });
 });
 
 describe("the card that asks", () => {
