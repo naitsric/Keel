@@ -11,8 +11,8 @@ use keel_harness::github::Issue;
 use keel_store::{Card, NewCard, Project, Store};
 
 use crate::{
-    Engine, Error, Result, StartRun, Workflow, locked, new_id, request_from_issue, title_from,
-    title_from_issue,
+    Engine, Error, Result, StartRun, Workflow, joint, locked, new_id, request_from_issue,
+    title_from, title_from_issue,
 };
 
 const MAX_AGENTS_KEY: &str = "max_agents";
@@ -228,10 +228,25 @@ impl Engine {
         }
         if lane == CardLane::Todo && card.column() != BoardColumn::Todo {
             let project = store.project(&card.project_id)?;
-            let workflow = self.default_workflow(&project, language)?;
-            self.check_can_run(&project, &workflow.steps)?;
+            let workflow = if joint::agrees(&card) {
+                joint::plan_workflow(language)
+            } else {
+                self.default_workflow(&project, language)?.steps
+            };
+            self.check_can_run(&project, &workflow)?;
         }
         if !store.move_card(card_id, lane, index, language)? {
+            return Err(Error::InvalidState);
+        }
+        self.inner.changed("");
+        Ok(())
+    }
+
+    /// Says which other projects a card's request touches. Then it runs as the place where the
+    /// change is agreed, and only once that's approved does each project get its part. None makes
+    /// it an ordinary card again. Only while the card waits in Backlog or Todo, and never on a part.
+    pub fn card_set_projects(&self, card_id: &str, projects: &[String]) -> Result<()> {
+        if !self.inner.store.set_joint_projects(card_id, projects)? {
             return Err(Error::InvalidState);
         }
         self.inner.changed("");
@@ -336,8 +351,16 @@ impl Engine {
         }
         let store = &self.inner.store;
         let project = store.project(&request.project_id)?;
-        self.check_can_run(&project, &request.workflow)?;
         let issue = request.source_issue.as_ref();
+        // Starting it here would skip agreeing on it, and every project but this one.
+        if let Some(issue) = issue
+            && store.cards(&project.id)?.iter().any(|card| {
+                card.issue_number == Some(issue.number) && card.joint_change_id.is_some()
+            })
+        {
+            return Err(Error::Blocked(Reason::StartsOnTheBoard));
+        }
+        self.check_can_run(&project, &request.workflow)?;
         // The card says what the run is called, so the person finds it by the same name.
         let title = match issue {
             Some(issue) => issue.title.clone(),
@@ -470,7 +493,13 @@ impl Engine {
     fn card_request(&self, card: &Card) -> Result<StartRun> {
         let project = self.inner.store.project(&card.project_id)?;
         let language = card.language.clone().unwrap_or_else(|| "en".to_owned());
-        let workflow = self.default_workflow(&project, &language)?;
+        let (workflow, saved_workflow) = if joint::agrees(card) {
+            (joint::plan_workflow(&language), None)
+        } else {
+            let workflow = self.default_workflow(&project, &language)?;
+            let reference = workflow.reference();
+            (workflow.steps, Some(reference))
+        };
         let issue = issue_of(card);
         let (title, request) = match &issue {
             Some(issue) => (
@@ -487,8 +516,8 @@ impl Engine {
             project_id: project.id,
             title: Some(title),
             request,
-            saved_workflow: Some(workflow.reference()),
-            workflow: workflow.steps,
+            saved_workflow,
+            workflow,
             language,
             source_issue: issue,
             started_by: None,

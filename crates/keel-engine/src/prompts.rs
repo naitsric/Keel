@@ -179,6 +179,37 @@ pub fn spec_prompt_with_size(language: &str) -> String {
     prompt.replacen(before, &format!("{size}{before}"), 1)
 }
 
+const AGREEMENT_EN: &str = r#"This request touches several projects, and you're in one of them. Work out what changes in each, so that a person can approve it all at once. Each project then gets its own change, one after another, and whoever makes each one gets what you write here.
+- parts: one for each project that has to change, in the order they're done: what the others depend on first. `project` is its name exactly as it's listed below, and `text` says what changes there, in up to 200 characters. A project that's only read isn't a part. Up to 5.
+- together: up to 5 things that only work with every part in place, each in one line, for a person to try once they're all done. Nobody can prove them in a single project.
+- limits: also what has to stay the same between the projects for them to keep working together, such as a name, a route or a format the other side relies on.
+
+The projects:
+{{projects}}
+
+"#;
+
+const AGREEMENT_ES: &str = r#"Este pedido toca varios proyectos, y estás en uno de ellos. Averigua qué cambia en cada uno, para que una persona lo apruebe todo de una vez. Después cada proyecto recibe su propio cambio, uno tras otro, y quien haga cada uno recibe lo que escribas aquí.
+- parts: una por cada proyecto que tiene que cambiar, en el orden en que se hacen: primero aquello de lo que dependen los demás. `project` es su nombre exactamente como aparece abajo, y `text` dice qué cambia ahí, en hasta 200 caracteres. Un proyecto que solo se lee no es una parte. Hasta 5.
+- together: hasta 5 cosas que solo funcionan con todas las partes hechas, cada una en una línea, para que una persona las pruebe cuando estén todas. Nadie puede demostrarlas en un solo proyecto.
+- limits: también lo que tiene que quedar igual entre los proyectos para que sigan funcionando juntos, como un nombre, una ruta o un formato del que depende el otro lado.
+
+Los proyectos:
+{{projects}}
+
+"#;
+
+/// The specifier's prompt where a change across projects is agreed: the same one, also saying what
+/// changes in each project. `{{projects}}` lists them.
+pub fn agreement_prompt(language: &str) -> String {
+    let (prompt, agreement, before) = if language.starts_with("es") {
+        (SPEC_PROMPT_ES, AGREEMENT_ES, "Pregunta solo cuando")
+    } else {
+        (SPEC_PROMPT_EN, AGREEMENT_EN, "Ask only when")
+    };
+    prompt.replacen(before, &format!("{agreement}{before}"), 1)
+}
+
 const VERIFY_PROMPT_EN: &str = r#"You check whether a change really does what was asked, and you edit nothing. You can't run anything: you read the tests and the code. Answer in the structure you were given.
 
 For each item in `criteria` below, find the test that really proves it, and read that test to be sure.

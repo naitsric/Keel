@@ -443,6 +443,12 @@ pub enum Reason {
     KeptAsking {
         rounds: usize,
     },
+    /// What was agreed across projects was approved, and its parts couldn't be put on the board.
+    PartsNotOpened {
+        detail: String,
+    },
+    /// This issue's card is where a change across projects is agreed, which only the board starts.
+    StartsOnTheBoard,
 }
 
 /// Why a run doesn't count as small. Each is a fact the engine checked for itself, and any one is
@@ -582,6 +588,24 @@ pub enum SpecProblem {
     },
     /// Something was left marked as still to be decided.
     LeftUnresolved,
+    /// An agreement across projects that changes none of them.
+    NoParts,
+    TooManyParts {
+        count: usize,
+        limit: usize,
+    },
+    /// A part in a project that isn't one of those the change touches.
+    UnknownProject {
+        project: String,
+    },
+    /// Two parts in one project.
+    RepeatedPart {
+        project: String,
+    },
+    TooManyTogether {
+        count: usize,
+        limit: usize,
+    },
 }
 
 impl Reason {
@@ -647,7 +671,9 @@ impl Reason {
             | Self::NothingToSendBackTo
             | Self::TreatedAsSmall { .. }
             | Self::NothingSkippedToRun
-            | Self::KeptAsking { .. } => false,
+            | Self::KeptAsking { .. }
+            | Self::PartsNotOpened { .. }
+            | Self::StartsOnTheBoard => false,
         }
     }
 }
@@ -953,6 +979,8 @@ mod tests {
             (Reason::TreatedAsSmall { lines: 1, files: 1 }, false),
             (Reason::NothingSkippedToRun, false),
             (Reason::KeptAsking { rounds: 3 }, false),
+            (Reason::PartsNotOpened { detail: text() }, false),
+            (Reason::StartsOnTheBoard, false),
         ]
     }
 
@@ -1003,6 +1031,8 @@ mod tests {
             Reason::TreatedAsSmall { .. } => 41,
             Reason::NothingSkippedToRun => 42,
             Reason::KeptAsking { .. } => 43,
+            Reason::PartsNotOpened { .. } => 44,
+            Reason::StartsOnTheBoard => 45,
         }
     }
 
@@ -1016,7 +1046,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=43).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=45).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]

@@ -164,7 +164,9 @@
     "sendBackNeedsInstructions": "Para devolverlo, di qué debe cambiar.",
     "nothingToSendBackTo": "Nada antes de esta aprobación puede volver a hacer el trabajo.",
     "nothingSkippedToRun": "No se omitió nada por ser un cambio pequeño, así que no hay nada que correr.",
-    "keptAsking": "Después de {{rounds}} rondas de preguntas, siguió preguntando algo que solo tú puedes decidir, así que Keel lo detuvo en vez de elegir por ti."
+    "keptAsking": "Después de {{rounds}} rondas de preguntas, siguió preguntando algo que solo tú puedes decidir, así que Keel lo detuvo en vez de elegir por ti.",
+    "partsNotOpened": "Lo aprobaste, pero Keel no pudo poner en el tablero la parte de cada proyecto: {{detail}}. Inténtalo de nuevo cuando eso esté resuelto.",
+    "startsOnTheBoard": "Este issue es un cambio en varios proyectos, así que arranca desde su tarjeta en el tablero."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
@@ -1033,7 +1035,12 @@
     "optionTooLong": "una opción de la pregunta {{id}} tiene {{chars}} caracteres y el límite es {{limit}}",
     "repeatedOption": "la pregunta {{id}} tiene opciones vacías o repetidas",
     "tooManyRecommended": "la pregunta {{id}} tiene {{count}} opciones recomendadas y puede tener una como máximo",
-    "leftUnresolved": "dejó algo sin decidir"
+    "leftUnresolved": "dejó algo sin decidir",
+    "noParts": "no dijo qué cambia en ninguno de los proyectos",
+    "tooManyParts": "cambia {{count}} proyectos, y el máximo es {{limit}}",
+    "unknownProject": "nombra {{project}}, que no es ninguno de los proyectos que elegiste",
+    "repeatedPart": "pone {{project}} dos veces",
+    "tooManyTogether": "pone {{count}} cosas para probar juntas, y el máximo es {{limit}}"
   },
   "invalidAnswers": {
     "unknownQuestion": "Esa respuesta es para una pregunta que este paso no hizo.",

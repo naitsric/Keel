@@ -6,6 +6,7 @@ mod brain;
 mod deliver;
 mod detect;
 mod git;
+mod joint;
 mod project_proposals;
 mod prompts;
 mod pull_requests;
@@ -1176,6 +1177,11 @@ impl Engine {
         if store.project_is_removed(&run.project_id)? {
             return Err(Error::Blocked(Reason::ProjectRemoved));
         }
+        // An approval answers what was agreed then. Something new agreed would go through on it, and
+        // the parts may already be on the board.
+        if state == AttemptState::Succeeded && self.inner.agreement(&attempt.run_id)?.is_some() {
+            return Err(Error::InvalidState);
+        }
         let attempts = store.attempts_of_run(&attempt.run_id)?;
         // One that was tried again already has its next try. Another would run the step twice.
         if !workflows::is_latest_of_its_step(&attempts, &attempt) {
@@ -1819,6 +1825,11 @@ impl Inner {
             }
             "rework" => Some(workflows::rework_text(&attempts, run.round, &run.language)),
             "answers" => Some(workflows::answers_text(&attempts, &run.language)),
+            "projects" => self
+                .agreement(&run.id)
+                .ok()
+                .flatten()
+                .map(|agreement| agreement.projects_text(&run.language)),
             "check" => Some(verification::check_text(
                 &verification::checks_in_round(&steps, &attempts, run.round),
                 &run.language,
@@ -1961,6 +1972,11 @@ impl Inner {
                     self.changed(run_id);
                     return Ok(());
                 }
+            }
+            // An agreement across projects has its parts on the board before it's over, or it waits
+            // for the person to try again. A run that never closed comes back through here.
+            if !self.open_parts(run_id, &steps, &attempts)? {
+                return Ok(());
             }
             self.store
                 .patch_run(run_id, &[("finished_at", Value::Text(now()))])?;
