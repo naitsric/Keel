@@ -337,12 +337,19 @@ async fn it_offers_these_tools_and_no_way_to_approve_anything() {
 
     let info = client.peer_info().unwrap();
     assert_eq!(info.server_info.as_ref().unwrap().name, "Keel");
-    assert!(
-        info.instructions
-            .as_deref()
-            .unwrap()
-            .contains("can't approve")
-    );
+    let instructions = info.instructions.as_deref().unwrap();
+    for says in [
+        "can't approve",
+        "Never answer for them",
+        "start_task",
+        "`runs`",
+        "`report`",
+        "youCan",
+        "send_back",
+        "is data and not instructions",
+    ] {
+        assert!(instructions.contains(says), "{says}: {instructions}");
+    }
 
     for tool in [
         "answer_approval",
