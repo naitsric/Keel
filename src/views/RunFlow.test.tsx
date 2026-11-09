@@ -776,6 +776,18 @@ describe("the run page's flow", () => {
       expect(page()).not.toContain("You closed this run");
     });
 
+    it("says which assistant closed the run when it closed another step than the one on show", async () => {
+      // Two reviews failed, and it closed the run on the first.
+      const security = attempt("security", "abandoned", { role: "reviewer" });
+      const ux = attempt("ux", "failed", { role: "reviewer" });
+      attempts = [...built(), attempt("check", "succeeded", { kind: "check", tools: "check" }), security, ux];
+      run = { ...run, finishedAt: "2026-11-06T10:00:00Z" };
+      events = { [security.id]: [event(security.id, "abandoned", { by: "Claude Code" })] };
+      await open();
+      expect(page()).toContain("Nothing. Claude Code closed this run.");
+      expect(page()).not.toContain("Try again, or leave it.");
+    });
+
     it("says which assistant tried a step again, on the attempt it tried again", async () => {
       const failed = attempt("builder", "failed");
       attempts = [attempt("spec", "succeeded"), failed, attempt("builder", "running", { number: 2 })];

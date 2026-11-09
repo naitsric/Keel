@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Run, type SpecDecided, type SpecOutput, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
@@ -147,7 +147,7 @@ function Summary({ run, attempts, current, commands, rawCheck, closedBy, onShowC
           </p>
         </SummaryBlock>
         <SummaryBlock title={t("run.whatToDecide")}>
-          <p>{decision === "run.decideAbandoned" && closedBy ? t("run.decideAbandonedBy", { client: closedBy }) : t(decision)}</p>
+          <p>{closedBy ? t("run.decideAbandonedBy", { client: closedBy }) : t(decision)}</p>
         </SummaryBlock>
       </div>
     </Card>
@@ -1468,8 +1468,8 @@ export function RunDetail({ runId }: { runId: string }) {
 
   if (!latest || !run) return null;
 
-  // An assistant that closed the run says so on the step it closed.
-  const closedBy: string | null = latest.state === "abandoned" ? ((eventsByAttempt[latest.id] ?? []).find((e) => e.kind === "abandoned")?.data.by ?? null) : null;
+  // An assistant that closed the run says so, whichever step it closed.
+  const closedBy = closedByAssistant(run, attempts, eventsByAttempt);
 
   const understood = attempt ? specOf(attempt) : null;
   const found = attempt ? verificationOf(attempt) : null;

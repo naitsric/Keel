@@ -174,6 +174,24 @@ export function sentBackByAssistant(attempts: { state: string; round: number; ou
   return { by: output.by, instructions: typeof output.instructions === "string" ? output.instructions : "" };
 }
 
+/**
+ * The assistant that closed a finished run, if one did. It may have closed another step than the one
+ * the page is about, such as the first of two reviews that failed. Of the steps as they stand, the
+ * last one closed is what ended the run: one tried again since no longer says anything.
+ */
+export function closedByAssistant(run: { finishedAt: string | null }, attempts: { id: string; stepId: string; state: string }[], events: Record<string, AuditEvent[]>): string | null {
+  if (!run.finishedAt) return null;
+  let last: AuditEvent | undefined;
+  for (const attempt of latestOfEachStep(attempts)) {
+    if (attempt.state !== "abandoned") continue;
+    for (const event of events[attempt.id] ?? []) {
+      if (event.kind === "abandoned" && (!last || event.seq > last.seq)) last = event;
+    }
+  }
+  const by: unknown = last?.data.by;
+  return typeof by === "string" && by ? by : null;
+}
+
 /** What a round's reviewers said, and what the approver made of it. */
 export function reviewsOfRound<T extends { role: string; round: number; output: unknown }>(attempts: T[], round: number): { reviewers: T[]; approver: T | undefined } {
   const current = attempts.filter((a) => a.round === round);
