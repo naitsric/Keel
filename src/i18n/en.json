@@ -164,7 +164,9 @@
     "sendBackNeedsInstructions": "To send it back, say what should change.",
     "nothingToSendBackTo": "Nothing before this approval can do the work again.",
     "nothingSkippedToRun": "Nothing was skipped for being a small change, so there's nothing to run.",
-    "keptAsking": "After {{rounds}} rounds of questions, it still asked something only you can decide, so Keel stopped it rather than choose for you."
+    "keptAsking": "After {{rounds}} rounds of questions, it still asked something only you can decide, so Keel stopped it rather than choose for you.",
+    "partsNotOpened": "You approved it, but Keel couldn't put each project's part on the board: {{detail}}. Try again once that's fixed.",
+    "startsOnTheBoard": "This issue is a change across several projects, so it starts from its card on the board."
   },
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",
@@ -1033,7 +1035,12 @@
     "optionTooLong": "an option of question {{id}} has {{chars}} characters, and the limit is {{limit}}",
     "repeatedOption": "question {{id}} has empty or repeated options",
     "tooManyRecommended": "question {{id}} has {{count}} recommended options, and it can have one at most",
-    "leftUnresolved": "it left something undecided"
+    "leftUnresolved": "it left something undecided",
+    "noParts": "it didn't say what changes in any of the projects",
+    "tooManyParts": "it changes {{count}} projects, and the limit is {{limit}}",
+    "unknownProject": "it names {{project}}, which isn't one of the projects you chose",
+    "repeatedPart": "it lists {{project}} twice",
+    "tooManyTogether": "it lists {{count}} things to try together, and the limit is {{limit}}"
   },
   "invalidAnswers": {
     "unknownQuestion": "That answer is for a question this step didn't ask.",

@@ -87,7 +87,7 @@ describe("what a specifier got wrong", () => {
   it("has a sentence for everything that can go wrong, with no jargon in it", () => {
     for (const language of ["en", "es"]) {
       const problems = i18next.getResource(language, "translation", "specProblems") as Record<string, string>;
-      expect(Object.keys(problems)).toEqual(["criterionNeedsText", "questionNeedsText", "tooManyChanges", "tooManyLimits", "unreadable", "noSummary", "summaryTooLong", "noCriteria", "tooManyCriteria", "criterionTooLong", "criterionNeedsId", "repeatedCriterion", "tooManyDecided", "decidedTooLong", "tooManyQuestions", "questionTooLong", "questionNeedsId", "repeatedQuestion", "wrongNumberOfOptions", "optionTooLong", "repeatedOption", "tooManyRecommended", "leftUnresolved"]);
+      expect(Object.keys(problems)).toEqual(["criterionNeedsText", "questionNeedsText", "tooManyChanges", "tooManyLimits", "unreadable", "noSummary", "summaryTooLong", "noCriteria", "tooManyCriteria", "criterionTooLong", "criterionNeedsId", "repeatedCriterion", "tooManyDecided", "decidedTooLong", "tooManyQuestions", "questionTooLong", "questionNeedsId", "repeatedQuestion", "wrongNumberOfOptions", "optionTooLong", "repeatedOption", "tooManyRecommended", "leftUnresolved", "noParts", "tooManyParts", "unknownProject", "repeatedPart", "tooManyTogether"]);
       for (const text of Object.values(problems)) expect(text).not.toMatch(JARGON);
     }
   });

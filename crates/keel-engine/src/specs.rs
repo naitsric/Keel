@@ -3,6 +3,7 @@
 //! the schema's own limits aren't reliable. Everything counts characters, since Spanish matters.
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use keel_core::{AttemptState, Reason, SpecProblem};
 use keel_store::Attempt;
@@ -23,6 +24,8 @@ const MAX_QUESTION_TEXT: usize = 140;
 const MIN_OPTIONS: usize = 2;
 const MAX_OPTIONS: usize = 4;
 const MAX_OPTION_LABEL: usize = 60;
+const MAX_PARTS: usize = 5;
+const MAX_TOGETHER: usize = 5;
 /// After this many, the engine takes the recommended options rather than asking a third time. A
 /// question with none recommended can only be answered by a person, so it gets one round more.
 pub const MAX_QUESTION_ROUNDS: usize = 2;
@@ -43,7 +46,23 @@ pub enum Size {
     Normal,
 }
 
-/// What a specifier answers, once it has passed [`validate_spec`]. New fields need `default`: runs
+/// What the specifier of a change across projects answers: the same, plus what changes in each
+/// project and what only works with all of them in place.
+static PLAN_SCHEMA: LazyLock<String> = LazyLock::new(|| {
+    let mut schema: Value = serde_json::from_str(SPEC_SCHEMA).unwrap_or_default();
+    schema["properties"]["parts"] = json!({"type":"array","items":{"type":"object","properties":{"project":{"type":"string"},"text":{"type":"string"}},"required":["project","text"],"additionalProperties":false}});
+    schema["properties"]["together"] = json!({"type":"array","items":{"type":"string"}});
+    if let Some(required) = schema["required"].as_array_mut() {
+        required.extend([json!("parts"), json!("together")]);
+    }
+    schema.to_string()
+});
+
+pub fn plan_schema() -> &'static str {
+    &PLAN_SCHEMA
+}
+
+/// What a specifier answers, once it has passed [`judge`]. New fields need `default`: runs
 /// already in the database don't have them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Spec {
@@ -63,6 +82,21 @@ pub struct Spec {
     pub decided: Vec<Decided>,
     #[serde(default)]
     pub questions: Vec<Question>,
+    /// Only where a change across projects is agreed: what changes in each project, in the order
+    /// it's done.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<Part>,
+    /// Only there too: what only works with every part in place, for a person to try.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub together: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Part {
+    /// The project's name, as the agent was given it.
+    pub project: String,
+    /// What changes there.
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -186,6 +220,13 @@ impl Spec {
         for limit in &mut self.limits {
             cut(limit);
         }
+        for part in &mut self.parts {
+            tidy(&mut part.project);
+            cut(&mut part.text);
+        }
+        for together in &mut self.together {
+            cut(together);
+        }
         for risk in &mut self.risks {
             tidy(risk);
         }
@@ -260,6 +301,18 @@ impl Spec {
                 limit: MAX_LISTED,
             });
         }
+        if self.parts.len() > MAX_PARTS {
+            problems.push(SpecProblem::TooManyParts {
+                count: self.parts.len(),
+                limit: MAX_PARTS,
+            });
+        }
+        if self.together.len() > MAX_TOGETHER {
+            problems.push(SpecProblem::TooManyTogether {
+                count: self.together.len(),
+                limit: MAX_TOGETHER,
+            });
+        }
 
         if self.decided.len() > MAX_DECIDED {
             problems.push(SpecProblem::TooManyDecided {
@@ -290,6 +343,28 @@ impl Spec {
 
         if self.leaves_something_unresolved() {
             problems.push(SpecProblem::LeftUnresolved);
+        }
+        problems
+    }
+
+    /// What an agreement across these projects gets wrong about its parts: it needs one at least,
+    /// each in one of them, and never two in the same one.
+    fn part_problems(&self, projects: &[String]) -> Vec<SpecProblem> {
+        let mut problems = Vec::new();
+        if self.parts.is_empty() {
+            problems.push(SpecProblem::NoParts);
+        }
+        let mut seen = HashSet::new();
+        for part in &self.parts {
+            if !projects.contains(&part.project) {
+                problems.push(SpecProblem::UnknownProject {
+                    project: part.project.clone(),
+                });
+            } else if !seen.insert(part.project.as_str()) {
+                problems.push(SpecProblem::RepeatedPart {
+                    project: part.project.clone(),
+                });
+            }
         }
         problems
     }
@@ -450,6 +525,21 @@ impl Spec {
                 })
                 .collect(),
         );
+        section(
+            say(
+                "What changes in each project",
+                "Qué cambia en cada proyecto",
+            ),
+            self.parts
+                .iter()
+                .enumerate()
+                .map(|(index, part)| format!("{}. {}: {}", index + 1, part.project, part.text))
+                .collect(),
+        );
+        section(
+            say("To try together", "Para probar juntos"),
+            self.together.clone(),
+        );
         text
     }
 }
@@ -466,11 +556,24 @@ fn decided_line(question: &str, answer: &str) -> String {
 
 /// Reads a specifier's structured answer and checks it against the limits. Anything an agent added
 /// beyond the structure is dropped here, so it can't pass as something the engine wrote.
-pub fn validate_spec(output: &Value) -> Result<Spec, Vec<SpecProblem>> {
+///
+/// `projects` is where a change across projects is agreed, by the names the agent was given. Only
+/// then does a spec have parts: anywhere else they're dropped, like anything else not asked for.
+fn validate_spec_for(
+    output: &Value,
+    projects: Option<&[String]>,
+) -> Result<Spec, Vec<SpecProblem>> {
     let mut spec: Spec =
         serde_json::from_value(output.clone()).map_err(|_| vec![SpecProblem::Unreadable])?;
     spec.normalize();
-    let problems = spec.problems();
+    let mut problems = spec.problems();
+    match projects {
+        Some(projects) => problems.extend(spec.part_problems(projects)),
+        None => {
+            spec.parts.clear();
+            spec.together.clear();
+        }
+    }
     if problems.is_empty() {
         Ok(spec)
     } else {
@@ -541,7 +644,27 @@ pub enum Verdict {
 /// option. A question with none goes to the person once more, and asking past that stops the step,
 /// so it can't go on asking forever and Keel never makes up an answer.
 pub fn judge(output: Option<&Value>, after_correction: bool, rounds_answered: usize) -> Verdict {
-    let spec = match output.map(validate_spec) {
+    judge_for(output, after_correction, rounds_answered, None)
+}
+
+/// [`judge`] where a change across these projects is agreed. Its parts are checked before anything
+/// is asked: once a person answers with every recommended option, nothing judges it again.
+pub fn judge_agreement(
+    output: Option<&Value>,
+    after_correction: bool,
+    rounds_answered: usize,
+    projects: &[String],
+) -> Verdict {
+    judge_for(output, after_correction, rounds_answered, Some(projects))
+}
+
+fn judge_for(
+    output: Option<&Value>,
+    after_correction: bool,
+    rounds_answered: usize,
+    projects: Option<&[String]>,
+) -> Verdict {
+    let spec = match output.map(|output| validate_spec_for(output, projects)) {
         Some(Ok(spec)) => spec,
         Some(Err(problems)) if after_correction => return Verdict::Stop(problems),
         Some(Err(problems)) => return Verdict::Correct(problems),
@@ -808,12 +931,44 @@ fn problem_line(problem: &SpecProblem, es: bool) -> String {
             "Dejaste algo marcado como [TBC]. Decídelo o pregúntalo.".to_owned()
         }
         LeftUnresolved => "You left something marked [TBC]. Decide it or ask.".to_owned(),
+        NoParts if es => {
+            "`parts` está vacío: di qué cambia en al menos uno de los proyectos.".to_owned()
+        }
+        NoParts => "`parts` is empty: say what changes in one of the projects at least.".to_owned(),
+        TooManyParts { count, limit } if es => {
+            format!("`parts` tiene {count} elementos y el máximo es {limit}.")
+        }
+        TooManyParts { count, limit } => {
+            format!("`parts` has {count} items, and the limit is {limit}.")
+        }
+        UnknownProject { project } if es => format!(
+            "`parts` nombra {project}, que no es ninguno de los proyectos de la lista. Usa el nombre exacto."
+        ),
+        UnknownProject { project } => format!(
+            "`parts` names {project}, which isn't one of the listed projects. Use the exact name."
+        ),
+        RepeatedPart { project } if es => {
+            format!("{project} aparece dos veces en `parts`: junta lo que cambia ahí en una.")
+        }
+        RepeatedPart { project } => {
+            format!("{project} is in `parts` twice: put what changes there in one.")
+        }
+        TooManyTogether { count, limit } if es => {
+            format!("`together` tiene {count} elementos y el máximo es {limit}.")
+        }
+        TooManyTogether { count, limit } => {
+            format!("`together` has {count} items, and the limit is {limit}.")
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn validate_spec(output: &Value) -> Result<Spec, Vec<SpecProblem>> {
+        validate_spec_for(output, None)
+    }
 
     fn valid() -> Value {
         json!({
@@ -1382,5 +1537,143 @@ mod tests {
             problems(with("size", json!("tiny"))),
             [SpecProblem::Unreadable]
         );
+    }
+
+    fn agreed(parts: Value, together: Value) -> Value {
+        let mut output = valid();
+        output["parts"] = parts;
+        output["together"] = together;
+        output
+    }
+
+    fn part(project: &str, text: &str) -> Value {
+        json!({ "project": project, "text": text })
+    }
+
+    const PROJECTS: [&str; 2] = ["back-adm", "valora"];
+
+    fn judged(output: &Value) -> Verdict {
+        let projects = PROJECTS.map(String::from);
+        judge_agreement(Some(output), false, 0, &projects)
+    }
+
+    #[test]
+    fn an_agreement_says_what_changes_in_each_project_it_was_given_once() {
+        let output = agreed(
+            json!([
+                part("valora", "  Sends the token\n in a header "),
+                part("back-adm", "Reads it")
+            ]),
+            json!(["Log in from Valora and land in back-adm"]),
+        );
+        let Verdict::Ready(kept) = judged(&output) else {
+            panic!("{:?}", judged(&output));
+        };
+        let spec: Spec = serde_json::from_value(kept).unwrap();
+        assert_eq!(spec.parts[0].text, "Sends the token in a header");
+        assert_eq!(spec.parts[1].project, "back-adm");
+        assert_eq!(spec.together.len(), 1);
+        let text = spec.readable("en");
+        assert!(
+            text.contains("1. valora: Sends the token in a header"),
+            "{text}"
+        );
+        assert!(text.contains("**To try together**"), "{text}");
+
+        let problems = |output: Value| match judged(&output) {
+            Verdict::Correct(problems) => problems,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            problems(agreed(json!([]), json!([]))),
+            [SpecProblem::NoParts]
+        );
+        assert_eq!(
+            problems(agreed(json!([part("dupplaBack", "x")]), json!([]))),
+            [SpecProblem::UnknownProject {
+                project: "dupplaBack".into()
+            }]
+        );
+        assert_eq!(
+            problems(agreed(
+                json!([part("valora", "x"), part("valora", "y")]),
+                json!([])
+            )),
+            [SpecProblem::RepeatedPart {
+                project: "valora".into()
+            }]
+        );
+        let many: Vec<Value> = (0..6).map(|i| part("valora", &i.to_string())).collect();
+        assert!(
+            problems(agreed(json!(many), json!([]))).contains(&SpecProblem::TooManyParts {
+                count: 6,
+                limit: MAX_PARTS
+            })
+        );
+        let tries: Vec<String> = (0..6).map(|i| i.to_string()).collect();
+        assert_eq!(
+            problems(agreed(json!([part("valora", "x")]), json!(tries))),
+            [SpecProblem::TooManyTogether {
+                count: 6,
+                limit: MAX_TOGETHER
+            }]
+        );
+
+        // The parts are checked before anything is asked.
+        let mut asks = agreed(json!([]), json!([]));
+        asks["questions"] = json!([{
+            "id": "Q1",
+            "text": "Which channel carries the token?",
+            "options": [{ "label": "A header", "recommended": true }, { "label": "A cookie", "recommended": false }],
+        }]);
+        assert_eq!(problems(asks), [SpecProblem::NoParts]);
+    }
+
+    #[test]
+    fn anywhere_else_parts_are_dropped_like_anything_not_asked_for() {
+        let output = agreed(json!([part("valora", "x")]), json!(["y"]));
+        let Verdict::Ready(kept) = judge(Some(&output), false, 0) else {
+            panic!();
+        };
+        assert!(kept.get("parts").is_none(), "{kept}");
+        assert!(kept.get("together").is_none(), "{kept}");
+        assert!(
+            judge(Some(&valid()), false, 0)
+                == Verdict::Ready(json!(validate_spec(&valid()).unwrap()))
+        );
+    }
+
+    #[test]
+    fn an_agreement_is_asked_for_its_parts_and_everything_else_as_before() {
+        let schema: Value = serde_json::from_str(plan_schema()).unwrap();
+        let required = schema["required"].as_array().unwrap();
+        assert!(required.contains(&json!("parts")) && required.contains(&json!("together")));
+        assert!(required.contains(&json!("criteria")));
+        let spec: Value = serde_json::from_str(SPEC_SCHEMA).unwrap();
+        assert!(
+            spec["properties"].get("parts").is_none(),
+            "only an agreement has parts"
+        );
+        let prompt = prompts::agreement_prompt("es");
+        assert!(prompt.contains("{{projects}}") && prompt.contains("{{request}}"));
+        assert!(
+            prompt.find("Los proyectos:").unwrap() < prompt.find("Pregunta solo cuando").unwrap()
+        );
+        for problem in [
+            SpecProblem::NoParts,
+            SpecProblem::UnknownProject {
+                project: "x".into(),
+            },
+            SpecProblem::RepeatedPart {
+                project: "x".into(),
+            },
+            SpecProblem::TooManyParts { count: 6, limit: 5 },
+            SpecProblem::TooManyTogether { count: 6, limit: 5 },
+        ] {
+            assert!(
+                correction_prompt(std::slice::from_ref(&problem), "en").contains("`"),
+                "{problem:?}"
+            );
+        }
     }
 }

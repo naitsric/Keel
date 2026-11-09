@@ -383,7 +383,13 @@ impl Inner {
             system_prompt_file,
             session_id: attempt.session_id.clone(),
             resume,
-            json_schema: workflows::schema_for(&spec.role).map(str::to_owned),
+            json_schema: if spec.role == keel_core::StepRole::Specifier
+                && self.agreement(&attempt.run_id)?.is_some()
+            {
+                Some(specs::plan_schema().to_owned())
+            } else {
+                workflows::schema_for(&spec.role).map(str::to_owned)
+            },
         };
         let args = command.args(spec);
         let version = auth::read_version(&claude, &tools.path_env);
@@ -1141,11 +1147,13 @@ impl Inner {
                     && !specs::answered_on(a).is_empty()
             })
             .count();
-        specs::judge(
-            this.and_then(|attempt| attempt.output.as_ref()),
-            fixing_a_limit,
-            rounds_answered,
-        )
+        let output = this.and_then(|attempt| attempt.output.as_ref());
+        match self.agreement(&m.run_id).ok().flatten() {
+            Some(agreement) => {
+                specs::judge_agreement(output, fixing_a_limit, rounds_answered, &agreement.names())
+            }
+            None => specs::judge(output, fixing_a_limit, rounds_answered),
+        }
     }
 
     /// What it answered, without anything an agent added beyond the structure. The whole answer as

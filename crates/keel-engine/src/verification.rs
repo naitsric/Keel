@@ -428,6 +428,8 @@ mod tests {
             limits: vec![],
             decided: vec![],
             questions: vec![],
+            parts: vec![],
+            together: vec![],
         }
     }
 
