@@ -7,6 +7,7 @@ import { BoardView } from "./views/BoardView";
 import { BrainPage } from "./views/BrainPage";
 import { Home } from "./views/Home";
 import { NewRunDialog } from "./views/NewRunDialog";
+import { ProjectProposals } from "./views/ProjectProposals";
 import { ProjectSetupDialog } from "./views/ProjectSetupDialog";
 import { RunDetail } from "./views/RunDetail";
 import { SettingsView } from "./views/SettingsView";
@@ -40,6 +41,7 @@ export default function App() {
       {/* First, so its commands register before a page's and the palette keeps them on top. */}
       <Shortcuts />
       <TopBar />
+      <ProjectProposals />
       {/* One page at a time, which scrolls by itself, so what's above and below it stays put. */}
       <div className="flex min-h-0 flex-1 flex-col">
         {view.name === "home" && <Home />}

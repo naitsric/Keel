@@ -4,7 +4,8 @@
 //!
 //! There is deliberately no tool to approve, reject, retry or abandon a step, to merge, to change a
 //! project's settings or saved workflows, or to let anything into the Brain. Those stay with the
-//! person, in the app. A client can propose a workflow, and only the person can save it.
+//! person, in the app. A client can propose a workflow or a project, and only the person can save
+//! the one or add the other.
 //! `tests/http.rs` fails if the list of tools grows without someone deciding so.
 
 use std::sync::Arc;
@@ -22,13 +23,14 @@ use serde_json::Value as Json;
 
 use crate::tools::{
     DraftWorkflowArgs, GetBrainArgs, GetRunArgs, GetStepArgs, ListIssuesArgs, ListProjectsArgs,
-    ListRunsArgs, ListWorkflowsArgs, StartRunArgs, StopRunArgs, WaitForRunArgs,
+    ListRunsArgs, ListWorkflowsArgs, ProposeProjectArgs, StartRunArgs, StopRunArgs, WaitForRunArgs,
 };
 use crate::{INSTRUCTIONS, McpServer, ToolError};
 
 const LIST_PROJECTS: &str = "List the projects in Keel: each one's id, name, GitHub repo and account, and the \
                              command that checks its work. Start here: the other tools take a project's id or \
-                             its name as `project`.";
+                             its name as `project`. `proposals` are the folders proposed with propose_project \
+                             that the person hasn't added yet, which aren't projects.";
 const LIST_WORKFLOWS: &str = "List the workflows a project can run: each one's id, name, and its steps with the \
                               model of each agent. start_run takes one of these ids. `drafts` are the ones \
                               proposed with draft_workflow that the person hasn't saved yet, which can't run.";
@@ -64,6 +66,16 @@ const DRAFT_WORKFLOW: &str = "Propose a workflow for a project, as a draft the p
                               a group. A draft can't ask for network, other folders or anything in the project's \
                               settings. Refused if this client may only read, or the project already has 20 \
                               drafts waiting.";
+const PROPOSE_PROJECT: &str = "Propose adding a git repository on this Mac to Keel, for the person to review in the \
+                               app. Nothing is added and nothing runs: it isn't a project, and start_run can't reach \
+                               it, until they add it. Adding is theirs alone, so tell them it's there. They choose \
+                               its GitHub account and commands, and adding it starts an agent that maps the repo, on \
+                               their Claude usage. `path` is the only thing you give, as a full path: a subfolder \
+                               proposes its repo, and the answer says which. list_projects shows it under \
+                               `proposals` while it waits, and under `projects` once added. Proposing the same \
+                               folder again returns the same proposal, and one already in Keel returns its project. \
+                               Refused if this client may only read, if it isn't a git repository with commits, or \
+                               if 10 proposals are waiting.";
 const STOP_RUN: &str = "Ask whatever a run has working to stop. It doesn't reject or abandon the run: what \
                         happens next is the person's decision in Keel. Refused if this client may only read.";
 
@@ -229,6 +241,21 @@ impl Handler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         reply(self.server.draft_workflow(client(&context)?, args).await)
+    }
+
+    #[tool(
+        name = "propose_project",
+        title = "Propose adding a project",
+        description = PROPOSE_PROJECT,
+        input_schema = input_schema::<ProposeProjectArgs>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn propose_project(
+        &self,
+        Parameters(args): Parameters<ProposeProjectArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        reply(self.server.propose_project(client(&context)?, args).await)
     }
 
     #[tool(

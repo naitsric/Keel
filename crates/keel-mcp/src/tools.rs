@@ -1,10 +1,13 @@
 //! What each tool does: plain methods of [`McpServer`], each leaving a row in the audit log. The
 //! engine blocks, so they run on tokio's blocking threads.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use keel_core::{StepRole, StepSpec, ToolProfile, WorkflowStep, mask_secrets, mask_value};
-use keel_engine::{Error, StartRun, request_from_issue};
+use keel_engine::{
+    Error, MAX_PROJECT_PROPOSALS, ProjectProposal, ProposedProject, StartRun, request_from_issue,
+};
 use keel_store::{Attempt, McpClient, NewMcpCall, Project};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -20,6 +23,7 @@ pub const MAX_OPEN_RUNS: i64 = 3;
 pub const MAX_DRAFTS: usize = 20;
 const MAX_DRAFT_NAME: usize = 80;
 const MAX_MODEL_NAME: usize = 100;
+const MAX_PROPOSED_PATH: usize = 1024;
 
 const MAX_TEXT: usize = 16 * 1024;
 const MAX_DIFF: usize = 64 * 1024;
@@ -126,6 +130,15 @@ pub struct StartRunArgs {
 pub struct StopRunArgs {
     /// A run's id.
     pub run: String,
+}
+
+// Only the folder. The account that pushes and the commands Keel runs are the person's to choose, so
+// a client has nowhere to name them.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProposeProjectArgs {
+    /// The full path of a git repository on this Mac, starting with `/`.
+    pub path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -248,7 +261,18 @@ impl McpServer {
         self.call(client, "list_projects", args, |server, _, _| {
             let projects = server.0.store.projects().map_err(store_error)?;
             let projects: Vec<Json> = projects.iter().map(project_view).collect();
-            Ok((json!({ "projects": projects }), None))
+            let proposals: Vec<Json> = server
+                .0
+                .engine
+                .project_proposals()
+                .map_err(engine_error)?
+                .iter()
+                .map(proposal_view)
+                .collect();
+            Ok((
+                json!({ "projects": projects, "proposals": proposals }),
+                None,
+            ))
         })
         .await
     }
@@ -558,6 +582,54 @@ impl McpServer {
         .await
     }
 
+    pub(crate) async fn propose_project(
+        &self,
+        client: McpClient,
+        args: ProposeProjectArgs,
+    ) -> Result<Json, ToolError> {
+        self.call(client, "propose_project", args, |server, client, args| {
+            if !client.can_run {
+                return Err(may_only_read());
+            }
+            let path = Path::new(&args.path);
+            if !path.is_absolute() || args.path.chars().count() > MAX_PROPOSED_PATH {
+                return Err(ToolError::new(format!(
+                    "Give the repository's full path, starting with `/`, in up to {MAX_PROPOSED_PATH} characters."
+                )));
+            }
+            let answer = match server
+                .0
+                .engine
+                .propose_project(path, &client.name)
+                .map_err(engine_error)?
+            {
+                ProposedProject::Waiting(proposal) => {
+                    let mut answer = proposal_view(&proposal);
+                    answer["state"] = json!("waitingForPerson");
+                    answer["who"] = json!(
+                        "The person, in Keel. There is no tool for this. It isn't a project, and no run can start on it, until they add it. They choose its GitHub account and commands, and adding it starts an agent that maps the repo. Tell them it's there."
+                    );
+                    answer
+                }
+                ProposedProject::InKeel(project) => {
+                    json!({ "state": "alreadyInKeel", "project": project_view(&project) })
+                }
+                ProposedProject::Full => {
+                    return Err(ToolError::new(format!(
+                        "{MAX_PROJECT_PROPOSALS} projects are already waiting, which is as many as may wait. The person adds or discards them in Keel."
+                    )));
+                }
+                ProposedProject::UnreadablePath => {
+                    return Err(ToolError::new(
+                        "This folder's path has characters Keel won't show as a proposal, because they could hide what it is. The person can add it by hand in Keel.",
+                    ));
+                }
+            };
+            Ok((answer, None))
+        })
+        .await
+    }
+
     pub(crate) async fn stop_run(
         &self,
         client: McpClient,
@@ -779,6 +851,15 @@ fn project_view(project: &Project) -> Json {
         "githubRepo": project.github_repo,
         "githubAccount": project.github_account,
         "checkCommand": project.check_command,
+    })
+}
+
+fn proposal_view(proposal: &ProjectProposal) -> Json {
+    json!({
+        "proposalId": proposal.id,
+        "path": proposal.path,
+        "proposedBy": proposal.proposed_by,
+        "createdAt": proposal.created_at,
     })
 }
 

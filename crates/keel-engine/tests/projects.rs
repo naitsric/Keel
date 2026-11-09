@@ -8,7 +8,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use keel_core::{BoardColumn, CardLane, Reason, WorkflowStep};
-use keel_engine::{AddOutcome, Config, Engine, Error, MapStart, StartRun, Workflow};
+use keel_engine::{
+    AddOutcome, Config, Engine, Error, MAX_PROJECT_PROPOSALS, MapStart, ProjectProposal,
+    ProposedProject, StartRun, Workflow,
+};
 use keel_harness::Tools;
 use keel_store::{Attempt, NewBrainNote, ProjectSettings, Store};
 
@@ -854,4 +857,215 @@ fn a_card_being_started_right_now_also_stops_the_removal() {
     w.store.release_claimed_cards().unwrap();
     w.engine.remove_project(&id).unwrap();
     assert_eq!(column(&w, &card), BoardColumn::Todo);
+}
+
+impl World {
+    fn propose(&self, path: &Path) -> ProjectProposal {
+        match self.engine.propose_project(path, "Claude Code").unwrap() {
+            ProposedProject::Waiting(proposal) => proposal,
+            other => panic!("expected it to wait for the person, got {other:?}"),
+        }
+    }
+
+    fn root(&self) -> String {
+        std::fs::canonicalize(&self.repo)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+#[test]
+fn a_proposal_adds_nothing_and_spends_nothing_until_the_person_adds_it() {
+    let w = world(true);
+    let proposal = w.propose(&w.repo);
+    assert_eq!(proposal.path, w.root());
+    assert_eq!(proposal.proposed_by, "Claude Code");
+    assert!(w.store.projects().unwrap().is_empty());
+    assert!(
+        w.store.runs(10).unwrap().is_empty(),
+        "no map behind their back"
+    );
+    assert_eq!(w.agents_run(), 0);
+
+    let added = w
+        .engine
+        .accept_project_proposal(&proposal.id, "en")
+        .unwrap();
+    assert_eq!(added.outcome, AddOutcome::New);
+    assert_eq!(
+        added.map,
+        Some(MapStart::Started),
+        "the same as adding it by hand"
+    );
+    assert_eq!(added.project.path, w.root());
+    assert_eq!(added.project.github_account, None, "the person chooses it");
+    assert_eq!(added.project.check_command, None, "the person chooses it");
+    assert!(w.engine.project_proposals().unwrap().is_empty());
+}
+
+#[test]
+fn discarding_a_proposal_leaves_nothing_behind() {
+    let w = world(true);
+    let proposal = w.propose(&w.repo);
+    w.engine.discard_project_proposal(&proposal.id).unwrap();
+    assert!(w.engine.project_proposals().unwrap().is_empty());
+    assert!(w.store.projects().unwrap().is_empty());
+    assert!(matches!(
+        w.engine.accept_project_proposal(&proposal.id, "en"),
+        Err(Error::InvalidState)
+    ));
+}
+
+#[test]
+fn the_same_folder_proposed_twice_asks_the_person_once() {
+    let w = world(true);
+    let first = w.propose(&w.repo);
+    let inner = w.repo.join("inner");
+    std::fs::create_dir(&inner).unwrap();
+    // From a subfolder it's the repo that gets proposed, as that's what adding it would add.
+    assert_eq!(w.propose(&inner), first);
+    assert_eq!(w.engine.project_proposals().unwrap().len(), 1);
+}
+
+#[test]
+fn a_folder_that_is_no_repo_is_not_left_for_the_person() {
+    let w = world(true);
+    let plain = w.dir.path().join("plain");
+    std::fs::create_dir(&plain).unwrap();
+    for path in [plain.clone(), w.dir.path().join("nowhere")] {
+        assert!(matches!(
+            w.engine.propose_project(&path, "Claude Code"),
+            Err(Error::NotARepo(_))
+        ));
+    }
+    assert!(w.engine.project_proposals().unwrap().is_empty());
+}
+
+#[test]
+fn a_project_that_is_already_in_keel_is_answered_and_not_proposed() {
+    let w = world(true);
+    let id = w.add();
+    match w.engine.propose_project(&w.repo, "Claude Code").unwrap() {
+        ProposedProject::InKeel(project) => assert_eq!(project.id, id),
+        other => panic!("expected the project, got {other:?}"),
+    }
+    assert!(w.engine.project_proposals().unwrap().is_empty());
+}
+
+#[test]
+fn a_removed_project_can_be_proposed_and_says_it_comes_back() {
+    let w = world(true);
+    let id = w.add();
+    w.engine.remove_project(&id).unwrap();
+    let proposal = w.propose(&w.repo);
+    let review = w.engine.project_proposal_reviews().unwrap().remove(0);
+    assert!(review.returning);
+    assert!(!review.gone);
+
+    let added = w
+        .engine
+        .accept_project_proposal(&proposal.id, "en")
+        .unwrap();
+    assert_eq!(added.outcome, AddOutcome::Restored);
+    assert_eq!(added.project.id, id);
+    assert_eq!(added.map, None);
+}
+
+#[test]
+fn adding_a_folder_by_hand_answers_its_proposal() {
+    let w = world(true);
+    w.propose(&w.repo);
+    w.engine.add_project(&w.repo).unwrap();
+    assert!(w.engine.project_proposals().unwrap().is_empty());
+}
+
+#[test]
+fn a_review_says_what_the_folder_is_now() {
+    let w = world(true);
+    let proposal = w.propose(&w.repo);
+    git(
+        &w.repo,
+        &["remote", "add", "origin", "https://github.com/octo/app.git"],
+    );
+    let review = w.engine.project_proposal_reviews().unwrap().remove(0);
+    assert_eq!(review.name, "app");
+    assert_eq!(review.github_repo.as_deref(), Some("octo/app"));
+    assert!(!review.returning);
+    assert!(!review.gone);
+    assert_eq!(review.proposal, proposal);
+    let shown = serde_json::to_value(&review).unwrap();
+    assert_eq!(shown["proposedBy"], "Claude Code");
+    assert_eq!(shown["githubRepo"], "octo/app");
+}
+
+#[test]
+fn a_folder_that_changed_since_it_was_proposed_cannot_be_added() {
+    let w = world(true);
+    let proposal = w.propose(&w.repo);
+    std::fs::remove_dir_all(w.repo.join(".git")).unwrap();
+    let review = w.engine.project_proposal_reviews().unwrap().remove(0);
+    assert!(review.gone);
+    assert!(matches!(
+        w.engine.accept_project_proposal(&proposal.id, "en"),
+        Err(Error::NotARepo(_))
+    ));
+    assert!(w.store.projects().unwrap().is_empty());
+    assert_eq!(
+        w.engine.project_proposals().unwrap().len(),
+        1,
+        "still theirs to discard"
+    );
+
+    // Inside another repo now, adding it would add something they never saw.
+    git(w.dir.path(), &["init", "-q", "-b", "main"]);
+    git(w.dir.path(), &["config", "user.name", "T"]);
+    git(w.dir.path(), &["config", "user.email", "t@example.com"]);
+    git(w.dir.path(), &["add", "app/README.md"]);
+    git(w.dir.path(), &["commit", "-qm", "around it"]);
+    assert!(w.engine.project_proposal_reviews().unwrap().remove(0).gone);
+    assert!(matches!(
+        w.engine.accept_project_proposal(&proposal.id, "en"),
+        Err(Error::NotARepo(_))
+    ));
+    assert!(w.store.projects().unwrap().is_empty());
+}
+
+#[test]
+fn only_so_many_proposals_may_wait_and_asking_again_for_one_still_answers() {
+    let w = world(true);
+    let mut first = None;
+    for i in 0..MAX_PROJECT_PROPOSALS {
+        let repo = w.dir.path().join(format!("repo-{i}"));
+        new_repo(&repo);
+        first.get_or_insert(w.propose(&repo));
+    }
+    let another = w.dir.path().join("another");
+    new_repo(&another);
+    assert!(matches!(
+        w.engine.propose_project(&another, "Claude Code").unwrap(),
+        ProposedProject::Full
+    ));
+    assert_eq!(
+        w.engine.project_proposals().unwrap().len(),
+        MAX_PROJECT_PROPOSALS
+    );
+    let first = first.unwrap();
+    assert_eq!(w.propose(Path::new(&first.path)), first);
+
+    // Once the person deals with one, there's room again.
+    w.engine.discard_project_proposal(&first.id).unwrap();
+    w.propose(&another);
+}
+
+#[test]
+fn a_path_that_could_hide_what_it_is_is_not_left_for_the_person() {
+    let w = world(true);
+    let repo = w.dir.path().join("cod\u{202E}gpj");
+    new_repo(&repo);
+    assert!(matches!(
+        w.engine.propose_project(&repo, "Claude Code").unwrap(),
+        ProposedProject::UnreadablePath
+    ));
+    assert!(w.engine.project_proposals().unwrap().is_empty());
 }

@@ -91,6 +91,8 @@ A client can read projects, workflows, runs, issues and the Brain. If you allow 
 
 A workflow a client proposes is a draft on the **Workflows** page. It shows the commands it would run, the agents that could change files, and any work that would happen after your approval. Nothing can run it until you save it, you can change it first, and saving always creates a new workflow rather than replacing one.
 
+A project a client proposes waits in a bar at the top of the window, with its folder and GitHub repository. It isn't added, and nothing can run on it, until you add it. Then you choose its account and commands as with any other, and its map starts. All a client can name is the folder.
+
 Connecting stores the token in Claude Code's own configuration, `~/.claude.json`, as it does for any MCP server.
 
 ## License
