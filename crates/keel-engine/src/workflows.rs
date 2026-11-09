@@ -651,7 +651,7 @@ fn slug(name: &str) -> String {
 }
 
 /// Keeps a file name inside the folder, whatever id comes in.
-fn safe_file(dir: &Path, id: &str) -> io::Result<std::path::PathBuf> {
+pub(crate) fn safe_file(dir: &Path, id: &str) -> io::Result<std::path::PathBuf> {
     if id.is_empty() || id.contains(['/', '\\']) || id.contains("..") || id.starts_with("builtin:")
     {
         return Err(io::Error::new(

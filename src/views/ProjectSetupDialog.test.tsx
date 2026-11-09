@@ -24,8 +24,9 @@ const PROJECT: Project = {
   defaultWorkflow: "mine",
   sensitivePaths: ["billing/"],
 };
-const NO_GUESS: Guess = { check: null, setup: null, from: [] };
-const PNPM: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"] };
+const NO_GUESS: Guess = { check: null, setup: null, from: [], setupOptions: [], checkOptions: [] };
+const PNPM: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"] };
+const UV: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: ["uv.lock", "pyproject.toml"], setupOptions: ["--group stubs", "--group test"], checkOptions: [] };
 const ACCOUNT = (login: string) => ({ login, active: false, ok: true, scopes: ["repo"] });
 
 interface Scene {
@@ -220,6 +221,51 @@ describe("the setup dialog", () => {
       expect(page()).toContain("Guessed from");
       await type(inputs()[0], "pnpm test:unit");
       expect(page()).not.toContain("Guessed from");
+    });
+  });
+
+  describe("what the repo offers to add", () => {
+    const option = (text: string) => [...document.querySelectorAll("button")].find((button) => button.textContent === text);
+
+    it("offers only what the command doesn't have yet, and adds what's chosen", async () => {
+      await show({ guess: UV });
+      expect(option("--group test")).toBeUndefined();
+      await act(async () => option("--group stubs")!.click());
+      expect(inputs()[1].value).toBe("uv sync --frozen --group test --group stubs");
+      expect(option("--group stubs")).toBeUndefined();
+    });
+
+    it("offers a saved project the group it's missing and changes nothing until it's chosen", async () => {
+      await show({ project: { ...PROJECT, checkCommand: "uv run --frozen pytest", setupCommand: "uv sync --frozen" }, guess: UV });
+      expect(inputs()[1].value).toBe("uv sync --frozen");
+      await act(async () => option("--group test")!.click());
+      expect(inputs()[1].value).toBe("uv sync --frozen --group test");
+    });
+
+    it("offers no flags for a setup command that isn't uv's", async () => {
+      await show({ project: { ...PROJECT, setupCommand: "make deps" }, guess: UV });
+      expect(option("--group stubs")).toBeUndefined();
+    });
+
+    it("makes a check that was added have to pass too", async () => {
+      await show({ guess: PNPM });
+      expect(option("pnpm test")).toBeUndefined();
+      await act(async () => option("pnpm run lint")!.click());
+      expect(inputs()[0].value).toBe("pnpm test && pnpm run lint");
+    });
+
+    it("adds nothing to a project with nothing to offer", async () => {
+      await show({ guess: NO_GUESS });
+      expect(page()).not.toContain("You can also add");
+    });
+
+    it("forgets a trial, since it only speaks for the commands it ran", async () => {
+      await show({ guess: PNPM, attempts: [{ id: "a", kind: "check", state: "succeeded", exitCode: 0, reason: null }] });
+      await act(async () => button("Try it")!.click());
+      await settle();
+      expect(page()).toContain("It passed");
+      await act(async () => option("pnpm run lint")!.click());
+      expect(page()).not.toContain("It passed");
     });
   });
 

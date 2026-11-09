@@ -13,7 +13,7 @@ import { useCommands, type Command } from "./registry";
 import { answers, button, callsTo, calls, hideApp, note, paletteOpen, paletteRow, paletteRows, pressEnter, pressKey, pressMod, row, settle, showApp, tapShift, type, view } from "./testApp";
 
 /** The backend calls that decide, spend or can't be taken back. No command may ever reach one. */
-const DECIDES = ["approval_answer", "rework_limit_answer", "run_start", "attempt_retry", "attempt_abandon", "brain_accept", "brain_dismiss", "brain_retire", "brain_generate_map", "decision_retire", "card_move", "card_delete", "project_add", "project_remove", "project_try_check", "workflow_draft_save", "workflow_draft_discard"];
+const DECIDES = ["approval_answer", "rework_limit_answer", "run_start", "attempt_retry", "attempt_abandon", "brain_accept", "brain_dismiss", "brain_retire", "brain_generate_map", "decision_retire", "card_move", "card_delete", "project_add", "project_remove", "project_try_check", "workflow_draft_save", "workflow_draft_discard", "project_proposal_accept", "project_proposal_discard"];
 /** These arrive with the add-project work, so they may not be in api.ts yet. */
 const NOT_ALWAYS_THERE = ["project_remove", "project_try_check"];
 
@@ -21,7 +21,7 @@ const NOT_ALWAYS_THERE = ["project_remove", "project_try_check"];
 const DECIDING_WORDS = /approve|reject|retry|resume|abandon|accept|retire|dismiss|\bto ?do\b|\bstart|deliver|merge|remove|delete|another round/i;
 const DECIDING_WORDS_ES = /aprob|rechaz|reintent|reanud|abandon|acept|retir|descart|inici|entreg|fusion|elimin|otra ronda/i;
 /** The same calls, as the code writes them. */
-const DECIDING_CALL = /api\.(approvalAnswer|reworkLimitAnswer|runStart|attemptRetry|attemptAbandon|brainAccept|brainDismiss|brainRetire|brainGenerateMap|decisionRetire|cardMove|cardDelete|projectAdd|projectRemove|projectTryCheck|workflowDraftSave|workflowDraftDiscard)\b/;
+const DECIDING_CALL = /api\.(approvalAnswer|reworkLimitAnswer|runStart|attemptRetry|attemptAbandon|brainAccept|brainDismiss|brainRetire|brainGenerateMap|decisionRetire|cardMove|cardDelete|projectAdd|projectRemove|projectTryCheck|workflowDraftSave|workflowDraftDiscard|projectProposalAccept|projectProposalDiscard)\b/;
 
 /** The app's own code as text, by path. */
 const SOURCES = import.meta.glob<string>(["/src/**/*.{ts,tsx}", "!/src/**/*.test.{ts,tsx}"], { query: "?raw", import: "default", eager: true });

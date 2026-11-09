@@ -6,6 +6,7 @@ mod brain;
 mod deliver;
 mod detect;
 mod git;
+mod project_proposals;
 mod prompts;
 mod pull_requests;
 mod runner;
@@ -34,6 +35,7 @@ use keel_store::rusqlite_value::Value;
 use keel_store::{
     Decision, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
 };
+pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
 pub use prompts::full_workflow;
 use serde_json::json;
 pub use specs::{Answer, AnswerChoice};
@@ -59,6 +61,14 @@ pub enum Error {
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
+
+/// What a project in this folder is called, until the person renames it.
+fn folder_name(root: &Path) -> String {
+    root.file_name().map_or_else(
+        || root.to_string_lossy().into_owned(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
 
 fn gh_blocked(error: GhError) -> Error {
     Error::Blocked(Reason::DeliveryFailed {
@@ -226,6 +236,33 @@ pub struct AddedProject {
     pub outcome: AddOutcome,
     /// Only a new project starts one, so anything else says nothing about a map.
     pub map: Option<MapStart>,
+}
+
+/// What came of proposing a folder.
+#[derive(Debug, Clone)]
+pub enum ProposedProject {
+    /// It waits for the person, whether this call left it or an earlier one did.
+    Waiting(ProjectProposal),
+    /// It's a project already, so there's nothing for the person to decide.
+    InKeel(Box<Project>),
+    /// As many as may wait are waiting.
+    Full,
+    /// Its path could hide from the person what it really is.
+    UnreadablePath,
+}
+
+/// What the person needs to decide on a proposal, read from the folder as it is now.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectProposalReview {
+    #[serde(flatten)]
+    pub proposal: ProjectProposal,
+    pub name: String,
+    pub github_repo: Option<String>,
+    /// It was in Keel and was removed, so it comes back with its history and starts no map.
+    pub returning: bool,
+    /// It isn't the root of a repo with commits anymore, so all that's left is to discard it.
+    pub gone: bool,
 }
 
 /// What the setup dialog starts from.
@@ -449,8 +486,15 @@ impl Engine {
         })
     }
 
-    /// A folder already in Keel keeps its row, so a removed one comes back with its history.
+    /// However a folder got added, a proposal to add it has its answer.
     fn add_folder(&self, path: &Path) -> Result<(Project, AddOutcome)> {
+        let added = self.add_or_restore(path)?;
+        self.inner.settle_project_proposals(&added.0.path);
+        Ok(added)
+    }
+
+    /// A folder already in Keel keeps its row, so a removed one comes back with its history.
+    fn add_or_restore(&self, path: &Path) -> Result<(Project, AddOutcome)> {
         let git = self.git()?;
         let root = git
             .toplevel(path)
@@ -470,12 +514,9 @@ impl Engine {
             }
             return Ok((project, outcome));
         }
-        let name = root
-            .file_name()
-            .map_or_else(|| root_text.clone(), |n| n.to_string_lossy().into_owned());
         let project = Project {
             id: new_id(),
-            name,
+            name: folder_name(&root),
             path: root_text,
             created_at: now(),
             github_account: None,
@@ -1270,6 +1311,96 @@ impl Engine {
         )?)
     }
 
+    /// Leaves a folder for the person to review. Nothing is added and nothing runs until they say
+    /// so, and a subfolder is proposed as its repo, as adding it would add. The same folder proposed
+    /// again is the same proposal, so asking twice doesn't ask them twice.
+    pub fn propose_project(&self, path: &Path, proposed_by: &str) -> Result<ProposedProject> {
+        let root = self
+            .git()?
+            .toplevel(path)
+            .map_err(|_| Error::NotARepo(path.to_string_lossy().into_owned()))?;
+        let root = root.to_string_lossy().into_owned();
+        if !project_proposals::readable_path(&root) {
+            return Ok(ProposedProject::UnreadablePath);
+        }
+        let store = &self.inner.store;
+        if let Some(project) = store.project_by_path(&root)?
+            && !store.project_is_removed(&project.id)?
+        {
+            return Ok(ProposedProject::InKeel(Box::new(project)));
+        }
+        let dir = self.inner.project_proposals_dir();
+        let waiting = project_proposals::load(&dir)?;
+        if let Some(proposal) = waiting.iter().find(|proposal| proposal.path == root) {
+            return Ok(ProposedProject::Waiting(proposal.clone()));
+        }
+        if waiting.len() >= MAX_PROJECT_PROPOSALS {
+            return Ok(ProposedProject::Full);
+        }
+        let proposal = ProjectProposal {
+            id: new_id(),
+            path: root,
+            proposed_by: proposed_by.to_owned(),
+            created_at: now(),
+        };
+        project_proposals::save(&dir, &proposal)?;
+        self.inner.changed("");
+        Ok(ProposedProject::Waiting(proposal))
+    }
+
+    /// What's waiting, newest first. It reads nothing but its own files, so a page can ask often.
+    pub fn project_proposals(&self) -> Result<Vec<ProjectProposal>> {
+        Ok(project_proposals::load(
+            &self.inner.project_proposals_dir(),
+        )?)
+    }
+
+    /// What's waiting, with what the person needs to see of each folder.
+    pub fn project_proposal_reviews(&self) -> Result<Vec<ProjectProposalReview>> {
+        let git = self.git()?;
+        let store = &self.inner.store;
+        self.project_proposals()?
+            .into_iter()
+            .map(|proposal| {
+                let root = PathBuf::from(&proposal.path);
+                let returning = match store.project_by_path(&proposal.path)? {
+                    Some(project) => store.project_is_removed(&project.id)?,
+                    None => false,
+                };
+                Ok(ProjectProposalReview {
+                    name: folder_name(&root),
+                    github_repo: git
+                        .origin_url(&root)
+                        .and_then(|url| github::github_repo(&url)),
+                    returning,
+                    gone: git.toplevel(&root).ok().as_deref() != Some(root.as_path()),
+                    proposal,
+                })
+            })
+            .collect()
+    }
+
+    /// The person adds what they were shown: that folder, and not whatever's around it by now. From
+    /// here on it's the same as adding it by hand, map included.
+    pub fn accept_project_proposal(&self, id: &str, language: &str) -> Result<AddedProject> {
+        let proposal = self
+            .project_proposals()?
+            .into_iter()
+            .find(|proposal| proposal.id == id)
+            .ok_or(Error::InvalidState)?;
+        let root = PathBuf::from(&proposal.path);
+        if self.git()?.toplevel(&root).ok().as_deref() != Some(root.as_path()) {
+            return Err(Error::NotARepo(proposal.path));
+        }
+        self.add_project_with_map(&root, language)
+    }
+
+    pub fn discard_project_proposal(&self, id: &str) -> Result<()> {
+        project_proposals::delete(&self.inner.project_proposals_dir(), id)?;
+        self.inner.changed("");
+        Ok(())
+    }
+
     /// Leaves a proposed workflow for the person to review. It follows the same rules as any other,
     /// but [`Engine::workflows`] doesn't see it, so nothing can run it until they save it.
     pub fn draft_workflow(
@@ -1405,6 +1536,26 @@ impl Inner {
 
     fn workspace(&self, run_id: &str) -> PathBuf {
         self.run_dir(run_id).join("workspace")
+    }
+
+    fn project_proposals_dir(&self) -> PathBuf {
+        self.config.data_dir.join("project-proposals")
+    }
+
+    /// Not being able to tidy up doesn't undo adding the project, so this never fails. One left
+    /// behind only adds what's already there.
+    fn settle_project_proposals(&self, root: &str) {
+        let dir = self.project_proposals_dir();
+        let Ok(waiting) = project_proposals::load(&dir) else {
+            return;
+        };
+        let mut settled = false;
+        for proposal in waiting.iter().filter(|proposal| proposal.path == root) {
+            settled |= project_proposals::delete(&dir, &proposal.id).is_ok();
+        }
+        if settled {
+            self.changed("");
+        }
     }
 
     fn drafts_dir(&self, project_id: &str) -> PathBuf {

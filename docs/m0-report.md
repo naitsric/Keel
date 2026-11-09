@@ -59,6 +59,31 @@ a bridge for databases in Docker. Linux waits until it has a safe option, so v0.
 A real agent and a real check have since reached Postgres in Docker this way, with direct TCP
 still blocked (`crates/keel-engine/examples/services_e2e.rs`).
 
+### Reading a folder outside the workspace
+
+Tested on 2026-11-09 with Claude Code 2.1.319 and Haiku, under the final policy, before letting a
+run read another repo. One folder was allowed and one next to it wasn't, both inside the home
+folder. Results come from what each tool returned and from the disk, not from what the agent
+said. `crates/keel-engine/examples/read_outside.rs` repeats the first row. The other rows ran the
+same command by hand with `--add-dir`, which Keel doesn't pass yet.
+
+| Allowed folder given as | Read, Grep, Glob | Edit, Write | Bash read | Bash write |
+|---|---|---|---|---|
+| `allowRead` only | Blocked | Not tried | Works | Not tried |
+| `allowRead` and `--add-dir` | Works | **Works** | Not tried | **Works** |
+| `allowRead`, `--add-dir` and `Edit(//<folder>/**)` denied | Read works | Blocked | Not tried | Blocked |
+
+- **The folder next to it** stayed closed in every row: the file tools were refused, and Bash got
+  `Operation not permitted`.
+- **The file tools:** `--restricted` confines them to the working directory whatever the sandbox
+  allows ("--restricted confines the file tools to the working directory"). So a project's
+  `allowed_read` reaches commands only: Bash, the check and setup. Agents with read-only tools,
+  which have no Bash, can't read those folders at all.
+- **`--add-dir`:** it opens the folder to writes as well, Bash included, so it always needs the
+  `Edit` deny rule.
+- **To let an agent read a folder without changing it:** pass the folder with `--add-dir`, keep
+  it in `allowRead` for Bash, and deny `Edit` on it.
+
 ## Findings for the harness
 
 - `subtype` is not enough. A bad API key returned `subtype: success` with `is_error: true`.

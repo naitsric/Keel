@@ -2053,6 +2053,7 @@ dependencies = [
  "serde_yaml_ng",
  "tempfile",
  "thiserror 2.0.21",
+ "toml 1.2.0+spec-1.1.0",
  "uuid",
 ]
 

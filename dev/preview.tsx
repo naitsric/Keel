@@ -12,7 +12,7 @@ import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
 import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
-import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, PrState, Project, ProjectAdded, Reason, Run, RunRow, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
+import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunRow, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
 import { useApp } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -230,6 +230,12 @@ const runWorkflow: WorkflowStep[] =
 // node=<a step's name> selects it once the page has loaded, and saveProblem=noPrompt:builder makes
 // saving fail like that (with click=Save a copy to press it). Add theme=light to any of them.
 /** `draft=late` has work happening after the person's approval, which the review has to call out. */
+const proposedProjects: ProjectProposal[] = [
+  { id: "pp2", path: "/Users/you/www/billing-api", name: "billing-api", githubRepo: "octo/billing-api", proposedBy: "Claude Code", createdAt: "2026-11-06T15:40:00.000Z", returning: false, gone: false },
+  { id: "pp1", path: "/Users/you/www/app-movil", name: "app-movil", githubRepo: null, proposedBy: "Claude Code", createdAt: "2026-11-06T15:30:00.000Z", returning: params.get("proposed") === "returning", gone: params.get("proposed") === "gone" },
+];
+const projectsProposed = params.get("proposed") ? proposedProjects.slice(params.get("proposed") === "2" ? 0 : 1) : [];
+
 const draftsWaiting: WorkflowDraft[] = [
   {
     id: "d1",
@@ -458,15 +464,15 @@ const projects = view === "board" || palette || params.get("drafts") === "1" ? [
 // keeps the runs of projects that are all gone.
 const freshProject: Project = { ...otherProject, id: "p3", name: "shop", path: "/Users/you/www/shop", githubAccount: null, githubRepo: params.get("repo") === "none" ? null : "acme/shop", setupCommand: null, checkCommand: null, allowedDomains: ["pypi.org"], allowedRead: [], services: [{ type: "bridge", name: "db", port: 5432, socket: null }], env: [{ name: "DB_HOST", value: "{{socketDir:db}}" }] };
 let listedProjects: Project[] = params.get("empty") === "1" ? [] : [...projects, ...(params.get("projects") === "mixed" || params.get("dialog") === "setup" ? [freshProject] : [])];
-const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[] }> = {
-  pnpm: { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"] },
-  npm: { check: "npm test", setup: "npm ci", from: ["package.json", "package-lock.json"] },
-  yarn: { check: "yarn test", setup: "yarn install --frozen-lockfile", from: ["package.json", "yarn.lock"] },
-  uv: { check: "uv run --frozen pytest", setup: "uv sync --frozen", from: ["uv.lock"] },
-  cargo: { check: "cargo test", setup: "cargo fetch", from: ["Cargo.toml"] },
-  go: { check: "go test ./...", setup: "go mod download", from: ["go.mod"] },
-  make: { check: "make test", setup: null, from: ["Makefile"] },
-  unknown: { check: null, setup: null, from: [] },
+const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[]; setupOptions: string[]; checkOptions: string[] }> = {
+  pnpm: { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run check:i18n", "pnpm run lint", "pnpm test", "pnpm run typecheck"] },
+  npm: { check: "npm test", setup: "npm ci", from: ["package.json", "package-lock.json"], setupOptions: [], checkOptions: [] },
+  yarn: { check: "yarn test", setup: "yarn install --frozen-lockfile", from: ["package.json", "yarn.lock"], setupOptions: [], checkOptions: [] },
+  uv: { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: ["uv.lock", "pyproject.toml"], setupOptions: ["--group notebook", "--group stubs", "--group test", "--group test-uv"], checkOptions: [] },
+  cargo: { check: "cargo test", setup: "cargo fetch", from: ["Cargo.toml"], setupOptions: [], checkOptions: [] },
+  go: { check: "go test ./...", setup: "go mod download", from: ["go.mod"], setupOptions: [], checkOptions: [] },
+  make: { check: "make test", setup: null, from: ["Makefile"], setupOptions: [], checkOptions: [] },
+  unknown: { check: null, setup: null, from: [], setupOptions: [], checkOptions: [] },
 };
 const addedAnswer = (): { project: Project; outcome: string; map: unknown } => {
   const outcome = params.get("added") ?? "new";
@@ -593,7 +599,7 @@ mockIPC((command, args) => {
       // A new object each time, as the real answer is.
       return { ...preflight };
     case "overview":
-      return params.get("empty") === "1" ? { pendingProposals: 0, workflowDrafts: 0, runs: params.get("history") === "1" ? runs : [], projects: listedProjects, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: params.get("proposals") === "1" ? 1 : 0, workflowDrafts: params.get("drafts") === "1" ? draftsWaiting.length : 0, runs, projects: listedProjects.map((p) => (p.id === "p1" ? { ...p, defaultWorkflow } : p)), totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
+      return params.get("empty") === "1" ? { pendingProposals: 0, workflowDrafts: 0, projectProposals: projectsProposed.length, runs: params.get("history") === "1" ? runs : [], projects: listedProjects, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: params.get("proposals") === "1" ? 1 : 0, workflowDrafts: params.get("drafts") === "1" ? draftsWaiting.length : 0, projectProposals: projectsProposed.length, runs, projects: listedProjects.map((p) => (p.id === "p1" ? { ...p, defaultWorkflow } : p)), totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
     case "plugin:dialog|open":
       return params.get("picker") === "cancel" ? null : freshProject.path;
     case "project_add":
@@ -645,6 +651,8 @@ mockIPC((command, args) => {
       ];
     case "workflow_results":
       return workflowResults;
+    case "project_proposals_list":
+      return projectsProposed;
     case "workflow_drafts_list":
       return params.get("drafts") === "1" ? draftsWaiting : [];
     case "workflow_draft_save":

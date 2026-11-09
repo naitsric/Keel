@@ -13,8 +13,8 @@ use keel_core::{
 };
 use keel_engine::{
     AddedProject, Answer, Board, BrainView, Config, Engine, Error as EngineError, GithubStatus,
-    Preflight, ProjectSetup, RawCheck, StartRun, Workflow, WorkflowDraft, request_from_issue,
-    title_from_issue,
+    Preflight, ProjectProposalReview, ProjectSetup, RawCheck, StartRun, Workflow, WorkflowDraft,
+    request_from_issue, title_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
@@ -136,6 +136,7 @@ struct Overview {
     projects: Vec<Project>,
     pending_proposals: i64,
     workflow_drafts: usize,
+    project_proposals: usize,
 }
 
 #[tauri::command(async)]
@@ -150,6 +151,10 @@ fn overview(state: State<'_, AppState>) -> CommandResult<Overview> {
             .engine
             .workflow_drafts()
             .map_or(0, |drafts| drafts.len()),
+        project_proposals: state
+            .engine
+            .project_proposals()
+            .map_or(0, |proposals| proposals.len()),
     })
 }
 
@@ -164,6 +169,29 @@ fn project_add(
     Ok(state
         .engine
         .add_project_with_map(Path::new(&path), &language)?)
+}
+
+#[tauri::command(async)]
+fn project_proposals_list(state: State<'_, AppState>) -> CommandResult<Vec<ProjectProposalReview>> {
+    Ok(state.engine.project_proposal_reviews()?)
+}
+
+/// The project isn't masked, for the same reason as in `project_add`.
+#[tauri::command(async)]
+fn project_proposal_accept(
+    state: State<'_, AppState>,
+    proposal_id: String,
+    language: String,
+) -> CommandResult<AddedProject> {
+    state.ready.wait();
+    Ok(state
+        .engine
+        .accept_project_proposal(&proposal_id, &language)?)
+}
+
+#[tauri::command(async)]
+fn project_proposal_discard(state: State<'_, AppState>, proposal_id: String) -> CommandResult<()> {
+    Ok(state.engine.discard_project_proposal(&proposal_id)?)
 }
 
 /// Not masked, for the same reason as in `overview`: the dialog saves it back.
@@ -918,6 +946,9 @@ pub fn run() {
             workflow_drafts_list,
             workflow_draft_save,
             workflow_draft_discard,
+            project_proposals_list,
+            project_proposal_accept,
+            project_proposal_discard,
             rework_limit_answer,
             run_attempts,
             project_update,
@@ -1136,6 +1167,7 @@ mod tests {
             }],
             pending_proposals: 0,
             workflow_drafts: 0,
+            project_proposals: 0,
         };
         let shown = serde_json::to_value(&overview).unwrap();
         assert_eq!(

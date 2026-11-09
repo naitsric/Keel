@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type Attempt, type AuditEvent, type GithubStatus, type MapStart, type ProjectSetup } from "../lib/api";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
-import { accountToSelect, commandNotFound, shortPath, trialOutcome, withSetup } from "../lib/projects";
+import { accountToSelect, checkOptionsLeft, commandNotFound, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withSetup, withSetupOption } from "../lib/projects";
 import { errorText, needsSignIn, reasonText } from "../lib/reason";
 import { type ProjectSetupRequest, useApp } from "../lib/store";
 import { Button, cx, Field, inputClass, Modal } from "../ui/primitives";
@@ -102,6 +102,28 @@ function TrialResult({ runId, onRunning, onOpenRun }: { runId: string; onRunning
         </button>
       </p>
       {output && <pre className="selectable mt-1.5 max-h-40 overflow-auto rounded border border-border bg-inset p-2 font-mono text-[11.5px] whitespace-pre-wrap">{[output.stdout, output.stderr].filter(Boolean).join("\n").trim() || t("setup.noOutput")}</pre>}
+    </div>
+  );
+}
+
+/** What the repo's own files say could go in a command. Nothing changes until one is chosen. */
+function OptionButtons({ options, onAdd }: { options: string[]; onAdd: (option: string) => void }) {
+  const { t } = useTranslation();
+  if (options.length === 0) return null;
+  return (
+    <div className="mt-1.5 flex flex-wrap items-center gap-1.5 text-[12px] text-muted">
+      <span>{t("setup.canAdd")}</span>
+      {options.map((option) => (
+        <button
+          key={option}
+          type="button"
+          aria-label={t("setup.addOption", { option })}
+          className="rounded border border-border px-1.5 py-0.5 font-mono text-[11.5px] text-accent hover:bg-inset"
+          onClick={() => onAdd(option)}
+        >
+          {option}
+        </button>
+      ))}
     </div>
   );
 }
@@ -348,11 +370,15 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
             </Button>
           </div>
         </Field>
+        {guess && <OptionButtons options={checkOptionsLeft(check, guess)} onAdd={(option) => changeCheck(withCheckOption(check, option))} />}
         {runId && <TrialResult key={runId} runId={runId} onRunning={setTrying} onOpenRun={() => leaveFor(() => navigate({ name: "run", runId }))} />}
       </div>
-      <Field label={t("settings.setupCommand")}>
-        <input value={setup} onChange={(e) => changeSetup(e.target.value)} placeholder={t("settings.setupCommandPlaceholder")} className={`${inputClass} font-mono`} />
-      </Field>
+      <div>
+        <Field label={t("settings.setupCommand")}>
+          <input value={setup} onChange={(e) => changeSetup(e.target.value)} placeholder={t("settings.setupCommandPlaceholder")} className={`${inputClass} font-mono`} />
+        </Field>
+        {guess && <OptionButtons options={setupOptionsLeft(setup, guess)} onAdd={(option) => changeSetup(withSetupOption(setup, guess, option))} />}
+      </div>
 
       <div className="space-y-0.5 text-[11.5px] leading-snug text-subtle">
         <p>
