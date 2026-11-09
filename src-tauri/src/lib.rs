@@ -919,6 +919,8 @@ pub fn run() {
             mcp::mcp_settings_save,
             mcp::mcp_client_create,
             mcp::mcp_client_set_can_run,
+            mcp::mcp_client_set_can_steer,
+            mcp::mcp_client_set_max_open_runs,
             mcp::mcp_client_revoke,
             mcp::mcp_connect_claude,
             run_get,

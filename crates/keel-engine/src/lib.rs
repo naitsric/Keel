@@ -38,8 +38,14 @@ use keel_store::{
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
 pub use prompts::full_workflow;
 use serde_json::json;
-pub use specs::{Answer, AnswerChoice};
-pub use workflows::{Workflow, WorkflowDraft};
+// What a reader outside the engine needs to tell what a run did and what it waits for, read the way
+// the engine reads it.
+pub use sizing::skipped_steps;
+pub use specs::of_attempt as spec_of_attempt;
+pub use specs::{Answer, AnswerChoice, Spec};
+pub use verification::of_attempt as verification_of_attempt;
+pub use verification::{Outcome, Verification};
+pub use workflows::{Workflow, WorkflowDraft, can_send_back, files_changed};
 
 const RESUME_PROMPT: &str = "Continue where you left off.";
 
@@ -989,6 +995,16 @@ impl Engine {
     /// round again after it. Their words stay in this run and don't become a decision, and the round
     /// doesn't count against the approver, since a person asked for it.
     pub fn send_back(&self, attempt_id: &str, instructions: &str) -> Result<()> {
+        self.send_back_as(attempt_id, instructions, None)
+    }
+
+    /// `send_back` for a client over MCP. The attempt and its event name it, so the person sees
+    /// who sent the work back.
+    pub fn send_back_by(&self, attempt_id: &str, instructions: &str, by: &str) -> Result<()> {
+        self.send_back_as(attempt_id, instructions, Some(by))
+    }
+
+    fn send_back_as(&self, attempt_id: &str, instructions: &str, by: Option<&str>) -> Result<()> {
         let store = &self.inner.store;
         let attempt = store.attempt(attempt_id)?;
         if attempt.state != AttemptState::WaitingApproval.as_str() {
@@ -1003,7 +1019,7 @@ impl Engine {
         if !workflows::can_send_back(&steps, &attempt.step_id) {
             return Err(Error::Blocked(Reason::NothingToSendBackTo));
         }
-        if !store.return_attempt(attempt_id, &attempt.run_id, instructions)? {
+        if !store.return_attempt(attempt_id, &attempt.run_id, instructions, by)? {
             return Err(Error::InvalidState);
         }
         self.inner.advance(&attempt.run_id)?;
@@ -1115,7 +1131,20 @@ impl Engine {
     /// Tries a step again in the same workspace. With `resume`, an agent continues its session
     /// instead of starting a new one. A failed delivery retries only the delivery.
     pub fn retry(&self, attempt_id: &str, resume: bool) -> Result<String> {
+        self.retry_as(attempt_id, resume, None)
+    }
+
+    /// `retry` for a client over MCP. The step it retries says who asked, so the person sees it.
+    pub fn retry_by(&self, attempt_id: &str, resume: bool, by: &str) -> Result<String> {
+        self.retry_as(attempt_id, resume, Some(by))
+    }
+
+    fn retry_as(&self, attempt_id: &str, resume: bool, by: Option<&str>) -> Result<String> {
         let store = &self.inner.store;
+        // Held from looking at the attempt until its next try is on the record, so two retries, or
+        // a retry and a close, can't both go through. `start_step` never takes it: `advance` and
+        // `answer_questions` call it while they hold it too.
+        let _guard = locked(&self.inner.advancing);
         let attempt = store.attempt(attempt_id)?;
         let state = AttemptState::parse(&attempt.state).ok_or(Error::InvalidState)?;
         // Those that wait for a person get answered, and one sent back has already moved on.
@@ -1130,18 +1159,29 @@ impl Engine {
         {
             return Err(Error::InvalidState);
         }
+        // A client only retries what went wrong, and never reopens a run the person, or a close,
+        // has ended. The person can.
+        if by.is_some()
+            && !matches!(
+                state,
+                AttemptState::Failed | AttemptState::Interrupted | AttemptState::Stopped
+            )
+        {
+            return Err(Error::InvalidState);
+        }
         let run = store.run(&attempt.run_id)?;
+        if by.is_some() && run.finished_at.is_some() {
+            return Err(Error::InvalidState);
+        }
         if store.project_is_removed(&run.project_id)? {
             return Err(Error::Blocked(Reason::ProjectRemoved));
         }
-        let number = store
-            .attempts_of_run(&attempt.run_id)?
-            .iter()
-            .filter(|a| a.step_id == attempt.step_id)
-            .map(|a| a.number)
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let attempts = store.attempts_of_run(&attempt.run_id)?;
+        // One that was tried again already has its next try. Another would run the step twice.
+        if !workflows::is_latest_of_its_step(&attempts, &attempt) {
+            return Err(Error::InvalidState);
+        }
+        let number = workflows::next_number(&attempts, &attempt.step_id);
         let steps: Vec<WorkflowStep> =
             serde_json::from_value(run.workflow.clone()).unwrap_or_default();
         let step = workflows::find_step(&steps, &attempt.step_id).ok_or(Error::InvalidState)?;
@@ -1150,6 +1190,14 @@ impl Engine {
             from: attempt.id.clone(),
             prompt: resumed_prompt(&attempt),
         });
+        // What really happens: a step that isn't an agent has no session to continue.
+        if let Some(by) = by {
+            store.append_event(
+                attempt_id,
+                "retryRequested",
+                &json!({ "by": by, "resume": resume.is_some() }),
+            )?;
+        }
         // Before the step starts: a quick one can be over, and have closed the run, by the time
         // `start_step` returns.
         if run.finished_at.is_some() {
@@ -1160,6 +1208,16 @@ impl Engine {
     }
 
     pub fn abandon(&self, attempt_id: &str) -> Result<()> {
+        self.abandon_as(attempt_id, None)
+    }
+
+    /// `abandon` for a client over MCP. Its event names the client, so the person sees who closed
+    /// the run.
+    pub fn abandon_by(&self, attempt_id: &str, by: &str) -> Result<()> {
+        self.abandon_as(attempt_id, Some(by))
+    }
+
+    fn abandon_as(&self, attempt_id: &str, by: Option<&str>) -> Result<()> {
         // So that cancelling and answering the same question can't both go through.
         let guard = locked(&self.inner.advancing);
         let attempt = self.inner.store.attempt(attempt_id)?;
@@ -1173,6 +1231,23 @@ impl Engine {
         {
             return Err(Error::InvalidState);
         }
+        // A client closes only an open run that's at rest, and on where it stands now. Closing
+        // doesn't stop anything, so a step still working would go on in a run that has ended.
+        if by.is_some() {
+            let store = &self.inner.store;
+            let run = store.run(&attempt.run_id)?;
+            let attempts = store.attempts_of_run(&attempt.run_id)?;
+            let working = attempts
+                .iter()
+                .any(|a| AttemptState::parse(&a.state).is_some_and(AttemptState::is_active));
+            if run.finished_at.is_some()
+                || state == AttemptState::Skipped
+                || working
+                || !workflows::is_latest_of_its_step(&attempts, &attempt)
+            {
+                return Err(Error::InvalidState);
+            }
+        }
         // Approving doesn't wait for `advancing`, and one that lands first has to stand.
         if !self
             .inner
@@ -1181,9 +1256,13 @@ impl Engine {
         {
             return Err(Error::InvalidState);
         }
+        let data = match by {
+            Some(by) => json!({ "by": by }),
+            None => json!({}),
+        };
         self.inner
             .store
-            .append_event(attempt_id, "abandoned", &json!({}))?;
+            .append_event(attempt_id, "abandoned", &data)?;
         self.inner
             .store
             .patch_run(&attempt.run_id, &[("finished_at", Value::Text(now()))])?;
@@ -1579,7 +1658,8 @@ impl Inner {
         })
     }
 
-    /// Records a step and sets it going.
+    /// Records a step and sets it going. Every caller holds `advancing`, so this never takes it:
+    /// the step itself runs on a thread of its own.
     fn start_step(
         self: &Arc<Self>,
         run_id: &str,

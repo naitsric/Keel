@@ -838,6 +838,52 @@ fn a_run_that_could_never_start_leaves_no_card_behind() {
     assert!(w.store.runs(10).unwrap().is_empty());
 }
 
+#[test]
+fn a_read_only_task_from_outside_ends_in_done_with_nothing_delivered() {
+    let w = world();
+    let WorkflowStep::Agent(mut step) = agent("task", ToolProfile::ReadOnly) else {
+        unreachable!()
+    };
+    step.prompt = "What does the login do?".into();
+    let run = w
+        .engine
+        .start_run_on_board(StartRun::one_step(w.project_id.clone(), step, "en".into()))
+        .unwrap();
+
+    let card = w.store.card_of_run(&run).unwrap().expect("it has a card");
+    let done = w.wait_column(&card, BoardColumn::Done);
+    assert_eq!(done.title, "What does the login do?");
+    assert_eq!(done.run_state, Some(AttemptState::Succeeded));
+    assert_eq!(done.pr_url, None);
+    assert_eq!(w.working(), 0);
+    assert!(w.github_writes().is_empty(), "{:?}", w.github_writes());
+    assert_eq!(w.remote_branches(), ["main"]);
+}
+
+#[test]
+fn a_run_from_outside_that_its_client_closes_keeps_what_its_card_says() {
+    let w = world();
+    let workflow = answer_step(&w.engine, &w.project_id);
+    let run = w
+        .engine
+        .start_run_on_board(outside_run(
+            &w,
+            steps_of(&w, &workflow),
+            "Add a triple function\n\nWith its test.",
+        ))
+        .unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    let approval = w.wait_approval(&run);
+
+    w.engine.abandon_by(&approval, "Claude Code").unwrap();
+    let closed = w.wait_column(&card, BoardColumn::Backlog);
+    assert_eq!(closed.title, "Add a triple function");
+    assert_eq!(closed.body, "Add a triple function\n\nWith its test.");
+    assert_eq!(closed.run_state, Some(AttemptState::Abandoned));
+    assert_eq!(closed.rejection, None);
+    assert!(w.github_writes().is_empty(), "{:?}", w.github_writes());
+}
+
 // Criterion 3: only as many as the limit work at once, and the rest enter in order.
 
 #[test]

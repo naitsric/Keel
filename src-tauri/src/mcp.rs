@@ -118,6 +118,32 @@ pub fn mcp_client_set_can_run(
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
     state.store.set_mcp_client_can_run(&id, can_run)?;
+    // Feedback only works with this on. It goes off with it, so it can't come back on unasked.
+    if !can_run {
+        state.store.set_mcp_client_can_steer(&id, false)?;
+    }
+    Ok(())
+}
+
+/// Lets it send work back, retry and close the runs it started. It also needs `can_run`.
+#[tauri::command(async)]
+pub fn mcp_client_set_can_steer(
+    id: String,
+    can_steer: bool,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    state.store.set_mcp_client_can_steer(&id, can_steer)?;
+    Ok(())
+}
+
+/// How many of its runs can be open at once. The store keeps it within bounds.
+#[tauri::command(async)]
+pub fn mcp_client_set_max_open_runs(
+    id: String,
+    max: i64,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    state.store.set_mcp_client_max_open_runs(&id, max)?;
     Ok(())
 }
 

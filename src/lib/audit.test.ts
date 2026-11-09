@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, commandsFrom, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, specifyingAttempt, specOf, stillGoing, toolSummary, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandsFrom, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, stillGoing, toolSummary, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -239,6 +239,58 @@ describe("the reviews of a round", () => {
   it("takes the approver's last answer, not a try that gave none", () => {
     const answered = a("approver", 0, { decision: "approve" });
     expect(reviewsOfRound([answered, a("approver", 0)], 0).approver).toBe(answered);
+  });
+});
+
+describe("work an assistant sent back", () => {
+  const returned = (round: number, output: unknown) => ({ state: "returned", round, output });
+
+  it("is what started this round, with who and what they asked", () => {
+    const attempts = [returned(0, { instructions: "Return 0", by: "Claude Code" }), { state: "waitingApproval", round: 1, output: null }];
+    expect(sentBackByAssistant(attempts, 1)).toEqual({ by: "Claude Code", instructions: "Return 0" });
+  });
+
+  it("is nothing when a person sent it back, or nobody did", () => {
+    expect(sentBackByAssistant([returned(0, { instructions: "Return 0" })], 1)).toBeNull();
+    expect(sentBackByAssistant([{ state: "succeeded", round: 0, output: { by: "Claude Code" } }], 1)).toBeNull();
+    expect(sentBackByAssistant([], 0)).toBeNull();
+  });
+
+  it("is nothing once something else started a later round", () => {
+    expect(sentBackByAssistant([returned(0, { instructions: "Return 0", by: "Claude Code" })], 2)).toBeNull();
+  });
+
+  it("finds the right one among several", () => {
+    const attempts = [returned(0, { instructions: "First", by: "Claude Code" }), returned(1, { instructions: "Second" }), returned(2, { instructions: "Third", by: "Cursor" })];
+    expect(sentBackByAssistant(attempts, 2)).toBeNull();
+    expect(sentBackByAssistant(attempts, 3)).toEqual({ by: "Cursor", instructions: "Third" });
+  });
+});
+
+describe("an assistant that closed the run", () => {
+  const ended = { finishedAt: "2026-11-09T10:00:00Z" };
+  const step = (id: string, stepId: string, state: string) => ({ id, stepId, state });
+  const closed = (attemptId: string, seq: number, by?: string): AuditEvent => ({ seq, attemptId, at: "2026-11-09T10:00:00Z", kind: "abandoned", data: by ? { by } : {} });
+  // Two reviews failed, and the assistant closed the run on the first one.
+  const reviews = [step("b", "builder", "succeeded"), step("s", "security", "abandoned"), step("u", "ux", "failed")];
+
+  it("is found on whichever step it closed", () => {
+    expect(closedByAssistant(ended, reviews, { s: [closed("s", 7, "Claude Code")] })).toBe("Claude Code");
+  });
+
+  it("is nothing while the run is open, or when the person closed it", () => {
+    expect(closedByAssistant({ finishedAt: null }, reviews, { s: [closed("s", 7, "Claude Code")] })).toBeNull();
+    expect(closedByAssistant(ended, reviews, { s: [closed("s", 7)] })).toBeNull();
+    expect(closedByAssistant(ended, reviews, {})).toBeNull();
+  });
+
+  it("goes by the last close, on steps as they stand", () => {
+    const both = [step("s", "security", "abandoned"), step("u", "ux", "abandoned")];
+    expect(closedByAssistant(ended, both, { s: [closed("s", 7, "Claude Code")], u: [closed("u", 9)] })).toBeNull();
+    expect(closedByAssistant(ended, both, { s: [closed("s", 9, "Claude Code")], u: [closed("u", 7)] })).toBe("Claude Code");
+    // The person tried that step again, and the run ended some other way.
+    const again = [step("s", "security", "abandoned"), step("s2", "security", "succeeded"), step("h", "human", "rejected")];
+    expect(closedByAssistant(ended, again, { s: [closed("s", 7, "Claude Code")] })).toBeNull();
   });
 });
 

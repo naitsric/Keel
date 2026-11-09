@@ -258,6 +258,15 @@ pub fn next_number(attempts: &[Attempt], step_id: &str) -> i64 {
         + 1
 }
 
+/// Whether nothing has tried this attempt's step since. `attempts` is the run's, in order.
+pub fn is_latest_of_its_step(attempts: &[Attempt], attempt: &Attempt) -> bool {
+    attempts
+        .iter()
+        .rev()
+        .find(|a| a.step_id == attempt.step_id)
+        .is_some_and(|latest| latest.id == attempt.id)
+}
+
 /// What the run has changed so far, going by the last step that looked.
 pub fn files_changed(attempts: &[Attempt]) -> Vec<String> {
     attempts
@@ -358,9 +367,15 @@ fn instructions_of(attempt: &Attempt) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// What was asked for last time, by the approver or by a person, for whoever works on or reviews
-/// this round. Reviewers need it too: a real run went in circles when one called out of scope what
-/// the approver had just asked for.
+/// The assistant that sent work back over MCP, which the engine writes next to its instructions.
+/// None when the person did.
+fn sent_back_by(attempt: &Attempt) -> Option<&str> {
+    attempt.output.as_ref()?.get("by")?.as_str()
+}
+
+/// What was asked for last time, by the approver, by a person, or by an assistant they allowed to,
+/// for whoever works on or reviews this round. Reviewers need it too: a real run went in circles
+/// when one called out of scope what the approver had just asked for.
 pub fn rework_text(attempts: &[Attempt], round: i64, language: &str) -> String {
     if round == 0 {
         return String::new();
@@ -380,30 +395,47 @@ pub fn rework_text(attempts: &[Attempt], round: i64, language: &str) -> String {
             };
             format!("{intro}\n{text}")
         });
+    // Whoever does the work should know whether the person said it or an assistant did.
     let from_person = last_round()
         .filter(|a| a.state == AttemptState::Returned.as_str())
-        .find_map(instructions_of)
-        .map(|text| {
-            let intro = if es {
-                "Una persona devolvió este trabajo. Esto es lo único que debe cambiar en esta ronda, y cuenta como parte del alcance:"
-            } else {
-                "A person sent this work back. This is the only thing to change in this round, and it counts as part of the scope:"
+        .find_map(|a| Some((instructions_of(a)?, sent_back_by(a))))
+        .map(|(text, by)| {
+            let intro = match (by, es) {
+                (None, true) => "Una persona devolvió este trabajo. Esto es lo único que debe cambiar en esta ronda, y cuenta como parte del alcance:".to_owned(),
+                (None, false) => "A person sent this work back. This is the only thing to change in this round, and it counts as part of the scope:".to_owned(),
+                (Some(by), true) => format!("{by}, un asistente que la persona autorizó, devolvió este trabajo. Esto es lo único que debe cambiar en esta ronda, y cuenta como parte del alcance:"),
+                (Some(by), false) => format!("{by}, an assistant the person allowed, sent this work back. This is the only thing to change in this round, and it counts as part of the scope:"),
             };
             format!("{intro}\n{text}")
         });
     // The spec doesn't run again, so nothing else remembers this. Without it, a later round reads a
     // person's change as a failure, and an approver can ask for it to be undone.
-    let earlier: Vec<String> = attempts
+    let returned: Vec<&Attempt> = attempts
         .iter()
         .filter(|a| a.round < round - 1 && a.state == AttemptState::Returned.as_str())
-        .filter_map(instructions_of)
-        .map(|text| format!("- {text}"))
         .collect();
+    let earlier: Vec<String> = returned
+        .iter()
+        .filter_map(|a| {
+            let text = instructions_of(a)?;
+            Some(match sent_back_by(a) {
+                None => format!("- {text}"),
+                Some(by) if es => {
+                    format!("- {text} (lo pidió {by}, un asistente que la persona autorizó)")
+                }
+                Some(by) => {
+                    format!("- {text} ({by}, an assistant the person allowed, asked for this)")
+                }
+            })
+        })
+        .collect();
+    let all_from_a_person = returned.iter().all(|a| sent_back_by(a).is_none());
     let still_stands = (!earlier.is_empty()).then(|| {
-        let intro = if es {
-            "Antes, una persona pidió esto. Sigue en pie, así que no lo deshagas:"
-        } else {
-            "Earlier, a person asked for this. It still stands, so don't undo it:"
+        let intro = match (all_from_a_person, es) {
+            (true, true) => "Antes, una persona pidió esto. Sigue en pie, así que no lo deshagas:",
+            (true, false) => "Earlier, a person asked for this. It still stands, so don't undo it:",
+            (false, true) => "Antes se pidió esto. Sigue en pie, así que no lo deshagas:",
+            (false, false) => "Earlier, this was asked for. It still stands, so don't undo it:",
         };
         format!("{intro}\n{}", earlier.join("\n"))
     });
@@ -1231,6 +1263,51 @@ mod tests {
             "{text}"
         );
         assert!(text.ends_with("Fix it"), "{text}");
+    }
+
+    #[test]
+    fn work_an_assistant_sent_back_says_it_was_that_assistant_and_not_the_person() {
+        let mut attempts = recorded(&[
+            ("human", "approval", "worker", Succeeded, ""),
+            ("human", "approval", "worker", Succeeded, ""),
+        ]);
+        attempts[1].round = 1;
+        with_output(
+            &mut attempts,
+            0,
+            "returned",
+            serde_json::json!({ "instructions": "Return 0 instead", "by": "Claude Code" }),
+        );
+        let text = rework_text(&attempts, 1, "en");
+        assert!(
+            text.starts_with("Claude Code, an assistant the person allowed, sent this work back."),
+            "{text}"
+        );
+        assert!(text.ends_with("Return 0 instead"), "{text}");
+        assert!(!text.contains("A person"), "{text}");
+        let text = rework_text(&attempts, 1, "es");
+        assert!(
+            text.starts_with("Claude Code, un asistente que la persona autorizó, devolvió"),
+            "{text}"
+        );
+
+        // A round later the person sends it back too, and both still stand.
+        with_output(
+            &mut attempts,
+            1,
+            "returned",
+            serde_json::json!({ "instructions": "Name it zero" }),
+        );
+        let text = rework_text(&attempts, 2, "en");
+        assert!(
+            text.starts_with(
+                "Earlier, this was asked for. It still stands, so don't undo it:\n- Return 0 instead (Claude Code, an assistant the person allowed, asked for this)"
+            ),
+            "{text}"
+        );
+        assert!(text.contains("\n\nA person sent this work back."), "{text}");
+        assert!(text.ends_with("\nName it zero"), "{text}");
+        assert!(rework_text(&attempts, 2, "es").starts_with("Antes se pidió esto."));
     }
 
     #[test]

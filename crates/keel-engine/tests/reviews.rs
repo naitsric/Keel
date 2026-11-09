@@ -34,7 +34,8 @@ fn git(repo: &Path, args: &[&str]) {
 }
 
 /// The prompt says who this is. Approvers take their decisions from a file, one line per call,
-/// and approve when it runs out. A reviewer's `sleep` proves reviews really run at once.
+/// and approve when it runs out. A reviewer's `sleep` proves reviews really run at once, and one
+/// keeps going for as long as `bin/hold` is there.
 fn fake(log: &Path, answers: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -67,6 +68,7 @@ BUILD*)
 REVIEW-NOANSWER*)
   result='{{"type":"result","subtype":"success","is_error":false,"result":"I looked.","num_turns":1}}';;
 REVIEW*)
+  while [ -f "$(dirname "$0")/hold" ]; do sleep 0.02; done
   sleep 0.4
   result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"total_cost_usd":0.01,"structured_output":{{"verdict":"changes","findings":["a.py:1 finding"],"summary":"one thing to fix"}}}}';;
 APPROVE*)
@@ -609,6 +611,67 @@ fn retrying_one_failed_review_leaves_the_others() {
         std::thread::sleep(Duration::from_millis(20));
     }
     assert_eq!(w.all(&run, "good").len(), 1, "the good one stays");
+}
+
+#[test]
+fn a_client_closes_a_run_only_where_it_stands_and_once_nothing_in_it_works() {
+    let w = world();
+    let hold = w.dir.path().join("bin/hold");
+    std::fs::write(&hold, "").unwrap();
+    let reviewer = |id: &str, paths: &[&str], prompt: &str| {
+        spec(id, ToolProfile::ReadOnly, StepRole::Reviewer, paths, prompt)
+    };
+    let steps = vec![
+        WorkflowStep::Agent(spec(
+            "builder",
+            ToolProfile::Build,
+            StepRole::Worker,
+            &[],
+            "BUILD",
+        )),
+        WorkflowStep::Parallel {
+            id: "reviews".into(),
+            steps: vec![
+                reviewer("good", &[], "REVIEW good"),
+                reviewer("silent", &[], "REVIEW-NOANSWER"),
+                reviewer("nothing", NO_MATCH, "REVIEW nothing"),
+            ],
+        },
+    ];
+    let run = w.start(steps);
+    let failed = w.wait(&run, "silent", AttemptState::Failed);
+    let closes = |attempt: &str| w.engine.abandon_by(attempt, "Claude Code");
+    let refused = |attempt: &str| matches!(closes(attempt), Err(Error::InvalidState));
+
+    // Closing stops nothing, so the review still going would go on in a run that has ended.
+    let good = w.all(&run, "good").pop().unwrap();
+    assert!(
+        AttemptState::parse(&good.state).unwrap().is_active(),
+        "{good:?}"
+    );
+    assert!(refused(&failed.id));
+    // What went through, or wasn't needed, isn't where the run stands.
+    assert!(refused(&w.all(&run, "builder")[0].id));
+    assert!(refused(&w.wait(&run, "nothing", AttemptState::Skipped).id));
+
+    std::fs::remove_file(&hold).unwrap();
+    w.wait(&run, "good", AttemptState::Succeeded);
+    w.engine.retry(&failed.id, false).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while w.all(&run, "silent").len() < 2 || w.all(&run, "silent")[1].state != "failed" {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    // Nor one tried again since.
+    assert!(refused(&failed.id));
+    assert!(w.store.run(&run).unwrap().finished_at.is_none());
+    assert_eq!(w.store.attempt(&failed.id).unwrap().state, "failed");
+
+    let again = w.all(&run, "silent").pop().unwrap();
+    closes(&again.id).unwrap();
+    assert!(w.store.run(&run).unwrap().finished_at.is_some());
+    // Once it has ended, there's nothing left to close.
+    assert!(refused(&again.id));
 }
 
 #[test]

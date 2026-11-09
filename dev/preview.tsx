@@ -300,6 +300,13 @@ const WHY_MOVED_UP: Reason[] =
         { code: "personAsked" },
       ]
     : [{ code: "sensitiveFiles", files: [".github/workflows/ci.yml"], total: 1 }, { code: "tooManyLines", lines: 512, limit: 400 }];
+// What an assistant over MCP did, in place of the person: by=1 has Claude Code send back flow=returned
+// (node=approval shows it), or close the run with state=abandoned. flow=sentBack is the approval it
+// comes back to, which says why. task=1 is a read-only task it started, with no saved workflow.
+const assistantBy = params.get("by") === "1" || params.get("flow") === "sentBack" ? "Claude Code" : null;
+const sentBackWith = say("Return 0 instead of raising when the list is empty.", "Devuelve 0 en vez de lanzar un error cuando la lista está vacía.");
+const returnedApproval = ran("approval", "returned", { kind: "approval", tools: "none", modelRequested: "", modelActual: null, output: { instructions: sentBackWith, ...(assistantBy ? { by: assistantBy } : {}) } as unknown as Attempt["output"] });
+const nextRound = (a: Attempt): Attempt => ({ ...a, id: `${a.stepId}-1-2`, round: 1, number: 2 });
 const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Attempt[]; round: number }> = {
   small: { steps: fittingSteps, round: 0, attempts: [specRan, builderRan(), checkRan(), verifierAttempt("succeeded"), skippedAsSmallRan("security"), skippedAsSmallRan("ux"), skippedAsSmallRan("ui"), skippedAsSmallRan("code"), skippedAsSmallRan("approver", "approver"), humanWaits] },
   asked: { steps: fittingSteps, round: 0, attempts: [specRan, builderRan(), checkRan(), verifierAttempt("succeeded"), skippedAsSmallRan("security"), skippedAsSmallRan("ux"), skippedAsSmallRan("ui"), skippedAsSmallRan("code"), skippedAsSmallRan("approver", "approver"), ran("approval", "postponed", { kind: "approval", tools: "none", modelRequested: "", modelActual: null }), reviewRan("security", "running", { number: 2, modelActual: "claude-sonnet-5-5", finishedAt: null }), reviewRan("ux", "skipped", { number: 2 }), reviewRan("ui", "skipped", { number: 2 }), reviewRan("code", "running", { number: 2, modelActual: "claude-sonnet-5-5", finishedAt: null })] },
@@ -318,7 +325,8 @@ const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Atte
   questions: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...questionAttempts] },
   corrected: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...correctedAttempts] },
   // A person sent it back: the approval they answered says so, and the run is on its next round.
-  returned: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), ran("approval", "returned", { kind: "approval", tools: "none", modelRequested: "", modelActual: null, output: { instructions: "Return 0 instead" } as unknown as Attempt["output"] }), builderRan({ round: 1, number: 2, state: "running", finishedAt: null })] },
+  returned: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), returnedApproval, builderRan({ round: 1, number: 2, state: "running", finishedAt: null })] },
+  sentBack: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), returnedApproval, ...[builderRan({ resultText: "I made add return 0 for an empty list." }), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), humanWaits].map(nextRound)] },
 };
 const flowScene = FLOW_SCENES[params.get("flow") ?? ""];
 const note = (seq: number, text: string, paths: string[]): BrainNote => ({ seq, projectId: "p1", kind: "map", state: "active", text, evidence: null, paths, commitSha: "4f4c706aa11", runId: "r1", attemptId: "a1", createdAt: at(4000), decidedAt: null });
@@ -332,19 +340,19 @@ const prShown = params.get("pr") ?? "draft";
 const prState: PrState | null = delivered && prShown !== "unknown" ? (prShown as PrState) : null;
 const run: Run = {
   id: "r1",
-  startedBy: params.get("mcp") === "on" ? "Claude Code" : null,
+  startedBy: params.get("mcp") === "on" || params.get("task") === "1" ? "Claude Code" : null,
   projectId: "p1",
   title: "#7 The add function in calc.py is wrong",
   baseRef: "main",
   request: "Fix add",
-  workflow: flowScene ? (flowScene.steps as WorkflowStep[]) : waiting ? runWorkflow : [agentStep("builder", "sonnet", "build")],
+  workflow: flowScene ? (flowScene.steps as WorkflowStep[]) : waiting ? runWorkflow : [agentStep("builder", "sonnet", params.get("task") === "1" ? "readOnly" : "build")],
   language: "en",
   sourceIssue: waiting ? { number: 7, title: "add is wrong", author: "someone", url: "https://github.com/acme/app/issues/7" } : null,
   branch: "keel/5e882d0f",
   prUrl: delivered ? "https://github.com/acme/app/pull/12" : null,
   prNumber: delivered ? 12 : null,
-  workflowId: "builtin:full",
-  workflowName: "Full, with reviews",
+  workflowId: params.get("task") === "1" ? null : "builtin:full",
+  workflowName: params.get("task") === "1" ? null : "Full, with reviews",
   prState,
   prStateAt: prState ? at(30) : null,
   prCheckedAt: prState ? at(2) : null,
@@ -368,6 +376,7 @@ const events: AuditEvent[] = [
   ...(state === "stalled" || state === "running" ? [] : [event(11, "toolResult", { id: "t4", isError: false, text: "ok" })]),
   ...(state === "stalled" ? [event(12, "stalled", {})] : []),
   ...(finished ? [event(13, "result", {}), event(14, "finished", { state })] : []),
+  ...(state === "abandoned" ? [event(15, "abandoned", assistantBy ? { by: assistantBy } : {})] : []),
 ];
 
 const DIFF = `diff --git a/calc.py b/calc.py
@@ -436,9 +445,17 @@ const mcpOverview = () => {
   return {
     settings: { enabled: on, port: 7413 },
     status: mcp === "on" ? { running: true, port: 7413, url: "http://127.0.0.1:7413/mcp", error: null } : { running: false, port: null, url: null, error: mcp === "port" ? { code: "portInUse", port: 7413 } : null },
-    clients: mcp === "on" ? [{ id: "c1", name: "Claude Code", tokenPrefix: "keel_Ab3xYz", canRun: true, createdAt: at(4000), lastSeenAt: at(20), revokedAt: null }, { id: "c2", name: "Cursor", tokenPrefix: "keel_Qr8Lmn", canRun: false, createdAt: at(90000), lastSeenAt: null, revokedAt: at(4000) }] : [],
+    clients:
+      mcp === "on"
+        ? [
+            { id: "c1", name: "Claude Code", tokenPrefix: "keel_Ab3xYz", canRun: true, canSteer: true, maxOpenRuns: 5, createdAt: at(4000), lastSeenAt: at(20), revokedAt: null },
+            { id: "c3", name: "Zed", tokenPrefix: "keel_Zd4Kpq", canRun: false, canSteer: false, maxOpenRuns: 3, createdAt: at(9000), lastSeenAt: at(300), revokedAt: null },
+            { id: "c2", name: "Cursor", tokenPrefix: "keel_Qr8Lmn", canRun: false, canSteer: false, maxOpenRuns: 3, createdAt: at(90000), lastSeenAt: null, revokedAt: at(4000) },
+          ]
+        : [],
     calls: mcp === "on"
       ? [
+          { seq: 4, clientId: "c1", clientName: "Claude Code", tool: "send_back", args: '{"run":"r1","instructions":"Return 0 instead"}', ok: true, error: null, runId: "r1", at: at(10), durationMs: 40 },
           { seq: 3, clientId: "c1", clientName: "Claude Code", tool: "wait_for_run", args: '{"run":"r1"}', ok: true, error: null, runId: "r1", at: at(20), durationMs: 4000 },
           { seq: 2, clientId: "c1", clientName: "Claude Code", tool: "start_run", args: '{"project":"demo"}', ok: true, error: null, runId: "r1", at: at(90), durationMs: 300 },
           { seq: 1, clientId: "c2", clientName: "Cursor", tool: "start_run", args: '{"project":"demo"}', ok: false, error: "This client may only read. The person can let it start runs in Keel's settings.", runId: null, at: at(600), durationMs: 2 },
@@ -745,6 +762,9 @@ mockIPC((command, args) => {
       if ((args as { attemptId?: string } | undefined)?.attemptId === "security-0-1") {
         if (params.get("flow") === "small" || params.get("flow") === "asked") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "skipped", data: { reason: asSmall.reason } }, { seq: 101, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: true, lines: 12, files: 2, round: 0 } }];
         if (params.get("flow") === "movedUp") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: false, because: WHY_MOVED_UP, round: 0 } }];
+      }
+      if ((args as { attemptId?: string } | undefined)?.attemptId === returnedApproval.id && (params.get("flow") === "returned" || params.get("flow") === "sentBack")) {
+        return [{ seq: 100, attemptId: returnedApproval.id, at: at(5), kind: "returned", data: { instructions: sentBackWith, round: 1, ...(assistantBy ? { by: assistantBy } : {}) } }];
       }
       // Only one step has a log, or the run's commands would count once per step.
       return (args as { attemptId?: string } | undefined)?.attemptId === attempt.id ? events : [];

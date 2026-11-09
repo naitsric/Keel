@@ -162,6 +162,36 @@ export function gist(text: string, limit = 240): { text: string; cut: boolean } 
   return { text: short, cut: short !== flat(body) };
 }
 
+/**
+ * What an assistant asked for when it sent the work back into this round. Nothing when a person did,
+ * or when something else started this round since: they know why.
+ */
+export function sentBackByAssistant(attempts: { state: string; round: number; output: unknown }[], round: number): { by: string; instructions: string } | null {
+  // Each return moves the run to the next round, so only one can have started this one.
+  const returned = attempts.find((a) => a.state === "returned" && a.round === round - 1);
+  const output = returned?.output as { by?: unknown; instructions?: unknown } | null | undefined;
+  if (typeof output?.by !== "string" || !output.by) return null;
+  return { by: output.by, instructions: typeof output.instructions === "string" ? output.instructions : "" };
+}
+
+/**
+ * The assistant that closed a finished run, if one did. It may have closed another step than the one
+ * the page is about, such as the first of two reviews that failed. Of the steps as they stand, the
+ * last one closed is what ended the run: one tried again since no longer says anything.
+ */
+export function closedByAssistant(run: { finishedAt: string | null }, attempts: { id: string; stepId: string; state: string }[], events: Record<string, AuditEvent[]>): string | null {
+  if (!run.finishedAt) return null;
+  let last: AuditEvent | undefined;
+  for (const attempt of latestOfEachStep(attempts)) {
+    if (attempt.state !== "abandoned") continue;
+    for (const event of events[attempt.id] ?? []) {
+      if (event.kind === "abandoned" && (!last || event.seq > last.seq)) last = event;
+    }
+  }
+  const by: unknown = last?.data.by;
+  return typeof by === "string" && by ? by : null;
+}
+
 /** What a round's reviewers said, and what the approver made of it. */
 export function reviewsOfRound<T extends { role: string; round: number; output: unknown }>(attempts: T[], round: number): { reviewers: T[]; approver: T | undefined } {
   const current = attempts.filter((a) => a.round === round);

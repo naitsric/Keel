@@ -1274,6 +1274,196 @@ fn sending_back_needs_instructions_and_something_to_go_back_to() {
     );
 }
 
+// A client over MCP can send work back, retry and close a run, and the app has to say who did it.
+
+#[test]
+fn a_client_that_sends_work_back_or_closes_the_run_is_named_and_a_person_is_not() {
+    let w = world();
+    w.answers(&[good()]);
+    let run = w.start(no_approver());
+    let first = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+
+    // From the app, it's kept just as it always was.
+    w.engine.send_back(&first.id, "Return 0").unwrap();
+    let second = w.wait_for_attempts(&run, "human", 2, AttemptState::WaitingApproval);
+    assert_eq!(
+        w.store.attempt(&first.id).unwrap().output,
+        Some(json!({ "instructions": "Return 0" }))
+    );
+    assert_eq!(w.event(&first.id, "returned").get("by"), None);
+
+    w.engine
+        .send_back_by(&second.id, "  Return 1  ", "Claude Code")
+        .unwrap();
+    let third = w.wait_for_attempts(&run, "human", 3, AttemptState::WaitingApproval);
+    assert_eq!(
+        w.store.attempt(&second.id).unwrap().output,
+        Some(json!({ "instructions": "Return 1", "by": "Claude Code" }))
+    );
+    assert_eq!(
+        w.event(&second.id, "returned"),
+        json!({ "instructions": "Return 1", "round": 2, "by": "Claude Code" })
+    );
+    assert!(w.step(&run, "builder").prompt.contains("Return 1"));
+
+    w.engine.abandon_by(&third.id, "Claude Code").unwrap();
+    assert_eq!(w.store.attempt(&third.id).unwrap().state, "abandoned");
+    assert_eq!(
+        w.event(&third.id, "abandoned"),
+        json!({ "by": "Claude Code" })
+    );
+    assert!(w.store.run(&run).unwrap().finished_at.is_some());
+
+    let other = w.start(no_approver());
+    let waiting = w.wait_for(&other, "human", AttemptState::WaitingApproval);
+    w.engine.abandon(&waiting.id).unwrap();
+    assert_eq!(w.event(&waiting.id, "abandoned"), json!({}));
+}
+
+#[test]
+fn a_client_that_retries_a_step_is_named_on_it_before_the_new_try_starts() {
+    let w = world();
+    w.answers(&[json!("fail"), json!("fail"), json!("fail")]);
+    let run = w.start(no_approver());
+    let failed = w.wait_for(&run, "spec", AttemptState::Failed);
+
+    // From the app, nothing new on the step.
+    let kinds = w.kinds(&failed.id);
+    w.engine.retry(&failed.id, false).unwrap();
+    let again = w.wait_for_attempts(&run, "spec", 2, AttemptState::Failed);
+    assert_eq!(w.kinds(&failed.id), kinds);
+
+    w.engine.retry_by(&again.id, true, "Claude Code").unwrap();
+    let asked = w
+        .store
+        .events(&again.id, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "retryRequested")
+        .expect("it says who asked");
+    assert_eq!(asked.data, json!({ "by": "Claude Code", "resume": true }));
+    let resumed = w.wait_for_attempts(&run, "spec", 3, AttemptState::Failed);
+    assert_eq!(resumed.session_id, again.session_id);
+    let first_of_it = w.store.events(&resumed.id, 0).unwrap()[0].seq;
+    assert!(
+        asked.seq < first_of_it,
+        "it was said before the try started"
+    );
+
+    w.engine
+        .retry_by(&resumed.id, false, "Claude Code")
+        .unwrap();
+    assert_eq!(
+        w.event(&resumed.id, "retryRequested"),
+        json!({ "by": "Claude Code", "resume": false })
+    );
+    w.wait_for(&run, "human", AttemptState::WaitingApproval);
+}
+
+fn invalid_state<T: std::fmt::Debug>(result: Result<T, Error>) -> bool {
+    matches!(result, Err(Error::InvalidState))
+}
+
+#[test]
+fn a_step_already_tried_again_never_starts_twice() {
+    let w = world();
+    w.answers(&[json!("fail"), json!("fail")]);
+    let run = w.start(no_approver());
+    let failed = w.wait_for(&run, "spec", AttemptState::Failed);
+
+    // The person and a client, or a client twice, pressing it at the same moment.
+    let (engine, id) = (&w.engine, failed.id.as_str());
+    let tries: Vec<_> = std::thread::scope(|scope| {
+        let tries: Vec<_> = (0..8)
+            .map(|n| {
+                scope.spawn(move || match n % 2 {
+                    0 => engine.retry(id, false),
+                    _ => engine.retry_by(id, false, "Claude Code"),
+                })
+            })
+            .collect();
+        tries.into_iter().map(|t| t.join().unwrap()).collect()
+    });
+    assert_eq!(tries.iter().filter(|t| t.is_ok()).count(), 1, "{tries:?}");
+    assert!(tries.into_iter().filter(Result::is_err).all(invalid_state));
+    let again = w.wait_for_attempts(&run, "spec", 2, AttemptState::Failed);
+    assert_eq!(again.number, 2);
+
+    // Later too: that one has had its next try, so only the latest can have another.
+    assert!(invalid_state(w.engine.retry(&failed.id, false)));
+    assert!(invalid_state(w.engine.retry_by(
+        &failed.id,
+        true,
+        "Claude Code"
+    )));
+    assert_eq!(w.all(&run, "spec").len(), 2);
+    w.engine.retry_by(&again.id, false, "Claude Code").unwrap();
+    w.wait_for(&run, "human", AttemptState::WaitingApproval);
+}
+
+#[test]
+fn a_client_retries_only_what_went_wrong_and_never_reopens_a_run() {
+    let w = world();
+    w.answers(&[json!("fail")]);
+    let run = w.start(no_approver());
+    let failed = w.wait_for(&run, "spec", AttemptState::Failed);
+    let by_client = |attempt: &str| w.engine.retry_by(attempt, false, "Claude Code");
+
+    // However it ended. As when a close on another step of the run ended it.
+    let ended = Column::Text("2026-11-09T10:00:00Z".into());
+    w.store.patch_run(&run, &[("finished_at", ended)]).unwrap();
+    assert!(invalid_state(by_client(&failed.id)));
+    w.store
+        .patch_run(&run, &[("finished_at", Column::Null)])
+        .unwrap();
+
+    // What the person closed stays closed.
+    w.engine.abandon(&failed.id).unwrap();
+    assert!(invalid_state(by_client(&failed.id)));
+    assert!(w.store.run(&run).unwrap().finished_at.is_some());
+    assert_eq!(w.all(&run, "spec").len(), 1);
+    assert!(!w.kinds(&failed.id).contains(&"retryRequested".to_owned()));
+
+    // The person can open it again.
+    w.engine.retry(&failed.id, false).unwrap();
+    w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    assert!(w.store.run(&run).unwrap().finished_at.is_none());
+
+    // What went through, or waits for the person, isn't a client's to retry.
+    assert!(invalid_state(by_client(&w.step(&run, "builder").id)));
+    assert!(invalid_state(by_client(&w.step(&run, "human").id)));
+    assert_eq!(w.all(&run, "builder").len(), 1);
+}
+
+#[test]
+fn a_client_s_retry_and_close_at_once_never_leave_a_step_working_in_a_run_that_ended() {
+    let w = world();
+    w.answers(&vec![json!("fail"); 12]);
+    for trial in 0..4 {
+        let run = w.start(no_approver());
+        let failed = w.wait_for(&run, "spec", AttemptState::Failed);
+        let (engine, id) = (&w.engine, failed.id.as_str());
+        let (retried, closed) = std::thread::scope(|scope| {
+            let retry = scope.spawn(move || engine.retry_by(id, false, "Claude Code"));
+            let close = scope.spawn(move || engine.abandon_by(id, "Claude Code"));
+            (retry.join().unwrap(), close.join().unwrap())
+        });
+        assert!(
+            retried.is_ok() != closed.is_ok(),
+            "trial {trial}: {retried:?} {closed:?}"
+        );
+        assert_eq!(
+            w.store.run(&run).unwrap().finished_at.is_some(),
+            closed.is_ok()
+        );
+        if retried.is_ok() {
+            w.wait_for_attempts(&run, "spec", 2, AttemptState::Failed);
+        } else {
+            assert_eq!(w.all(&run, "spec").len(), 1, "trial {trial}");
+        }
+    }
+}
+
 #[test]
 fn a_saved_workflow_with_a_plain_worker_spec_behaves_exactly_as_before() {
     let w = world();
