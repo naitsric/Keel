@@ -2141,3 +2141,208 @@ async fn a_task_counts_toward_the_runs_a_client_may_have_open() {
     ok(&call(&client, "start_task", task).await);
     client.cancel().await.unwrap();
 }
+
+// What a client sends at once, from several sessions, goes through as if it came one at a time.
+
+impl World {
+    /// As many sessions of one client, to send its calls at once.
+    async fn sessions(&self, token: &str, count: usize) -> Vec<Client> {
+        let mut sessions = Vec::new();
+        for _ in 0..count {
+            sessions.push(self.client(token).await);
+        }
+        sessions
+    }
+}
+
+/// Each call from its own session, all sent at once, and what each got back, in the same order.
+async fn at_once(sessions: &[Client], calls: &[(&str, Json)]) -> Vec<CallToolResult> {
+    assert!(calls.len() <= sessions.len());
+    let mut sent = tokio::task::JoinSet::new();
+    for (index, (session, (tool, args))) in sessions.iter().zip(calls).enumerate() {
+        let peer = session.peer().clone();
+        let Json::Object(arguments) = args.clone() else {
+            panic!("arguments are an object")
+        };
+        let request = CallToolRequestParams::new((*tool).to_owned()).with_arguments(arguments);
+        sent.spawn(async move { (index, peer.call_tool(request).await.unwrap()) });
+    }
+    let mut results = sent.join_all().await;
+    results.sort_by_key(|(index, _)| *index);
+    results.into_iter().map(|(_, result)| result).collect()
+}
+
+fn went_through(results: &[CallToolResult]) -> usize {
+    results.iter().filter(|r| r.is_error == Some(false)).count()
+}
+
+/// Stops the run's latest step once it runs, and waits until it has stopped.
+async fn stop_once_running(client: &Client, run: &str) {
+    for _ in 0..100 {
+        let view = view_of(client, run).await;
+        if view["steps"].as_array().unwrap().last().unwrap()["state"] == "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    ok(&call(client, "stop_run", json!({ "run": run })).await);
+    let stopped = settled(client, run).await;
+    assert_eq!(stopped["waitingFor"]["state"], "stopped", "{stopped}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retries_sent_at_once_start_the_step_once_and_never_more_often_than_allowed() {
+    let w = world().await;
+    let sessions = w.sessions(&w.steering_token("Claude Code"), 8).await;
+    let client = &sessions[0];
+    let _hold = w.hold();
+    let run = id_of(&ok(&call(client, "start_run", w.start_args("Fix it")).await));
+    let retries = vec![("retry_step", json!({ "run": run })); sessions.len()];
+    for round in 1..=4 {
+        stop_once_running(client, &run).await;
+        let results = at_once(&sessions, &retries).await;
+        let numbers: Vec<i64> = w
+            .store
+            .attempts_of_run(&run)
+            .unwrap()
+            .iter()
+            .filter(|a| a.step_id == "builder")
+            .map(|a| a.number)
+            .collect();
+        if round <= 3 {
+            assert_eq!(went_through(&results), 1, "round {round}: {results:?}");
+            assert_eq!(numbers, (1..=round + 1).collect::<Vec<_>>());
+        } else {
+            assert_eq!(went_through(&results), 0, "{results:?}");
+            for result in &results {
+                assert!(refused(result).contains("3 times"), "{result:?}");
+            }
+            assert_eq!(numbers, [1, 2, 3, 4]);
+        }
+    }
+    let calls = w.store.mcp_calls(100).unwrap();
+    let retried = calls.iter().filter(|c| c.tool == "retry_step" && c.ok);
+    assert_eq!(retried.count(), 3);
+    for session in sessions {
+        session.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_retry_and_a_close_sent_at_once_never_leave_a_step_working_in_a_run_that_ended() {
+    let w = world().await;
+    let (row, token) = w.server.create_client("Claude Code", true).unwrap();
+    w.store.set_mcp_client_can_steer(&row.id, true).unwrap();
+    let sessions = w.sessions(&token, 2).await;
+    let client = &sessions[0];
+    let _hold = w.hold();
+    for trial in 0..4 {
+        let run = id_of(&ok(&call(
+            client,
+            "start_run",
+            w.start_args(&format!("Fix {trial}")),
+        )
+        .await));
+        stop_once_running(client, &run).await;
+        let retry = ("retry_step", json!({ "run": run }));
+        let close = ("close_run", json!({ "run": run }));
+        // Sent the other way round every other time.
+        let (retried, closed) = if trial % 2 == 0 {
+            let results = at_once(&sessions, &[retry, close]).await;
+            (results[0].clone(), results[1].clone())
+        } else {
+            let results = at_once(&sessions, &[close, retry]).await;
+            (results[1].clone(), results[0].clone())
+        };
+        let (retried, closed) = (
+            retried.is_error == Some(false),
+            closed.is_error == Some(false),
+        );
+        assert!(retried != closed, "trial {trial}: one of them, never both");
+        let finished = w.store.run(&run).unwrap().finished_at.is_some();
+        let working = w
+            .store
+            .attempts_of_run(&run)
+            .unwrap()
+            .iter()
+            .any(|a| AttemptState::parse(&a.state).unwrap().is_active());
+        assert_eq!(finished, closed, "trial {trial}");
+        assert_eq!(working, retried, "trial {trial}");
+        // What the retry started holds the project's place: it ends before the next trial.
+        if retried {
+            stop_once_running(client, &run).await;
+            ok(&call(client, "close_run", json!({ "run": run })).await);
+        }
+    }
+    for session in sessions {
+        session.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn runs_started_at_once_keep_to_the_number_the_person_set_and_waiting_holds_none_up() {
+    let w = world().await;
+    let (row, token) = w.server.create_client("Claude Code", true).unwrap();
+    w.store.set_mcp_client_max_open_runs(&row.id, 1).unwrap();
+    let sessions = w.sessions(&token, 8).await;
+    let _hold = w.hold();
+    let task = json!({ "project": "app", "prompt": "What does it do?" });
+    let starts: Vec<(&str, Json)> = (0..sessions.len())
+        .map(|n| match n % 2 {
+            0 => ("start_task", task.clone()),
+            _ => ("start_run", w.start_args(&format!("Fix {n}"))),
+        })
+        .collect();
+    let results = at_once(&sessions, &starts).await;
+    assert_eq!(went_through(&results), 1, "{results:?}");
+    for result in results.iter().filter(|r| r.is_error == Some(true)) {
+        assert!(refused(result).contains("runs open"), "{result:?}");
+    }
+    assert_eq!(w.store.runs(10).unwrap().len(), 1);
+    let run = w.store.runs(10).unwrap()[0].id.clone();
+
+    // A long wait for that run doesn't keep the same client from being answered meanwhile.
+    let peer = sessions[1].peer().clone();
+    let Json::Object(arguments) = json!({ "run": run, "seconds": 5 }) else {
+        unreachable!()
+    };
+    let waiting = tokio::spawn(async move {
+        let request = CallToolRequestParams::new("wait_for_run").with_arguments(arguments);
+        peer.call_tool(request).await.unwrap()
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let began = std::time::Instant::now();
+    let refusal = refused(&call(&sessions[0], "start_task", task).await);
+    assert!(refusal.contains("runs open"), "{refusal}");
+    assert!(
+        began.elapsed() < Duration::from_secs(3),
+        "it waited for the wait: {:?}",
+        began.elapsed()
+    );
+    assert_eq!(ok(&waiting.await.unwrap())["state"], "working");
+    for session in sessions {
+        session.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_long_list_of_runs_to_wait_for_is_refused_at_once() {
+    let w = world().await;
+    let client = w.client(&w.token(false)).await;
+    // About 800 KB, under what a request may carry. Going through it would take a while.
+    let runs: Vec<String> = (0..100_000).map(|n| n.to_string()).collect();
+    let began = std::time::Instant::now();
+    let args = json!({ "runs": runs, "seconds": 1 });
+    let refusal = refused(&call(&client, "wait_for_run", args).await);
+    assert!(refusal.contains("up to 10"), "{refusal}");
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        began.elapsed()
+    );
+    // Counted as given, repeats too.
+    let args = json!({ "runs": vec!["same"; 11], "seconds": 1 });
+    let refusal = refused(&call(&client, "wait_for_run", args).await);
+    assert!(refusal.contains("up to 10"), "{refusal}");
+    client.cancel().await.unwrap();
+}

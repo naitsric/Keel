@@ -258,6 +258,15 @@ pub fn next_number(attempts: &[Attempt], step_id: &str) -> i64 {
         + 1
 }
 
+/// Whether nothing has tried this attempt's step since. `attempts` is the run's, in order.
+pub fn is_latest_of_its_step(attempts: &[Attempt], attempt: &Attempt) -> bool {
+    attempts
+        .iter()
+        .rev()
+        .find(|a| a.step_id == attempt.step_id)
+        .is_some_and(|latest| latest.id == attempt.id)
+}
+
 /// What the run has changed so far, going by the last step that looked.
 pub fn files_changed(attempts: &[Attempt]) -> Vec<String> {
     attempts

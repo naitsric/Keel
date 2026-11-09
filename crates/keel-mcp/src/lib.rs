@@ -21,7 +21,8 @@ mod http;
 mod token;
 mod tools;
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use keel_engine::Engine;
 use keel_store::{McpClient, Store};
@@ -94,6 +95,9 @@ struct Core {
     engine: Engine,
     store: Arc<Store>,
     listener: http::Listener,
+    /// One per client, held by each call that changes something until its row is in the audit.
+    /// See `McpServer::call`.
+    changing: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl McpServer {
@@ -102,6 +106,7 @@ impl McpServer {
             engine,
             store,
             listener: http::Listener::default(),
+            changing: Mutex::default(),
         }))
     }
 

@@ -1141,6 +1141,10 @@ impl Engine {
 
     fn retry_as(&self, attempt_id: &str, resume: bool, by: Option<&str>) -> Result<String> {
         let store = &self.inner.store;
+        // Held from looking at the attempt until its next try is on the record, so two retries, or
+        // a retry and a close, can't both go through. `start_step` never takes it: `advance` and
+        // `answer_questions` call it while they hold it too.
+        let _guard = locked(&self.inner.advancing);
         let attempt = store.attempt(attempt_id)?;
         let state = AttemptState::parse(&attempt.state).ok_or(Error::InvalidState)?;
         // Those that wait for a person get answered, and one sent back has already moved on.
@@ -1155,18 +1159,29 @@ impl Engine {
         {
             return Err(Error::InvalidState);
         }
+        // A client only retries what went wrong, and never reopens a run the person, or a close,
+        // has ended. The person can.
+        if by.is_some()
+            && !matches!(
+                state,
+                AttemptState::Failed | AttemptState::Interrupted | AttemptState::Stopped
+            )
+        {
+            return Err(Error::InvalidState);
+        }
         let run = store.run(&attempt.run_id)?;
+        if by.is_some() && run.finished_at.is_some() {
+            return Err(Error::InvalidState);
+        }
         if store.project_is_removed(&run.project_id)? {
             return Err(Error::Blocked(Reason::ProjectRemoved));
         }
-        let number = store
-            .attempts_of_run(&attempt.run_id)?
-            .iter()
-            .filter(|a| a.step_id == attempt.step_id)
-            .map(|a| a.number)
-            .max()
-            .unwrap_or(0)
-            + 1;
+        let attempts = store.attempts_of_run(&attempt.run_id)?;
+        // One that was tried again already has its next try. Another would run the step twice.
+        if !workflows::is_latest_of_its_step(&attempts, &attempt) {
+            return Err(Error::InvalidState);
+        }
+        let number = workflows::next_number(&attempts, &attempt.step_id);
         let steps: Vec<WorkflowStep> =
             serde_json::from_value(run.workflow.clone()).unwrap_or_default();
         let step = workflows::find_step(&steps, &attempt.step_id).ok_or(Error::InvalidState)?;
@@ -1215,6 +1230,23 @@ impl Engine {
             )
         {
             return Err(Error::InvalidState);
+        }
+        // A client closes only an open run that's at rest, and on where it stands now. Closing
+        // doesn't stop anything, so a step still working would go on in a run that has ended.
+        if by.is_some() {
+            let store = &self.inner.store;
+            let run = store.run(&attempt.run_id)?;
+            let attempts = store.attempts_of_run(&attempt.run_id)?;
+            let working = attempts
+                .iter()
+                .any(|a| AttemptState::parse(&a.state).is_some_and(AttemptState::is_active));
+            if run.finished_at.is_some()
+                || state == AttemptState::Skipped
+                || working
+                || !workflows::is_latest_of_its_step(&attempts, &attempt)
+            {
+                return Err(Error::InvalidState);
+            }
         }
         // Approving doesn't wait for `advancing`, and one that lands first has to stand.
         if !self
@@ -1626,7 +1658,8 @@ impl Inner {
         })
     }
 
-    /// Records a step and sets it going.
+    /// Records a step and sets it going. Every caller holds `advancing`, so this never takes it:
+    /// the step itself runs on a thread of its own.
     fn start_step(
         self: &Arc<Self>,
         run_id: &str,

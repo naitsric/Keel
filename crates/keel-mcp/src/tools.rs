@@ -2,6 +2,7 @@
 //! engine blocks, so they run on tokio's blocking threads.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use keel_core::{
@@ -62,6 +63,17 @@ const NEEDS_PERSON: [&str; 7] = [
 /// What stop_run may stop. A step waiting for an approval or for answers isn't working, and only a
 /// person answers it.
 const STOPPABLE: [&str; 4] = ["queued", "preparing", "running", "stalled"];
+/// The tools that only look. Every other one changes something, so it waits its turn: see `call`.
+const ONLY_LOOK: [&str; 8] = [
+    "list_projects",
+    "list_workflows",
+    "list_issues",
+    "list_runs",
+    "get_run",
+    "get_step",
+    "get_brain",
+    "wait_for_run",
+];
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct ListProjectsArgs {}
@@ -554,6 +566,10 @@ impl McpServer {
                     std::thread::sleep(WAIT_TICK);
                 }
             }
+            // Before anything goes through them: repeats only come out below, one by one.
+            if args.runs.len() > MAX_WAITED_RUNS {
+                return Err(too_many_to_wait_for());
+            }
             let mut ids: Vec<String> = Vec::new();
             for id in args.run.into_iter().chain(args.runs) {
                 if !ids.contains(&id) {
@@ -561,9 +577,7 @@ impl McpServer {
                 }
             }
             if ids.len() > MAX_WAITED_RUNS {
-                return Err(ToolError::new(format!(
-                    "Wait for up to {MAX_WAITED_RUNS} runs at once."
-                )));
+                return Err(too_many_to_wait_for());
             }
             for id in &ids {
                 server.0.store.run(id).map_err(|_| {
@@ -942,6 +956,13 @@ impl McpServer {
     {
         let server = self.clone();
         let done = tokio::task::spawn_blocking(move || {
+            // What a client may still do, its open runs and its retries, is counted from these rows,
+            // and a row is only written once the work is done. So a client's calls that change
+            // something go one at a time, until the row is in: two at once would count the same
+            // rows, and both go through. One that only looks, like a long wait_for_run, holds
+            // nothing up.
+            let turn = (!ONLY_LOOK.contains(&tool)).then(|| server.turn_of(&client.id));
+            let _turn = turn.as_deref().map(locked);
             let started = Instant::now();
             let logged = serde_json::to_string(&args).unwrap_or_default();
             let logged = capped(&logged, MAX_LOGGED_ARGS);
@@ -969,6 +990,14 @@ impl McpServer {
         });
         done.await
             .unwrap_or_else(|e| Err(ToolError::new(format!("Keel failed on this call: {e}"))))
+    }
+
+    /// What a client's calls that change something take turns on.
+    fn turn_of(&self, client_id: &str) -> Arc<Mutex<()>> {
+        locked(&self.0.changing)
+            .entry(client_id.to_owned())
+            .or_default()
+            .clone()
     }
 
     /// A project by its id or, when only one has it, its name.
@@ -1329,7 +1358,8 @@ fn retry_target<'a>(run: &Run, attempts: &'a [Attempt]) -> Result<&'a Attempt, T
 }
 
 /// The attempt a client could close the run on: the one the person would act on, or else the
-/// latest. Never while something works, since closing doesn't stop it.
+/// latest step that didn't go through. Never while something works, since closing doesn't stop it.
+/// The engine looks again as it closes, in case the run moved meanwhile.
 fn close_target<'a>(run: &Run, attempts: &'a [Attempt]) -> Result<&'a Attempt, ToolError> {
     still_open(run)?;
     if attempts.iter().any(working) {
@@ -1338,8 +1368,14 @@ fn close_target<'a>(run: &Run, attempts: &'a [Attempt]) -> Result<&'a Attempt, T
         ));
     }
     needs_person(attempts)
-        .or(attempts.last())
-        .filter(|a| !matches!(a.state.as_str(), "succeeded" | "returned" | "postponed"))
+        .or_else(|| {
+            latest_of_each_step(attempts)
+                .into_iter()
+                .rev()
+                .find(|a| !matches!(a.state.as_str(), "succeeded" | "skipped"))
+        })
+        // On its way to the next round, or to what was skipped.
+        .filter(|a| !matches!(a.state.as_str(), "returned" | "postponed"))
         .ok_or_else(|| {
             ToolError::new(
                 "This run is moving between steps, so it can't be closed right now. Try again in a moment.",
@@ -1596,6 +1632,15 @@ fn plain_model_name(model: &str) -> bool {
         && model
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "-._:[]".contains(c))
+}
+
+/// A call that panicked doesn't keep the client's next ones waiting.
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+fn too_many_to_wait_for() -> ToolError {
+    ToolError::new(format!("Wait for up to {MAX_WAITED_RUNS} runs at once."))
 }
 
 fn may_only_read() -> ToolError {
