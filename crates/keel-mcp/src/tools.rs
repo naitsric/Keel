@@ -5,21 +5,31 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use keel_core::{
-    StepCondition, StepRole, StepSpec, ToolProfile, WorkflowStep, mask_secrets, mask_value,
+    AttemptState, StepCondition, StepRole, StepSpec, ToolProfile, WorkflowStep, mask_secrets,
+    mask_value,
 };
 use keel_engine::{
-    Error, MAX_PROJECT_PROPOSALS, ProjectProposal, ProposedProject, StartRun, request_from_issue,
+    Error, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
+    can_send_back, files_changed, request_from_issue, skipped_steps, spec_of_attempt,
+    verification_of_attempt,
 };
-use keel_store::{Attempt, McpClient, NewMcpCall, Project};
+use keel_store::{Attempt, MAX_OPEN_RUNS_CEILING, McpClient, NewMcpCall, Project, Run};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
 
 use crate::{McpServer, ToolError};
 
-/// Runs a client may have open at once. A run waiting for the person counts, so an assistant can't
-/// spend a person's usage faster than they're looking at it.
-pub const MAX_OPEN_RUNS: i64 = 3;
+/// Runs a client may have open at once until the person sets its own number in Keel's settings. A
+/// run waiting for the person counts, so an assistant can't spend a person's usage faster than
+/// they're looking at it.
+pub const MAX_OPEN_RUNS: i64 = keel_store::DEFAULT_MAX_OPEN_RUNS;
+/// Runs one wait_for_run can watch at once.
+const MAX_WAITED_RUNS: usize = 10;
+/// How many times a client may send back, or retry, one of its runs. After that it's the person's.
+const MAX_FEEDBACK_PER_RUN: i64 = 3;
+const MAX_FINDINGS: usize = 20;
+const MAX_FINDING: usize = 2 * 1024;
 
 /// Drafts a project may have waiting, so a client can't bury the person in them.
 pub const MAX_DRAFTS: usize = 20;
@@ -78,6 +88,9 @@ pub struct ListRunsArgs {
     /// How many, up to 100. 20 by default.
     #[serde(default)]
     pub limit: Option<u32>,
+    /// Only the runs this client started, to find them again.
+    #[serde(default)]
+    pub mine: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -105,7 +118,11 @@ pub struct GetBrainArgs {
 #[serde(rename_all = "camelCase")]
 pub struct WaitForRunArgs {
     /// A run's id.
-    pub run: String,
+    #[serde(default)]
+    pub run: Option<String>,
+    /// Several runs' ids, up to 10, to wait until any of them stops working.
+    #[serde(default)]
+    pub runs: Vec<String>,
     /// How long to wait, up to 50. 30 by default.
     #[serde(default)]
     pub seconds: Option<u64>,
@@ -374,7 +391,7 @@ impl McpServer {
         client: McpClient,
         args: ListRunsArgs,
     ) -> Result<Json, ToolError> {
-        self.call(client, "list_runs", args, |server, _, args| {
+        self.call(client, "list_runs", args, |server, client, args| {
             let limit = args.limit.unwrap_or(20).clamp(1, 100) as usize;
             let project = args
                 .project
@@ -386,7 +403,13 @@ impl McpServer {
             } else {
                 limit as i64
             };
-            let runs = server.0.store.runs(scan).map_err(store_error)?;
+            let store = &server.0.store;
+            let runs = if args.mine {
+                store.runs_started_by_mcp_client(&client.id, scan)
+            } else {
+                store.runs(scan)
+            }
+            .map_err(store_error)?;
             let runs: Vec<_> = runs
                 .into_iter()
                 .filter(|run| project.as_ref().is_none_or(|p| p.id == run.project_id))
@@ -402,8 +425,8 @@ impl McpServer {
         client: McpClient,
         args: GetRunArgs,
     ) -> Result<Json, ToolError> {
-        self.call(client, "get_run", args, |server, _, args| {
-            Ok((server.run_view(&args.run)?, Some(args.run)))
+        self.call(client, "get_run", args, |server, client, args| {
+            Ok((server.run_view(client, &args.run)?, Some(args.run)))
         })
         .await
     }
@@ -458,13 +481,50 @@ impl McpServer {
         client: McpClient,
         args: WaitForRunArgs,
     ) -> Result<Json, ToolError> {
-        self.call(client, "wait_for_run", args, |server, _, args| {
+        self.call(client, "wait_for_run", args, |server, client, args| {
             let seconds = args.seconds.unwrap_or(WAIT_DEFAULT_SECS).min(WAIT_MAX_SECS);
             let deadline = Instant::now() + Duration::from_secs(seconds);
+            if args.runs.is_empty() {
+                let run = args.run.ok_or_else(|| {
+                    ToolError::new("Say which run to wait for with `run`, or several with `runs`.")
+                })?;
+                loop {
+                    let view = server.run_view(client, &run)?;
+                    if view["state"] != "working" || Instant::now() >= deadline {
+                        return Ok((view, Some(run)));
+                    }
+                    std::thread::sleep(WAIT_TICK);
+                }
+            }
+            let mut ids: Vec<String> = Vec::new();
+            for id in args.run.into_iter().chain(args.runs) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+            if ids.len() > MAX_WAITED_RUNS {
+                return Err(ToolError::new(format!(
+                    "Wait for up to {MAX_WAITED_RUNS} runs at once."
+                )));
+            }
+            for id in &ids {
+                server.0.store.run(id).map_err(|_| {
+                    ToolError::new(format!("Keel has no run {id:?}. list_runs lists them."))
+                })?;
+            }
             loop {
-                let view = server.run_view(&args.run)?;
-                if view["state"] != "working" || Instant::now() >= deadline {
-                    return Ok((view, Some(args.run)));
+                let views = ids
+                    .iter()
+                    .map(|id| server.run_view(client, id))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let ready: Vec<&String> = ids
+                    .iter()
+                    .zip(&views)
+                    .filter(|(_, view)| view["state"] != "working")
+                    .map(|(id, _)| id)
+                    .collect();
+                if !ready.is_empty() || Instant::now() >= deadline {
+                    return Ok((json!({ "ready": ready, "runs": views }), None));
                 }
                 std::thread::sleep(WAIT_TICK);
             }
@@ -481,15 +541,7 @@ impl McpServer {
             if !client.can_run {
                 return Err(may_only_read());
             }
-            let store = &server.0.store;
-            let open = store
-                .open_runs_of_mcp_client(&client.id)
-                .map_err(store_error)?;
-            if open >= MAX_OPEN_RUNS {
-                return Err(ToolError::new(format!(
-                    "This client already has {open} runs open, which is as many as it may have. They finish when the person decides in Keel."
-                )));
-            }
+            server.room_for_another_run(client)?;
             let project = server.project(&args.project)?;
             let language = server.language(args.language.as_deref())?;
             let engine = &server.0.engine;
@@ -549,7 +601,7 @@ impl McpServer {
                     (error, _) => engine_error(error),
                 })?;
             engine.announce(&run);
-            Ok((server.run_view(&run)?, Some(run)))
+            Ok((server.new_run_view(client, &run)?, Some(run)))
         })
         .await
     }
@@ -674,7 +726,7 @@ impl McpServer {
             for attempt in working {
                 server.0.engine.stop(&attempt.id).map_err(engine_error)?;
             }
-            Ok((server.run_view(&args.run)?, Some(args.run)))
+            Ok((server.run_view(client, &args.run)?, Some(args.run)))
         })
         .await
     }
@@ -768,16 +820,119 @@ impl McpServer {
         self.0.store.attempts_of_run(run).map_err(store_error)
     }
 
-    fn run_view(&self, run_id: &str) -> Result<Json, ToolError> {
+    /// Refused once this client has as many runs open as the person allows it.
+    fn room_for_another_run(&self, client: &McpClient) -> Result<(), ToolError> {
+        let open = self
+            .0
+            .store
+            .open_runs_of_mcp_client(&client.id)
+            .map_err(store_error)?;
+        if open >= client.max_open_runs.clamp(1, MAX_OPEN_RUNS_CEILING) {
+            return Err(ToolError::new(format!(
+                "This client has as many runs open as the person allows it ({open}). They finish when the person decides in Keel, and the person can raise the limit in Keel's settings."
+            )));
+        }
+        Ok(())
+    }
+
+    /// Whether this client may still use a feedback tool on one of its runs.
+    fn feedback_left(
+        &self,
+        client: &McpClient,
+        run_id: &str,
+        tool: &str,
+    ) -> Result<bool, ToolError> {
+        let used = self
+            .0
+            .store
+            .mcp_calls_on_run(&client.id, run_id, tool)
+            .map_err(store_error)?;
+        Ok(used < MAX_FEEDBACK_PER_RUN)
+    }
+
+    /// The tools this client may use on this run right now, by the same rules the tools follow.
+    fn you_can(
+        &self,
+        client: &McpClient,
+        mine: bool,
+        run: &Run,
+        steps: &[WorkflowStep],
+        attempts: &[Attempt],
+    ) -> Result<Vec<&'static str>, ToolError> {
+        let mut tools = Vec::new();
+        if steer_refusal(client, mine).is_none() {
+            if send_back_target(run, steps, attempts).is_ok()
+                && self.feedback_left(client, &run.id, "send_back")?
+            {
+                tools.push("send_back");
+            }
+            if retry_target(run, attempts).is_ok()
+                && self.feedback_left(client, &run.id, "retry_step")?
+            {
+                tools.push("retry_step");
+            }
+            if close_target(run, attempts).is_ok() {
+                tools.push("close_run");
+            }
+        }
+        if client.can_run && attempts.iter().any(working) {
+            tools.push("stop_run");
+        }
+        Ok(tools)
+    }
+
+    fn run_view(&self, client: &McpClient, run_id: &str) -> Result<Json, ToolError> {
+        self.run_view_of(client, run_id, false)
+    }
+
+    /// For the call that started the run: its row, which is how a run is known to be this
+    /// client's, is only written once it returns.
+    fn new_run_view(&self, client: &McpClient, run_id: &str) -> Result<Json, ToolError> {
+        self.run_view_of(client, run_id, true)
+    }
+
+    fn run_view_of(
+        &self,
+        client: &McpClient,
+        run_id: &str,
+        just_started: bool,
+    ) -> Result<Json, ToolError> {
         let attempts = self.attempts(run_id)?;
-        let run = self.0.store.run(run_id).map_err(store_error)?;
-        let waiting = needs_person(&attempts);
+        let store = &self.0.store;
+        let run = store.run(run_id).map_err(store_error)?;
+        let mine = just_started
+            || store
+                .run_started_by_mcp_client(run_id, &client.id)
+                .map_err(store_error)?;
+        let steps = steps_of(&run);
+        let waiting = needs_person(&attempts).filter(|_| run.finished_at.is_none());
         let state = if run.finished_at.is_some() {
             "finished"
         } else if waiting.is_some() {
             "waitingForPerson"
         } else {
             "working"
+        };
+        let waiting_for = match waiting {
+            Some(attempt) => {
+                let mut view = json!({
+                    "step": attempt.step_id,
+                    "attemptId": attempt.id,
+                    "state": attempt.state,
+                    "reason": attempt.reason,
+                    "youCan": self.you_can(client, mine, &run, &steps, &attempts)?,
+                    "who": who_decides(&attempt.state),
+                });
+                if attempt.state == AttemptState::WaitingAnswers.as_str() {
+                    let questions = spec_of_attempt(attempt).map(|spec| spec.questions);
+                    view["questions"] = json!(questions.unwrap_or_default());
+                }
+                if attempt.state == AttemptState::WaitingApproval.as_str() {
+                    view["canSendBack"] = json!(can_send_back(&steps, &attempt.step_id));
+                }
+                Some(view)
+            }
+            None => None,
         };
         let total_cost: f64 = attempts.iter().filter_map(|a| a.cost_usd).sum();
         Ok(json!({
@@ -786,15 +941,11 @@ impl McpServer {
             "title": run.title,
             "request": capped(&run.request, MAX_TEXT),
             "state": state,
-            "waitingFor": waiting.filter(|_| run.finished_at.is_none()).map(|attempt| json!({
-                "step": attempt.step_id,
-                "attemptId": attempt.id,
-                "state": attempt.state,
-                "reason": attempt.reason,
-                "who": "The person, in the Keel app. There is no tool for this.",
-            })),
+            "waitingFor": waiting_for,
+            "report": self.report(&run, &attempts)?,
             "startedBy": run.started_by,
-            "cardId": self.0.store.card_of_run(run_id).map_err(store_error)?,
+            "startedByYou": mine,
+            "cardId": store.card_of_run(run_id).map_err(store_error)?,
             "language": run.language,
             "branch": run.branch,
             "prUrl": run.pr_url,
@@ -810,18 +961,258 @@ impl McpServer {
             "steps": attempts.iter().map(attempt_view).collect::<Vec<_>>(),
         }))
     }
+
+    /// What the run did, in short, the way a subagent answers: what an orchestrator reads first.
+    /// What agents wrote is cut here, and masked on the way out like the rest.
+    fn report(&self, run: &Run, attempts: &[Attempt]) -> Result<Json, ToolError> {
+        Ok(json!({
+            "answer": answer(attempts),
+            "filesChanged": files_changed(attempts),
+            "check": self.check_report(run, attempts)?,
+            "notProven": not_proven(attempts),
+            "reviews": reviews(attempts),
+            "skipped": skipped_steps(attempts),
+            "prUrl": run.pr_url,
+            "prState": run.pr_state,
+        }))
+    }
+
+    /// Whether the check passed on the code as it is in this round, and what it printed when it
+    /// failed. One from an earlier round checked code that has changed since, so it says nothing.
+    /// With several, a failed one is what matters.
+    fn check_report(&self, run: &Run, attempts: &[Attempt]) -> Result<Json, ToolError> {
+        let passed = AttemptState::Succeeded.as_str();
+        let failed = AttemptState::Failed.as_str();
+        let checks: Vec<&Attempt> = latest_of_each_step(attempts)
+            .into_iter()
+            .filter(|a| a.kind == "check" && a.round == run.round)
+            .filter(|a| a.state == passed || a.state == failed)
+            .collect();
+        let failure = checks.iter().find(|a| a.state == failed);
+        let Some(check) = failure.or(checks.last()) else {
+            return Ok(Json::Null);
+        };
+        let mut view = json!({ "step": check.step_id, "passed": failure.is_none() });
+        if failure.is_some() {
+            let events = self.0.store.events(&check.id, 0).map_err(store_error)?;
+            view["output"] = json!(command_output(&events));
+        }
+        Ok(view)
+    }
+}
+
+/// Each step's latest attempt, in the order they came.
+fn latest_of_each_step(attempts: &[Attempt]) -> Vec<&Attempt> {
+    attempts
+        .iter()
+        .enumerate()
+        .filter(|(index, attempt)| {
+            !attempts[index + 1..]
+                .iter()
+                .any(|later| later.step_id == attempt.step_id)
+        })
+        .map(|(_, attempt)| attempt)
+        .collect()
 }
 
 /// The step a person has to act on, if any: looking only at each step's latest attempt, and never
 /// at a learner, since its failure doesn't stop a run.
 fn needs_person(attempts: &[Attempt]) -> Option<&Attempt> {
-    attempts.iter().enumerate().find_map(|(index, attempt)| {
-        let superseded = attempts[index + 1..]
-            .iter()
-            .any(|later| later.step_id == attempt.step_id);
-        (!superseded && attempt.role != "learner" && NEEDS_PERSON.contains(&attempt.state.as_str()))
-            .then_some(attempt)
-    })
+    latest_of_each_step(attempts)
+        .into_iter()
+        .find(|attempt| attempt.role != "learner" && NEEDS_PERSON.contains(&attempt.state.as_str()))
+}
+
+fn working(attempt: &Attempt) -> bool {
+    STOPPABLE.contains(&attempt.state.as_str())
+}
+
+fn steps_of(run: &Run) -> Vec<WorkflowStep> {
+    serde_json::from_value(run.workflow.clone()).unwrap_or_default()
+}
+
+/// Who moves a run on from where it waits. Answering and approving are only ever the person's.
+fn who_decides(state: &str) -> &'static str {
+    match state {
+        "waitingAnswers" => {
+            "Only the person answers these questions, in Keel. There is no tool for it. Bring them the questions as they are, and don't answer for them."
+        }
+        "waitingApproval" => {
+            "Only the person approves or rejects this, in Keel. There is no tool for it. Tell them it's waiting, and don't decide for them."
+        }
+        _ => {
+            "The person decides what happens next, in Keel. This client may only use what youCan lists."
+        }
+    }
+}
+
+/// Why this client can't give feedback on a run, if it can't. Every feedback tool asks this first,
+/// and in this order, so the refusal says what's missing.
+fn steer_refusal(client: &McpClient, mine: bool) -> Option<ToolError> {
+    if !client.can_run {
+        return Some(may_only_read());
+    }
+    if !client.can_steer {
+        return Some(ToolError::new(
+            "This client may not give feedback. The person can allow it in Keel's settings.",
+        ));
+    }
+    if !mine {
+        return Some(ToolError::new(
+            "Only the person acts on a run this client didn't start, in Keel.",
+        ));
+    }
+    None
+}
+
+fn still_open(run: &Run) -> Result<(), ToolError> {
+    match run.finished_at {
+        Some(_) => Err(ToolError::new(
+            "This run has finished, so there's nothing left to do on it.",
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The approval a client could send the work back from: only one this run waits at, with something
+/// before it that would do the work again.
+fn send_back_target<'a>(
+    run: &Run,
+    steps: &[WorkflowStep],
+    attempts: &'a [Attempt],
+) -> Result<&'a Attempt, ToolError> {
+    still_open(run)?;
+    let approval = needs_person(attempts)
+        .filter(|a| a.state == AttemptState::WaitingApproval.as_str())
+        .ok_or_else(|| {
+            ToolError::new(
+                "This run isn't waiting at an approval, which is the only place work can be sent back from.",
+            )
+        })?;
+    if !can_send_back(steps, &approval.step_id) {
+        return Err(ToolError::new(
+            "Nothing before this approval would do the work again, so it can't be sent back. Bring it to the person, who decides in Keel.",
+        ));
+    }
+    Ok(approval)
+}
+
+/// The step a client could retry: only one that failed, was interrupted or was stopped. One that's
+/// blocked or stalled needs the person's judgment.
+fn retry_target<'a>(run: &Run, attempts: &'a [Attempt]) -> Result<&'a Attempt, ToolError> {
+    still_open(run)?;
+    match needs_person(attempts) {
+        Some(step) if matches!(step.state.as_str(), "failed" | "interrupted" | "stopped") => {
+            Ok(step)
+        }
+        Some(step) if matches!(step.state.as_str(), "blocked" | "stalled") => {
+            Err(ToolError::new(format!(
+                "Step {:?} is {}. What happens next is the person's to decide, in Keel.",
+                step.step_id, step.state
+            )))
+        }
+        _ => Err(ToolError::new(
+            "No step in this run failed, was interrupted or was stopped, so there's nothing to retry.",
+        )),
+    }
+}
+
+/// The attempt a client could close the run on: the one the person would act on, or else the
+/// latest. Never while something works, since closing doesn't stop it.
+fn close_target<'a>(run: &Run, attempts: &'a [Attempt]) -> Result<&'a Attempt, ToolError> {
+    still_open(run)?;
+    if attempts.iter().any(working) {
+        return Err(ToolError::new(
+            "Something in this run is still working. Stop it with stop_run first, then close it.",
+        ));
+    }
+    needs_person(attempts)
+        .or(attempts.last())
+        .filter(|a| !matches!(a.state.as_str(), "succeeded" | "returned" | "postponed"))
+        .ok_or_else(|| {
+            ToolError::new(
+                "This run is moving between steps, so it can't be closed right now. Try again in a moment.",
+            )
+        })
+}
+
+/// What the last worker wrote last. For a task that only reads, that's what it found.
+fn answer(attempts: &[Attempt]) -> Option<String> {
+    attempts
+        .iter()
+        .rev()
+        .find(|a| {
+            a.kind == "agent" && a.role == "worker" && a.state != AttemptState::Skipped.as_str()
+        })
+        .and_then(|a| a.result_text.as_deref())
+        .map(|text| capped(text, MAX_TEXT))
+}
+
+/// What the verifier says no test proves, after Keel corrected what it said. Null when no verifier
+/// has answered, which isn't the same as everything being proven.
+fn not_proven(attempts: &[Attempt]) -> Json {
+    let verification = attempts
+        .iter()
+        .rev()
+        .find(|a| a.role == "verifier")
+        .and_then(verification_of_attempt);
+    match verification {
+        Some(verification) => json!(
+            verification
+                .criteria
+                .into_iter()
+                .filter(|checked| checked.result != Outcome::Met)
+                .collect::<Vec<_>>()
+        ),
+        None => Json::Null,
+    }
+}
+
+/// Each reviewer's verdict and each approver's decision, from the latest of each. As in the
+/// builder's rework prompt, an approver's instructions only count when it sent the work back.
+fn reviews(attempts: &[Attempt]) -> Vec<Json> {
+    latest_of_each_step(attempts)
+        .into_iter()
+        .filter(|a| a.kind == "agent" && a.state == AttemptState::Succeeded.as_str())
+        .filter_map(|a| {
+            let output = a.output.as_ref()?;
+            let text = |key: &str| {
+                output
+                    .get(key)
+                    .and_then(Json::as_str)
+                    .map(|text| capped(text, MAX_FINDING))
+            };
+            match a.role.as_str() {
+                "reviewer" => {
+                    let findings: Vec<String> = output
+                        .get("findings")
+                        .and_then(Json::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(Json::as_str)
+                        .take(MAX_FINDINGS)
+                        .map(|finding| capped(finding, MAX_FINDING))
+                        .collect();
+                    Some(json!({
+                        "step": a.step_id,
+                        "verdict": text("verdict"),
+                        "findings": findings,
+                    }))
+                }
+                "approver" => {
+                    let rework = text("decision").as_deref() == Some("rework");
+                    Some(json!({
+                        "step": a.step_id,
+                        "decision": text("decision"),
+                        "risk": text("risk"),
+                        "reasons": text("reasons"),
+                        "instructions": text("instructions").filter(|_| rework),
+                    }))
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 fn attempt_view(attempt: &Attempt) -> Json {

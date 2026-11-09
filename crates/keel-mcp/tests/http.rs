@@ -11,7 +11,9 @@ use std::time::Duration;
 use keel_core::{
     AttemptState, BoardColumn, CardLane, MASK, StepRole, StepSpec, ToolProfile, WorkflowStep,
 };
-use keel_engine::{AddOutcome, Config, Engine, MAX_PROJECT_PROPOSALS, Workflow};
+use keel_engine::{
+    AddOutcome, Answer, AnswerChoice, Config, Engine, MAX_PROJECT_PROPOSALS, StartRun, Workflow,
+};
 use keel_harness::Tools;
 use keel_mcp::{MAX_DRAFTS, MAX_OPEN_RUNS, MCP_PATH, McpServer, StartError};
 use keel_store::Store;
@@ -86,7 +88,17 @@ list=$(printf '%s' "$tools" | sed 's/,/","/g')
 echo "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake\",\"tools\":[\"$list\"],\"apiKeySource\":\"none\"}"
 while [ -f "$(dirname "$0")/hold" ]; do sleep 0.02; done
 if [ -n "$schema" ]; then
-  echo '{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{"summary":"It gets fixed","criteria":[{"id":"C1","when":"it runs","then":"it works"}],"changes":[],"limits":[],"decided":[],"questions":[{"id":"Q1","text":"What then?","options":[{"label":"Yes","recommended":true},{"label":"No","recommended":false}]}]}}'
+  case "$schema" in
+  *verdict*) out='{"verdict":"changes","findings":["Line 3 divides by zero"],"summary":"One problem"}';;
+  *decision*) out='{"decision":"approve","risk":"low","reasons":"It does what was asked","instructions":"Only a note"}';;
+  *unverified*) out='{"criteria":[{"id":"C1","result":"met","evidence":""}],"summary":"It works"}';;
+  *) out='{"summary":"It gets fixed","criteria":[{"id":"C1","when":"it runs","then":"it works"}],"changes":[],"limits":[],"decided":[],"questions":[{"id":"Q1","text":"What then?","options":[{"label":"Yes","recommended":true},{"label":"No","recommended":false}]}]}';;
+  esac
+  echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"num_turns\":1,\"structured_output\":$out}"
+  exit 0
+fi
+if [ "$tools" = "Read,Grep,Glob" ]; then
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"The login checks the password twice.","num_turns":1}'
   exit 0
 fi
 echo work >> fixed.txt
@@ -189,6 +201,85 @@ impl World {
     fn start_args(&self, request: &str) -> Json {
         json!({ "project": self.project_id, "workflow": self.workflow_id, "request": request })
     }
+
+    /// A client the person let give feedback on its own runs.
+    fn steering_token(&self, name: &str) -> String {
+        let (client, token) = self.server.create_client(name, true).unwrap();
+        self.store
+            .set_mcp_client_can_steer(&client.id, true)
+            .unwrap();
+        token
+    }
+
+    fn saved(&self, name: &str, steps: Vec<WorkflowStep>) -> String {
+        let workflow = Workflow {
+            id: String::new(),
+            name: name.into(),
+            builtin: false,
+            steps,
+        };
+        self.engine
+            .save_workflow(&self.project_id, &workflow)
+            .unwrap()
+            .id
+    }
+
+    fn args_for(&self, workflow: &str, request: &str) -> Json {
+        json!({ "project": self.project_id, "workflow": workflow, "request": request })
+    }
+
+    /// A run the person started in the app, with the same workflow as `start_args`.
+    fn person_run(&self, request: &str) -> String {
+        let workflow = self
+            .engine
+            .workflow(&self.project_id, &self.workflow_id, "en")
+            .unwrap()
+            .unwrap();
+        self.engine
+            .start_run_on_board(StartRun {
+                project_id: self.project_id.clone(),
+                title: None,
+                request: request.into(),
+                workflow: workflow.steps.clone(),
+                saved_workflow: Some(workflow.reference()),
+                language: "en".into(),
+                source_issue: None,
+                started_by: None,
+            })
+            .unwrap()
+    }
+}
+
+fn agent(id: &str, tools: ToolProfile, role: StepRole) -> StepSpec {
+    StepSpec {
+        id: id.into(),
+        model: "haiku".into(),
+        effort: None,
+        tools,
+        prompt: "{{request}}".into(),
+        max_turns: None,
+        max_budget_usd: None,
+        paths: vec![],
+        when: None,
+        role,
+    }
+}
+
+/// Waits until the run isn't working, as a client would.
+async fn settled(client: &Client, run: &str) -> Json {
+    let mut view = json!({});
+    for _ in 0..20 {
+        view = ok(&call(client, "wait_for_run", json!({ "run": run, "seconds": 5 })).await);
+        if view["state"] != "working" {
+            break;
+        }
+    }
+    assert_ne!(view["state"], "working", "{view}");
+    view
+}
+
+fn id_of(view: &Json) -> String {
+    view["id"].as_str().unwrap().to_owned()
 }
 
 fn initialize_body() -> String {
@@ -1212,4 +1303,378 @@ async fn settings_stay_off_until_the_person_turns_them_on() {
         .unwrap();
     assert!(w.server.settings().unwrap().enabled);
     assert_eq!(w.server.settings().unwrap().port, 7500);
+}
+
+/// Everything a run can report on: a spec that asks, a build, a check, a review, a verifier, an
+/// approver, and the person.
+fn reporting_steps() -> Vec<WorkflowStep> {
+    vec![
+        WorkflowStep::Agent(agent("spec", ToolProfile::ReadOnly, StepRole::Specifier)),
+        WorkflowStep::Agent(agent("builder", ToolProfile::Build, StepRole::Worker)),
+        WorkflowStep::Check {
+            id: "tests".into(),
+            run: "true".into(),
+        },
+        WorkflowStep::Parallel {
+            id: "reviews".into(),
+            steps: vec![agent("security", ToolProfile::ReadOnly, StepRole::Reviewer)],
+        },
+        WorkflowStep::Agent(agent("verify", ToolProfile::ReadOnly, StepRole::Verifier)),
+        WorkflowStep::Agent(agent(
+            "approver",
+            ToolProfile::ReadOnly,
+            StepRole::Approver {
+                rework_to: "builder".into(),
+                max_rounds: 2,
+            },
+        )),
+        WorkflowStep::Approval { id: "human".into() },
+    ]
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_reports_what_it_did_and_brings_what_the_person_has_to_decide() {
+    let w = world().await;
+    let workflow = w.saved("Everything", reporting_steps());
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let started = ok(&call(&client, "start_run", w.args_for(&workflow, "Fix the bug")).await);
+    let run = id_of(&started);
+    assert_eq!(started["startedByYou"], true);
+
+    let asking = settled(&client, &run).await;
+    let waiting = &asking["waitingFor"];
+    assert_eq!(waiting["state"], "waitingAnswers", "{asking}");
+    assert_eq!(
+        waiting["questions"],
+        json!([{
+            "id": "Q1",
+            "text": "What then?",
+            "options": [{ "label": "Yes", "recommended": true }, { "label": "No", "recommended": false }],
+        }])
+    );
+    let who = waiting["who"].as_str().unwrap();
+    assert!(who.contains("Only the person answers"), "{who}");
+    assert_eq!(waiting["youCan"], json!(["close_run"]));
+    assert!(waiting.get("canSendBack").is_none(), "{waiting}");
+    assert_eq!(
+        asking["report"]["answer"],
+        Json::Null,
+        "nothing is built yet"
+    );
+
+    // The person answers, in Keel.
+    let attempt = waiting["attemptId"].as_str().unwrap();
+    let yes = Answer {
+        question: "Q1".into(),
+        choice: AnswerChoice::Option {
+            label: "Yes".into(),
+        },
+        remember: false,
+    };
+    w.engine.answer_questions(attempt, &[yes]).unwrap();
+
+    let view = settled(&client, &run).await;
+    let waiting = &view["waitingFor"];
+    assert_eq!(waiting["step"], "human", "{view}");
+    assert_eq!(waiting["canSendBack"], true);
+    assert_eq!(waiting["youCan"], json!(["send_back", "close_run"]));
+    assert!(waiting.get("questions").is_none(), "{waiting}");
+    let who = waiting["who"].as_str().unwrap();
+    assert!(who.contains("Only the person approves"), "{who}");
+    assert_eq!(
+        view["report"],
+        json!({
+            "answer": "Fixed it.",
+            "filesChanged": ["fixed.txt"],
+            "check": { "step": "tests", "passed": true },
+            // It said this was met without saying what proves it, so Keel didn't take its word.
+            "notProven": [{
+                "id": "C1", "when": "it runs", "then": "it works",
+                "result": "unverified", "evidence": "", "corrected": "noEvidence",
+            }],
+            "reviews": [
+                { "step": "security", "verdict": "changes", "findings": ["Line 3 divides by zero"] },
+                // What an approver that approved only noted isn't something to do.
+                { "step": "approver", "decision": "approve", "risk": "low", "reasons": "It does what was asked", "instructions": null },
+            ],
+            // A run an assistant started never counts as small.
+            "skipped": [],
+            "prUrl": null,
+            "prState": null,
+        })
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_report_names_what_was_skipped_for_being_small() {
+    let w = world().await;
+    let workflow = w.saved("Everything", reporting_steps());
+    let client = w.client(&w.token(true)).await;
+    let run = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.args_for(&workflow, "Fix it"),
+    )
+    .await));
+    let asking = settled(&client, &run).await;
+    let attempt = asking["waitingFor"]["attemptId"].as_str().unwrap();
+    w.engine
+        .answer_questions(
+            attempt,
+            &[Answer {
+                question: "Q1".into(),
+                choice: AnswerChoice::Option {
+                    label: "Yes".into(),
+                },
+                remember: false,
+            }],
+        )
+        .unwrap();
+    let view = settled(&client, &run).await;
+    // As a run the person started could have it, which is the only kind that can be small.
+    let security = view["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["step"] == "security")
+        .unwrap();
+    let reason = keel_core::Reason::TreatedAsSmall { lines: 1, files: 1 };
+    w.store
+        .set_state(
+            security["attemptId"].as_str().unwrap(),
+            AttemptState::Skipped,
+            Some(&reason),
+        )
+        .unwrap();
+    let view = ok(&call(&client, "get_run", json!({ "run": run })).await);
+    assert_eq!(view["report"]["skipped"], json!(["security"]));
+    assert_eq!(view["report"]["reviews"][0]["step"], "approver", "{view}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_check_says_why_and_only_the_client_that_started_it_may_act_if_allowed() {
+    let w = world().await;
+    let workflow = w.saved(
+        "Checked",
+        vec![
+            WorkflowStep::Agent(agent("builder", ToolProfile::Build, StepRole::Worker)),
+            WorkflowStep::Check {
+                id: "tests".into(),
+                run: "echo '3 failed' >&2; exit 1".into(),
+            },
+            WorkflowStep::Approval { id: "human".into() },
+        ],
+    );
+    let owner = w.client(&w.steering_token("Owner")).await;
+    let run = id_of(&ok(&call(
+        &owner,
+        "start_run",
+        w.args_for(&workflow, "Fix it"),
+    )
+    .await));
+    let view = settled(&owner, &run).await;
+    assert_eq!(view["waitingFor"]["state"], "failed", "{view}");
+    assert_eq!(view["waitingFor"]["step"], "tests", "{view}");
+    let check = &view["report"]["check"];
+    assert_eq!(check["step"], "tests", "{check}");
+    assert_eq!(check["passed"], false, "{check}");
+    assert_eq!(check["output"]["exitCode"], 1, "{check}");
+    let stderr = check["output"]["stderr"].as_str().unwrap();
+    assert!(stderr.contains("3 failed"), "{stderr}");
+    assert_eq!(view["report"]["answer"], "Fixed it.");
+    assert_eq!(view["startedByYou"], true);
+    assert_eq!(
+        view["waitingFor"]["youCan"],
+        json!(["retry_step", "close_run"])
+    );
+    let who = view["waitingFor"]["who"].as_str().unwrap();
+    assert!(who.contains("youCan"), "{who}");
+
+    // Another client the person let give feedback didn't start it.
+    let other = w.client(&w.steering_token("Other")).await;
+    let seen = ok(&call(&other, "get_run", json!({ "run": run })).await);
+    assert_eq!(seen["startedByYou"], false);
+    assert_eq!(seen["waitingFor"]["youCan"], json!([]));
+    let reader = w.client(&w.token(false)).await;
+    let seen = ok(&call(&reader, "get_run", json!({ "run": run })).await);
+    assert_eq!(seen["waitingFor"]["youCan"], json!([]));
+
+    // What the client may do is read on every request.
+    let row = w
+        .store
+        .mcp_clients()
+        .unwrap()
+        .into_iter()
+        .find(|client| client.name == "Owner")
+        .unwrap();
+    w.store.set_mcp_client_can_steer(&row.id, false).unwrap();
+    let seen = ok(&call(&owner, "get_run", json!({ "run": run })).await);
+    assert_eq!(seen["startedByYou"], true);
+    assert_eq!(seen["waitingFor"]["youCan"], json!([]));
+    for client in [owner, other, reader] {
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_the_person_started_is_not_a_client_s_to_act_on() {
+    let w = world().await;
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let run = w.person_run("Fix it by hand");
+    let view = settled(&client, &run).await;
+    assert_eq!(view["startedByYou"], false);
+    assert_eq!(view["waitingFor"]["state"], "waitingApproval", "{view}");
+    assert_eq!(view["waitingFor"]["canSendBack"], true);
+    assert_eq!(view["waitingFor"]["youCan"], json!([]));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn waiting_on_several_runs_returns_as_soon_as_one_of_them_stops_working() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let asks = w.saved(
+        "Just ask",
+        vec![WorkflowStep::Approval { id: "human".into() }],
+    );
+    let hold = w._dir.path().join("bin/hold");
+    std::fs::write(&hold, "").unwrap();
+    let busy = id_of(&ok(&call(&client, "start_run", w.start_args("Busy")).await));
+
+    let waited = ok(&call(
+        &client,
+        "wait_for_run",
+        json!({ "runs": [busy], "seconds": 1 }),
+    )
+    .await);
+    assert_eq!(waited["ready"], json!([]), "it waited it out");
+    assert_eq!(waited["runs"][0]["state"], "working");
+
+    let quick = id_of(&ok(
+        &call(&client, "start_run", w.args_for(&asks, "Quick")).await
+    ));
+    let began = std::time::Instant::now();
+    let args = json!({ "runs": [busy, quick], "seconds": 30 });
+    let waited = ok(&call(&client, "wait_for_run", args).await);
+    assert!(
+        began.elapsed() < Duration::from_secs(20),
+        "it didn't wait it out"
+    );
+    assert_eq!(waited["ready"], json!([quick]));
+    assert_eq!(waited["runs"][0]["id"], json!(busy));
+    assert_eq!(waited["runs"][0]["state"], "working");
+    assert_eq!(waited["runs"][1]["state"], "waitingForPerson");
+    assert_eq!(waited["runs"][1]["waitingFor"]["step"], "human");
+
+    // `run` counts as one of them.
+    let args = json!({ "run": busy, "runs": [quick], "seconds": 1 });
+    let waited = ok(&call(&client, "wait_for_run", args).await);
+    assert_eq!(waited["runs"].as_array().unwrap().len(), 2);
+
+    std::fs::remove_file(&hold).unwrap();
+    let mut waited = json!({});
+    for _ in 0..20 {
+        waited = ok(&call(
+            &client,
+            "wait_for_run",
+            json!({ "runs": [busy], "seconds": 5 }),
+        )
+        .await);
+        if waited["ready"] != json!([]) {
+            break;
+        }
+    }
+    assert_eq!(waited["ready"], json!([busy]), "{waited}");
+
+    let refusal = refused(&call(&client, "wait_for_run", json!({ "seconds": 1 })).await);
+    assert!(refusal.contains("Say which run"), "{refusal}");
+    let refusal = refused(&call(&client, "wait_for_run", json!({ "runs": [busy, "nope"] })).await);
+    assert!(refusal.contains("no run \"nope\""), "{refusal}");
+    let many: Vec<String> = (0..11).map(|n| format!("run-{n}")).collect();
+    let refusal = refused(&call(&client, "wait_for_run", json!({ "runs": many })).await);
+    assert!(refusal.contains("up to 10"), "{refusal}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_can_find_the_runs_it_started_again() {
+    let w = world().await;
+    let mine = w.client(&w.token(true)).await;
+    let theirs = w.client(&w.token(true)).await;
+    let first = id_of(&ok(&call(&mine, "start_run", w.start_args("Mine")).await));
+    let other = id_of(&ok(
+        &call(&theirs, "start_run", w.start_args("Theirs")).await
+    ));
+    w.person_run("The person's");
+    let ids = |listed: Json| -> Vec<String> {
+        listed["runs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|run| run["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(ids(ok(&call(&mine, "list_runs", json!({})).await)).len(), 3);
+    let listed = ok(&call(&mine, "list_runs", json!({ "mine": true })).await);
+    assert_eq!(ids(listed), std::slice::from_ref(&first));
+    let listed = ok(&call(
+        &mine,
+        "list_runs",
+        json!({ "mine": true, "project": "app" }),
+    )
+    .await);
+    assert_eq!(ids(listed), [first]);
+    let listed = ok(&call(&theirs, "list_runs", json!({ "mine": true })).await);
+    assert_eq!(ids(listed), [other]);
+    mine.cancel().await.unwrap();
+    theirs.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_keeps_to_the_number_of_open_runs_the_person_set() {
+    let w = world().await;
+    let (row, token) = w.server.create_client("Claude Code", true).unwrap();
+    w.store.set_mcp_client_max_open_runs(&row.id, 1).unwrap();
+    let client = w.client(&token).await;
+    ok(&call(&client, "start_run", w.start_args("One")).await);
+    let refusal = refused(&call(&client, "start_run", w.start_args("Two")).await);
+    assert!(refusal.contains("runs open"), "{refusal}");
+    assert!(refusal.contains("Keel's settings"), "{refusal}");
+    assert_eq!(w.store.runs(10).unwrap().len(), 1);
+
+    // It's read on every request, so the person's change applies at once.
+    w.store.set_mcp_client_max_open_runs(&row.id, 2).unwrap();
+    ok(&call(&client, "start_run", w.start_args("Two")).await);
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn what_an_agent_wrote_reaches_the_report_with_its_secrets_masked() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let run = id_of(&ok(
+        &call(&client, "start_run", w.start_args("Fix it")).await
+    ));
+    let view = settled(&client, &run).await;
+    // Put together here, so no secret scanner trips on this file.
+    let secret = format!("{}{}", "ghp_", "x".repeat(36));
+    let builder = view["steps"][0]["attemptId"].as_str().unwrap();
+    w.store
+        .patch_attempt(
+            builder,
+            &[(
+                "result_text",
+                Value::Text(format!("Done. I used API_KEY={secret} to test.")),
+            )],
+        )
+        .unwrap();
+    let view = ok(&call(&client, "get_run", json!({ "run": run })).await);
+    assert_eq!(
+        view["report"]["answer"],
+        format!("Done. I used API_KEY={MASK} to test.")
+    );
+    assert!(!view.to_string().contains(&secret), "{view}");
+    client.cancel().await.unwrap();
 }

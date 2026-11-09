@@ -38,8 +38,14 @@ use keel_store::{
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
 pub use prompts::full_workflow;
 use serde_json::json;
-pub use specs::{Answer, AnswerChoice};
-pub use workflows::{Workflow, WorkflowDraft};
+// What a reader outside the engine needs to tell what a run did and what it waits for, read the way
+// the engine reads it.
+pub use sizing::skipped_steps;
+pub use specs::of_attempt as spec_of_attempt;
+pub use specs::{Answer, AnswerChoice, Spec};
+pub use verification::of_attempt as verification_of_attempt;
+pub use verification::{Outcome, Verification};
+pub use workflows::{Workflow, WorkflowDraft, can_send_back, files_changed};
 
 const RESUME_PROMPT: &str = "Continue where you left off.";
 
