@@ -25,7 +25,7 @@ use serde_json::Value as Json;
 use crate::tools::{
     CloseRunArgs, DraftWorkflowArgs, GetBrainArgs, GetRunArgs, GetStepArgs, ListIssuesArgs,
     ListProjectsArgs, ListRunsArgs, ListWorkflowsArgs, ProposeProjectArgs, RetryStepArgs,
-    SendBackArgs, StartRunArgs, StopRunArgs, WaitForRunArgs,
+    SendBackArgs, StartRunArgs, StartTaskArgs, StopRunArgs, WaitForRunArgs,
 };
 use crate::{INSTRUCTIONS, McpServer, ToolError};
 
@@ -67,6 +67,13 @@ const START_RUN: &str = "Start a run of a saved workflow, from `request` text, a
                          the person's approval before any pull request, and you can't approve or answer what a step \
                          asks them. Refused if this client may only read, or already has as many runs open as \
                          the person allows (3 unless they changed it).";
+const START_TASK: &str = "Start one agent that only reads a project, to read, investigate or review code, with \
+                          your own `prompt`. It works in its own copy of the project and can't change files, \
+                          run commands or open a pull request. When it's done, its finding is in \
+                          `report.answer` of get_run or wait_for_run. It appears in Keel at once as a card, \
+                          counts toward this client's open runs, and spends the person's Claude usage. \
+                          `model` is sonnet unless you say otherwise. Refused if this client may only read, \
+                          or already has as many runs open as the person allows.";
 const DRAFT_WORKFLOW: &str = "Propose a workflow for a project, as a draft the person reviews on Keel's Workflows \
                               page. Nothing runs: start_run can't see it until the person saves it, and they may \
                               change it or discard it first. Saving is theirs alone, so tell them it's there. \
@@ -255,6 +262,21 @@ impl Handler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         reply(self.server.start_run(client(&context)?, args).await)
+    }
+
+    #[tool(
+        name = "start_task",
+        title = "Start a task that only reads",
+        description = START_TASK,
+        input_schema = input_schema::<StartTaskArgs>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn start_task(
+        &self,
+        Parameters(args): Parameters<StartTaskArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        reply(self.server.start_task(client(&context)?, args).await)
     }
 
     #[tool(

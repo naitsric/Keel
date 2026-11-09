@@ -34,8 +34,9 @@ use serde_json::{Value as Json, json};
 /// retry_step because it only retries what failed or was stopped, never what waits on the person's
 /// judgment. close_run is here because it delivers nothing, and the card keeps its text for the
 /// person. All three are only for a client the person lets give feedback, on runs it started, and
-/// the first two only a few times per run.
-const TOOLS: [&str; 15] = [
+/// the first two only a few times per run. start_task is here because its one agent only reads, and
+/// has nothing to deliver.
+const TOOLS: [&str; 16] = [
     "close_run",
     "draft_workflow",
     "get_brain",
@@ -49,6 +50,7 @@ const TOOLS: [&str; 15] = [
     "retry_step",
     "send_back",
     "start_run",
+    "start_task",
     "stop_run",
     "wait_for_run",
 ];
@@ -1702,6 +1704,23 @@ impl World {
         )
     }
 
+    /// The run's card, once it's in that column.
+    async fn card_in(&self, run: &str, column: BoardColumn) -> keel_engine::BoardCard {
+        let id = self.store.card_of_run(run).unwrap().unwrap();
+        let mut card = None;
+        for _ in 0..100 {
+            let board = self.engine.board(&self.project_id).unwrap();
+            card = board.cards.into_iter().find(|c| c.id == id);
+            if card.as_ref().is_some_and(|c| c.column == column) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let card = card.unwrap();
+        assert_eq!(card.column, column, "{card:?}");
+        card
+    }
+
     fn hold(&self) -> PathBuf {
         let hold = self._dir.path().join("bin/hold");
         std::fs::write(&hold, "").unwrap();
@@ -1978,24 +1997,140 @@ async fn a_client_closes_its_waiting_run_with_nothing_delivered_and_never_one_th
     assert_eq!(event.data["by"], "Claude Code");
 
     // The card goes back for the person, with what it said.
-    let card = w.store.card_of_run(&run).unwrap().unwrap();
-    let mut back = None;
-    for _ in 0..100 {
-        let board = w.engine.board(&w.project_id).unwrap();
-        back = board.cards.into_iter().find(|c| c.id == card);
-        if back
-            .as_ref()
-            .is_some_and(|c| c.column == BoardColumn::Backlog)
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let back = back.unwrap();
-    assert_eq!(back.column, BoardColumn::Backlog);
-    assert_eq!(back.title, "Fix the bug");
+    let card = w.card_in(&run, BoardColumn::Backlog).await;
+    assert_eq!(card.title, "Fix the bug");
 
     let refusal = refused(&call(&client, "close_run", json!({ "run": run })).await);
     assert!(refusal.contains("has finished"), "{refusal}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_is_one_agent_that_only_reads_and_its_finding_is_the_report_s_answer() {
+    let w = world().await;
+    // A project that sets up before building. A task builds nothing, so it doesn't.
+    w.engine
+        .update_project(
+            &w.project_id,
+            &keel_store::ProjectSettings {
+                setup_command: Some("echo installing".into()),
+                ..keel_store::ProjectSettings::default()
+            },
+        )
+        .unwrap();
+    let (row, token) = w.server.create_client("Claude Code", true).unwrap();
+    let client = w.client(&token).await;
+    let args = json!({
+        "project": "app",
+        "prompt": "What does the login do?\n\nSay where it checks the password.",
+        "title": "How the login works",
+        "effort": "low",
+    });
+    let started = ok(&call(&client, "start_task", args).await);
+    let run = id_of(&started);
+    assert_eq!(started["startedByYou"], true);
+    assert_eq!(started["startedBy"], "Claude Code");
+    assert_eq!(started["title"], "How the login works");
+    assert_eq!(started["workflowId"], Json::Null);
+
+    let steps: Vec<WorkflowStep> =
+        serde_json::from_value(w.store.run(&run).unwrap().workflow).unwrap();
+    let [WorkflowStep::Agent(task)] = steps.as_slice() else {
+        panic!("{steps:?}")
+    };
+    assert_eq!(task.id, "task");
+    assert_eq!(task.tools, ToolProfile::ReadOnly);
+    assert_eq!(task.role, StepRole::Worker);
+    assert_eq!(task.model, "sonnet");
+    assert_eq!(task.effort.as_deref(), Some("low"));
+
+    let done = settled(&client, &run).await;
+    assert_eq!(done["state"], "finished", "{done}");
+    assert_eq!(
+        done["report"]["answer"],
+        "The login checks the password twice."
+    );
+    assert_eq!(done["report"]["filesChanged"], json!([]));
+    assert_eq!(done["report"]["check"], Json::Null);
+    assert_eq!(done["prUrl"], Json::Null);
+    assert_eq!(done["steps"].as_array().unwrap().len(), 1, "no setup ran");
+    assert!(w.store.run_started_by_mcp_client(&run, &row.id).unwrap());
+    let calls = w.store.mcp_calls(100).unwrap();
+    let started = calls.iter().find(|c| c.tool == "start_task").unwrap();
+    assert_eq!(started.run_id.as_deref(), Some(run.as_str()));
+
+    // It's on the board under its title, and ends there with nothing delivered.
+    let card = w.card_in(&run, BoardColumn::Done).await;
+    assert_eq!(card.title, "How the login works");
+    let listed = ok(&call(&client, "list_runs", json!({ "mine": true })).await);
+    assert_eq!(listed["runs"][0]["id"], json!(run));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_task_can_ask_for_nothing_more_than_reading() {
+    let w = world().await;
+    let reader = w.client(&w.token(false)).await;
+    let args = json!({ "project": "app", "prompt": "What does it do?" });
+    let refusal = refused(&call(&reader, "start_task", args).await);
+    assert!(refusal.contains("may only read"), "{refusal}");
+    reader.cancel().await.unwrap();
+
+    let client = w.client(&w.token(true)).await;
+    let with = |extra: Json| {
+        let mut args = json!({ "project": "app", "prompt": "What does it do?" });
+        for (key, value) in extra.as_object().unwrap() {
+            args[key] = value.clone();
+        }
+        args
+    };
+    let cases = [
+        (
+            with(json!({ "model": "--dangerously-skip-permissions" })),
+            "model's name",
+        ),
+        (with(json!({ "model": "opus model" })), "model's name"),
+        (with(json!({ "maxTurns": 0 })), "above zero"),
+        (with(json!({ "maxBudgetUsd": 0.0 })), "above zero"),
+        (with(json!({ "prompt": "  " })), "`prompt`"),
+        (
+            with(json!({ "prompt": "x".repeat(16 * 1024 + 1) })),
+            "`prompt`",
+        ),
+        (with(json!({ "title": "x".repeat(81) })), "80 characters"),
+        (with(json!({ "language": "fr" })), "`en` or `es`"),
+        (with(json!({ "project": "nope" })), "no project"),
+        // What a task can't have is refused, not ignored.
+        (with(json!({ "tools": "build" })), "tools"),
+        (
+            with(json!({ "allowedDomains": ["evil.example"] })),
+            "allowedDomains",
+        ),
+    ];
+    for (args, says) in cases {
+        let refusal = refused(&call(&client, "start_task", args.clone()).await);
+        assert!(refusal.contains(says), "{args}: {refusal}");
+    }
+    assert!(w.store.runs(10).unwrap().is_empty());
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_task_counts_toward_the_runs_a_client_may_have_open() {
+    let w = world().await;
+    let (row, token) = w.server.create_client("Claude Code", true).unwrap();
+    w.store.set_mcp_client_max_open_runs(&row.id, 1).unwrap();
+    let client = w.client(&token).await;
+    let hold = w.hold();
+    let task = json!({ "project": "app", "prompt": "What does it do?" });
+    let run = id_of(&ok(&call(&client, "start_task", task.clone()).await));
+    let refusal = refused(&call(&client, "start_task", task.clone()).await);
+    assert!(refusal.contains("runs open"), "{refusal}");
+    let refusal = refused(&call(&client, "start_run", w.start_args("Fix it")).await);
+    assert!(refusal.contains("runs open"), "{refusal}");
+
+    std::fs::remove_file(&hold).unwrap();
+    assert_eq!(settled(&client, &run).await["state"], "finished");
+    ok(&call(&client, "start_task", task).await);
     client.cancel().await.unwrap();
 }

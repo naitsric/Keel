@@ -338,9 +338,13 @@ impl Engine {
         let project = store.project(&request.project_id)?;
         self.check_can_run(&project, &request.workflow)?;
         let issue = request.source_issue.as_ref();
+        // The card says what the run is called, so the person finds it by the same name.
         let title = match issue {
             Some(issue) => issue.title.clone(),
-            None => title_from(&request.request),
+            None => request
+                .title
+                .clone()
+                .unwrap_or_else(|| title_from(&request.request)),
         };
         // If this run is rejected, the card goes back to Backlog, and what's on it is what runs next.
         let body = match issue {

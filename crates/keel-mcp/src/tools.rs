@@ -34,6 +34,9 @@ const MAX_FINDING: usize = 2 * 1024;
 /// Drafts a project may have waiting, so a client can't bury the person in them.
 pub const MAX_DRAFTS: usize = 20;
 const MAX_DRAFT_NAME: usize = 80;
+const MAX_TASK_TITLE: usize = 80;
+/// What a task runs on unless the client says otherwise: it only reads, and that's plenty for it.
+const TASK_MODEL: &str = "sonnet";
 const MAX_MODEL_NAME: usize = 100;
 const MAX_PROPOSED_PATH: usize = 1024;
 
@@ -180,6 +183,32 @@ pub struct RetryStepArgs {
 pub struct CloseRunArgs {
     /// A run's id.
     pub run: String,
+}
+
+// Nothing here can make it edit, reach the network or deliver. Anything else is refused rather than
+// ignored, so a client doesn't go on believing it got it.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StartTaskArgs {
+    /// A project's id or name.
+    pub project: String,
+    /// What to read, find out or review, and what to answer with, in up to 16 KB.
+    pub prompt: String,
+    /// `fable`, `opus`, `sonnet`, `haiku` or a full model id. `sonnet` by default.
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<DraftEffort>,
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+    #[serde(default)]
+    pub max_budget_usd: Option<f64>,
+    /// What its card is called, in up to 80 characters. The prompt's first line by default.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// `en` or `es`, for what the agent writes. The app's language by default.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 // Only the folder. The account that pushes and the commands Keel runs are the person's to choose, so
@@ -629,6 +658,71 @@ impl McpServer {
                     )),
                     (error, _) => engine_error(error),
                 })?;
+            engine.announce(&run);
+            Ok((server.new_run_view(client, &run)?, Some(run)))
+        })
+        .await
+    }
+
+    /// A single agent that only reads, in the run's own copy of the project. It can't edit, so no
+    /// setup runs before it, and there's nothing to deliver.
+    pub(crate) async fn start_task(
+        &self,
+        client: McpClient,
+        args: StartTaskArgs,
+    ) -> Result<Json, ToolError> {
+        self.call(client, "start_task", args, |server, client, args| {
+            if !client.can_run {
+                return Err(may_only_read());
+            }
+            server.room_for_another_run(client)?;
+            let project = server.project(&args.project)?;
+            let language = server.language(args.language.as_deref())?;
+            let prompt = args.prompt.trim();
+            if prompt.is_empty() || prompt.len() > MAX_TEXT {
+                return Err(ToolError::new(
+                    "Say what to find out in `prompt`, in up to 16 KB.",
+                ));
+            }
+            let model = args.model.as_deref().map_or(TASK_MODEL, str::trim);
+            // It goes to `claude` as an argument, so it can't be left looking like a flag.
+            if !plain_model_name(model) {
+                return Err(ToolError::new(
+                    "`model` has to be a model's name, like sonnet or claude-opus-5-5.",
+                ));
+            }
+            if args.max_turns == Some(0) || args.max_budget_usd.is_some_and(|budget| budget <= 0.0)
+            {
+                return Err(ToolError::new(
+                    "`maxTurns` and `maxBudgetUsd` have to be above zero.",
+                ));
+            }
+            let title = match args.title.as_deref().map(str::trim) {
+                None | Some("") => None,
+                Some(title) if title.chars().count() > MAX_TASK_TITLE => {
+                    return Err(ToolError::new(format!(
+                        "Give the task a title of up to {MAX_TASK_TITLE} characters, or none."
+                    )));
+                }
+                Some(title) => Some(title.to_owned()),
+            };
+            let step = StepSpec {
+                id: "task".into(),
+                model: model.to_owned(),
+                effort: args.effort.map(|effort| effort.as_str().to_owned()),
+                tools: ToolProfile::ReadOnly,
+                prompt: prompt.to_owned(),
+                max_turns: args.max_turns,
+                max_budget_usd: args.max_budget_usd,
+                paths: Vec::new(),
+                when: None,
+                role: StepRole::Worker,
+            };
+            let mut request = StartRun::one_step(project.id, step, language);
+            request.title = title;
+            request.started_by = Some(client.name.clone());
+            let engine = &server.0.engine;
+            let run = engine.start_run_on_board(request).map_err(engine_error)?;
             engine.announce(&run);
             Ok((server.new_run_view(client, &run)?, Some(run)))
         })
