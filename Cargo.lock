@@ -2014,7 +2014,7 @@ dependencies = [
 
 [[package]]
 name = "keel"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "keel-core",
  "keel-engine",
@@ -2032,7 +2032,7 @@ dependencies = [
 
 [[package]]
 name = "keel-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "regex",
  "serde",
@@ -2041,7 +2041,7 @@ dependencies = [
 
 [[package]]
 name = "keel-engine"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "globset",
@@ -2059,7 +2059,7 @@ dependencies = [
 
 [[package]]
 name = "keel-harness"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "keel-core",
  "libc",
@@ -2071,7 +2071,7 @@ dependencies = [
 
 [[package]]
 name = "keel-mcp"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -2096,7 +2096,7 @@ dependencies = [
 
 [[package]]
 name = "keel-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "keel-core",
