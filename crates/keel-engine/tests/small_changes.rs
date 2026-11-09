@@ -1180,7 +1180,7 @@ fn a_restart_remembers_nothing_and_the_run_still_does_not_go_back_down() {
     // As if the app died right after a person sent it back, before the run could move on.
     assert!(
         w.store
-            .return_attempt(&there.id, &run, "One more thing")
+            .return_attempt(&there.id, &run, "One more thing", None)
             .unwrap()
     );
     let reopened = w.restarted();

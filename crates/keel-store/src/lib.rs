@@ -264,6 +264,11 @@ const MIGRATIONS: &[&str] = &[
     r#"
     alter table project add column sensitive_paths text not null default '[]';
 "#,
+    // 13: Whether an MCP client may give feedback on its own runs, and how many it may keep open.
+    r#"
+    alter table mcp_client add column can_steer integer not null default 0;
+    alter table mcp_client add column max_open_runs integer not null default 3;
+"#,
 ];
 
 /// The attempt that says where a run stands, for a query that calls its run `r`. Of each step's
@@ -280,6 +285,11 @@ const ATTEMPT_THAT_MATTERS: &str = "select b.rowid from attempt b where b.run_id
              b.rowid desc
     limit 1";
 
+/// How many runs an MCP client may keep open until the person says otherwise.
+pub const DEFAULT_MAX_OPEN_RUNS: i64 = 3;
+/// The most the person can allow, so a client can't spend their usage faster than they can follow.
+pub const MAX_OPEN_RUNS_CEILING: i64 = 10;
+
 /// An assistant allowed to reach Keel over MCP. Its token's hash is never read back.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -290,6 +300,11 @@ pub struct McpClient {
     pub token_prefix: String,
     /// May start and stop runs, and not only read.
     pub can_run: bool,
+    /// May send work back, retry and close the runs it started, besides `can_run`. Off unless the
+    /// person turns it on.
+    pub can_steer: bool,
+    /// How many of its runs may be open at once, counting those that wait for the person.
+    pub max_open_runs: i64,
     pub created_at: String,
     pub last_seen_at: Option<String>,
     pub revoked_at: Option<String>,
@@ -321,8 +336,7 @@ pub struct NewMcpCall<'a> {
     pub duration_ms: i64,
 }
 
-const MCP_CLIENT_COLUMNS: &str =
-    "id, name, token_prefix, can_run, created_at, last_seen_at, revoked_at";
+const MCP_CLIENT_COLUMNS: &str = "id, name, token_prefix, can_run, can_steer, max_open_runs, created_at, last_seen_at, revoked_at";
 
 fn mcp_client_from(r: &Row) -> rusqlite::Result<McpClient> {
     Ok(McpClient {
@@ -330,11 +344,16 @@ fn mcp_client_from(r: &Row) -> rusqlite::Result<McpClient> {
         name: r.get(1)?,
         token_prefix: r.get(2)?,
         can_run: r.get(3)?,
-        created_at: r.get(4)?,
-        last_seen_at: r.get(5)?,
-        revoked_at: r.get(6)?,
+        can_steer: r.get(4)?,
+        max_open_runs: r.get(5)?,
+        created_at: r.get(6)?,
+        last_seen_at: r.get(7)?,
+        revoked_at: r.get(8)?,
     })
 }
+
+/// The tools that start a run, which is how a client's runs are told from everyone else's.
+const MCP_STARTS_A_RUN: &str = "('start_run', 'start_task')";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1039,6 +1058,23 @@ impl Store {
         self.mcp_client(id)
     }
 
+    pub fn set_mcp_client_can_steer(&self, id: &str, can_steer: bool) -> Result<McpClient> {
+        self.lock().execute(
+            "update mcp_client set can_steer = ?2 where id = ?1",
+            rusqlite::params![id, can_steer],
+        )?;
+        self.mcp_client(id)
+    }
+
+    /// Kept between one and the ceiling, whatever the caller asks for.
+    pub fn set_mcp_client_max_open_runs(&self, id: &str, max: i64) -> Result<McpClient> {
+        self.lock().execute(
+            "update mcp_client set max_open_runs = ?2 where id = ?1",
+            rusqlite::params![id, max.clamp(1, MAX_OPEN_RUNS_CEILING)],
+        )?;
+        self.mcp_client(id)
+    }
+
     pub fn revoke_mcp_client(&self, id: &str) -> Result<McpClient> {
         self.lock().execute(
             "update mcp_client set revoked_at = ?2 where id = ?1 and revoked_at is null",
@@ -1093,10 +1129,47 @@ impl Store {
     /// Runs this client started that haven't finished.
     pub fn open_runs_of_mcp_client(&self, client_id: &str) -> Result<i64> {
         Ok(self.lock().query_row(
-            "select count(distinct r.id) from run r
-             join mcp_call c on c.run_id = r.id
-             where c.client_id = ?1 and c.tool = 'start_run' and c.ok = 1 and r.finished_at is null",
+            &format!(
+                "select count(distinct r.id) from run r
+                 join mcp_call c on c.run_id = r.id
+                 where c.client_id = ?1 and c.tool in {MCP_STARTS_A_RUN} and c.ok = 1
+                   and r.finished_at is null"
+            ),
             [client_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Whether this client started that run. A client only acts on its own runs.
+    pub fn run_started_by_mcp_client(&self, run_id: &str, client_id: &str) -> Result<bool> {
+        Ok(self.lock().query_row(
+            &format!(
+                "select exists (select 1 from mcp_call
+                 where run_id = ?1 and client_id = ?2 and tool in {MCP_STARTS_A_RUN} and ok = 1)"
+            ),
+            [run_id, client_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The runs this client started, newest first, as `runs` has them. So a client that lost track
+    /// can find its own again.
+    pub fn runs_started_by_mcp_client(&self, client_id: &str, limit: i64) -> Result<Vec<RunRow>> {
+        self.run_rows(
+            &format!(
+                "exists (select 1 from mcp_call c
+                 where c.run_id = r.id and c.client_id = ?2 and c.tool in {MCP_STARTS_A_RUN} and c.ok = 1)"
+            ),
+            params![limit, client_id],
+        )
+    }
+
+    /// How many times this client called that tool on that run and it went through. What caps how
+    /// often a client can send back or retry the same run.
+    pub fn mcp_calls_on_run(&self, client_id: &str, run_id: &str, tool: &str) -> Result<i64> {
+        Ok(self.lock().query_row(
+            "select count(*) from mcp_call where client_id = ?1 and run_id = ?2 and tool = ?3 and ok = 1",
+            [client_id, run_id, tool],
             |r| r.get(0),
         )?)
     }
@@ -1622,11 +1695,22 @@ impl Store {
     /// A person sends the work back from an approval: its attempt says so, with what they want, and
     /// the run moves to its next round. All or nothing, because an attempt that says it went back
     /// in a round that never moved on would hold the run forever. False if it wasn't waiting.
-    pub fn return_attempt(&self, id: &str, run_id: &str, instructions: &str) -> Result<bool> {
+    /// `by` names the MCP client that did it, so the person sees who. None when it was them.
+    pub fn return_attempt(
+        &self,
+        id: &str,
+        run_id: &str,
+        instructions: &str,
+        by: Option<&str>,
+    ) -> Result<bool> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let at = now();
-        let output = serde_json::json!({ "instructions": instructions }).to_string();
+        let mut output = serde_json::json!({ "instructions": instructions });
+        if let Some(by) = by {
+            output["by"] = by.into();
+        }
+        let output = output.to_string();
         let changed = tx.execute(
             "update attempt set state = 'returned', reason = null, output = ?2, finished_at = ?3
              where id = ?1 and state = 'waitingApproval'",
@@ -1642,13 +1726,13 @@ impl Store {
         let round: i64 = tx.query_row("select round from run where id = ?1", [run_id], |r| {
             r.get(0)
         })?;
+        let mut data = serde_json::json!({ "instructions": instructions, "round": round });
+        if let Some(by) = by {
+            data["by"] = by.into();
+        }
         tx.execute(
             "insert into event (attempt_id, at, kind, data) values (?1, ?2, 'returned', ?3)",
-            params![
-                id,
-                at,
-                serde_json::json!({ "instructions": instructions, "round": round }).to_string()
-            ],
+            params![id, at, data.to_string()],
         )?;
         tx.commit()?;
         Ok(true)
@@ -1754,6 +1838,12 @@ impl Store {
 
     /// Runs, newest first, each with its latest attempt.
     pub fn runs(&self, limit: i64) -> Result<Vec<RunRow>> {
+        self.run_rows("1", params![limit])
+    }
+
+    /// Runs matching a filter on `r`, newest first. `?1` is the limit, and the filter's own
+    /// parameters come after it.
+    fn run_rows<P: rusqlite::Params>(&self, filter: &str, params: P) -> Result<Vec<RunRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
             "select r.id, r.title, r.project_id, p.name as project_name, a.step_id, a.id as attempt_id, a.number,
@@ -1762,9 +1852,10 @@ impl Store {
              from run r
              join project p on p.id = r.project_id
              join attempt a on a.run_id = r.id and a.rowid = ({ATTEMPT_THAT_MATTERS})
+             where {filter}
              order by r.created_at desc limit ?1"
         ))?;
-        let rows = stmt.query_map([limit], |r| {
+        let rows = stmt.query_map(params, |r| {
             Ok(RunRow {
                 id: r.get(0)?,
                 title: r.get(1)?,
@@ -3137,24 +3228,52 @@ mod tests {
     fn sending_back_moves_the_attempt_and_the_round_together_and_only_once() {
         let (_dir, store) = store();
         let id = seeded(&store);
-        assert!(!store.return_attempt(&id, "r", "Change it").unwrap());
+        assert!(!store.return_attempt(&id, "r", "Change it", None).unwrap());
         assert_eq!(store.run("r").unwrap().round, 0, "it wasn't waiting");
 
         store
             .set_state(&id, AttemptState::WaitingApproval, None)
             .unwrap();
-        assert!(store.return_attempt(&id, "r", "Change it").unwrap());
+        assert!(store.return_attempt(&id, "r", "Change it", None).unwrap());
         let attempt = store.attempt(&id).unwrap();
         assert_eq!(attempt.state, "returned");
-        assert_eq!(attempt.output.unwrap()["instructions"], "Change it");
+        assert_eq!(
+            attempt.output.unwrap(),
+            serde_json::json!({ "instructions": "Change it" })
+        );
         assert!(attempt.finished_at.is_some());
         assert_eq!(store.run("r").unwrap().round, 1);
         let events = store.events(&id, 0).unwrap();
         assert_eq!(events[0].kind, "returned");
-        assert_eq!(events[0].data["round"], 1);
+        assert_eq!(
+            events[0].data,
+            serde_json::json!({ "instructions": "Change it", "round": 1 })
+        );
 
-        assert!(!store.return_attempt(&id, "r", "Again").unwrap());
+        assert!(!store.return_attempt(&id, "r", "Again", None).unwrap());
         assert_eq!(store.run("r").unwrap().round, 1);
+    }
+
+    #[test]
+    fn work_a_client_sent_back_says_which_client_it_was() {
+        let (_dir, store) = store();
+        let id = seeded(&store);
+        store
+            .set_state(&id, AttemptState::WaitingApproval, None)
+            .unwrap();
+        assert!(
+            store
+                .return_attempt(&id, "r", "Change it", Some("Claude Code"))
+                .unwrap()
+        );
+        assert_eq!(
+            store.attempt(&id).unwrap().output.unwrap(),
+            serde_json::json!({ "instructions": "Change it", "by": "Claude Code" })
+        );
+        assert_eq!(
+            store.events(&id, 0).unwrap()[0].data,
+            serde_json::json!({ "instructions": "Change it", "round": 1, "by": "Claude Code" })
+        );
     }
 
     #[test]
@@ -3969,6 +4088,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table mcp_client drop column max_open_runs;
+                 alter table mcp_client drop column can_steer;
                  alter table project drop column sensitive_paths;
                  drop trigger decision_question_fixed;
                  alter table decision drop column question;
@@ -4059,5 +4180,185 @@ mod tests {
         assert!(conn.execute("update mcp_call set ok = 1", []).is_err());
         assert!(conn.execute("delete from mcp_call", []).is_err());
         assert!(conn.execute("delete from mcp_client", []).is_err());
+    }
+
+    #[test]
+    fn a_client_from_before_feedback_cannot_give_it_and_keeps_three_runs_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        // Exactly what the last release left, with a client that can run.
+        let before = 12;
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..before] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.pragma_update(None, "user_version", before as i64)
+                .unwrap();
+            conn.execute(
+                "insert into mcp_client (id, name, token_hash, token_prefix, can_run, created_at)
+                 values ('c1', 'Claude Code', ?1, 'keel_abc', 1, 'then')",
+                [&[7u8; 32][..]],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let client = store.mcp_client("c1").unwrap();
+        assert!(client.can_run);
+        assert!(!client.can_steer);
+        assert_eq!(client.max_open_runs, DEFAULT_MAX_OPEN_RUNS);
+        assert_eq!(client.max_open_runs, 3);
+        assert_eq!(store.mcp_client_by_token(&[7u8; 32]).unwrap(), Some(client));
+    }
+
+    #[test]
+    fn a_person_lets_a_client_give_feedback_and_keep_more_runs_open_within_bounds() {
+        let (_dir, store) = store();
+        let client = store
+            .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        assert!(!client.can_steer, "off until the person turns it on");
+        assert_eq!(client.max_open_runs, DEFAULT_MAX_OPEN_RUNS);
+
+        assert!(
+            store
+                .set_mcp_client_can_steer("c1", true)
+                .unwrap()
+                .can_steer
+        );
+        assert!(store.mcp_client("c1").unwrap().can_steer);
+        assert!(
+            !store
+                .set_mcp_client_can_steer("c1", false)
+                .unwrap()
+                .can_steer
+        );
+
+        let max = |n| {
+            store
+                .set_mcp_client_max_open_runs("c1", n)
+                .unwrap()
+                .max_open_runs
+        };
+        assert_eq!(max(7), 7);
+        assert_eq!(max(50), MAX_OPEN_RUNS_CEILING);
+        assert_eq!(max(0), 1);
+        assert_eq!(max(-4), 1);
+        assert!(store.mcp_client("c1").unwrap().can_run, "the rest stays");
+
+        let json = serde_json::to_value(store.mcp_client("c1").unwrap()).unwrap();
+        assert_eq!(json["canSteer"], false);
+        assert_eq!(json["maxOpenRuns"], 1);
+    }
+
+    #[test]
+    fn a_client_owns_only_the_runs_it_started_and_only_calls_that_went_through_count() {
+        let (_dir, store) = store();
+        seeded(&store);
+        for (id, at) in [
+            ("task", "2026-01-02T00:00:00.000Z"),
+            ("other", "2026-01-03T00:00:00.000Z"),
+        ] {
+            store
+                .add_run(&NewRun {
+                    id: id.into(),
+                    project_id: "p".into(),
+                    title: id.into(),
+                    request: id.into(),
+                    workflow: "[]".into(),
+                    language: "en".into(),
+                    source_issue: None,
+                    workflow_id: None,
+                    workflow_name: None,
+                    started_by: None,
+                })
+                .unwrap();
+            store
+                .add_attempt(&new_attempt(id, id, "work", AttemptState::Running))
+                .unwrap();
+            store
+                .patch_run(id, &[("created_at", Value::Text(at.into()))])
+                .unwrap();
+        }
+        store
+            .patch_run(
+                "r",
+                &[("created_at", Value::Text("2026-01-01T00:00:00.000Z".into()))],
+            )
+            .unwrap();
+        let mine = store
+            .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        let theirs = store
+            .add_mcp_client("c2", "Other", &[8u8; 32], "keel_def", true)
+            .unwrap();
+        let call = |client: &McpClient, tool: &str, run: &str, error: Option<&str>| {
+            store
+                .add_mcp_call(&NewMcpCall {
+                    client,
+                    tool,
+                    args: "{}",
+                    error,
+                    run_id: Some(run),
+                    duration_ms: 1,
+                })
+                .unwrap();
+        };
+        call(&mine, "start_run", "r", None);
+        call(&mine, "start_task", "task", None);
+        call(&mine, "start_run", "other", Some("too many open"));
+        call(&theirs, "start_run", "other", None);
+        call(&mine, "send_back", "r", None);
+        call(&mine, "send_back", "r", None);
+        call(&mine, "send_back", "r", Some("nothing waits for approval"));
+        call(&theirs, "send_back", "r", None);
+        call(&mine, "retry_step", "r", None);
+
+        assert!(store.run_started_by_mcp_client("r", "c1").unwrap());
+        assert!(
+            store.run_started_by_mcp_client("task", "c1").unwrap(),
+            "a read-only task is theirs too"
+        );
+        assert!(
+            !store.run_started_by_mcp_client("other", "c1").unwrap(),
+            "it was refused"
+        );
+        assert!(store.run_started_by_mcp_client("other", "c2").unwrap());
+        assert!(
+            !store.run_started_by_mcp_client("r", "c2").unwrap(),
+            "acting on a run doesn't make it yours"
+        );
+        assert!(!store.run_started_by_mcp_client("r", "nobody").unwrap());
+
+        assert_eq!(store.mcp_calls_on_run("c1", "r", "send_back").unwrap(), 2);
+        assert_eq!(store.mcp_calls_on_run("c2", "r", "send_back").unwrap(), 1);
+        assert_eq!(store.mcp_calls_on_run("c1", "r", "retry_step").unwrap(), 1);
+        assert_eq!(
+            store.mcp_calls_on_run("c1", "task", "send_back").unwrap(),
+            0
+        );
+
+        let ids = |client: &str| {
+            store
+                .runs_started_by_mcp_client(client, 10)
+                .unwrap()
+                .into_iter()
+                .map(|run| run.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids("c1"), ["task", "r"], "newest first");
+        assert_eq!(ids("c2"), ["other"]);
+        assert_eq!(
+            store.runs_started_by_mcp_client("c1", 1).unwrap()[0].id,
+            "task"
+        );
+
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 2);
+        store
+            .patch_run("task", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
+        assert_eq!(ids("c1"), ["task", "r"], "finished ones stay theirs");
     }
 }

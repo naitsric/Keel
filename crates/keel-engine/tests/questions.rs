@@ -1274,6 +1274,92 @@ fn sending_back_needs_instructions_and_something_to_go_back_to() {
     );
 }
 
+// A client over MCP can send work back, retry and close a run, and the app has to say who did it.
+
+#[test]
+fn a_client_that_sends_work_back_or_closes_the_run_is_named_and_a_person_is_not() {
+    let w = world();
+    w.answers(&[good()]);
+    let run = w.start(no_approver());
+    let first = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+
+    // From the app, it's kept just as it always was.
+    w.engine.send_back(&first.id, "Return 0").unwrap();
+    let second = w.wait_for_attempts(&run, "human", 2, AttemptState::WaitingApproval);
+    assert_eq!(
+        w.store.attempt(&first.id).unwrap().output,
+        Some(json!({ "instructions": "Return 0" }))
+    );
+    assert_eq!(w.event(&first.id, "returned").get("by"), None);
+
+    w.engine
+        .send_back_by(&second.id, "  Return 1  ", "Claude Code")
+        .unwrap();
+    let third = w.wait_for_attempts(&run, "human", 3, AttemptState::WaitingApproval);
+    assert_eq!(
+        w.store.attempt(&second.id).unwrap().output,
+        Some(json!({ "instructions": "Return 1", "by": "Claude Code" }))
+    );
+    assert_eq!(
+        w.event(&second.id, "returned"),
+        json!({ "instructions": "Return 1", "round": 2, "by": "Claude Code" })
+    );
+    assert!(w.step(&run, "builder").prompt.contains("Return 1"));
+
+    w.engine.abandon_by(&third.id, "Claude Code").unwrap();
+    assert_eq!(w.store.attempt(&third.id).unwrap().state, "abandoned");
+    assert_eq!(
+        w.event(&third.id, "abandoned"),
+        json!({ "by": "Claude Code" })
+    );
+    assert!(w.store.run(&run).unwrap().finished_at.is_some());
+
+    let other = w.start(no_approver());
+    let waiting = w.wait_for(&other, "human", AttemptState::WaitingApproval);
+    w.engine.abandon(&waiting.id).unwrap();
+    assert_eq!(w.event(&waiting.id, "abandoned"), json!({}));
+}
+
+#[test]
+fn a_client_that_retries_a_step_is_named_on_it_before_the_new_try_starts() {
+    let w = world();
+    w.answers(&[json!("fail"), json!("fail"), json!("fail")]);
+    let run = w.start(no_approver());
+    let failed = w.wait_for(&run, "spec", AttemptState::Failed);
+
+    // From the app, nothing new on the step.
+    let kinds = w.kinds(&failed.id);
+    w.engine.retry(&failed.id, false).unwrap();
+    let again = w.wait_for_attempts(&run, "spec", 2, AttemptState::Failed);
+    assert_eq!(w.kinds(&failed.id), kinds);
+
+    w.engine.retry_by(&again.id, true, "Claude Code").unwrap();
+    let asked = w
+        .store
+        .events(&again.id, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "retryRequested")
+        .expect("it says who asked");
+    assert_eq!(asked.data, json!({ "by": "Claude Code", "resume": true }));
+    let resumed = w.wait_for_attempts(&run, "spec", 3, AttemptState::Failed);
+    assert_eq!(resumed.session_id, again.session_id);
+    let first_of_it = w.store.events(&resumed.id, 0).unwrap()[0].seq;
+    assert!(
+        asked.seq < first_of_it,
+        "it was said before the try started"
+    );
+
+    w.engine
+        .retry_by(&resumed.id, false, "Claude Code")
+        .unwrap();
+    assert_eq!(
+        w.event(&resumed.id, "retryRequested"),
+        json!({ "by": "Claude Code", "resume": false })
+    );
+    w.wait_for(&run, "human", AttemptState::WaitingApproval);
+}
+
 #[test]
 fn a_saved_workflow_with_a_plain_worker_spec_behaves_exactly_as_before() {
     let w = world();

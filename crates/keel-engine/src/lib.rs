@@ -989,6 +989,16 @@ impl Engine {
     /// round again after it. Their words stay in this run and don't become a decision, and the round
     /// doesn't count against the approver, since a person asked for it.
     pub fn send_back(&self, attempt_id: &str, instructions: &str) -> Result<()> {
+        self.send_back_as(attempt_id, instructions, None)
+    }
+
+    /// `send_back` for a client over MCP. The attempt and its event name it, so the person sees
+    /// who sent the work back.
+    pub fn send_back_by(&self, attempt_id: &str, instructions: &str, by: &str) -> Result<()> {
+        self.send_back_as(attempt_id, instructions, Some(by))
+    }
+
+    fn send_back_as(&self, attempt_id: &str, instructions: &str, by: Option<&str>) -> Result<()> {
         let store = &self.inner.store;
         let attempt = store.attempt(attempt_id)?;
         if attempt.state != AttemptState::WaitingApproval.as_str() {
@@ -1003,7 +1013,7 @@ impl Engine {
         if !workflows::can_send_back(&steps, &attempt.step_id) {
             return Err(Error::Blocked(Reason::NothingToSendBackTo));
         }
-        if !store.return_attempt(attempt_id, &attempt.run_id, instructions)? {
+        if !store.return_attempt(attempt_id, &attempt.run_id, instructions, by)? {
             return Err(Error::InvalidState);
         }
         self.inner.advance(&attempt.run_id)?;
@@ -1115,6 +1125,15 @@ impl Engine {
     /// Tries a step again in the same workspace. With `resume`, an agent continues its session
     /// instead of starting a new one. A failed delivery retries only the delivery.
     pub fn retry(&self, attempt_id: &str, resume: bool) -> Result<String> {
+        self.retry_as(attempt_id, resume, None)
+    }
+
+    /// `retry` for a client over MCP. The step it retries says who asked, so the person sees it.
+    pub fn retry_by(&self, attempt_id: &str, resume: bool, by: &str) -> Result<String> {
+        self.retry_as(attempt_id, resume, Some(by))
+    }
+
+    fn retry_as(&self, attempt_id: &str, resume: bool, by: Option<&str>) -> Result<String> {
         let store = &self.inner.store;
         let attempt = store.attempt(attempt_id)?;
         let state = AttemptState::parse(&attempt.state).ok_or(Error::InvalidState)?;
@@ -1150,6 +1169,14 @@ impl Engine {
             from: attempt.id.clone(),
             prompt: resumed_prompt(&attempt),
         });
+        // What really happens: a step that isn't an agent has no session to continue.
+        if let Some(by) = by {
+            store.append_event(
+                attempt_id,
+                "retryRequested",
+                &json!({ "by": by, "resume": resume.is_some() }),
+            )?;
+        }
         // Before the step starts: a quick one can be over, and have closed the run, by the time
         // `start_step` returns.
         if run.finished_at.is_some() {
@@ -1160,6 +1187,16 @@ impl Engine {
     }
 
     pub fn abandon(&self, attempt_id: &str) -> Result<()> {
+        self.abandon_as(attempt_id, None)
+    }
+
+    /// `abandon` for a client over MCP. Its event names the client, so the person sees who closed
+    /// the run.
+    pub fn abandon_by(&self, attempt_id: &str, by: &str) -> Result<()> {
+        self.abandon_as(attempt_id, Some(by))
+    }
+
+    fn abandon_as(&self, attempt_id: &str, by: Option<&str>) -> Result<()> {
         // So that cancelling and answering the same question can't both go through.
         let guard = locked(&self.inner.advancing);
         let attempt = self.inner.store.attempt(attempt_id)?;
@@ -1181,9 +1218,13 @@ impl Engine {
         {
             return Err(Error::InvalidState);
         }
+        let data = match by {
+            Some(by) => json!({ "by": by }),
+            None => json!({}),
+        };
         self.inner
             .store
-            .append_event(attempt_id, "abandoned", &json!({}))?;
+            .append_event(attempt_id, "abandoned", &data)?;
         self.inner
             .store
             .patch_run(&attempt.run_id, &[("finished_at", Value::Text(now()))])?;
