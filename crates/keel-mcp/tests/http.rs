@@ -29,8 +29,14 @@ use serde_json::{Value as Json, json};
 /// Everything a client can do. A new tool has to be added here on purpose: nothing that answers an
 /// approval, merges, changes settings or saved workflows, or lets anything into the Brain belongs
 /// here. draft_workflow is here because what it leaves can't run until the person saves it, and
-/// propose_project because what it leaves isn't a project until the person adds it.
-const TOOLS: [&str; 12] = [
+/// propose_project because what it leaves isn't a project until the person adds it. send_back is
+/// here because the run comes back to the same approval, so the person still decides, and
+/// retry_step because it only retries what failed or was stopped, never what waits on the person's
+/// judgment. close_run is here because it delivers nothing, and the card keeps its text for the
+/// person. All three are only for a client the person lets give feedback, on runs it started, and
+/// the first two only a few times per run.
+const TOOLS: [&str; 15] = [
+    "close_run",
     "draft_workflow",
     "get_brain",
     "get_run",
@@ -40,6 +46,8 @@ const TOOLS: [&str; 12] = [
     "list_runs",
     "list_workflows",
     "propose_project",
+    "retry_step",
+    "send_back",
     "start_run",
     "stop_run",
     "wait_for_run",
@@ -337,7 +345,6 @@ async fn it_offers_these_tools_and_no_way_to_approve_anything() {
     for tool in [
         "answer_approval",
         "answer_questions",
-        "send_back",
         "approve",
         "reject",
         "merge",
@@ -1676,5 +1683,319 @@ async fn what_an_agent_wrote_reaches_the_report_with_its_secrets_masked() {
         format!("Done. I used API_KEY={MASK} to test.")
     );
     assert!(!view.to_string().contains(&secret), "{view}");
+    client.cancel().await.unwrap();
+}
+
+impl World {
+    /// A builder whose check fails, then the person.
+    fn failing_check(&self) -> String {
+        self.saved(
+            "Checked",
+            vec![
+                WorkflowStep::Agent(agent("builder", ToolProfile::Build, StepRole::Worker)),
+                WorkflowStep::Check {
+                    id: "tests".into(),
+                    run: "echo '3 failed' >&2; exit 1".into(),
+                },
+                WorkflowStep::Approval { id: "human".into() },
+            ],
+        )
+    }
+
+    fn hold(&self) -> PathBuf {
+        let hold = self._dir.path().join("bin/hold");
+        std::fs::write(&hold, "").unwrap();
+        hold
+    }
+}
+
+fn waiting_attempt(view: &Json) -> String {
+    view["waitingFor"]["attemptId"].as_str().unwrap().to_owned()
+}
+
+const FEEDBACK: [&str; 3] = ["send_back", "retry_step", "close_run"];
+
+fn feedback_args(tool: &str, run: &str) -> Json {
+    match tool {
+        "send_back" => json!({ "run": run, "instructions": "Return 0 instead" }),
+        _ => json!({ "run": run }),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn feedback_needs_the_person_s_permission_and_a_run_of_the_client_s_own() {
+    let w = world().await;
+    let owner = w.client(&w.token(true)).await;
+    let run = id_of(&ok(&call(&owner, "start_run", w.start_args("Fix it")).await));
+    let waiting = waiting_attempt(&settled(&owner, &run).await);
+
+    // It may run, but the person hasn't let it give feedback.
+    for tool in FEEDBACK {
+        let refusal = refused(&call(&owner, tool, feedback_args(tool, &run)).await);
+        assert!(
+            refusal.contains("may not give feedback"),
+            "{tool}: {refusal}"
+        );
+        assert!(refusal.contains("Keel's settings"), "{tool}: {refusal}");
+    }
+    let reader = w.client(&w.token(false)).await;
+    for tool in FEEDBACK {
+        let refusal = refused(&call(&reader, tool, feedback_args(tool, &run)).await);
+        assert!(refusal.contains("may only read"), "{tool}: {refusal}");
+    }
+    // Allowed to give feedback, but on a run another client started, or the person did.
+    let other = w.client(&w.steering_token("Other")).await;
+    let person = w.person_run("By hand");
+    settled(&other, &person).await;
+    for run in [&run, &person] {
+        for tool in FEEDBACK {
+            let refusal = refused(&call(&other, tool, feedback_args(tool, run)).await);
+            assert!(refusal.contains("didn't start"), "{tool}: {refusal}");
+        }
+    }
+    let refusal = refused(&call(&other, "close_run", json!({ "run": "nope" })).await);
+    assert!(refusal.contains("no run"), "{refusal}");
+
+    assert_eq!(
+        w.store.attempt(&waiting).unwrap().state,
+        AttemptState::WaitingApproval.as_str(),
+        "nothing changed"
+    );
+    assert!(w.store.run(&person).unwrap().finished_at.is_none());
+    let calls = w.store.mcp_calls(100).unwrap();
+    assert!(
+        calls
+            .iter()
+            .filter(|c| FEEDBACK.contains(&c.tool.as_str()))
+            .all(|c| !c.ok),
+        "each refusal is on record"
+    );
+    for client in [owner, reader, other] {
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_sends_its_run_back_from_the_approval_and_the_builder_hears_who_it_was() {
+    let w = world().await;
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let hold = w.hold();
+    let run = id_of(&ok(
+        &call(&client, "start_run", w.start_args("Fix it")).await
+    ));
+    let refusal = refused(&call(&client, "send_back", feedback_args("send_back", &run)).await);
+    assert!(
+        refusal.contains("isn't waiting at an approval"),
+        "{refusal}"
+    );
+    std::fs::remove_file(&hold).unwrap();
+    let view = settled(&client, &run).await;
+    assert_eq!(view["waitingFor"]["state"], "waitingApproval", "{view}");
+
+    for empty in ["", "  \n "] {
+        let args = json!({ "run": run, "instructions": empty });
+        let refusal = refused(&call(&client, "send_back", args).await);
+        assert!(refusal.contains("`instructions`"), "{refusal}");
+    }
+    let args = json!({ "run": run, "instructions": "x".repeat(16 * 1024 + 1) });
+    let refusal = refused(&call(&client, "send_back", args).await);
+    assert!(refusal.contains("16 KB"), "{refusal}");
+
+    let approval = waiting_attempt(&view);
+    let args = json!({ "run": run, "instructions": "Return 0 instead" });
+    let sent = ok(&call(&client, "send_back", args).await);
+    assert_eq!(sent["state"], "working", "{sent}");
+    let returned = w.store.attempt(&approval).unwrap();
+    assert_eq!(returned.state, "returned");
+    assert_eq!(
+        returned.output.unwrap(),
+        json!({ "instructions": "Return 0 instead", "by": "Claude Code" })
+    );
+    let event = w
+        .store
+        .events(&approval, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "returned")
+        .unwrap();
+    assert_eq!(event.data["by"], "Claude Code");
+
+    let view = settled(&client, &run).await;
+    assert_eq!(view["waitingFor"]["step"], "human", "{view}");
+    assert_eq!(view["round"], 1);
+    let builder = view["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|step| step["step"] == "builder")
+        .unwrap();
+    let prompt = w
+        .store
+        .attempt(builder["attemptId"].as_str().unwrap())
+        .unwrap()
+        .prompt;
+    assert!(
+        prompt.contains("Claude Code, an assistant the person allowed, sent this work back."),
+        "{prompt}"
+    );
+    assert!(prompt.contains("Return 0 instead"), "{prompt}");
+
+    // Two more, and then it's the person's.
+    for n in 2..=3 {
+        let args = json!({ "run": run, "instructions": format!("Round {n}") });
+        ok(&call(&client, "send_back", args).await);
+        let view = settled(&client, &run).await;
+        assert_eq!(view["waitingFor"]["step"], "human", "{view}");
+    }
+    assert_eq!(
+        view_of(&client, &run).await["waitingFor"]["youCan"],
+        json!(["close_run"])
+    );
+    let args = json!({ "run": run, "instructions": "Once more" });
+    let refusal = refused(&call(&client, "send_back", args).await);
+    assert!(refusal.contains("3 times"), "{refusal}");
+    assert!(refusal.contains("Bring it to the person"), "{refusal}");
+    assert_eq!(w.store.run(&run).unwrap().round, 3);
+    client.cancel().await.unwrap();
+}
+
+async fn view_of(client: &Client, run: &str) -> Json {
+    ok(&call(client, "get_run", json!({ "run": run })).await)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_retries_only_a_step_that_failed_was_interrupted_or_stopped() {
+    let w = world().await;
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let checked = w.failing_check();
+    let run = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.args_for(&checked, "Fix it"),
+    )
+    .await));
+    let failed = waiting_attempt(&settled(&client, &run).await);
+
+    let retried = ok(&call(&client, "retry_step", json!({ "run": run })).await);
+    assert_ne!(waiting_attempt(&settled(&client, &run).await), failed);
+    let event = w
+        .store
+        .events(&failed, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "retryRequested")
+        .unwrap();
+    assert_eq!(event.data, json!({ "by": "Claude Code", "resume": false }));
+    assert_eq!(retried["id"], json!(run));
+
+    // What's blocked or stalled is the person's to judge.
+    let view = view_of(&client, &run).await;
+    let latest = waiting_attempt(&view);
+    let reason = keel_core::Reason::ReworkLimit { rounds: 1 };
+    w.store
+        .set_state(&latest, AttemptState::Blocked, Some(&reason))
+        .unwrap();
+    let refusal = refused(&call(&client, "retry_step", json!({ "run": run })).await);
+    assert!(refusal.contains("person's to decide"), "{refusal}");
+    assert_eq!(
+        view_of(&client, &run).await["waitingFor"]["youCan"],
+        json!(["close_run"])
+    );
+
+    // As if the app had gone down while it ran.
+    w.store
+        .set_state(&latest, AttemptState::Interrupted, None)
+        .unwrap();
+    ok(&call(&client, "retry_step", json!({ "run": run })).await);
+    settled(&client, &run).await;
+    ok(&call(&client, "retry_step", json!({ "run": run, "resume": true })).await);
+    settled(&client, &run).await;
+    let refusal = refused(&call(&client, "retry_step", json!({ "run": run })).await);
+    assert!(refusal.contains("3 times"), "{refusal}");
+
+    // A stopped step, on a run that then waits at an approval, where there's nothing to retry.
+    let hold = w.hold();
+    let other = id_of(&ok(
+        &call(&client, "start_run", w.start_args("Fix that")).await
+    ));
+    for _ in 0..100 {
+        if view_of(&client, &other).await["steps"][0]["state"] == "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    ok(&call(&client, "stop_run", json!({ "run": other })).await);
+    let stopped = settled(&client, &other).await;
+    assert_eq!(stopped["waitingFor"]["state"], "stopped", "{stopped}");
+    assert_eq!(
+        stopped["waitingFor"]["youCan"],
+        json!(["retry_step", "close_run"])
+    );
+    std::fs::remove_file(&hold).unwrap();
+    ok(&call(&client, "retry_step", json!({ "run": other })).await);
+    let view = settled(&client, &other).await;
+    assert_eq!(view["waitingFor"]["state"], "waitingApproval", "{view}");
+    let refusal = refused(&call(&client, "retry_step", json!({ "run": other })).await);
+    assert!(refusal.contains("nothing to retry"), "{refusal}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_closes_its_waiting_run_with_nothing_delivered_and_never_one_that_works() {
+    let w = world().await;
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let hold = w.hold();
+    let run = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.start_args("Fix the bug\n\nAnd its test."),
+    )
+    .await));
+    let refusal = refused(&call(&client, "close_run", json!({ "run": run })).await);
+    assert!(refusal.contains("stop_run first"), "{refusal}");
+    std::fs::remove_file(&hold).unwrap();
+    let view = settled(&client, &run).await;
+    let approval = waiting_attempt(&view);
+    assert_eq!(
+        view["waitingFor"]["youCan"],
+        json!(["send_back", "close_run"])
+    );
+
+    let closed = ok(&call(&client, "close_run", json!({ "run": run })).await);
+    assert_eq!(closed["state"], "finished", "{closed}");
+    assert_eq!(closed["waitingFor"], Json::Null);
+    assert_eq!(closed["prUrl"], Json::Null);
+    assert_eq!(closed["report"]["prUrl"], Json::Null);
+    assert_eq!(w.store.attempt(&approval).unwrap().state, "abandoned");
+    let event = w
+        .store
+        .events(&approval, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "abandoned")
+        .unwrap();
+    assert_eq!(event.data["by"], "Claude Code");
+
+    // The card goes back for the person, with what it said.
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    let mut back = None;
+    for _ in 0..100 {
+        let board = w.engine.board(&w.project_id).unwrap();
+        back = board.cards.into_iter().find(|c| c.id == card);
+        if back
+            .as_ref()
+            .is_some_and(|c| c.column == BoardColumn::Backlog)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let back = back.unwrap();
+    assert_eq!(back.column, BoardColumn::Backlog);
+    assert_eq!(back.title, "Fix the bug");
+
+    let refusal = refused(&call(&client, "close_run", json!({ "run": run })).await);
+    assert!(refusal.contains("has finished"), "{refusal}");
     client.cancel().await.unwrap();
 }

@@ -2,10 +2,11 @@
 //! Each call goes to the matching method of [`McpServer`] with the client the HTTP layer
 //! authenticated. Nothing is decided here.
 //!
-//! There is deliberately no tool to approve, reject, return, answer, retry or abandon a step, to
-//! merge, to change a project's settings or saved workflows, or to let anything into the Brain. Those
-//! stay with the person, in the app. A client can propose a workflow or a project, and only the
-//! person can save the one or add the other.
+//! There is deliberately no tool to approve, reject or answer a step, to merge, to change a project's
+//! settings or saved workflows, or to let anything into the Brain. Those stay with the person, in the
+//! app. Sending work back, retrying a step and closing a run are only for a client the person lets
+//! give feedback, and only on runs it started. A client can propose a workflow or a project, and
+//! only the person can save the one or add the other.
 //! `tests/http.rs` fails if the list of tools grows without someone deciding so.
 
 use std::sync::Arc;
@@ -22,8 +23,9 @@ use schemars::JsonSchema;
 use serde_json::Value as Json;
 
 use crate::tools::{
-    DraftWorkflowArgs, GetBrainArgs, GetRunArgs, GetStepArgs, ListIssuesArgs, ListProjectsArgs,
-    ListRunsArgs, ListWorkflowsArgs, ProposeProjectArgs, StartRunArgs, StopRunArgs, WaitForRunArgs,
+    CloseRunArgs, DraftWorkflowArgs, GetBrainArgs, GetRunArgs, GetStepArgs, ListIssuesArgs,
+    ListProjectsArgs, ListRunsArgs, ListWorkflowsArgs, ProposeProjectArgs, RetryStepArgs,
+    SendBackArgs, StartRunArgs, StopRunArgs, WaitForRunArgs,
 };
 use crate::{INSTRUCTIONS, McpServer, ToolError};
 
@@ -90,6 +92,21 @@ const PROPOSE_PROJECT: &str = "Propose adding a git repository on this Mac to Ke
                                if 10 proposals are waiting.";
 const STOP_RUN: &str = "Ask whatever a run has working to stop. It doesn't reject or abandon the run: what \
                         happens next is the person's decision in Keel. Refused if this client may only read.";
+const SEND_BACK: &str = "Send the work of a run this client started back from the person's approval, with what \
+                         to change. Everything from where the work is done runs again, the check included, and \
+                         the run comes back to the same approval: the person still approves. Use it when \
+                         something concrete is missing, with clear `instructions`. The agent is told this \
+                         client sent it. At most 3 times per run, then it's the person's. Refused unless the \
+                         person lets this client give feedback, and on runs it didn't start.";
+const RETRY_STEP: &str = "Try again the step of a run this client started that failed, was interrupted or was \
+                          stopped. With `resume`, the agent goes on from where it stopped. A step that's blocked \
+                          or stalled is the person's to decide. A failed delivery retries only the delivery, \
+                          which reaches GitHub. At most 3 times per run, then it's the person's. Refused unless \
+                          the person lets this client give feedback, and on runs it didn't start.";
+const CLOSE_RUN: &str = "Close a run this client started without delivering anything: no pull request, and its \
+                         card goes back to the Backlog with its text. Refused while anything in it is working, \
+                         so stop that with stop_run first, and once it has finished. Refused unless the person \
+                         lets this client give feedback, and on runs it didn't start.";
 
 /// What rmcp serves: one per session, or per request without one.
 #[derive(Clone)]
@@ -283,6 +300,51 @@ impl Handler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         reply(self.server.stop_run(client(&context)?, args).await)
+    }
+
+    #[tool(
+        name = "send_back",
+        title = "Send a run's work back with what to change",
+        description = SEND_BACK,
+        input_schema = input_schema::<SendBackArgs>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn send_back(
+        &self,
+        Parameters(args): Parameters<SendBackArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        reply(self.server.send_back(client(&context)?, args).await)
+    }
+
+    #[tool(
+        name = "retry_step",
+        title = "Retry a step that failed",
+        description = RETRY_STEP,
+        input_schema = input_schema::<RetryStepArgs>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn retry_step(
+        &self,
+        Parameters(args): Parameters<RetryStepArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        reply(self.server.retry_step(client(&context)?, args).await)
+    }
+
+    #[tool(
+        name = "close_run",
+        title = "Close a run without delivering it",
+        description = CLOSE_RUN,
+        input_schema = input_schema::<CloseRunArgs>(),
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = false)
+    )]
+    async fn close_run(
+        &self,
+        Parameters(args): Parameters<CloseRunArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        reply(self.server.close_run(client(&context)?, args).await)
     }
 }
 

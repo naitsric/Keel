@@ -45,7 +45,8 @@ const WAIT_DEFAULT_SECS: u64 = 30;
 const WAIT_MAX_SECS: u64 = 50;
 const WAIT_TICK: Duration = Duration::from_millis(300);
 
-/// A person, not a client, moves a run on from these.
+/// What a run waits on someone for. Answering and approving are only ever the person's. Of the
+/// rest, a client the person lets give feedback can send back, retry or close its own runs.
 const NEEDS_PERSON: [&str; 7] = [
     "waitingApproval",
     "waitingAnswers",
@@ -149,6 +150,34 @@ pub struct StartRunArgs {
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct StopRunArgs {
+    /// A run's id.
+    pub run: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SendBackArgs {
+    /// A run's id.
+    pub run: String,
+    /// What to change, plainly and concretely, in up to 16 KB. The agent that does the work again
+    /// gets these words.
+    pub instructions: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryStepArgs {
+    /// A run's id.
+    pub run: String,
+    /// Have the agent go on from where it stopped, instead of starting the step over. A step that
+    /// isn't an agent always starts over. False by default.
+    #[serde(default)]
+    pub resume: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CloseRunArgs {
     /// A run's id.
     pub run: String,
 }
@@ -731,6 +760,78 @@ impl McpServer {
         .await
     }
 
+    pub(crate) async fn send_back(
+        &self,
+        client: McpClient,
+        args: SendBackArgs,
+    ) -> Result<Json, ToolError> {
+        self.call(client, "send_back", args, |server, client, args| {
+            let (run, attempts) = server.steerable(client, &args.run)?;
+            let approval = send_back_target(&run, &steps_of(&run), &attempts)?;
+            let instructions = args.instructions.trim();
+            if instructions.is_empty() || instructions.len() > MAX_TEXT {
+                return Err(ToolError::new(
+                    "Say what to change in `instructions`, in up to 16 KB.",
+                ));
+            }
+            if !server.feedback_left(client, &run.id, "send_back")? {
+                return Err(ToolError::new(format!(
+                    "This client has sent this run back {MAX_FEEDBACK_PER_RUN} times already, which is as many as it may. Bring it to the person, who decides in Keel."
+                )));
+            }
+            server
+                .0
+                .engine
+                .send_back_by(&approval.id, instructions, &client.name)
+                .map_err(changed_meanwhile)?;
+            Ok((server.run_view(client, &args.run)?, Some(args.run)))
+        })
+        .await
+    }
+
+    pub(crate) async fn retry_step(
+        &self,
+        client: McpClient,
+        args: RetryStepArgs,
+    ) -> Result<Json, ToolError> {
+        self.call(client, "retry_step", args, |server, client, args| {
+            let (run, attempts) = server.steerable(client, &args.run)?;
+            let step = retry_target(&run, &attempts)?;
+            if !server.feedback_left(client, &run.id, "retry_step")? {
+                return Err(ToolError::new(format!(
+                    "This client has retried this run {MAX_FEEDBACK_PER_RUN} times already, which is as many as it may. Bring it to the person, who decides in Keel."
+                )));
+            }
+            // As the app's Retry button: the step starts over unless asked to go on.
+            let resume = args.resume.unwrap_or(false);
+            server
+                .0
+                .engine
+                .retry_by(&step.id, resume, &client.name)
+                .map_err(changed_meanwhile)?;
+            Ok((server.run_view(client, &args.run)?, Some(args.run)))
+        })
+        .await
+    }
+
+    pub(crate) async fn close_run(
+        &self,
+        client: McpClient,
+        args: CloseRunArgs,
+    ) -> Result<Json, ToolError> {
+        self.call(client, "close_run", args, |server, client, args| {
+            let (run, attempts) = server.steerable(client, &args.run)?;
+            let target = close_target(&run, &attempts)?;
+            server
+                .0
+                .engine
+                .abandon_by(&target.id, &client.name)
+                .map_err(changed_meanwhile)?;
+            Ok((server.run_view(client, &args.run)?, Some(args.run)))
+        })
+        .await
+    }
+
     /// Runs one call on a blocking thread and records it. A result never leaves without its row.
     async fn call<A, F>(
         &self,
@@ -835,6 +936,27 @@ impl McpServer {
         Ok(())
     }
 
+    /// A run this client may give feedback on, with its attempts, or why it may not.
+    fn steerable(
+        &self,
+        client: &McpClient,
+        run_id: &str,
+    ) -> Result<(Run, Vec<Attempt>), ToolError> {
+        may_steer(client)?;
+        let attempts = self.attempts(run_id)?;
+        let store = &self.0.store;
+        if !store
+            .run_started_by_mcp_client(run_id, &client.id)
+            .map_err(store_error)?
+        {
+            return Err(ToolError::new(
+                "Only the person acts on a run this client didn't start, in Keel.",
+            ));
+        }
+        let run = store.run(run_id).map_err(store_error)?;
+        Ok((run, attempts))
+    }
+
     /// Whether this client may still use a feedback tool on one of its runs.
     fn feedback_left(
         &self,
@@ -860,7 +982,7 @@ impl McpServer {
         attempts: &[Attempt],
     ) -> Result<Vec<&'static str>, ToolError> {
         let mut tools = Vec::new();
-        if steer_refusal(client, mine).is_none() {
+        if may_steer(client).is_ok() && mine {
             if send_back_target(run, steps, attempts).is_ok()
                 && self.feedback_left(client, &run.id, "send_back")?
             {
@@ -1046,23 +1168,18 @@ fn who_decides(state: &str) -> &'static str {
     }
 }
 
-/// Why this client can't give feedback on a run, if it can't. Every feedback tool asks this first,
-/// and in this order, so the refusal says what's missing.
-fn steer_refusal(client: &McpClient, mine: bool) -> Option<ToolError> {
+/// Whether the person lets this client give feedback at all. Every feedback tool asks this first,
+/// in this order, so the refusal says what's missing. The run also has to be the client's own.
+fn may_steer(client: &McpClient) -> Result<(), ToolError> {
     if !client.can_run {
-        return Some(may_only_read());
+        return Err(may_only_read());
     }
     if !client.can_steer {
-        return Some(ToolError::new(
+        return Err(ToolError::new(
             "This client may not give feedback. The person can allow it in Keel's settings.",
         ));
     }
-    if !mine {
-        return Some(ToolError::new(
-            "Only the person acts on a run this client didn't start, in Keel.",
-        ));
-    }
-    None
+    Ok(())
 }
 
 fn still_open(run: &Run) -> Result<(), ToolError> {
@@ -1400,6 +1517,16 @@ fn engine_error(error: Error) -> ToolError {
             serde_json::to_string(&reason).unwrap_or_default()
         )),
         other => ToolError::new(other.to_string()),
+    }
+}
+
+/// The person, or the run itself, can act between a client looking and the engine acting on it.
+fn changed_meanwhile(error: Error) -> ToolError {
+    match error {
+        Error::InvalidState => ToolError::new(
+            "The run changed in the meantime, so Keel did nothing. Look at it again with get_run.",
+        ),
+        other => engine_error(other),
     }
 }
 
