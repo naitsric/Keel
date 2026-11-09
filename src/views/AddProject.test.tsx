@@ -396,7 +396,7 @@ describe("adding a project", () => {
       });
       await click(i18next.t("settings.save"));
       expect(called("project_update")[0].args.settings).toMatchObject({ sensitivePaths: ["billing/", "*.proto"] });
-      expect(page()).toContain(".github/, migrations, SQL schema");
+      expect(page()).toContain(".github/ and other CI, build and dependency files, test settings, migrations");
     });
 
     it("says which pattern it can't read", async () => {

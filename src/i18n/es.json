@@ -543,7 +543,7 @@
     "readPaths": "Otras carpetas que los agentes pueden leer",
     "readPathsHint": "Una por línea, como ~/.nvm. Tu carpeta personal queda oculta en lo demás.",
     "sensitive": "Archivos demasiado sensibles para un cambio pequeño",
-    "sensitiveHint": "Un patrón por línea, como billing/ o *.proto. Un cambio que toque uno recibe la revisión completa. Estos siempre cuentan: .github/, migraciones, esquema SQL, inicio de sesión y permisos, secretos, archivos de entorno y archivos de bloqueo.",
+    "sensitiveHint": "Un patrón por línea, como billing/ o *.proto. Un cambio que toque uno recibe la revisión completa. Estos siempre cuentan: .github/ y otros de CI, archivos de build y de dependencias, la configuración de las pruebas, migraciones, esquema SQL, inicio de sesión y permisos, secretos, archivos de entorno y archivos de bloqueo.",
     "save": "Guardar",
     "saved": "Guardado",
     "services": "Servicios",

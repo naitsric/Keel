@@ -543,7 +543,7 @@
     "readPaths": "Other folders agents can read",
     "readPathsHint": "One per line, such as ~/.nvm. Your home folder is hidden otherwise.",
     "sensitive": "Files too sensitive for a small change",
-    "sensitiveHint": "One pattern per line, such as billing/ or *.proto. A change that touches one gets the full review. These always count: .github/, migrations, SQL schema, sign-in and permissions, secrets, environment files and lock files.",
+    "sensitiveHint": "One pattern per line, such as billing/ or *.proto. A change that touches one gets the full review. These always count: .github/ and other CI, build and dependency files, test settings, migrations, SQL schema, sign-in and permissions, secrets, environment files and lock files.",
     "save": "Save",
     "saved": "Saved",
     "services": "Services",
