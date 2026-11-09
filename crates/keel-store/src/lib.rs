@@ -7,7 +7,9 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use keel_core::{AttemptState, BoardColumn, CardLane, EnvVar, Reason, Service, card_column};
+use keel_core::{
+    AttemptState, BoardColumn, CardLane, EnvVar, PrState, Reason, Service, card_column,
+};
 pub use rusqlite::types as rusqlite_value;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
@@ -243,6 +245,25 @@ const MIGRATIONS: &[&str] = &[
     r#"
     alter table project add column removed_at text;
 "#,
+    // 10: Which workflow a run used, since its copy only holds the steps, and what became of its
+    // pull request as of the last time Keel looked. Older runs have nulls.
+    r#"
+    alter table run add column workflow_id text;
+    alter table run add column workflow_name text;
+    alter table run add column pr_state text;
+    alter table run add column pr_state_at text;
+    alter table run add column pr_checked_at text;
+"#,
+    // 11: What a person was asked, on a decision that came from answering it. Older ones have null.
+    r#"
+    alter table decision add column question text;
+    create trigger decision_question_fixed before update of question on decision
+    begin select raise(abort, 'decisions are never rewritten'); end;
+"#,
+    // 12: What a project counts as too sensitive for a change to be small, on top of what always is.
+    r#"
+    alter table project add column sensitive_paths text not null default '[]';
+"#,
 ];
 
 /// The attempt that says where a run stands, for a query that calls its run `r`. Of each step's
@@ -254,7 +275,7 @@ const ATTEMPT_THAT_MATTERS: &str = "select b.rowid from attempt b where b.run_id
                     where later.run_id = b.run_id and later.step_id = b.step_id and later.rowid > b.rowid)
     order by case when b.role = 'learner' and b.state not in ('queued', 'preparing', 'running', 'stalled') then 4
                   when b.state in ('rejected', 'abandoned') then 0
-                  when b.state in ('stalled', 'blocked', 'waitingApproval', 'interrupted', 'failed', 'stopped') then 1
+                  when b.state in ('stalled', 'blocked', 'waitingApproval', 'waitingAnswers', 'interrupted', 'failed', 'stopped') then 1
                   when b.state in ('queued', 'preparing', 'running') then 2 else 3 end,
              b.rowid desc
     limit 1";
@@ -334,6 +355,8 @@ pub struct Project {
     pub env: Vec<EnvVar>,
     /// The workflow its cards start with. `None` means the full one.
     pub default_workflow: Option<String>,
+    /// Patterns for files too sensitive for a change to count as small, on top of what always is.
+    pub sensitive_paths: Vec<String>,
 }
 
 /// What a person can change about a project.
@@ -347,9 +370,10 @@ pub struct ProjectSettings {
     pub services: Vec<Service>,
     pub env: Vec<EnvVar>,
     pub default_workflow: Option<String>,
+    pub sensitive_paths: Vec<String>,
 }
 
-const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow";
+const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths";
 
 fn project_from(r: &Row) -> rusqlite::Result<Project> {
     let list = |text: String| serde_json::from_str(&text).unwrap_or_default();
@@ -367,6 +391,7 @@ fn project_from(r: &Row) -> rusqlite::Result<Project> {
         env: serde_json::from_str(&r.get::<_, String>(10)?).unwrap_or_default(),
         setup_command: r.get(11)?,
         default_workflow: r.get(12)?,
+        sensitive_paths: list(r.get(13)?),
     })
 }
 
@@ -391,6 +416,15 @@ pub struct Run {
     pub finished_at: Option<String>,
     /// The MCP client that started it. None when a person did, in the app.
     pub started_by: Option<String>,
+    /// The saved workflow its steps came from, as it was called then. None for a run that had no
+    /// saved workflow, or from before Keel kept this.
+    pub workflow_id: Option<String>,
+    pub workflow_name: Option<String>,
+    /// What became of its pull request, as of `pr_checked_at`. None until Keel knows.
+    pub pr_state: Option<PrState>,
+    /// When that happened, going by GitHub.
+    pub pr_state_at: Option<String>,
+    pub pr_checked_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -402,9 +436,17 @@ pub struct NewRun {
     pub workflow: String,
     pub language: String,
     pub source_issue: Option<String>,
+    pub workflow_id: Option<String>,
+    pub workflow_name: Option<String>,
+    /// The assistant that started it over MCP, if one did.
+    pub started_by: Option<String>,
 }
 
-const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by";
+const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by, workflow_id, workflow_name, pr_state, pr_state_at, pr_checked_at";
+
+fn pr_state_from(text: Option<String>) -> Option<PrState> {
+    text.as_deref().and_then(PrState::parse)
+}
 
 fn run_from(r: &Row) -> rusqlite::Result<Run> {
     let source_issue: Option<String> = r.get(7)?;
@@ -425,6 +467,11 @@ fn run_from(r: &Row) -> rusqlite::Result<Run> {
         finished_at: r.get(12)?,
         round: r.get(13)?,
         started_by: r.get(14)?,
+        workflow_id: r.get(15)?,
+        workflow_name: r.get(16)?,
+        pr_state: pr_state_from(r.get(17)?),
+        pr_state_at: r.get(18)?,
+        pr_checked_at: r.get(19)?,
     })
 }
 
@@ -478,7 +525,8 @@ fn brain_note_from(r: &rusqlite::Row) -> rusqlite::Result<BrainNote> {
     })
 }
 
-/// What a person said at an approval step. These reach later runs of the project.
+/// What a person said at an approval step, or answered and asked to remember. These reach later
+/// runs of the project. `answer` is `approve`, `reject` or `answered`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Decision {
@@ -490,6 +538,8 @@ pub struct Decision {
     pub answer: String,
     pub text: String,
     pub retired: bool,
+    /// What they were asked, when `answer` is `answered`.
+    pub question: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -616,6 +666,57 @@ pub struct Totals {
     pub cost_usd: f64,
 }
 
+/// How a workflow's runs in one project have gone. A run that doesn't say which workflow it used
+/// isn't in here: it had no saved one, or it's from before Keel kept this.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowResults {
+    pub workflow_id: String,
+    /// What its latest run called it. It may have been renamed or deleted since.
+    pub workflow_name: String,
+    pub runs: i64,
+    /// Those that ended, however they ended.
+    pub finished: i64,
+    /// Pull requests merged, and closed without merging, as of the last time Keel looked.
+    pub merged: i64,
+    pub closed: i64,
+    /// What a run whose pull request got merged cost on average. None if none did.
+    pub cost_per_merged_usd: Option<f64>,
+    /// How many times a finished run was sent back on average. None if none finished, since an open
+    /// run's count isn't final.
+    pub average_rounds: Option<f64>,
+    /// Runs that stopped to ask a person something.
+    pub stopped_to_ask: i64,
+    /// Questions a person answered, and how many of those got the recommended option. A high share
+    /// means it asks too much.
+    pub answers: i64,
+    pub answers_recommended: i64,
+    /// How many times a person sent work back from what it decided alone. A high count means it
+    /// asks too little.
+    pub sent_back: i64,
+    /// Of what had to be true, how much was met, not met and not verified, as the last verifier of
+    /// each finished run left it. An open run's can still change, and earlier rounds are about code
+    /// that's gone. Many not verified means a step that really runs tests would be worth building.
+    pub criteria_met: i64,
+    pub criteria_unmet: i64,
+    pub criteria_unverified: i64,
+    /// Finished runs the engine last found small, so they skipped what only a bigger change needs.
+    /// An open run's can still change.
+    pub short_route: i64,
+    /// Runs the engine found weren't small. That's final the moment it happens.
+    pub moved_up: i64,
+    /// Why they weren't, most common first. A run counts once per reason, and can have several.
+    pub moved_up_because: Vec<MovedUpBecause>,
+}
+
+/// How many of a workflow's runs weren't small for one reason. `code` is a `WhyNotSmall`'s.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MovedUpBecause {
+    pub code: String,
+    pub runs: i64,
+}
+
 /// A card on the board, with what its column depends on. The issue is a copy taken on import.
 #[derive(Debug, Clone)]
 pub struct Card {
@@ -638,6 +739,8 @@ pub struct Card {
     pub run_state: Option<AttemptState>,
     pub run_reason: Option<serde_json::Value>,
     pub pr_url: Option<String>,
+    pub pr_state: Option<PrState>,
+    pub pr_state_at: Option<String>,
     /// What the person wrote when rejecting it. Empty if they wrote nothing.
     pub rejection: Option<String>,
 }
@@ -687,6 +790,8 @@ fn card_from(r: &Row) -> rusqlite::Result<Card> {
         run_state,
         run_reason: json_col(r, "attempt_reason")?,
         pr_url: r.get("run_pr_url")?,
+        pr_state: pr_state_from(r.get("run_pr_state")?),
+        pr_state_at: r.get("run_pr_state_at")?,
         // A rejection with nothing written leaves no decision, and is still a rejection.
         rejection: (run_state == Some(AttemptState::Rejected))
             .then(|| rejection.unwrap_or_default()),
@@ -701,6 +806,7 @@ fn read_cards<P: rusqlite::Params>(
 ) -> rusqlite::Result<Vec<Card>> {
     let mut stmt = conn.prepare(&format!(
         "select c.*, r.created_at as run_started_at, r.finished_at as run_finished_at, r.pr_url as run_pr_url,
+                r.pr_state as run_pr_state, r.pr_state_at as run_pr_state_at,
                 a.state as attempt_state, a.reason as attempt_reason,
                 (select d.text from decision d where d.attempt_id = a.id and d.answer = 'reject'
                  order by d.seq desc limit 1) as rejection
@@ -744,9 +850,9 @@ fn bottom_of_backlog(conn: &Connection, project_id: &str) -> rusqlite::Result<i6
 
 fn insert_run(conn: &Connection, run: &NewRun) -> rusqlite::Result<()> {
     conn.execute(
-        "insert into run (id, project_id, title, request, workflow, language, source_issue, created_at)
-         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![run.id, run.project_id, run.title, run.request, run.workflow, run.language, run.source_issue, now()],
+        "insert into run (id, project_id, title, request, workflow, language, source_issue, created_at, workflow_id, workflow_name, started_by)
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![run.id, run.project_id, run.title, run.request, run.workflow, run.language, run.source_issue, now(), run.workflow_id, run.workflow_name, run.started_by],
     )?;
     Ok(())
 }
@@ -995,18 +1101,10 @@ impl Store {
         )?)
     }
 
-    pub fn set_run_started_by(&self, run_id: &str, client_name: &str) -> Result<()> {
-        self.lock().execute(
-            "update run set started_by = ?2 where id = ?1",
-            rusqlite::params![run_id, client_name],
-        )?;
-        Ok(())
-    }
-
     pub fn add_project(&self, project: &Project) -> Result<()> {
         self.lock().execute(
-            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 project.id,
                 project.name,
@@ -1021,6 +1119,7 @@ impl Store {
                 serde_json::to_string(&project.env).unwrap_or_default(),
                 project.setup_command,
                 project.default_workflow,
+                serde_json::to_string(&project.sensitive_paths).unwrap_or_default(),
             ],
         )?;
         Ok(())
@@ -1028,7 +1127,7 @@ impl Store {
 
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<()> {
         self.lock().execute(
-            "update project set github_account = ?2, check_command = ?3, allowed_domains = ?4, allowed_read = ?5, services = ?6, env = ?7, setup_command = ?8, default_workflow = ?9 where id = ?1",
+            "update project set github_account = ?2, check_command = ?3, allowed_domains = ?4, allowed_read = ?5, services = ?6, env = ?7, setup_command = ?8, default_workflow = ?9, sensitive_paths = ?10 where id = ?1",
             params![
                 id,
                 settings.github_account,
@@ -1039,6 +1138,7 @@ impl Store {
                 serde_json::to_string(&settings.env).unwrap_or_default(),
                 settings.setup_command,
                 settings.default_workflow,
+                serde_json::to_string(&settings.sensitive_paths).unwrap_or_default(),
             ],
         )?;
         Ok(())
@@ -1163,6 +1263,143 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// Runs with a pull request that could still change and that nobody has looked at since `before`,
+    /// the longest waiting first. A merged one can't change. A closed one can still be reopened. A
+    /// removed project's runs wait until it's back.
+    /// Pull requests last looked at before `before`, longest waiting first. A merged one is done, and
+    /// one closed before `closed_before` is left alone: it could still be reopened, but asking about
+    /// it forever would crowd out the ones that are moving.
+    pub fn runs_with_pr_due(
+        &self,
+        before: &str,
+        closed_before: &str,
+        limit: i64,
+    ) -> Result<Vec<Run>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "select {RUN_COLUMNS} from run
+             where pr_url is not null
+               and coalesce(pr_state, '') <> 'merged'
+               and not (pr_state = 'closed' and pr_state_at is not null and pr_state_at < ?2)
+               and (pr_checked_at is null or pr_checked_at < ?1)
+               and project_id in (select id from project where removed_at is null)
+             order by pr_checked_at is not null, pr_checked_at, created_at
+             limit ?3"
+        ))?;
+        let rows = stmt.query_map(params![before, closed_before, limit], run_from)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn workflow_results(&self, project_id: &str) -> Result<Vec<WorkflowResults>> {
+        let conn = self.lock();
+        let criteria = |result: &str| {
+            format!(
+                "coalesce(sum(case when r.finished_at is not null then
+                     (select count(*) from json_each((select a.output from attempt a
+                                                      where a.run_id = r.id and a.role = 'verifier' and a.state = 'succeeded'
+                                                      order by a.rowid desc limit 1), '$.criteria') c
+                      where json_extract(c.value, '$.result') = '{result}') end), 0)"
+            )
+        };
+        let mut stmt = conn.prepare(&format!(
+            "select r.workflow_id,
+                    (select latest.workflow_name from run latest
+                     where latest.project_id = r.project_id and latest.workflow_id = r.workflow_id
+                     order by latest.created_at desc, latest.rowid desc limit 1),
+                    count(*),
+                    coalesce(sum(r.finished_at is not null), 0),
+                    coalesce(sum(r.pr_state = 'merged'), 0),
+                    coalesce(sum(r.pr_state = 'closed'), 0),
+                    coalesce(sum(case when r.pr_state = 'merged'
+                                      then (select coalesce(sum(a.cost_usd), 0) from attempt a where a.run_id = r.id)
+                                      end), 0),
+                    coalesce(sum(case when r.finished_at is not null then r.round end), 0),
+                    coalesce(sum(exists (select 1 from event e join attempt a on a.id = e.attempt_id
+                                         where a.run_id = r.id and e.kind = 'questionsAsked')), 0),
+                    coalesce(sum((select coalesce(sum(json_extract(e.data, '$.total')), 0) from event e
+                                  join attempt a on a.id = e.attempt_id
+                                  where a.run_id = r.id and e.kind = 'answers')), 0),
+                    coalesce(sum((select coalesce(sum(json_extract(e.data, '$.recommended')), 0) from event e
+                                  join attempt a on a.id = e.attempt_id
+                                  where a.run_id = r.id and e.kind = 'answers')), 0),
+                    coalesce(sum((select count(*) from attempt a
+                                  where a.run_id = r.id and a.state = 'returned')), 0),
+                    {},
+                    {},
+                    {},
+                    coalesce(sum(case when r.finished_at is not null then
+                        (select json_extract(e.data, '$.small') from event e
+                         join attempt a on a.id = e.attempt_id
+                         where a.run_id = r.id and e.kind = 'sizeDecided'
+                         order by e.seq desc limit 1) end), 0),
+                    coalesce(sum(exists (select 1 from event e join attempt a on a.id = e.attempt_id
+                                         where a.run_id = r.id and e.kind = 'sizeDecided'
+                                           and json_extract(e.data, '$.small') = 0)), 0)
+             from run r
+             where r.project_id = ?1 and r.workflow_id is not null
+             group by r.workflow_id
+             order by max(r.created_at) desc",
+            criteria("met"),
+            criteria("unmet"),
+            criteria("unverified"),
+        ))?;
+        let rows = stmt.query_map([project_id], |r| {
+            let workflow_id: String = r.get(0)?;
+            let workflow_name: Option<String> = r.get(1)?;
+            let finished: i64 = r.get(3)?;
+            let merged: i64 = r.get(4)?;
+            let merged_cost: f64 = r.get(6)?;
+            let rounds: i64 = r.get(7)?;
+            Ok(WorkflowResults {
+                workflow_name: workflow_name.unwrap_or_else(|| workflow_id.clone()),
+                workflow_id,
+                runs: r.get(2)?,
+                finished,
+                merged,
+                closed: r.get(5)?,
+                cost_per_merged_usd: (merged > 0).then(|| merged_cost / merged as f64),
+                average_rounds: (finished > 0).then(|| rounds as f64 / finished as f64),
+                stopped_to_ask: r.get(8)?,
+                answers: r.get(9)?,
+                answers_recommended: r.get(10)?,
+                sent_back: r.get(11)?,
+                criteria_met: r.get(12)?,
+                criteria_unmet: r.get(13)?,
+                criteria_unverified: r.get(14)?,
+                short_route: r.get(15)?,
+                moved_up: r.get(16)?,
+                moved_up_because: Vec::new(),
+            })
+        })?;
+        let mut results: Vec<WorkflowResults> = rows.collect::<rusqlite::Result<_>>()?;
+        let mut stmt = conn.prepare(
+            "select r.workflow_id, json_extract(why.value, '$.code'), count(distinct r.id)
+             from run r
+             join attempt a on a.run_id = r.id
+             join event e on e.attempt_id = a.id and e.kind = 'sizeDecided'
+             join json_each(e.data, '$.because') why
+             where r.project_id = ?1 and r.workflow_id is not null
+             group by r.workflow_id, json_extract(why.value, '$.code')
+             order by 3 desc, 2",
+        )?;
+        let rows = stmt.query_map([project_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                MovedUpBecause {
+                    code: r.get(1)?,
+                    runs: r.get(2)?,
+                },
+            ))
+        })?;
+        for row in rows {
+            let (workflow_id, because) = row?;
+            if let Some(found) = results.iter_mut().find(|w| w.workflow_id == workflow_id) {
+                found.moved_up_because.push(because);
+            }
+        }
+        Ok(results)
+    }
+
     pub fn patch_run(&self, id: &str, fields: &[(&'static str, Value)]) -> Result<()> {
         if fields.is_empty() {
             return Ok(());
@@ -1203,11 +1440,28 @@ impl Store {
         Ok(())
     }
 
+    /// What a person answered to a question, and asked to have remembered.
+    pub fn add_answered_decision(
+        &self,
+        project_id: &str,
+        run_id: &str,
+        attempt_id: &str,
+        question: &str,
+        answer: &str,
+    ) -> Result<()> {
+        self.lock().execute(
+            "insert into decision (project_id, run_id, attempt_id, at, answer, text, question)
+             values (?1, ?2, ?3, ?4, 'answered', ?5, ?6)",
+            params![project_id, run_id, attempt_id, now(), answer, question],
+        )?;
+        Ok(())
+    }
+
     /// A project's decisions still in force, newest first.
     pub fn decisions(&self, project_id: &str) -> Result<Vec<Decision>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "select seq, project_id, run_id, attempt_id, at, answer, text, retired from decision
+            "select seq, project_id, run_id, attempt_id, at, answer, text, retired, question from decision
              where project_id = ?1 and retired = 0 order by seq desc",
         )?;
         let rows = stmt.query_map([project_id], |r| {
@@ -1220,6 +1474,7 @@ impl Store {
                 answer: r.get(5)?,
                 text: r.get(6)?,
                 retired: r.get(7)?,
+                question: r.get(8)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1352,6 +1607,74 @@ impl Store {
             params![id, state.as_str(), reason],
         )?;
         Ok(())
+    }
+
+    /// Moves an attempt on only if it's still where the caller found it. False if it isn't, which
+    /// is how a second answer to the same question loses.
+    pub fn change_state(&self, id: &str, from: AttemptState, to: AttemptState) -> Result<bool> {
+        let changed = self.lock().execute(
+            "update attempt set state = ?3, reason = null where id = ?1 and state = ?2",
+            params![id, from.as_str(), to.as_str()],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// A person sends the work back from an approval: its attempt says so, with what they want, and
+    /// the run moves to its next round. All or nothing, because an attempt that says it went back
+    /// in a round that never moved on would hold the run forever. False if it wasn't waiting.
+    pub fn return_attempt(&self, id: &str, run_id: &str, instructions: &str) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let at = now();
+        let output = serde_json::json!({ "instructions": instructions }).to_string();
+        let changed = tx.execute(
+            "update attempt set state = 'returned', reason = null, output = ?2, finished_at = ?3
+             where id = ?1 and state = 'waitingApproval'",
+            params![id, output, at],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "update run set round = round + 1 where id = ?1",
+            params![run_id],
+        )?;
+        let round: i64 = tx.query_row("select round from run where id = ?1", [run_id], |r| {
+            r.get(0)
+        })?;
+        tx.execute(
+            "insert into event (attempt_id, at, kind, data) values (?1, ?2, 'returned', ?3)",
+            params![
+                id,
+                at,
+                serde_json::json!({ "instructions": instructions, "round": round }).to_string()
+            ],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// A person asks for what was skipped to run before they answer: its attempt says so, and reads
+    /// as neither approved nor rejected. The round stays, since nothing has to be built again. All or
+    /// nothing, like `return_attempt`. False if it wasn't waiting.
+    pub fn postpone_attempt(&self, id: &str, skipped: &[String]) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let at = now();
+        let changed = tx.execute(
+            "update attempt set state = 'postponed', reason = null, finished_at = ?2
+             where id = ?1 and state = 'waitingApproval'",
+            params![id, at],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "insert into event (attempt_id, at, kind, data) values (?1, ?2, 'postponed', ?3)",
+            params![id, at, serde_json::json!({ "steps": skipped }).to_string()],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Updates progress columns. Column names come from this crate's callers, never from data.
@@ -1731,7 +2054,7 @@ impl Store {
                    and (exists (select 1 from attempt x where x.run_id = r.id
                                   and x.state in ('queued', 'preparing', 'running', 'stalled'))
                         or coalesce((select a.state from attempt a where a.rowid = ({ATTEMPT_THAT_MATTERS})), 'none')
-                           in ('none', 'succeeded', 'skipped'))"
+                           in ('none', 'succeeded', 'skipped', 'returned', 'postponed'))"
             ),
             [],
             |r| r.get(0),
@@ -1764,7 +2087,7 @@ impl Store {
             "select
                 coalesce(sum(state in ('preparing', 'running') and number = 1), 0),
                 coalesce(sum(state in ('preparing', 'running') and number > 1), 0),
-                coalesce(sum(state in ('stalled', 'blocked', 'interrupted', 'waitingApproval')
+                coalesce(sum(state in ('stalled', 'blocked', 'interrupted', 'waitingApproval', 'waitingAnswers')
                     and not exists (select 1 from attempt later
                                     where later.run_id = attempt.run_id and later.step_id = attempt.step_id and later.rowid > attempt.rowid)), 0),
                 coalesce(sum(coalesce(input_tokens, 0) + coalesce(output_tokens, 0)), 0),
@@ -1812,6 +2135,7 @@ mod tests {
                 services: vec![],
                 env: vec![],
                 default_workflow: None,
+                sensitive_paths: vec![],
             })
             .unwrap();
         store
@@ -1823,6 +2147,9 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
+                workflow_id: None,
+                workflow_name: None,
+                started_by: None,
             })
             .unwrap();
         store
@@ -1925,6 +2252,14 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 alter table project drop column sensitive_paths;
+                 drop trigger decision_question_fixed;
+                 alter table decision drop column question;
+                 alter table run drop column workflow_id;
+                 alter table run drop column workflow_name;
+                 alter table run drop column pr_state;
+                 alter table run drop column pr_state_at;
+                 alter table run drop column pr_checked_at;
                  alter table project drop column removed_at;
                  drop table card;
                  alter table project drop column default_workflow;
@@ -2176,10 +2511,12 @@ mod tests {
                         value: "{{socket:db}}".into(),
                     }],
                     default_workflow: Some("builtin:simple".into()),
+                    sensitive_paths: vec!["billing/".into()],
                 },
             )
             .unwrap();
         let project = store.project("p").unwrap();
+        assert_eq!(project.sensitive_paths, ["billing/"]);
         assert_eq!(project.default_workflow.as_deref(), Some("builtin:simple"));
         assert_eq!(project.github_account.as_deref(), Some("octo"));
         assert_eq!(project.setup_command.as_deref(), Some("uv sync"));
@@ -2316,6 +2653,551 @@ mod tests {
     }
 
     #[test]
+    fn runs_from_before_workflows_and_pull_requests_were_kept_load_with_nothing_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        // Exactly what the last release left, with a run that opened a pull request.
+        let before = 9;
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..before] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.pragma_update(None, "user_version", before as i64)
+                .unwrap();
+            conn.execute_batch(
+                "insert into project (id, name, path, created_at) values ('p', 'demo', '/demo', 'then');
+                 insert into run (id, project_id, title, created_at, pr_url, pr_number, finished_at)
+                     values ('r', 'p', 'old', 'then', 'https://github.com/acme/app/pull/3', 3, 'then');
+                 insert into card (id, project_id, title, lane, position, run_id, created_at)
+                     values ('c', 'p', 'old', 'started', 0, 'r', 'then');",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let run = store.run("r").unwrap();
+        assert_eq!(run.pr_number, Some(3));
+        assert_eq!(run.workflow_id, None);
+        assert_eq!(run.workflow_name, None);
+        assert_eq!(run.pr_state, None);
+        assert_eq!(run.pr_state_at, None);
+        assert_eq!(run.pr_checked_at, None);
+        let cards = store.cards("p").unwrap();
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].pr_state, None);
+        assert_eq!(cards[0].pr_url, run.pr_url);
+        assert_eq!(cards[0].column(), BoardColumn::Done);
+        assert!(
+            store.workflow_results("p").unwrap().is_empty(),
+            "it doesn't say which workflow it used, so it counts for none"
+        );
+        // It can still find out what became of its pull request.
+        let due = store.runs_with_pr_due(&now(), "0", 10).unwrap();
+        assert_eq!(due.len(), 1);
+    }
+
+    /// A run in project `p` with a pull request Keel last looked at then, or not yet.
+    fn run_with_pr(store: &Store, id: &str, state: Option<&str>, checked: Option<&str>) {
+        run_with_pr_at(store, id, state, None, checked);
+    }
+
+    /// The same, saying when it got to that state.
+    fn run_with_pr_at(
+        store: &Store,
+        id: &str,
+        state: Option<&str>,
+        state_at: Option<&str>,
+        checked: Option<&str>,
+    ) {
+        store
+            .add_run(&NewRun {
+                id: id.into(),
+                project_id: "p".into(),
+                title: id.into(),
+                request: id.into(),
+                workflow: "[]".into(),
+                language: "en".into(),
+                source_issue: None,
+                workflow_id: None,
+                workflow_name: None,
+                started_by: None,
+            })
+            .unwrap();
+        let text = |value: Option<&str>| value.map_or(Value::Null, |v| Value::Text(v.into()));
+        store
+            .patch_run(
+                id,
+                &[
+                    (
+                        "pr_url",
+                        Value::Text(format!("https://github.com/acme/app/pull/{id}")),
+                    ),
+                    ("pr_state", text(state)),
+                    ("pr_state_at", text(state_at)),
+                    ("pr_checked_at", text(checked)),
+                ],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn only_a_pull_request_that_can_still_change_and_has_waited_long_enough_is_due() {
+        let (_dir, store) = store();
+        seeded(&store);
+        run_with_pr(&store, "never", None, None);
+        run_with_pr(
+            &store,
+            "older",
+            Some("draft"),
+            Some("2026-01-01T00:00:00.000Z"),
+        );
+        run_with_pr(
+            &store,
+            "oldest",
+            Some("open"),
+            Some("2025-01-01T00:00:00.000Z"),
+        );
+        run_with_pr_at(
+            &store,
+            "closed",
+            Some("closed"),
+            Some("2026-05-20T00:00:00Z"),
+            Some("2026-02-01T00:00:00.000Z"),
+        );
+        run_with_pr_at(
+            &store,
+            "closedLongAgo",
+            Some("closed"),
+            Some("2026-04-01T00:00:00Z"),
+            Some("2025-01-01T00:00:00.000Z"),
+        );
+        run_with_pr(
+            &store,
+            "merged",
+            Some("merged"),
+            Some("2025-01-01T00:00:00.000Z"),
+        );
+        run_with_pr(
+            &store,
+            "recent",
+            Some("open"),
+            Some("2026-11-01T00:00:00.000Z"),
+        );
+
+        let before = "2026-06-01T00:00:00.000Z";
+        let closed_before = "2026-05-01T00:00:00.000Z";
+        let due = |limit| -> Vec<String> {
+            store
+                .runs_with_pr_due(before, closed_before, limit)
+                .unwrap()
+                .into_iter()
+                .map(|run| run.id)
+                .collect()
+        };
+        // Never looked at first, then the longest waiting. `r` has no pull request at all, and one
+        // closed long enough ago isn't looked at however long it has waited.
+        assert_eq!(due(10), ["never", "oldest", "older", "closed"]);
+        assert_eq!(due(2), ["never", "oldest"]);
+
+        store
+            .lock()
+            .execute("update project set removed_at = 'now' where id = 'p'", [])
+            .unwrap();
+        assert!(due(10).is_empty(), "a removed project's runs wait");
+    }
+
+    #[test]
+    fn results_count_each_workflow_on_its_own_and_only_what_is_final() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let add = |id: &str,
+                   workflow: Option<(&str, &str)>,
+                   state: Option<&str>,
+                   round: i64,
+                   finished: bool,
+                   cost: f64| {
+            store
+                .add_run(&NewRun {
+                    id: id.into(),
+                    project_id: "p".into(),
+                    title: id.into(),
+                    request: id.into(),
+                    workflow: "[]".into(),
+                    language: "en".into(),
+                    source_issue: None,
+                    workflow_id: workflow.map(|w| w.0.into()),
+                    workflow_name: workflow.map(|w| w.1.into()),
+                    started_by: None,
+                })
+                .unwrap();
+            store
+                .patch_run(
+                    id,
+                    &[
+                        (
+                            "pr_state",
+                            state.map_or(Value::Null, |s| Value::Text(s.into())),
+                        ),
+                        ("round", Value::Integer(round)),
+                        (
+                            "finished_at",
+                            if finished {
+                                Value::Text(now())
+                            } else {
+                                Value::Null
+                            },
+                        ),
+                    ],
+                )
+                .unwrap();
+            let attempt = format!("{id}-a");
+            store
+                .add_attempt(&new_attempt(
+                    &attempt,
+                    id,
+                    "builder",
+                    AttemptState::Succeeded,
+                ))
+                .unwrap();
+            store
+                .patch_attempt(&attempt, &[("cost_usd", Value::Real(cost))])
+                .unwrap();
+        };
+        let full = Some(("builtin:full", "Full"));
+        add("merged-1", full, Some("merged"), 2, true, 1.0);
+        add("merged-2", full, Some("merged"), 0, true, 3.0);
+        add("closed", full, Some("closed"), 1, true, 50.0);
+        // Its rounds aren't final, and what it cost so far bought no merged pull request.
+        add("still-going", full, None, 9, false, 50.0);
+        add(
+            "simple",
+            Some(("builtin:simple", "Simple")),
+            None,
+            0,
+            true,
+            7.0,
+        );
+        add("no-workflow", None, Some("merged"), 5, true, 100.0);
+        // A later run has the workflow under a new name.
+        add("renamed", Some(("mine", "Old name")), None, 0, false, 0.0);
+        store
+            .lock()
+            .execute(
+                "update run set created_at = '2020-01-01' where id = 'renamed'",
+                [],
+            )
+            .unwrap();
+        add("renamed-2", Some(("mine", "New name")), None, 0, false, 0.0);
+
+        let results = store.workflow_results("p").unwrap();
+        let of = |id: &str| results.iter().find(|r| r.workflow_id == id).unwrap();
+        assert_eq!(results.len(), 3, "{results:?}");
+        assert_eq!(
+            *of("builtin:full"),
+            WorkflowResults {
+                workflow_id: "builtin:full".into(),
+                workflow_name: "Full".into(),
+                runs: 4,
+                finished: 3,
+                merged: 2,
+                closed: 1,
+                cost_per_merged_usd: Some(2.0),
+                average_rounds: Some(1.0),
+                stopped_to_ask: 0,
+                answers: 0,
+                answers_recommended: 0,
+                sent_back: 0,
+                criteria_met: 0,
+                criteria_unmet: 0,
+                criteria_unverified: 0,
+                short_route: 0,
+                moved_up: 0,
+                moved_up_because: vec![],
+            }
+        );
+        assert_eq!(of("builtin:simple").merged, 0);
+        assert_eq!(of("builtin:simple").cost_per_merged_usd, None);
+        assert_eq!(of("builtin:simple").average_rounds, Some(0.0));
+        assert_eq!(of("mine").workflow_name, "New name");
+        assert_eq!(of("mine").average_rounds, None, "none has finished");
+        assert!(store.workflow_results("nobody").unwrap().is_empty());
+    }
+
+    #[test]
+    fn results_count_what_the_last_verifier_of_each_finished_run_left() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let add_run = |id: &str, finished: bool| {
+            store
+                .add_run(&NewRun {
+                    id: id.into(),
+                    project_id: "p".into(),
+                    title: id.into(),
+                    request: id.into(),
+                    workflow: "[]".into(),
+                    language: "en".into(),
+                    source_issue: None,
+                    workflow_id: Some("w".into()),
+                    workflow_name: Some("W".into()),
+                    started_by: None,
+                })
+                .unwrap();
+            if finished {
+                store
+                    .patch_run(id, &[("finished_at", Value::Text(now()))])
+                    .unwrap();
+            }
+        };
+        let verifier = |id: &str, run: &str, state: AttemptState, results: &[&str]| {
+            let mut attempt = new_attempt(id, run, "verify", state);
+            attempt.role = "verifier".into();
+            store.add_attempt(&attempt).unwrap();
+            let criteria: Vec<serde_json::Value> = results
+                .iter()
+                .map(|result| serde_json::json!({ "id": "C", "when": "w", "then": "t", "result": result, "evidence": "" }))
+                .collect();
+            let output = serde_json::json!({ "criteria": criteria, "summary": "s" }).to_string();
+            store
+                .patch_attempt(id, &[("output", Value::Text(output))])
+                .unwrap();
+        };
+        add_run("one", true);
+        // An earlier round's answer is about code that's gone.
+        verifier("one-a", "one", AttemptState::Succeeded, &["unmet", "unmet"]);
+        verifier(
+            "one-b",
+            "one",
+            AttemptState::Succeeded,
+            &["met", "unverified"],
+        );
+        // It didn't succeed, so nobody corrected it, and what the agent said isn't counted.
+        verifier("one-c", "one", AttemptState::Failed, &["met", "met", "met"]);
+        add_run("two", true);
+        verifier(
+            "two-a",
+            "two",
+            AttemptState::Succeeded,
+            &["met", "unmet", "unverified"],
+        );
+        add_run("open", false);
+        verifier("open-a", "open", AttemptState::Succeeded, &["met", "met"]);
+        add_run("no-verifier", true);
+
+        let results = store.workflow_results("p").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].runs, 4);
+        assert_eq!(
+            (
+                results[0].criteria_met,
+                results[0].criteria_unmet,
+                results[0].criteria_unverified
+            ),
+            (2, 1, 2)
+        );
+    }
+
+    #[test]
+    fn results_count_the_short_route_when_it_is_final_and_moving_up_by_reason() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let add_run = |id: &str, finished: bool| {
+            store
+                .add_run(&NewRun {
+                    id: id.into(),
+                    project_id: "p".into(),
+                    title: id.into(),
+                    request: id.into(),
+                    workflow: "[]".into(),
+                    language: "en".into(),
+                    source_issue: None,
+                    workflow_id: Some("w".into()),
+                    workflow_name: Some("W".into()),
+                    started_by: None,
+                })
+                .unwrap();
+            if finished {
+                store
+                    .patch_run(id, &[("finished_at", Value::Text(now()))])
+                    .unwrap();
+            }
+        };
+        let decided = |run: &str, attempt: &str, data: serde_json::Value| {
+            store
+                .add_attempt(&new_attempt(attempt, run, "review", AttemptState::Skipped))
+                .unwrap();
+            store.append_event(attempt, "sizeDecided", &data).unwrap();
+        };
+        let small = serde_json::json!({ "small": true, "lines": 3, "files": 1, "round": 0 });
+        let up = |codes: &[&str]| {
+            let because: Vec<serde_json::Value> = codes
+                .iter()
+                .map(|code| serde_json::json!({ "code": code }))
+                .collect();
+            serde_json::json!({ "small": false, "because": because, "round": 0 })
+        };
+        add_run("short", true);
+        decided("short", "a1", small.clone());
+        // Sent back after being small, and found otherwise the second time.
+        add_run("changed-its-mind", true);
+        decided("changed-its-mind", "a2", small.clone());
+        decided("changed-its-mind", "a3", up(&["tooManyLines", "noCheck"]));
+        add_run("twice", true);
+        decided("twice", "a4", up(&["tooManyLines"]));
+        decided("twice", "a5", up(&["tooManyLines"]));
+        // Still going, so being small doesn't count yet. Going up already does.
+        add_run("open-small", false);
+        decided("open-small", "a6", small);
+        add_run("open-up", false);
+        decided("open-up", "a7", up(&["personAsked"]));
+        // Nothing in its workflow asks.
+        add_run("plain", true);
+
+        let results = store.workflow_results("p").unwrap();
+        assert_eq!(results[0].runs, 6);
+        assert_eq!(results[0].short_route, 1);
+        assert_eq!(results[0].moved_up, 3);
+        assert_eq!(
+            results[0].moved_up_because,
+            [
+                MovedUpBecause {
+                    code: "tooManyLines".into(),
+                    runs: 2
+                },
+                MovedUpBecause {
+                    code: "noCheck".into(),
+                    runs: 1
+                },
+                MovedUpBecause {
+                    code: "personAsked".into(),
+                    runs: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn asking_for_what_was_skipped_reads_as_neither_answer_and_only_happens_once() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_attempt(&new_attempt(
+                "h",
+                "r",
+                "human",
+                AttemptState::WaitingApproval,
+            ))
+            .unwrap();
+        let steps = vec!["security".to_owned(), "approver".to_owned()];
+        assert!(store.postpone_attempt("h", &steps).unwrap());
+        let attempt = store.attempt("h").unwrap();
+        assert_eq!(attempt.state, "postponed");
+        assert!(attempt.finished_at.is_some());
+        assert_eq!(store.run("r").unwrap().round, 0, "nothing is built again");
+        let events = store.events("h", 0).unwrap();
+        assert_eq!(events[0].kind, "postponed");
+        assert_eq!(events[0].data["steps"][1], "approver");
+        // Whichever answer got there first stands.
+        assert!(!store.postpone_attempt("h", &steps).unwrap());
+        assert_eq!(store.events("h", 0).unwrap().len(), 1);
+        store
+            .add_attempt(&new_attempt("g", "r", "other", AttemptState::Succeeded))
+            .unwrap();
+        assert!(!store.postpone_attempt("g", &steps).unwrap());
+        assert_eq!(store.attempt("g").unwrap().state, "succeeded");
+    }
+
+    #[test]
+    fn a_state_only_changes_from_where_the_caller_found_it() {
+        let (_dir, store) = store();
+        let id = seeded(&store);
+        store
+            .set_state(&id, AttemptState::WaitingAnswers, Some(&Reason::AgentLost))
+            .unwrap();
+        assert!(
+            store
+                .change_state(&id, AttemptState::WaitingAnswers, AttemptState::Succeeded)
+                .unwrap()
+        );
+        let attempt = store.attempt(&id).unwrap();
+        assert_eq!(
+            (attempt.state.as_str(), attempt.reason),
+            ("succeeded", None)
+        );
+        assert!(
+            !store
+                .change_state(&id, AttemptState::WaitingAnswers, AttemptState::Abandoned)
+                .unwrap(),
+            "the second one finds it moved"
+        );
+        assert_eq!(store.attempt(&id).unwrap().state, "succeeded");
+    }
+
+    #[test]
+    fn sending_back_moves_the_attempt_and_the_round_together_and_only_once() {
+        let (_dir, store) = store();
+        let id = seeded(&store);
+        assert!(!store.return_attempt(&id, "r", "Change it").unwrap());
+        assert_eq!(store.run("r").unwrap().round, 0, "it wasn't waiting");
+
+        store
+            .set_state(&id, AttemptState::WaitingApproval, None)
+            .unwrap();
+        assert!(store.return_attempt(&id, "r", "Change it").unwrap());
+        let attempt = store.attempt(&id).unwrap();
+        assert_eq!(attempt.state, "returned");
+        assert_eq!(attempt.output.unwrap()["instructions"], "Change it");
+        assert!(attempt.finished_at.is_some());
+        assert_eq!(store.run("r").unwrap().round, 1);
+        let events = store.events(&id, 0).unwrap();
+        assert_eq!(events[0].kind, "returned");
+        assert_eq!(events[0].data["round"], 1);
+
+        assert!(!store.return_attempt(&id, "r", "Again").unwrap());
+        assert_eq!(store.run("r").unwrap().round, 1);
+    }
+
+    #[test]
+    fn an_answer_kept_as_a_decision_says_what_was_asked_and_cannot_be_rewritten() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_answered_decision("p", "r", "a", "If it's 0?", "Show an error")
+            .unwrap();
+        store
+            .add_decision("p", "r", "a", "approve", "Fine")
+            .unwrap();
+        let decisions = store.decisions("p").unwrap();
+        assert_eq!(decisions[0].answer, "approve");
+        assert_eq!(decisions[0].question, None);
+        assert_eq!(decisions[1].answer, "answered");
+        assert_eq!(decisions[1].question.as_deref(), Some("If it's 0?"));
+        assert_eq!(decisions[1].text, "Show an error");
+        assert!(
+            store
+                .lock()
+                .execute("update decision set question = 'other'", [])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn waiting_for_answers_counts_as_waiting_for_a_person_and_shows_on_the_home_table() {
+        let (_dir, store) = store();
+        let id = seeded(&store);
+        store
+            .set_state(&id, AttemptState::WaitingAnswers, None)
+            .unwrap();
+        assert_eq!(store.totals().unwrap().blocked, 1);
+        // A step that finished later doesn't take its place.
+        store
+            .add_attempt(&new_attempt("later", "r", "other", AttemptState::Succeeded))
+            .unwrap();
+        assert_eq!(store.runs(10).unwrap()[0].state, "waitingAnswers");
+        assert_eq!(store.working_runs().unwrap(), 0);
+    }
+
+    #[test]
     fn an_issue_imported_twice_is_one_card() {
         let (_dir, store) = store();
         seeded(&store);
@@ -2351,6 +3233,7 @@ mod tests {
                 services: vec![],
                 env: vec![],
                 default_workflow: None,
+                sensitive_paths: vec![],
             })
             .unwrap();
         assert_eq!(
@@ -2437,6 +3320,11 @@ mod tests {
             (AttemptState::Running, false, BoardColumn::InProgress),
             (
                 AttemptState::WaitingApproval,
+                false,
+                BoardColumn::HumanReview,
+            ),
+            (
+                AttemptState::WaitingAnswers,
                 false,
                 BoardColumn::HumanReview,
             ),
@@ -2598,7 +3486,13 @@ mod tests {
             // Between two steps: the next one is on its way.
             (AttemptState::Succeeded, 1),
             (AttemptState::Skipped, 1),
+            // The work went back and the next step is on its way.
+            (AttemptState::Returned, 1),
+            // What was skipped is on its way.
+            (AttemptState::Postponed, 1),
             (AttemptState::WaitingApproval, 0),
+            // Nothing is running, and it could wait for days.
+            (AttemptState::WaitingAnswers, 0),
             (AttemptState::Blocked, 0),
             (AttemptState::Failed, 0),
             (AttemptState::Stopped, 0),
@@ -2658,6 +3552,9 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
+                workflow_id: None,
+                workflow_name: None,
+                started_by: None,
             })
             .unwrap();
         assert_eq!(store.working_runs().unwrap(), 1);
@@ -2675,6 +3572,9 @@ mod tests {
             workflow: "[]".into(),
             language: "en".into(),
             source_issue: None,
+            workflow_id: None,
+            workflow_name: None,
+            started_by: None,
         };
         card(&store, "c");
         assert!(store.move_card("c", CardLane::Todo, 0, "en").unwrap());
@@ -2741,6 +3641,9 @@ mod tests {
                         workflow: "[]".into(),
                         language: "en".into(),
                         source_issue: None,
+                        workflow_id: None,
+                        workflow_name: None,
+                        started_by: None,
                     },
                     id,
                 )
@@ -2908,6 +3811,7 @@ mod tests {
                 services: vec![],
                 env: vec![],
                 default_workflow: None,
+                sensitive_paths: vec![],
             })
             .unwrap();
         let pause = || std::thread::sleep(std::time::Duration::from_millis(5));
@@ -3065,6 +3969,14 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table project drop column sensitive_paths;
+                 drop trigger decision_question_fixed;
+                 alter table decision drop column question;
+                 alter table run drop column workflow_id;
+                 alter table run drop column workflow_name;
+                 alter table run drop column pr_state;
+                 alter table run drop column pr_state_at;
+                 alter table run drop column pr_checked_at;
                  alter table project drop column removed_at;",
             )
             .unwrap();
@@ -3072,6 +3984,10 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(store.projects().unwrap().len(), 1);
         assert!(!store.project_is_removed("p").unwrap());
+        assert_eq!(
+            store.project("p").unwrap().sensitive_paths,
+            Vec::<String>::new()
+        );
     }
 
     #[test]

@@ -4,7 +4,9 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use keel_core::{StepRole, StepSpec, ToolProfile, WorkflowStep, mask_secrets, mask_value};
+use keel_core::{
+    StepCondition, StepRole, StepSpec, ToolProfile, WorkflowStep, mask_secrets, mask_value,
+};
 use keel_engine::{
     Error, MAX_PROJECT_PROPOSALS, ProjectProposal, ProposedProject, StartRun, request_from_issue,
 };
@@ -34,15 +36,17 @@ const WAIT_MAX_SECS: u64 = 50;
 const WAIT_TICK: Duration = Duration::from_millis(300);
 
 /// A person, not a client, moves a run on from these.
-const NEEDS_PERSON: [&str; 6] = [
+const NEEDS_PERSON: [&str; 7] = [
     "waitingApproval",
+    "waitingAnswers",
     "stalled",
     "blocked",
     "interrupted",
     "failed",
     "stopped",
 ];
-/// What stop_run may stop. A step waiting for approval isn't working, and only a person answers it.
+/// What stop_run may stop. A step waiting for an approval or for answers isn't working, and only a
+/// person answers it.
 const STOPPABLE: [&str; 4] = ["queued", "preparing", "running", "stalled"];
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -185,7 +189,8 @@ pub struct DraftAgent {
     pub id: String,
     /// `fable`, `opus`, `sonnet`, `haiku` or a full model id.
     pub model: String,
-    /// What it's told to do. It can use {{request}}, {{diff}}, {{rework}} and {{steps.<id>.output}}.
+    /// What it's told to do. It can use {{request}}, {{diff}}, {{rework}}, {{answers}}, {{check}} and
+    /// {{steps.<id>.output}}.
     pub prompt: String,
     /// What it may do. Read-only unless you say otherwise.
     #[serde(default)]
@@ -198,6 +203,11 @@ pub struct DraftAgent {
     /// Run it only if the run changed files matching one of these globs.
     #[serde(default)]
     pub paths: Vec<String>,
+    /// `notSmall` skips it for a change Keel finds small. Keel decides that itself, from the change
+    /// and whether the check passed, and a person still approves. It has to come after the first
+    /// worker that builds.
+    #[serde(default)]
+    pub when: Option<DraftCondition>,
     #[serde(default)]
     pub max_turns: Option<u32>,
     #[serde(default)]
@@ -220,6 +230,13 @@ pub enum DraftTools {
     ReadOnly,
     /// Edits files and runs commands inside the sandbox.
     Build,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum DraftCondition {
+    /// Only if the change isn't small.
+    NotSmall,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -250,6 +267,12 @@ pub enum DraftRole {
     },
     /// Says what the run taught, for the person to accept. Read-only, and only as the last step.
     Learner,
+    /// Works out what a request will change, and may ask the person what only they can decide, in
+    /// Keel. Read-only.
+    Specifier,
+    /// Says, for each thing a specifier earlier in the workflow said has to be true, whether a test
+    /// really proves it. Keel corrects its answer. Read-only.
+    Verifier,
 }
 
 impl McpServer {
@@ -513,9 +536,11 @@ impl McpServer {
                         .as_ref()
                         .map(|issue| format!("#{} {}", issue.number, issue.title)),
                     request,
+                    saved_workflow: Some(workflow.reference()),
                     workflow: workflow.steps,
                     language,
                     source_issue: issue,
+                    started_by: Some(client.name.clone()),
                 })
                 .map_err(|error| match (error, issue_number) {
                     (Error::InvalidState, Some(number)) => ToolError::new(format!(
@@ -523,9 +548,6 @@ impl McpServer {
                     )),
                     (error, _) => engine_error(error),
                 })?;
-            store
-                .set_run_started_by(&run, &client.name)
-                .map_err(store_error)?;
             engine.announce(&run);
             Ok((server.run_view(&run)?, Some(run)))
         })
@@ -776,6 +798,11 @@ impl McpServer {
             "language": run.language,
             "branch": run.branch,
             "prUrl": run.pr_url,
+            "prState": run.pr_state,
+            "prStateAt": run.pr_state_at,
+            "prCheckedAt": run.pr_checked_at,
+            "workflowId": run.workflow_id,
+            "workflowName": run.workflow_name,
             "round": run.round,
             "createdAt": run.created_at,
             "finishedAt": run.finished_at,
@@ -867,7 +894,7 @@ fn proposal_view(proposal: &ProjectProposal) -> Json {
 fn step_summary(step: &WorkflowStep) -> Json {
     match step {
         WorkflowStep::Agent(spec) => json!({
-            "type": "agent", "id": spec.id, "model": spec.model, "tools": spec.tools, "role": spec.role,
+            "type": "agent", "id": spec.id, "model": spec.model, "tools": spec.tools, "role": spec.role, "when": spec.when,
         }),
         WorkflowStep::Setup { id, run } => json!({ "type": "setup", "id": id, "run": run }),
         WorkflowStep::Check { id, run } => json!({ "type": "check", "id": id, "run": run }),
@@ -875,7 +902,7 @@ fn step_summary(step: &WorkflowStep) -> Json {
             "type": "parallel",
             "id": id,
             "steps": steps.iter().map(|spec| json!({
-                "id": spec.id, "model": spec.model, "tools": spec.tools, "paths": spec.paths,
+                "id": spec.id, "model": spec.model, "tools": spec.tools, "paths": spec.paths, "when": spec.when,
             })).collect::<Vec<_>>(),
         }),
         WorkflowStep::Approval { id } => json!({ "type": "approval", "id": id }),
@@ -928,6 +955,9 @@ impl DraftAgent {
             max_turns: self.max_turns,
             max_budget_usd: self.max_budget_usd,
             paths: self.paths,
+            when: self.when.map(|when| match when {
+                DraftCondition::NotSmall => StepCondition::NotSmall,
+            }),
             role: match self.role {
                 Some(DraftRole::Worker) | None => StepRole::Worker,
                 Some(DraftRole::Reviewer) => StepRole::Reviewer,
@@ -939,6 +969,8 @@ impl DraftAgent {
                     max_rounds,
                 },
                 Some(DraftRole::Learner) => StepRole::Learner,
+                Some(DraftRole::Specifier) => StepRole::Specifier,
+                Some(DraftRole::Verifier) => StepRole::Verifier,
             },
         })
     }

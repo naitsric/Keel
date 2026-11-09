@@ -128,6 +128,7 @@ impl World {
                     services,
                     env,
                     default_workflow: None,
+                    sensitive_paths: vec![],
                 },
             )
             .unwrap();
@@ -142,6 +143,8 @@ impl World {
                 workflow,
                 language: "en".into(),
                 source_issue: None,
+                saved_workflow: None,
+                started_by: None,
             })
             .unwrap()
     }
@@ -195,6 +198,7 @@ fn agent(id: &str, tools: ToolProfile) -> WorkflowStep {
         max_turns: None,
         max_budget_usd: None,
         paths: vec![],
+        when: None,
         role: Default::default(),
     })
 }

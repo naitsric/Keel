@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import i18next from "../i18n";
-import type { Project, StepSpec, Workflow, WorkflowDraft, WorkflowStep } from "../lib/api";
+import type { Project, StepSpec, Workflow, WorkflowDraft, WorkflowResults, WorkflowStep } from "../lib/api";
 import { useApp } from "../lib/store";
 import { WorkflowsView } from "./WorkflowsView";
 
@@ -34,6 +34,7 @@ describe("the workflow editor", () => {
   let drafts: WorkflowDraft[];
   let draftSaves: { projectId: string; draftId: string; workflow: Workflow }[];
   let discarded: string[];
+  let results: WorkflowResults[];
 
   const flush = () => act(async () => {});
   const open = async () => {
@@ -76,7 +77,9 @@ describe("the workflow editor", () => {
     drafts = [];
     draftSaves = [];
     discarded = [];
+    results = [];
     mockIPC((command, args) => {
+      if (command === "workflow_results") return results;
       if (command === "workflows_list") return [BUILTIN, MINE, ...copies];
       if (command === "workflow_drafts_list") return drafts;
       if (command === "workflow_draft_save") {
@@ -176,6 +179,21 @@ describe("the workflow editor", () => {
       await open();
       await click(row("Proposed"));
       expect(document.querySelector("[role=alert]")?.textContent).toContain("sneaky runs after your approval");
+    });
+
+    it("says which steps a small change would skip", async () => {
+      drafts = [proposal({ steps: [{ type: "agent", ...spec("builder", { tools: "build" }) }, { type: "agent", ...spec("look", { role: { kind: "reviewer" }, when: "notSmall" }) }, { type: "approval", id: "human" }] })];
+      await open();
+      await click(row("Proposed"));
+      const review = [...document.querySelectorAll("dt")].find((dt) => dt.textContent === "Skipped for a small change");
+      expect(review?.nextElementSibling?.textContent).toBe("look");
+    });
+
+    it("doesn't bring it up when a small change would skip nothing", async () => {
+      drafts = [proposal()];
+      await open();
+      await click(row("Proposed"));
+      expect(page()).not.toContain("Skipped for a small change");
     });
 
     it("says it right when there are several", async () => {
@@ -703,6 +721,26 @@ describe("the workflow editor", () => {
       expect(ids()).toContain("reviewer");
     });
 
+    it("offers a step that works out the change, which can't edit anything", async () => {
+      await open();
+      await click(node("builder"));
+      const roles = () => [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Role"] [role="radio"]')];
+      expect(roles().map((r) => r.textContent)).toContain("Works out the change");
+      await click(roles().find((r) => r.textContent === "Works out the change") as HTMLButtonElement);
+      const edited = roles().find((r) => r.getAttribute("aria-checked") === "true");
+      expect(edited?.textContent).toBe("Works out the change");
+      expect(document.querySelector('[role="radiogroup"][aria-label="What can it do?"]')).toBeNull();
+    });
+
+    it("offers a step that checks what was asked, which can't edit anything either", async () => {
+      await open();
+      await click(node("builder"));
+      const roles = () => [...document.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Role"] [role="radio"]')];
+      await click(roles().find((r) => r.textContent === "Checks what was asked") as HTMLButtonElement);
+      expect(roles().find((r) => r.getAttribute("aria-checked") === "true")?.textContent).toBe("Checks what was asked");
+      expect(document.querySelector('[role="radiogroup"][aria-label="What can it do?"]')).toBeNull();
+    });
+
     it("offers the roles a group allows", async () => {
       await open();
       await click(node("ux"));
@@ -959,6 +997,182 @@ describe("the workflow editor", () => {
       expect(buttonWith("Agregar un paso antes de builder")).not.toBeNull();
       expect(buttonWith("Mover antes")).not.toBeNull();
       expect(buttonWith("Mover después")).not.toBeNull();
+    });
+  });
+  describe("whether a step depends on the change", () => {
+    const FITTING: Workflow = {
+      id: "fits",
+      name: "Fits the change",
+      builtin: false,
+      steps: [
+        { type: "agent", ...spec("builder", { tools: "build" }) },
+        { type: "parallel", id: "reviews", steps: [spec("security", { role: { kind: "reviewer" }, when: "notSmall" })] },
+        { type: "agent", ...spec("review", { role: { kind: "reviewer" } }) },
+      ],
+    };
+    const openFitting = async () => {
+      mockIPC((command, args) => {
+        if (command === "workflows_list") return [BUILTIN, FITTING];
+        if (command === "workflow_save") {
+          saved.push((args as { workflow: Workflow }).workflow);
+          return (args as { workflow: Workflow }).workflow;
+        }
+        return command === "workflow_results" ? [] : command === "workflow_drafts_list" ? [] : null;
+      });
+      await open();
+      await click(text("Fits the change"));
+    };
+
+    it("is in plain words, and says what it means", async () => {
+      await openFitting();
+      await click(node("security"));
+      expect(page()).toContain("When it runs");
+      expect(page()).toContain("Only if the change isn't small");
+      expect(page()).toContain("a person still approves");
+      expect(page().toLowerCase()).not.toContain("notsmall");
+      await i18next.changeLanguage("es");
+      await flush();
+      expect(page()).toContain("Cuándo corre");
+      expect(page()).toContain("Solo si el cambio no es pequeño");
+    });
+
+    it("can be set on a step, and goes as the engine reads it", async () => {
+      await openFitting();
+      await click(node("review"));
+      await click(text("Only if the change isn't small"));
+      await saveNow();
+      const steps = lastSaved().steps;
+      expect((steps[2] as StepSpec).when).toBe("notSmall");
+    });
+
+    it("can be taken off a step, and then it says nothing about it, like one saved before", async () => {
+      await openFitting();
+      await click(node("security"));
+      await click(text("Always"));
+      await saveNow();
+      const group = lastSaved().steps[1] as { steps: StepSpec[] };
+      expect("when" in group.steps[0]).toBe(false);
+    });
+
+    it("leaves a step that never had one with nothing to send", async () => {
+      await openFitting();
+      await click(node("review"));
+      await saveNow();
+      expect("when" in lastSaved().steps[2]).toBe(false);
+    });
+
+    it("shows on the diagram, in words too", async () => {
+      await openFitting();
+      expect(node("security").className).toContain("border-dashed");
+      expect(node("security").getAttribute("aria-label")).toContain("Only if the change isn't small");
+      expect(node("review").getAttribute("aria-label")).not.toContain("Only if");
+    });
+
+    it("says what the engine refused, on the step", async () => {
+      saveError = { code: "blocked", reason: { code: "invalidWorkflow", problem: "whenBeforeBuild", step: "only" }, detail: null };
+      await open();
+      await click(text("Mine"));
+      await saveNow();
+      expect(page()).toContain("“only” depends on how big the change is, so it has to come after the first step that builds.");
+    });
+  });
+  describe("the results", () => {
+    const of = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0, shortRoute: 0, movedUp: 0, movedUpBecause: [], ...fields });
+    const cells = (row: string) => [...document.querySelectorAll("tr")].find((tr) => tr.querySelector("th")?.textContent?.startsWith(row))?.querySelectorAll("td");
+
+    it("say how often the workflow took the short way, and why runs didn't, where that means something", async () => {
+      results = [of({ workflowId: "mine", shortRoute: 4, movedUp: 3, movedUpBecause: [{ code: "sensitiveFiles", runs: 2 }, { code: "personAsked", runs: 1 }] }), of({ runs: 3, finished: 3 })];
+      await open();
+      const columns = (row: string) => [...(cells(row) ?? [])].map((cell) => cell.textContent);
+      expect(columns("Treated as small changes")).toEqual(["Doesn't depend on the change", "4"]);
+      expect(columns("Moved to full review")).toEqual(["Doesn't depend on the change", "3"]);
+      expect(columns("Why they moved")).toEqual(["Doesn't depend on the change", "sensitive files: 2, you asked: 1"]);
+    });
+
+    it("say plainly that there's nothing to go on yet", async () => {
+      await open();
+      expect(page()).toContain("There isn't enough data yet");
+      expect(document.querySelector("table")).toBeNull();
+    });
+
+    it("compare the workflows side by side, in the order of the list", async () => {
+      results = [of({ workflowId: "mine", workflowName: "An old name", runs: 8, finished: 8, merged: 4, closed: 2, costPerMergedUsd: 0.5, averageRounds: 1.25 }), of({ runs: 30, finished: 30, merged: 20, closed: 5, costPerMergedUsd: 3.2, averageRounds: 0 })];
+      await open();
+      const headers = [...document.querySelectorAll("thead th")].map((th) => th.textContent);
+      expect(headers).toEqual(["Full, with reviews", "Mine"]);
+      const texts = (row: string) => [...(cells(row) ?? [])].map((td) => td.textContent);
+      expect(texts("Runs")).toEqual(["30", "8"]);
+      expect(texts("Pull requests merged")).toEqual(["20", "4"]);
+      expect(texts("Closed without merging")).toEqual(["5", "2"]);
+      expect(texts("Average cost per merged pull request")).toEqual(["$3.20", "$0.50"]);
+      expect(texts("Average times sent back")).toEqual(["0", "1.3"]);
+    });
+
+    it("don't average too few runs, and say why", async () => {
+      results = [of({ runs: 2, finished: 2, merged: 1, closed: 1, costPerMergedUsd: 9, averageRounds: 2 })];
+      await open();
+      expect(cells("Runs")?.[0].textContent).toBe("2");
+      expect(cells("Average cost per merged pull request")?.[0].textContent).toBe("Not enough data yet");
+      expect(cells("Average times sent back")?.[0].textContent).toBe("Not enough data yet");
+      expect(page()).toContain("Averages show from 3 merged pull requests");
+      expect(page()).not.toContain("$9");
+    });
+
+    it("say how often it stopped to ask, and what a high number would mean", async () => {
+      results = [of({ runs: 10, stoppedToAsk: 4, answers: 8, answersRecommended: 6, sentBack: 2 })];
+      await open();
+      expect(cells("Runs that stopped to ask")?.[0].textContent).toBe("4");
+      expect(cells("Answers that took the recommended option")?.[0].textContent).toBe("75% (6 of 8)");
+      expect(cells("Times “Change” was used")?.[0].textContent).toBe("2");
+      expect(page()).toContain("High means it asks too much.");
+      expect(page()).toContain("High means it asks too little.");
+    });
+
+    it("say how much of what had to be true was met, and what a high number of the rest would mean", async () => {
+      results = [of({ runs: 10, criteriaMet: 41, criteriaUnmet: 3, criteriaUnverified: 28 })];
+      await open();
+      expect(cells("What had to be true: met")?.[0].textContent).toBe("41");
+      expect(cells("What had to be true: not met")?.[0].textContent).toBe("3");
+      expect(cells("What had to be true: not verified")?.[0].textContent).toBe("28");
+      expect(page()).toContain("High means a step that really runs the tests would be worth having.");
+    });
+
+    it("say so plainly when a workflow hasn't checked anything", async () => {
+      results = [of({ runs: 10 })];
+      await open();
+      expect(cells("What had to be true: met")?.[0].textContent).toBe("Nothing checked yet");
+      expect(cells("What had to be true: not verified")?.[0].textContent).toBe("Nothing checked yet");
+    });
+
+    it("don't work out a share from too few answers", async () => {
+      results = [of({ runs: 2, stoppedToAsk: 1, answers: 2, answersRecommended: 2 })];
+      await open();
+      expect(cells("Answers that took the recommended option")?.[0].textContent).toBe("Not enough data yet");
+    });
+
+    it("keep a workflow since deleted, under the name its runs knew", async () => {
+      results = [of({ workflowId: "gone", workflowName: "Since deleted", runs: 1 })];
+      await open();
+      expect(document.querySelector("thead th")?.textContent).toBe("Since deleted");
+    });
+
+    it("are of the project on show, and follow it", async () => {
+      const asked: string[] = [];
+      mockIPC((command, args) => {
+        if (command === "workflow_results") asked.push((args as { projectId: string }).projectId);
+        if (command === "workflows_list") return [BUILTIN];
+        if (command === "workflow_drafts_list") return [];
+        return command === "workflow_results" ? [] : null;
+      });
+      await open();
+      expect(asked).toEqual(["p1"]);
+      const project = labelled<HTMLSelectElement>("Project", "select") as HTMLSelectElement;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set?.call(project, "p2");
+        project.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+      await flush();
+      expect(asked).toEqual(["p1", "p2"]);
     });
   });
 });

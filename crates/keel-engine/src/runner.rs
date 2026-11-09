@@ -17,7 +17,8 @@ use serde_json::json;
 
 use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
-use crate::{Error, Inner, Result, brain, locked, prompts, workflows};
+use crate::specs::{self, Verdict};
+use crate::{Error, Inner, Result, Resume, brain, locked, prompts, verification, workflows};
 
 /// Tool output kept in the database. The raw file always has all of it.
 const EVENT_TEXT_LIMIT: usize = 64 * 1024;
@@ -962,38 +963,32 @@ impl Inner {
         }
 
         if let Some(result) = &m.result {
-            // A resumed session reports totals for the whole session, so count only what's new.
-            let earlier = m
-                .resumed_from
-                .as_deref()
-                .and_then(|id| store.attempt(id).ok());
-            let delta_cost = |value: Option<f64>, before: Option<f64>| {
-                value.map(|v| (v - before.unwrap_or(0.0)).max(0.0))
-            };
-            let delta = |value: Option<i64>, before: Option<i64>| {
-                value.map(|v| (v - before.unwrap_or(0)).max(0))
-            };
+            // A resumed session reports totals for the whole session, so count only what's new. Each
+            // attempt before this one only kept what it added, so it takes all of them.
+            let earlier = self.earlier_in_session(m.resumed_from.as_deref());
+            let delta_cost = |value: Option<f64>, before: f64| value.map(|v| (v - before).max(0.0));
+            let delta = |value: Option<i64>, before: i64| value.map(|v| (v - before).max(0));
             let optional_real = |v: Option<f64>| v.map_or(Value::Null, Value::Real);
             let optional_int = |v: Option<i64>| v.map_or(Value::Null, Value::Integer);
             fields.push((
                 "cost_usd",
                 optional_real(delta_cost(
                     result.cost_usd,
-                    earlier.as_ref().and_then(|a| a.cost_usd),
+                    earlier.iter().filter_map(|a| a.cost_usd).sum(),
                 )),
             ));
             fields.push((
                 "input_tokens",
                 optional_int(delta(
                     result.input_tokens,
-                    earlier.as_ref().and_then(|a| a.input_tokens),
+                    earlier.iter().filter_map(|a| a.input_tokens).sum(),
                 )),
             ));
             fields.push((
                 "output_tokens",
                 optional_int(delta(
                     result.output_tokens,
-                    earlier.as_ref().and_then(|a| a.output_tokens),
+                    earlier.iter().filter_map(|a| a.output_tokens).sum(),
                 )),
             ));
             fields.push(("turns", optional_int(result.turns)));
@@ -1014,6 +1009,56 @@ impl Inner {
             state = AttemptState::Failed;
             reason = Some(Reason::SnapshotFailed);
         }
+        // A specifier's result only counts if it keeps to its limits, and it may have questions.
+        let mut correction = None;
+        if state == AttemptState::Succeeded && m.role == "specifier" {
+            match self.judge_spec(&m) {
+                Verdict::Ready(output) => self.keep_output(&m, &output),
+                Verdict::Ask { output, questions } => {
+                    self.keep_output(&m, &output);
+                    state = AttemptState::WaitingAnswers;
+                    let _ = store.append_event(
+                        &m.attempt_id,
+                        "questionsAsked",
+                        &json!({ "questions": questions }),
+                    );
+                }
+                Verdict::TookRecommended {
+                    output,
+                    settled,
+                    rounds,
+                } => {
+                    self.keep_output(&m, &output);
+                    let _ = store.append_event(
+                        &m.attempt_id,
+                        "questionsTaken",
+                        &json!({ "settled": settled, "rounds": rounds }),
+                    );
+                }
+                Verdict::Correct(problems) => {
+                    state = AttemptState::Failed;
+                    reason = Some(Reason::SpecNotUsable {
+                        problems: problems.clone(),
+                    });
+                    correction = Some(problems);
+                }
+                Verdict::Stop(problems) => {
+                    state = AttemptState::Blocked;
+                    reason = Some(Reason::SpecNotUsable { problems });
+                }
+                Verdict::KeptAsking { output, rounds } => {
+                    self.keep_output(&m, &output);
+                    state = AttemptState::Blocked;
+                    reason = Some(Reason::KeptAsking { rounds });
+                }
+            }
+        }
+        // Anything that makes it succeed comes through here, a resumed or retried attempt included,
+        // and what can't be corrected has to reach a person rather than pass.
+        if state == AttemptState::Succeeded && m.role == "verifier" && !self.correct_verifier(&m) {
+            state = AttemptState::Failed;
+            reason = Some(Reason::NoStructuredOutput);
+        }
         let _ = store.set_state(&m.attempt_id, state, reason.as_ref());
         let _ = store.append_event(
             &m.attempt_id,
@@ -1028,7 +1073,10 @@ impl Inner {
         );
         locked(&self.controls).remove(&m.attempt_id);
         self.close_failed_trial(&m.run_id, state);
-        self.changed(&m.run_id);
+        // Going straight on to a fix: that it needed one isn't news for the board.
+        if correction.is_none() {
+            self.changed(&m.run_id);
+        }
         if state == AttemptState::Succeeded
             && let Ok(attempt) = store.attempt(&m.attempt_id)
             && let Err(error) = self.record_brain_output(&attempt)
@@ -1039,9 +1087,146 @@ impl Inner {
                 &json!({ "error": error.to_string() }),
             );
         }
+        if let Some(problems) = correction {
+            if let Err(error) = self.ask_for_correction(&m.attempt_id, &problems) {
+                // Nobody was told this finished, because the correction was meant to follow it.
+                let _ = store.append_event(
+                    &m.attempt_id,
+                    "correctionFailed",
+                    &json!({ "error": error.to_string() }),
+                );
+                self.changed(&m.run_id);
+            }
+            return;
+        }
         if state == AttemptState::Succeeded || m.role == "learner" {
             let _ = self.advance(&m.run_id);
         }
+    }
+
+    /// The attempts before this one in its session, nearest first.
+    fn earlier_in_session(&self, resumed_from: Option<&str>) -> Vec<Attempt> {
+        let mut found: Vec<Attempt> = Vec::new();
+        let mut next = resumed_from.map(str::to_owned);
+        while let Some(id) = next.take() {
+            // It can't come round, but a bad row shouldn't hang the app.
+            if found.iter().any(|attempt| attempt.id == id) {
+                break;
+            }
+            let Ok(attempt) = self.store.attempt(&id) else {
+                break;
+            };
+            next.clone_from(&attempt.resumed_from);
+            found.push(attempt);
+        }
+        found
+    }
+
+    fn judge_spec(&self, m: &Monitor) -> Verdict {
+        let attempts = self.store.attempts_of_run(&m.run_id).unwrap_or_default();
+        let this = attempts.iter().find(|a| a.id == m.attempt_id);
+        let fixing_a_limit = m.resumed_from.as_deref().is_some_and(|from| {
+            attempts.iter().any(|a| {
+                a.id == from
+                    && a.reason.as_ref().and_then(|r| r.get("code"))
+                        == Some(&json!("specNotUsable"))
+            })
+        });
+        // What a person has answered. Fixing a limit isn't a round of questions.
+        let rounds_answered = attempts
+            .iter()
+            .filter(|a| {
+                a.step_id == m.step_id
+                    && this.is_some_and(|this| a.round == this.round)
+                    && !specs::answered_on(a).is_empty()
+            })
+            .count();
+        specs::judge(
+            this.and_then(|attempt| attempt.output.as_ref()),
+            fixing_a_limit,
+            rounds_answered,
+        )
+    }
+
+    /// What it answered, without anything an agent added beyond the structure. The whole answer as
+    /// it came stays on the record, in the `result` event.
+    fn keep_output(&self, m: &Monitor, output: &serde_json::Value) {
+        let _ = self.store.patch_attempt(
+            &m.attempt_id,
+            &[("output", Value::Text(output.to_string()))],
+        );
+    }
+
+    /// Replaces what a verifier answered with what the engine can stand behind. Whether a check
+    /// passed comes from what Keel ran in this attempt's round, and the list from the latest spec.
+    /// False if there's no answer to correct, or nothing to correct it against.
+    fn correct_verifier(&self, m: &Monitor) -> bool {
+        let Ok(attempts) = self.store.attempts_of_run(&m.run_id) else {
+            return false;
+        };
+        let Some(this) = attempts.iter().find(|a| a.id == m.attempt_id) else {
+            return false;
+        };
+        let Ok(run) = self.store.run(&m.run_id) else {
+            return false;
+        };
+        let steps: Vec<WorkflowStep> = serde_json::from_value(run.workflow).unwrap_or_default();
+        let check = verification::checks_in_round(&steps, &attempts, this.round);
+        let corrected = workflows::specifying_attempt(&attempts)
+            .and_then(specs::of_attempt)
+            .zip(this.output.as_ref())
+            .and_then(|(spec, output)| verification::correct(output, &spec, check.passed()));
+        let Some(corrected) = corrected else {
+            return false;
+        };
+        self.keep_output(m, &json!(corrected.verification));
+        let changed: Vec<_> = corrected
+            .verification
+            .criteria
+            .iter()
+            .filter(|checked| checked.corrected.is_some())
+            .collect();
+        if !changed.is_empty() || !corrected.dropped.is_empty() {
+            let _ = self.store.append_event(
+                &m.attempt_id,
+                "verificationCorrected",
+                &json!({ "corrected": changed, "dropped": corrected.dropped, "check": check }),
+            );
+        }
+        true
+    }
+
+    /// Resumes the same session once, saying exactly what to fix.
+    fn ask_for_correction(
+        self: &Arc<Self>,
+        attempt_id: &str,
+        problems: &[keel_core::SpecProblem],
+    ) -> Result<()> {
+        let _guard = locked(&self.advancing);
+        let attempt = self.store.attempt(attempt_id)?;
+        let run = self.store.run(&attempt.run_id)?;
+        if run.finished_at.is_some() {
+            return Ok(());
+        }
+        let steps: Vec<WorkflowStep> = serde_json::from_value(run.workflow).unwrap_or_default();
+        let step = workflows::find_step(&steps, &attempt.step_id).ok_or(Error::InvalidState)?;
+        let attempts = self.store.attempts_of_run(&attempt.run_id)?;
+        self.store.append_event(
+            attempt_id,
+            "specCorrected",
+            &json!({ "problems": problems }),
+        )?;
+        self.start_step(
+            &attempt.run_id,
+            &step,
+            workflows::next_number(&attempts, &attempt.step_id),
+            Some(Resume {
+                session: attempt.session_id.clone(),
+                from: attempt.id.clone(),
+                prompt: Some(specs::correction_prompt(problems, &attempt.language)),
+            }),
+        )?;
+        Ok(())
     }
 }
 

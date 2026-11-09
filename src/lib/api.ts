@@ -12,11 +12,17 @@ export type AttemptState =
   | "interrupted"
   | "blocked"
   | "waitingApproval"
+  | "waitingAnswers"
   | "rejected"
+  | "returned"
+  | "postponed"
   | "skipped"
   | "abandoned";
 
 export type ToolProfile = "readOnly" | "build";
+
+/** What became of a pull request after Keel opened it, as of the last time it looked. */
+export type PrState = "open" | "draft" | "merged" | "closed";
 
 /** A code with its data. The backend sends no sentences; `reasonText` writes them. */
 export type Reason = { code: string } & Record<string, unknown>;
@@ -70,6 +76,8 @@ export interface Project {
   env: EnvVar[];
   /** What a board card runs. Null means the full built-in workflow. */
   defaultWorkflow: string | null;
+  /** Too sensitive for a change to count as small, on top of what always is. */
+  sensitivePaths: string[];
 }
 
 export interface ProjectSettings {
@@ -81,6 +89,7 @@ export interface ProjectSettings {
   services: Service[];
   env: EnvVar[];
   defaultWorkflow: string | null;
+  sensitivePaths: string[];
 }
 
 /** What a project's files give away. Nothing is saved until a person says so. */
@@ -171,11 +180,15 @@ export interface Issue {
 export interface Decision {
   seq: number;
   at: string;
-  answer: "approve" | "reject";
+  answer: "approve" | "reject" | "answered";
   text: string;
+  /** What they were asked, when it's an answer they asked to have remembered. */
+  question: string | null;
 }
 
-export type StepRole = { kind: "worker" } | { kind: "reviewer" } | { kind: "approver"; reworkTo: string; maxRounds: number } | { kind: "mapper" } | { kind: "learner" };
+export type StepRole = { kind: "worker" } | { kind: "reviewer" } | { kind: "approver"; reworkTo: string; maxRounds: number } | { kind: "mapper" } | { kind: "learner" } | { kind: "specifier" } | { kind: "verifier" };
+
+export type StepCondition = "notSmall";
 
 export interface BrainNote {
   seq: number;
@@ -222,6 +235,8 @@ export interface StepSpec {
   maxBudgetUsd: number | null;
   paths?: string[];
   role?: StepRole;
+  /** Runs only if this holds. Absent means always. */
+  when?: StepCondition;
 }
 
 export type WorkflowStep =
@@ -247,6 +262,66 @@ export interface WorkflowDraft {
   steps: WorkflowStep[];
   proposedBy: string;
   createdAt: string;
+}
+
+export interface SpecQuestion {
+  id: string;
+  text: string;
+  options: { label: string; recommended: boolean }[];
+}
+
+export interface SpecDecided {
+  text: string;
+  /** Who settled it, if it was once a question: a person, or Keel when the rounds of them ran out. */
+  taken?: "person" | "roundsLimit";
+}
+
+/** An answer to a question, as the engine keeps it. */
+export interface GivenAnswer {
+  question: string;
+  asked: string;
+  answer: string;
+  recommended: boolean;
+  remember: boolean;
+}
+
+/** A specifier's answer. */
+export interface SpecOutput {
+  /** Only ever a prediction. The engine decides from the change itself. */
+  size?: "small" | "normal";
+  risks?: string[];
+  summary: string;
+  criteria: { id: string; when: string; then: string }[];
+  changes: { kind: "adds" | "changes" | "removes"; text: string }[];
+  limits: string[];
+  decided: SpecDecided[];
+  questions: SpecQuestion[];
+  /** What a person said to `questions`. Only the engine writes this. */
+  answered?: GivenAnswer[];
+}
+
+/** One thing the specifier said has to be true, in its words, and what became of it. */
+export interface CheckedCriterion {
+  id: string;
+  when: string;
+  then: string;
+  result: "met" | "unmet" | "unverified";
+  evidence: string;
+  /** Why it isn't what the verifier said. Only the engine writes this. */
+  corrected?: "noEvidence" | "noCheckPassed" | "leftOut";
+}
+
+/** A verifier's answer, once the engine has corrected it. */
+export interface VerificationOutput {
+  criteria: CheckedCriterion[];
+  summary: string;
+}
+
+/** How a person answers one question. */
+export interface QuestionAnswer {
+  question: string;
+  choice: { kind: "option"; label: string } | { kind: "own"; text: string };
+  remember: boolean;
 }
 
 /** A folder an assistant proposed adding, as it is now. It isn't a project until the person adds it. */
@@ -296,6 +371,47 @@ export interface Run {
   finishedAt: string | null;
   /** The MCP client that started it. Null when a person did, in the app. */
   startedBy: string | null;
+  /** The saved workflow its steps came from. Null if it had none, or is from before Keel kept this. */
+  workflowId: string | null;
+  workflowName: string | null;
+  /** Null until Keel knows. */
+  prState: PrState | null;
+  /** When that happened, going by GitHub. */
+  prStateAt: string | null;
+  prCheckedAt: string | null;
+}
+
+/** How a workflow's runs in a project have gone. */
+export interface WorkflowResults {
+  workflowId: string;
+  /** What its latest run called it. */
+  workflowName: string;
+  runs: number;
+  /** Those that ended, however they ended. */
+  finished: number;
+  merged: number;
+  closed: number;
+  /** Null if no pull request was merged. */
+  costPerMergedUsd: number | null;
+  /** Null if no run finished. */
+  averageRounds: number | null;
+  /** Runs that stopped to ask a person something. */
+  stoppedToAsk: number;
+  /** Questions a person answered, and how many of those got the recommended option. */
+  answers: number;
+  answersRecommended: number;
+  /** How many times a person sent work back from what it decided alone. */
+  sentBack: number;
+  /** Of what had to be true, what the last verifier of each finished run left. */
+  criteriaMet: number;
+  criteriaUnmet: number;
+  criteriaUnverified: number;
+  /** Finished runs the engine last found small. */
+  shortRoute: number;
+  /** Runs it found weren't. */
+  movedUp: number;
+  /** Why they weren't, most common first. A run counts once per reason, and can have several. */
+  movedUpBecause: { code: string; runs: number }[];
 }
 
 export type WorkflowChoice =
@@ -344,7 +460,7 @@ export interface Attempt {
   runId: string;
   stepId: string;
   kind: "agent" | "setup" | "check" | "approval" | "deliver";
-  role: "worker" | "reviewer" | "approver" | "mapper" | "learner";
+  role: "worker" | "reviewer" | "approver" | "mapper" | "learner" | "specifier" | "verifier";
   round: number;
   output: (Verdict & Decision_ & { lines?: unknown[] }) | null;
   runFiles: string[] | null;
@@ -421,6 +537,8 @@ export interface BoardCard {
   /** Of the latest attempt. */
   reason: Reason | null;
   prUrl: string | null;
+  prState: PrState | null;
+  prStateAt: string | null;
   /** What the person wrote when rejecting. It may be empty. */
   rejection: string | null;
   startBlocked: Reason | null;
@@ -460,10 +578,13 @@ export const api = {
   runProposals: (runId: string) => invoke<BrainNote[]>("run_proposals", { runId }),
   runStart: (request: RunRequest) => invoke<string>("run_start", { request }),
   runGet: (runId: string) => invoke<Run>("run_get", { runId }),
+  /** Asks Keel to see what became of the run's pull request. What it finds arrives as a change. */
+  runLookAtPr: (runId: string) => invoke<void>("run_look_at_pr", { runId }),
   runDiff: (runId: string) => invoke<string>("run_diff", { runId }),
   runAddsSecret: (runId: string) => invoke<boolean>("run_adds_secret", { runId }),
   workflowsList: (projectId: string, language: string) => invoke<Workflow[]>("workflows_list", { projectId, language }),
   workflowSave: (projectId: string, workflow: Workflow) => invoke<Workflow>("workflow_save", { projectId, workflow }),
+  workflowResults: (projectId: string) => invoke<WorkflowResults[]>("workflow_results", { projectId }),
   workflowDelete: (projectId: string, workflowId: string) => invoke<void>("workflow_delete", { projectId, workflowId }),
   workflowDraftsList: () => invoke<WorkflowDraft[]>("workflow_drafts_list"),
   workflowDraftSave: (projectId: string, draftId: string, workflow: Workflow) => invoke<Workflow>("workflow_draft_save", { projectId, draftId, workflow }),
@@ -482,6 +603,10 @@ export const api = {
   decisionsList: (projectId: string) => invoke<Decision[]>("decisions_list", { projectId }),
   decisionRetire: (seq: number) => invoke<void>("decision_retire", { seq }),
   approvalAnswer: (attemptId: string, approve: boolean, text: string) => invoke<void>("approval_answer", { attemptId, approve, text }),
+  approvalSendBack: (attemptId: string, instructions: string) => invoke<void>("approval_send_back", { attemptId, instructions }),
+  /** Runs what was skipped for being a small change. The approval comes round again afterwards. */
+  approvalRunSkipped: (attemptId: string) => invoke<void>("approval_run_skipped", { attemptId }),
+  questionsAnswer: (attemptId: string, answers: QuestionAnswer[]) => invoke<void>("questions_answer", { attemptId, answers }),
   openGithubUrl: (url: string) => invoke<void>("open_github_url", { url }),
   attemptEvents: (attemptId: string, afterSeq: number) => invoke<AuditEvent[]>("attempt_events", { attemptId, afterSeq }),
   attemptDiff: (attemptId: string) => invoke<string>("attempt_diff", { attemptId }),

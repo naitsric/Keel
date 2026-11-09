@@ -19,6 +19,8 @@ const card = (id: string, column: BoardColumn, extra: Partial<BoardCard> = {}): 
   runState: null,
   reason: null,
   prUrl: null,
+  prState: null,
+  prStateAt: null,
   rejection: null,
   startBlocked: null,
   createdAt: "2026-11-05T00:00:00Z",
@@ -26,6 +28,43 @@ const card = (id: string, column: BoardColumn, extra: Partial<BoardCard> = {}): 
 });
 
 const layout: Layout = { backlog: ["a", "b", "c"], todo: ["x", "y"] };
+
+describe("what a done card says about its pull request", () => {
+  const done = (extra: Partial<BoardCard>) => cardLabel(en, card("d", "done", { runState: "succeeded", prUrl: "https://github.com/acme/app/pull/12", ...extra }));
+
+  it("says nothing until Keel knows, or if there isn't one", () => {
+    expect(done({})).toBeNull();
+    expect(cardLabel(en, card("d", "done", { runState: "succeeded" }))).toBeNull();
+  });
+
+  it("only reads as a success once it's merged, and says when", () => {
+    const merged = done({ prState: "merged", prStateAt: "2026-11-06T10:00:00Z" });
+    expect(merged?.label).toBe("Merged");
+    expect(merged?.state).toBe("succeeded");
+    expect(merged?.detail).toContain("2026");
+    const closed = done({ prState: "closed", prStateAt: "2026-11-06T10:00:00Z" });
+    expect(closed?.label).toBe("Closed without merging");
+    expect(closed?.state).toBe("rejected");
+    expect(closed?.detail).toContain("2026");
+  });
+
+  it("doesn't date one that's still open, since that's only when someone last touched it", () => {
+    const open = done({ prState: "open", prStateAt: "2026-11-06T10:00:00Z" });
+    expect(open?.label).toBe("Pull request open");
+    expect(open?.state).toBe("queued");
+    expect(open?.detail).toBeNull();
+    expect(done({ prState: "draft", prStateAt: "2026-11-06T10:00:00Z" })?.label).toBe("Draft pull request");
+  });
+
+  it("speaks Spanish too", () => {
+    expect(cardLabel(t("es"), card("d", "done", { prState: "merged", prStateAt: null }))?.label).toBe("Mergeado");
+    expect(cardLabel(t("es"), card("d", "done", { prState: "closed", prStateAt: null }))?.label).toBe("Cerrado sin mergear");
+  });
+
+  it("only shows on a card that's done: its column still comes from the run", () => {
+    expect(cardLabel(en, card("w", "inProgress", { runState: "running", prState: "merged" }))?.label).toBe(en("states.running"));
+  });
+});
 
 describe("groupCards", () => {
   it("trusts the backend's column and keeps its order", () => {
@@ -315,6 +354,7 @@ describe("cardLabel", () => {
 
   it("says what Human Review needs, for each state", () => {
     expect(review("waitingApproval")).toEqual({ state: "waitingApproval", label: "Needs your approval", detail: "Open it to approve or reject." });
+    expect(review("waitingAnswers")).toEqual({ state: "waitingAnswers", label: "Needs your decision", detail: "Open it to answer." });
     expect(review("failed")?.label).toBe("Failed");
     expect(review("blocked")?.label).toBe("Blocked");
     expect(review("stalled")?.label).toBe("Looks stuck");

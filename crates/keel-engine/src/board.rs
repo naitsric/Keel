@@ -6,12 +6,12 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
-use keel_core::{AttemptState, BoardColumn, CardLane, Reason, WorkflowStep};
+use keel_core::{AttemptState, BoardColumn, CardLane, PrState, Reason};
 use keel_harness::github::Issue;
 use keel_store::{Card, NewCard, Project, Store};
 
 use crate::{
-    Engine, Error, Result, StartRun, locked, new_id, request_from_issue, title_from,
+    Engine, Error, Result, StartRun, Workflow, locked, new_id, request_from_issue, title_from,
     title_from_issue,
 };
 
@@ -88,6 +88,10 @@ pub struct BoardCard {
     #[serde(serialize_with = "keel_core::serialize_masked")]
     pub reason: Option<Reason>,
     pub pr_url: Option<String>,
+    /// What became of that pull request, as of the last time Keel looked. The column doesn't
+    /// depend on it: a card is done when its run is, whatever happens on GitHub later.
+    pub pr_state: Option<PrState>,
+    pub pr_state_at: Option<String>,
     #[serde(serialize_with = "keel_core::serialize_masked")]
     pub rejection: Option<String>,
     #[serde(serialize_with = "keel_core::serialize_masked")]
@@ -117,6 +121,8 @@ impl From<Card> for BoardCard {
             run_id: card.run_id,
             run_state: card.run_state,
             pr_url: card.pr_url,
+            pr_state: card.pr_state,
+            pr_state_at: card.pr_state_at,
             rejection: card.rejection,
             created_at: card.created_at,
         }
@@ -223,7 +229,7 @@ impl Engine {
         if lane == CardLane::Todo && card.column() != BoardColumn::Todo {
             let project = store.project(&card.project_id)?;
             let workflow = self.default_workflow(&project, language)?;
-            self.check_can_run(&project, &workflow)?;
+            self.check_can_run(&project, &workflow.steps)?;
         }
         if !store.move_card(card_id, lane, index, language)? {
             return Err(Error::InvalidState);
@@ -460,7 +466,7 @@ impl Engine {
     fn card_request(&self, card: &Card) -> Result<StartRun> {
         let project = self.inner.store.project(&card.project_id)?;
         let language = card.language.clone().unwrap_or_else(|| "en".to_owned());
-        let workflow: Vec<WorkflowStep> = self.default_workflow(&project, &language)?;
+        let workflow = self.default_workflow(&project, &language)?;
         let issue = issue_of(card);
         let (title, request) = match &issue {
             Some(issue) => (
@@ -477,21 +483,21 @@ impl Engine {
             project_id: project.id,
             title: Some(title),
             request,
-            workflow,
+            saved_workflow: Some(workflow.reference()),
+            workflow: workflow.steps,
             language,
             source_issue: issue,
+            started_by: None,
         })
     }
 
-    fn default_workflow(&self, project: &Project, language: &str) -> Result<Vec<WorkflowStep>> {
+    fn default_workflow(&self, project: &Project, language: &str) -> Result<Workflow> {
         let id = project
             .default_workflow
             .as_deref()
             .unwrap_or(DEFAULT_WORKFLOW);
-        Ok(self
-            .workflow(&project.id, id, language)?
-            .ok_or(Error::Blocked(Reason::DefaultWorkflowMissing))?
-            .steps)
+        self.workflow(&project.id, id, language)?
+            .ok_or(Error::Blocked(Reason::DefaultWorkflowMissing))
     }
 }
 
@@ -502,11 +508,11 @@ mod tests {
     use std::sync::mpsc;
     use std::time::Instant;
 
-    use keel_core::{StepSpec, ToolProfile};
+    use keel_core::{StepSpec, ToolProfile, WorkflowStep};
     use keel_harness::Tools;
 
     use super::*;
-    use crate::{Config, Workflow};
+    use crate::Config;
 
     const FAKE_CLAUDE: &str = r#"#!/bin/bash
 case "$1" in
@@ -577,6 +583,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Done.","nu
                         max_turns: None,
                         max_budget_usd: None,
                         paths: vec![],
+                        when: None,
                         role: Default::default(),
                     })],
                     builtin: false,

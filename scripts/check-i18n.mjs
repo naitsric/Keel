@@ -25,6 +25,13 @@ for (const [, variant] of reasonEnum.matchAll(/^\s{4}([A-Z]\w+)\b/gm)) {
   const code = variant[0].toLowerCase() + variant.slice(1);
   if (!enKeys.has(`reasons.${code}`)) problems.push(`no translation for reason: ${code}`);
 }
+// Every reason a run isn't small has to reach a person in words, and the results count it.
+const whyStart = core.indexOf("pub enum WhyNotSmall");
+const whyEnum = core.slice(whyStart, core.indexOf("\n}", whyStart));
+for (const [, variant] of whyEnum.matchAll(/^\s{4}([A-Z]\w+)\b/gm)) {
+  const code = variant[0].toLowerCase() + variant.slice(1);
+  for (const key of [`fits.why.${code}`, `fits.short.${code}`]) if (!enKeys.has(key)) problems.push(`no translation for why a run isn't small: ${key}`);
+}
 const stateEnum = core.slice(core.indexOf("pub enum AttemptState"), core.indexOf("impl AttemptState"));
 for (const [, variant] of stateEnum.matchAll(/^\s{4}([A-Z]\w+),/gm)) {
   const code = variant[0].toLowerCase() + variant.slice(1);

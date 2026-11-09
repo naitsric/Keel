@@ -1,7 +1,7 @@
 import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Bot, CheckCircle2, GitPullRequest, Layers, Plus, Trash2, TriangleAlert, UserCheck, Wrench } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type CommandError, type StepRole, type StepSpec, type ToolProfile, type Workflow, type WorkflowDraft, type WorkflowStep } from "../lib/api";
+import { api, type CommandError, type StepCondition, type StepRole, type StepSpec, type ToolProfile, type Workflow, type WorkflowDraft, type WorkflowResults, type WorkflowStep } from "../lib/api";
 import { draftFacts } from "../lib/drafts";
 import { flowOf, pathKey, pathOfKey, problemKeys, type StepPath } from "../lib/flow";
 import { formatRelative } from "../lib/format";
@@ -11,10 +11,11 @@ import { Button, Card, cx, Field, inputClass, Segmented } from "../ui/primitives
 import { AddProject } from "./AddProject";
 import { FlowDiagram } from "./FlowDiagram";
 import { ModelField } from "./ModelField";
+import { WorkflowResultsCard } from "./WorkflowResultsCard";
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 const DEFAULT_EFFORT = "__default__";
-const PROMPT_TOKENS = "{{request}}, {{diff}}, {{rework}}, {{steps.spec.output}}";
+const PROMPT_TOKENS = "{{request}}, {{diff}}, {{rework}}, {{answers}}, {{check}}, {{steps.spec.output}}";
 
 /** A step's name that isn't taken yet. */
 export function freshId(base: string, taken: string[]): string {
@@ -83,13 +84,21 @@ export function removedStep(steps: WorkflowStep[], path: StepPath): StepsEdit {
 
 const newAgent = (id: string, role: StepRole, tools: ToolProfile): StepSpec => ({ id, model: "sonnet", effort: null, tools, prompt: "", maxTurns: null, maxBudgetUsd: null, paths: [], role });
 
+const ALWAYS = "always";
+
+/** A step with this condition. A step with none says nothing about it, like one saved before there were any. */
+export function withWhen(spec: StepSpec, when: StepCondition | typeof ALWAYS): StepSpec {
+  const { when: _, ...rest } = spec;
+  return when === ALWAYS ? rest : { ...rest, when };
+}
+
 /** The fields of an agent, standing alone or inside a group. */
 function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; earlier: string[]; inGroup: boolean; onChange: (spec: StepSpec) => void }) {
   const { t } = useTranslation();
   const role = spec.role ?? { kind: "worker" };
   const setRole = (kind: StepRole["kind"]) => {
     if (kind === "approver") onChange({ ...spec, tools: "readOnly", role: { kind, reworkTo: earlier[earlier.length - 1] ?? "", maxRounds: 2 } });
-    else if (kind === "reviewer" || kind === "learner" || kind === "mapper") onChange({ ...spec, tools: "readOnly", role: { kind } });
+    else if (kind === "reviewer" || kind === "learner" || kind === "mapper" || kind === "specifier" || kind === "verifier") onChange({ ...spec, tools: "readOnly", role: { kind } });
     else onChange({ ...spec, role: { kind } });
   };
   const judges = role.kind !== "worker";
@@ -120,6 +129,8 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
             onChange={setRole}
             options={inGroup ? [{ value: "reviewer", label: t("workflows.roleReviewer") }, { value: "worker", label: t("workflows.roleWorker") }] : [
               { value: "worker", label: t("workflows.roleWorker") },
+              { value: "specifier", label: t("workflows.roleSpecifier") },
+              { value: "verifier", label: t("workflows.roleVerifier") },
               { value: "reviewer", label: t("workflows.roleReviewer") },
               { value: "approver", label: t("workflows.roleApprover") },
               { value: "learner", label: t("workflows.roleLearner") },
@@ -160,6 +171,19 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
             </div>
           </>
         )}
+      </div>
+      <div>
+        <span className="mb-1 block text-[12px] font-medium text-muted">{t("workflows.when")}</span>
+        <Segmented<StepCondition | typeof ALWAYS>
+          label={t("workflows.when")}
+          value={spec.when ?? ALWAYS}
+          onChange={(when) => onChange(withWhen(spec, when))}
+          options={[
+            { value: ALWAYS, label: t("workflows.whenAlways") },
+            { value: "notSmall", label: t("workflows.whenNotSmall") },
+          ]}
+        />
+        <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t("workflows.whenHint")}</p>
       </div>
       <Field label={t("workflows.paths")} hint={t("workflows.pathsHint")}>
         <input
@@ -344,6 +368,12 @@ function DraftReview({ draft, steps, project }: { draft: WorkflowDraft; steps: W
           <dt className={label}>{t("workflows.draftDelivery")}</dt>
           <dd>{facts.delivers ? t("workflows.draftDelivers") : t("workflows.draftNoDelivery")}</dd>
         </div>
+        {facts.conditional.length > 0 && (
+          <div>
+            <dt className={label}>{t("workflows.draftConditional")}</dt>
+            <dd className="font-mono text-[11.5px] break-words">{facts.conditional.join(", ")}</dd>
+          </div>
+        )}
       </dl>
       {facts.afterApproval.length > 0 && (
         <p role="alert" className="flex gap-1.5 text-[12.5px] font-medium text-warning">
@@ -364,6 +394,7 @@ export function WorkflowsView() {
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
   const [editing, setEditing] = useState<Workflow | null>(null);
   const [drafts, setDrafts] = useState<WorkflowDraft[]>([]);
+  const [results, setResults] = useState<WorkflowResults[]>([]);
   // The proposed workflow in the editor. It isn't a workflow until it's saved, so it has no id there.
   const [reviewing, setReviewing] = useState<WorkflowDraft | null>(null);
   const openingDraft = useRef(false);
@@ -408,6 +439,19 @@ export function WorkflowsView() {
   useEffect(() => {
     loadDrafts().catch((e) => setError(errorText(t, e)));
   }, [loadDrafts, revision, t]);
+
+  // What a pull request became arrives as a change like any other.
+  useEffect(() => {
+    if (!projectId) return;
+    let current = true;
+    api
+      .workflowResults(projectId)
+      .then((found) => current && setResults(found))
+      .catch((e) => current && setError(errorText(t, e)));
+    return () => {
+      current = false;
+    };
+  }, [projectId, revision, t]);
 
   const steps = editing?.steps ?? [];
   const flow = useMemo(() => flowOf(steps), [steps]);
@@ -680,6 +724,7 @@ export function WorkflowsView() {
             )}
           </div>
         )}
+        {projects.length > 0 && <WorkflowResultsCard results={results} workflows={workflows} />}
       </main>
     </>
   );

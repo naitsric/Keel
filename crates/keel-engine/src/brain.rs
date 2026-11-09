@@ -45,6 +45,7 @@ pub fn map_workflow(language: &str, model: &str) -> Vec<WorkflowStep> {
         max_turns: None,
         max_budget_usd: None,
         paths: Vec::new(),
+        when: None,
         role: StepRole::Mapper,
     })]
 }
@@ -73,6 +74,7 @@ pub fn learner_step(id: &str, language: &str, model: &str, reviewers: &[&str]) -
         max_turns: None,
         max_budget_usd: None,
         paths: Vec::new(),
+        when: None,
         role: StepRole::Learner,
     }
 }
@@ -106,16 +108,20 @@ fn note_line(note: &BrainNote, stale: bool) -> String {
 /// Says who said it and about what. A bare "(reject): keep a docstring" reads as a person rejecting
 /// the docstring, and a real agent did the opposite of what was asked because of it.
 fn decision_line(decision: &Decision) -> String {
+    let date = decision.at.get(..10).unwrap_or(&decision.at);
+    if decision.answer == "answered" {
+        return format!(
+            "- On {date}, a person was asked {} and answered {}\n",
+            decision.question.as_deref().unwrap_or_default().trim(),
+            decision.text.trim()
+        );
+    }
     let about = if decision.answer == "reject" {
         "rejected a change and said"
     } else {
         "approved a change and said"
     };
-    format!(
-        "- On {}, a person {about}: {}\n",
-        decision.at.get(..10).unwrap_or(&decision.at),
-        decision.text.trim()
-    )
+    format!("- On {date}, a person {about}: {}\n", decision.text.trim())
 }
 
 /// Puts it together within the limit. What people decided outranks what was learned, which
@@ -476,6 +482,8 @@ impl Engine {
             workflow: map_workflow(language, model),
             language: language.to_owned(),
             source_issue: None,
+            saved_workflow: None,
+            started_by: None,
         })
     }
 
@@ -614,6 +622,7 @@ mod tests {
             answer: "approve".into(),
             text: text.into(),
             retired: false,
+            question: None,
         }
     }
 
@@ -631,6 +640,20 @@ mod tests {
         assert!(text.contains("a person approved a change and said: Keep it small"));
         assert!(text.contains("also when they said it while rejecting a change"));
         assert!(!text.contains("(reject)"));
+    }
+
+    #[test]
+    fn an_answer_a_person_asked_to_remember_says_what_they_were_asked() {
+        let mut answered = decision(1, "Show an error, as today");
+        answered.answer = "answered".into();
+        answered.question = Some("If `whole` is 0, what should happen?".into());
+        let text = block(&[answered], &[], &HashSet::new()).text;
+        assert!(
+            text.contains(
+                "- On 2026-11-04, a person was asked If `whole` is 0, what should happen? and answered Show an error, as today\n"
+            ),
+            "{text}"
+        );
     }
 
     #[test]

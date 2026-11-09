@@ -43,7 +43,10 @@ const STATE_TONES: Record<AttemptState, string> = {
   interrupted: "text-warning",
   blocked: "text-warning",
   waitingApproval: "text-warning",
+  waitingAnswers: "text-warning",
   rejected: "text-muted",
+  returned: "text-muted",
+  postponed: "text-muted",
   skipped: "text-subtle",
   abandoned: "text-subtle",
 };
@@ -59,7 +62,10 @@ const STATE_DOTS: Record<AttemptState, string> = {
   interrupted: "bg-warning",
   blocked: "bg-warning",
   waitingApproval: "bg-warning animate-pulse",
+  waitingAnswers: "bg-warning animate-pulse",
   rejected: "bg-subtle",
+  returned: "bg-subtle",
+  postponed: "bg-subtle",
   skipped: "bg-subtle",
   abandoned: "bg-subtle",
 };

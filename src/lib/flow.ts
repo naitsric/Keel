@@ -14,6 +14,7 @@ export interface FlowAttempt {
   modelRequested: string;
   modelActual: string | null;
   output: { decision?: string } | null;
+  reason?: { code: string } | null;
 }
 
 export interface FlowNode<T extends FlowAttempt = Attempt> {
@@ -25,6 +26,8 @@ export interface FlowNode<T extends FlowAttempt = Attempt> {
   model: string | null;
   /** Shown small: the learner runs after everything else, and its failing holds nothing back. */
   minor: boolean;
+  /** Only runs if the change isn't small. */
+  conditional: boolean;
   state: NodeState;
   /** Every attempt of this step, oldest first. */
   attempts: T[];
@@ -57,7 +60,7 @@ export interface Flow<T extends FlowAttempt = Attempt> {
   live: boolean;
 }
 
-const SETTLED: NodeState[] = ["succeeded", "skipped"];
+const SETTLED: NodeState[] = ["succeeded", "skipped", "returned", "postponed"];
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 const SINGLE_KINDS = ["agent", "setup", "check", "approval", "deliver"];
@@ -73,6 +76,34 @@ export function parseSteps(workflow: unknown): WorkflowStep[] | null {
   return readable ? (workflow as WorkflowStep[]) : null;
 }
 
+/**
+ * Where rework starts, like `rework_index` in the engine: every round runs again from here. An
+ * approver says where, and without one it's the last worker that can change files, as long as an
+ * approval comes after it to send work back.
+ */
+export function reworkIndex(steps: WorkflowStep[]): number | null {
+  for (const step of steps) {
+    if (step.type !== "agent" || step.role?.kind !== "approver") continue;
+    const { reworkTo } = step.role;
+    const at = steps.findIndex((s) => s.id === reworkTo);
+    if (at >= 0) return at;
+  }
+  const lastApproval = steps.map((s) => s.type).lastIndexOf("approval");
+  const before = lastApproval < 0 ? steps : steps.slice(0, lastApproval);
+  for (let at = before.length - 1; at >= 0; at--) {
+    const step = before[at];
+    if (step.type === "agent" && (step.role?.kind ?? "worker") === "worker" && step.tools === "build") return at;
+  }
+  return null;
+}
+
+/** Whether a person at this approval can send the work back: what does it again has to come before them. */
+export function canSendBack(steps: WorkflowStep[], approvalId: string): boolean {
+  const from = reworkIndex(steps);
+  const at = steps.findIndex((s) => s.id === approvalId);
+  return from !== null && at >= 0 && from < at;
+}
+
 function reworksOf(steps: WorkflowStep[], attempts: FlowAttempt[], round: number): FlowRework[] {
   const approvers = steps.flatMap((step, from) => (step.type === "agent" && step.role?.kind === "approver" ? [{ id: step.id, role: step.role, from }] : []));
   return approvers.flatMap(({ id, role, from }) => {
@@ -80,8 +111,9 @@ function reworksOf(steps: WorkflowStep[], attempts: FlowAttempt[], round: number
     // Halfway through an edit, or in a file nobody validated, it can point anywhere.
     if (to < 0 || to >= from) return [];
     // Saying "rework" isn't going back: at the limit the run stops and a person decides. With one
-    // approver, every new round is its doing, and a person's "one more round" counts too.
-    const times = approvers.length === 1 ? round : new Set(attempts.filter((a) => a.stepId === id && a.round < round && a.output?.decision === "rework").map((a) => a.round)).size;
+    // approver, every new round is its doing, a person's "one more round" counts too, and only what
+    // a person sent back from their own approval doesn't.
+    const times = approvers.length === 1 ? round - attempts.filter((a) => a.state === "returned").length : new Set(attempts.filter((a) => a.stepId === id && a.round < round && a.output?.decision === "rework").map((a) => a.round)).size;
     return [{ from, to, fromId: id, toId: role.reworkTo, times, maxRounds: role.maxRounds }];
   });
 }
@@ -96,10 +128,9 @@ export function flowOf<T extends FlowAttempt = Attempt>(steps: WorkflowStep[], a
   for (const attempt of given) unclaimed.set(attempt.stepId, [...(unclaimed.get(attempt.stepId) ?? []), attempt]);
   const round = Math.max(runRound, ...given.map((a) => a.round));
   const reworks = reworksOf(steps, given, round);
-  // Like `rework_index` in the engine: every round runs again from the first approver's target.
-  const reruns = reworks[0]?.to ?? Number.POSITIVE_INFINITY;
+  const reruns = reworks[0]?.to ?? reworkIndex(steps) ?? Number.POSITIVE_INFINITY;
 
-  const nodeOf = (key: string, id: string, kind: Attempt["kind"], role: StepRole["kind"] | null, model: string | null | undefined, stage: number): FlowNode<T> => {
+  const nodeOf = (key: string, id: string, kind: Attempt["kind"], role: StepRole["kind"] | null, model: string | null | undefined, stage: number, conditional = false): FlowNode<T> => {
     const found = unclaimed.get(id) ?? [];
     unclaimed.delete(id);
     const attempt = found.at(-1) ?? null;
@@ -110,6 +141,7 @@ export function flowOf<T extends FlowAttempt = Attempt>(steps: WorkflowStep[], a
       role,
       model: (kind === "agent" && (attempt?.modelActual || attempt?.modelRequested || model)) || null,
       minor: role === "learner",
+      conditional,
       state: attempt?.state ?? "pending",
       attempts: found,
       attempt,
@@ -121,8 +153,8 @@ export function flowOf<T extends FlowAttempt = Attempt>(steps: WorkflowStep[], a
 
   const stages = steps.map((step, index): FlowStage<T> => {
     const key = String(index);
-    if (step.type === "parallel") return { type: "parallel", key, id: step.id, nodes: step.steps.map((spec, member) => nodeOf(`${index}.${member}`, spec.id, "agent", spec.role?.kind ?? "worker", spec.model, index)) };
-    const node = step.type === "agent" ? nodeOf(key, step.id, "agent", step.role?.kind ?? "worker", step.model, index) : nodeOf(key, step.id, step.type, null, null, index);
+    if (step.type === "parallel") return { type: "parallel", key, id: step.id, nodes: step.steps.map((spec, member) => nodeOf(`${index}.${member}`, spec.id, "agent", spec.role?.kind ?? "worker", spec.model, index, Boolean(spec.when))) };
+    const node = step.type === "agent" ? nodeOf(key, step.id, "agent", step.role?.kind ?? "worker", step.model, index, Boolean(step.when)) : nodeOf(key, step.id, step.type, null, null, index);
     return { type: "step", key, node };
   });
   const extras = [...unclaimed.entries()].map(([id, found], index) => {

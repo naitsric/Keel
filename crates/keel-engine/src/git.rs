@@ -63,6 +63,18 @@ pub struct Snapshot {
     pub diff: String,
 }
 
+/// How big a change is, as git counts it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ChangeSize {
+    /// Every path it touches, on both sides of a move.
+    pub files: Vec<String>,
+    /// Lines added plus lines deleted.
+    pub lines: usize,
+    /// Files git won't count in lines, because they're binary or a `.gitattributes` says to treat
+    /// them that way. Nothing is known about how much changed in these.
+    pub without_lines: Vec<String>,
+}
+
 impl Git {
     pub fn new(bin: PathBuf) -> Self {
         Self {
@@ -426,6 +438,53 @@ impl Git {
         self.diff_range(workspace, &format!("{base}..HEAD"))
     }
 
+    /// How big the change since `base` really is. What decides whether reviews run comes from here,
+    /// so what a step could have left behind must not make it look smaller. A file moved out of a
+    /// folder has to show the folder it left, so moves are read as a removal and an addition. Replaced
+    /// objects could make two commits look the same, and `-z` keeps names as they are, where git would
+    /// otherwise put any with an accent in quotes, and a pattern would no longer match them.
+    pub fn change_size(&self, workspace: &Path, base: &str) -> Result<ChangeSize, GitError> {
+        let range = format!("{base}..HEAD");
+        let output = self.run_in_workspace(
+            workspace,
+            &[
+                "--no-replace-objects",
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--no-renames",
+                "--no-relative",
+                "--ignore-submodules=none",
+                "--numstat",
+                "-z",
+                &range,
+            ],
+        )?;
+        let mut size = parse_numstat(&output)?;
+        let raw = self.run_in_workspace(
+            workspace,
+            &[
+                "--no-replace-objects",
+                "diff",
+                "--no-ext-diff",
+                "--no-renames",
+                "--no-relative",
+                "--ignore-submodules=none",
+                "--raw",
+                "--no-abbrev",
+                "-z",
+                &range,
+            ],
+        )?;
+        // git counts a submodule moving as two lines, whatever it brings in with it.
+        for path in submodules_in_raw(&raw) {
+            if !size.without_lines.contains(&path) {
+                size.without_lines.push(path);
+            }
+        }
+        Ok(size)
+    }
+
     /// Whether a command left the workspace different, which a check shouldn't.
     pub fn is_dirty(&self, workspace: &Path) -> bool {
         self.run_in_workspace(workspace, &["status", "--porcelain"])
@@ -485,6 +544,46 @@ fn bounded_output(
     Ok((status.success(), stdout, stderr))
 }
 
+/// The submodules in `git diff --raw -z`, which goes `:mode mode sha sha status`, then the path.
+fn submodules_in_raw(output: &str) -> Vec<String> {
+    const SUBMODULE: &str = "160000";
+    let mut found = Vec::new();
+    let mut fields = output.split('\0');
+    while let (Some(meta), Some(path)) = (fields.next(), fields.next()) {
+        let mut modes = meta.trim_start_matches(':').split(' ');
+        if modes.next() == Some(SUBMODULE) || modes.next() == Some(SUBMODULE) {
+            found.push(path.to_owned());
+        }
+    }
+    found
+}
+
+/// `git diff --numstat -z`: added, deleted and the path, separated by tabs, with `-` for what it won't
+/// count. Anything else means this isn't what it seems, and nothing here can be relied on.
+fn parse_numstat(output: &str) -> Result<ChangeSize, GitError> {
+    let mut size = ChangeSize::default();
+    for record in output.split('\0').filter(|record| !record.is_empty()) {
+        let unreadable = || GitError::Failed(format!("git diff --numstat said: {record}"));
+        let mut fields = record.splitn(3, '\t');
+        let (Some(added), Some(deleted), Some(path)) =
+            (fields.next(), fields.next(), fields.next())
+        else {
+            return Err(unreadable());
+        };
+        size.files.push(path.to_owned());
+        if added == "-" || deleted == "-" {
+            size.without_lines.push(path.to_owned());
+            continue;
+        }
+        let count = |text: &str| text.parse::<usize>().map_err(|_| unreadable());
+        size.lines = size
+            .lines
+            .saturating_add(count(added)?)
+            .saturating_add(count(deleted)?);
+    }
+    Ok(size)
+}
+
 fn require_own_branch(branch: &str) -> Result<(), GitError> {
     let safe = branch.starts_with(BRANCH_PREFIX)
         && branch.len() > BRANCH_PREFIX.len()
@@ -501,6 +600,22 @@ fn require_own_branch(branch: &str) -> Result<(), GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_count_of_what_changed_reads_lines_paths_and_what_it_will_not_count() {
+        let size =
+            parse_numstat("3\t1\tsrc/a.py\0-\t-\tlogo.png\x000\t0\tname with\ttab\0").unwrap();
+        assert_eq!(size.lines, 4);
+        assert_eq!(size.files, ["src/a.py", "logo.png", "name with\ttab"]);
+        assert_eq!(size.without_lines, ["logo.png"]);
+        assert_eq!(parse_numstat("").unwrap(), ChangeSize::default());
+    }
+
+    #[test]
+    fn a_count_that_is_not_what_it_should_be_is_not_read_as_a_small_number() {
+        assert!(parse_numstat("nonsense\0").is_err());
+        assert!(parse_numstat("a\tb\tc\0").is_err());
+    }
 
     /// A run's workspace after a step that had write access to `.git/config`, set up as in a real
     /// install: under the home folder, with a canary a program outside the sandbox could touch.
@@ -609,6 +724,84 @@ mod tests {
             !run_diff.contains("FAKE-DIFF") && run_diff.contains("+two"),
             "{run_diff}"
         );
+        let size = p.git.change_size(&p.workspace, &p.base).unwrap();
+        assert!(!p.canary.exists());
+        assert_eq!(size.files, [".gitattributes", "a.txt"]);
+        assert_eq!(size.lines, 3, "one new line, and one that changed");
+    }
+
+    /// What a step committed, as `change_size` counts it.
+    fn size_after(p: &Poisoned, script: &str) -> ChangeSize {
+        p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        sh(&p.workspace, script);
+        p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        p.git.change_size(&p.workspace, &p.base).unwrap()
+    }
+
+    #[test]
+    fn a_submodule_moving_is_not_counted_as_two_lines() {
+        let p = poisoned("");
+        let head = p.git.head(&p.workspace).unwrap();
+        let size = size_after(
+            &p,
+            &format!(
+                "mkdir -p vendor/lib && git update-index --add --cacheinfo 160000,{head},vendor/lib && git commit -qm sub"
+            ),
+        );
+        assert_eq!(size.without_lines, ["vendor/lib"]);
+        assert_eq!(
+            submodules_in_raw(":100644 100644 aa bb M\0a.txt\0:000000 160000 00 cc A\0x/y\0"),
+            ["x/y"]
+        );
+        assert_eq!(submodules_in_raw(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn moving_a_file_shows_the_folder_it_left_and_not_only_where_it_went() {
+        let p = poisoned("");
+        p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        sh(
+            &p.workspace,
+            "mkdir auth && git mv a.txt auth/secret.txt && git commit -qm in",
+        );
+        let moved_in = p.git.head(&p.workspace).unwrap();
+        sh(
+            &p.workspace,
+            "mkdir other && git mv auth/secret.txt other/plain.txt && git commit -qm out",
+        );
+        let size = p.git.change_size(&p.workspace, &moved_in).unwrap();
+        assert_eq!(size.files, ["auth/secret.txt", "other/plain.txt"]);
+    }
+
+    #[test]
+    fn a_name_with_an_accent_stays_as_it_is_and_is_not_put_in_quotes() {
+        let p = poisoned("");
+        let size = size_after(&p, "mkdir -p sub && echo x > 'sub/ñandú.txt'");
+        assert!(size.files.contains(&"sub/ñandú.txt".to_owned()), "{size:?}");
+    }
+
+    #[test]
+    fn hiding_lines_with_an_attribute_says_so_instead_of_counting_none() {
+        let p = poisoned("");
+        let size = size_after(
+            &p,
+            "printf '* -diff\\n' > .git/info/attributes && seq 1 900 > long.txt",
+        );
+        assert_eq!(size.lines, 0);
+        assert!(
+            size.without_lines.contains(&"long.txt".to_owned()),
+            "{size:?}"
+        );
+    }
+
+    #[test]
+    fn replacing_a_commit_does_not_make_the_change_look_like_nothing() {
+        let p = poisoned("");
+        p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        let head = p.git.head(&p.workspace).unwrap();
+        sh(&p.workspace, &format!("git replace {head} {}", p.base));
+        let size = p.git.change_size(&p.workspace, &p.base).unwrap();
+        assert_eq!(size.files, [".gitattributes", "a.txt"]);
     }
 
     #[test]

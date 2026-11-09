@@ -1,4 +1,5 @@
-import type { AuditEvent } from "./api";
+import type { TFunction } from "i18next";
+import type { AuditEvent, GivenAnswer, SpecOutput, VerificationOutput } from "./api";
 
 export interface CommandRun {
   id: string;
@@ -85,6 +86,61 @@ export function explainingAttempts<T extends { kind: string; tools: string; role
   return agents.slice(-1);
 }
 
+/**
+ * The attempt that says what was asked: the latest that worked of a step with the specifier's role,
+ * or else of a step called `spec`, which is how workflows saved before that role say it.
+ */
+export function specifyingAttempt<T extends { kind: string; role: string; stepId: string; state: string }>(attempts: T[]): T | undefined {
+  const latest = (applies: (attempt: T) => boolean) => [...attempts].reverse().find((a) => a.kind === "agent" && a.state === "succeeded" && applies(a));
+  return latest((a) => a.role === "specifier") ?? latest((a) => a.stepId === "spec");
+}
+
+/** A specifier's structured answer, or null for anything else, including one Keel can't read. */
+export function specOf(attempt: { role?: string; output?: unknown }): SpecOutput | null {
+  const output = attempt.output as Partial<SpecOutput> | null | undefined;
+  if (attempt.role !== "specifier" || typeof output?.summary !== "string") return null;
+  return { criteria: [], changes: [], limits: [], decided: [], questions: [], ...output, summary: output.summary };
+}
+
+/** What that attempt says, in words a person can read: the sentence that sums it up, or else what it wrote. */
+export const askedText = (attempt: { resultText: string | null; role?: string; output?: unknown }): string | null => specOf(attempt)?.summary.trim() || attempt.resultText?.trim() || null;
+
+/** What a person has answered in this run, oldest first. */
+// As in the engine, only one that succeeded: any other holds what the agent wrote, which isn't an answer.
+export const answersIn = (attempts: { role?: string; state?: string; output?: unknown }[]): GivenAnswer[] =>
+  attempts.filter((a) => a.state === undefined || a.state === "succeeded").flatMap((a) => specOf(a)?.answered ?? []);
+
+/** How many rounds of questions a person has already answered at this step, before the one it's on. */
+export const roundsAnswered = (attempts: { stepId: string; round: number; role?: string; output?: unknown }[], attempt: { stepId: string; round: number }) => attempts.filter((a) => a.stepId === attempt.stepId && a.round === attempt.round && (specOf(a)?.answered?.length ?? 0) > 0).length;
+
+/**
+ * A verifier's answer, or null for anything else. Only one that succeeded has been corrected by the
+ * engine: an attempt that was stopped can still hold what the agent first said.
+ */
+export function verificationOf(attempt: { role?: string; state?: string; output?: unknown }): VerificationOutput | null {
+  const output = attempt.output as Partial<VerificationOutput> | null | undefined;
+  if (attempt.role !== "verifier" || attempt.state !== "succeeded" || !Array.isArray(output?.criteria)) return null;
+  return { summary: "", ...output, criteria: output.criteria };
+}
+
+/** What a verifier said in this round. What it said in an earlier one is about code that has changed since. */
+export function verificationInRound(attempts: { round: number; role?: string; state?: string; output?: unknown }[], round: number): VerificationOutput | null {
+  const found = [...attempts].reverse().find((a) => a.round === round && verificationOf(a));
+  return found ? verificationOf(found) : null;
+}
+
+export function verificationCounts(verification: VerificationOutput) {
+  const count = (result: string) => verification.criteria.filter((c) => c.result === result).length;
+  return { met: count("met"), unmet: count("unmet"), unverified: count("unverified"), total: verification.criteria.length };
+}
+
+/** "3 of 4 met, 1 not verified", or that none of them could be, which is a normal thing to find. */
+export function verificationLine(t: TFunction, verification: VerificationOutput): string {
+  const { met, unmet, unverified, total } = verificationCounts(verification);
+  if (met === 0 && unmet === 0) return t("run.verifyNone", { count: total });
+  return [t("run.verifyMet", { count: met, total }), unmet > 0 && t("run.verifyUnmet", { count: unmet }), unverified > 0 && t("run.verifyUnverified", { count: unverified })].filter(Boolean).join(", ");
+}
+
 const flat = (text: string) =>
   text
     .replace(/^\s*(?:[-*•]|\d+\.)\s+/gm, "")
@@ -145,7 +201,7 @@ export function latestOfEachStep<T extends { stepId: string }>(attempts: T[]): T
   return [...latest.values()];
 }
 
-const NEEDS_A_PERSON = ["waitingApproval", "stalled", "blocked", "interrupted", "failed", "stopped", "rejected"];
+const NEEDS_A_PERSON = ["waitingApproval", "waitingAnswers", "stalled", "blocked", "interrupted", "failed", "stopped", "rejected"];
 const WORKING = ["running", "preparing", "queued"];
 
 /**

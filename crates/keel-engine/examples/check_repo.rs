@@ -60,6 +60,7 @@ fn main() {
                 max_turns: Some(15),
                 max_budget_usd: None,
                 paths: vec![],
+                when: None,
                 role: Default::default(),
             }),
         );
@@ -72,6 +73,8 @@ fn main() {
             workflow,
             language: "en".into(),
             source_issue: None,
+            saved_workflow: None,
+            started_by: None,
         })
         .unwrap();
     loop {

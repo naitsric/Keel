@@ -8,11 +8,14 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use keel_core::{AttemptState, BoardColumn, CardLane, MASK, StepSpec, ToolProfile, WorkflowStep};
+use keel_core::{
+    AttemptState, BoardColumn, CardLane, MASK, StepRole, StepSpec, ToolProfile, WorkflowStep,
+};
 use keel_engine::{AddOutcome, Config, Engine, MAX_PROJECT_PROPOSALS, Workflow};
 use keel_harness::Tools;
 use keel_mcp::{MAX_DRAFTS, MAX_OPEN_RUNS, MCP_PATH, McpServer, StartError};
 use keel_store::Store;
+use keel_store::rusqlite_value::Value;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::RunningService;
@@ -72,11 +75,20 @@ case "$1" in
 auth) echo '{"loggedIn":true,"subscriptionType":"max","email":"a@example.com"}'; exit 0;;
 esac
 cat > /dev/null
-tools=""; prev=""
-for a in "$@"; do [ "$prev" = "--tools" ] && tools="$a"; prev="$a"; done
+tools=""; prev=""; schema=""
+for a in "$@"; do
+  [ "$prev" = "--tools" ] && tools="$a"
+  [ "$prev" = "--json-schema" ] && schema="$a"
+  prev="$a"
+done
 list=$(printf '%s' "$tools" | sed 's/,/","/g')
+[ -n "$schema" ] && list="$list\",\"StructuredOutput"
 echo "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake\",\"tools\":[\"$list\"],\"apiKeySource\":\"none\"}"
 while [ -f "$(dirname "$0")/hold" ]; do sleep 0.02; done
+if [ -n "$schema" ]; then
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{"summary":"It gets fixed","criteria":[{"id":"C1","when":"it runs","then":"it works"}],"changes":[],"limits":[],"decided":[],"questions":[{"id":"Q1","text":"What then?","options":[{"label":"Yes","recommended":true},{"label":"No","recommended":false}]}]}}'
+  exit 0
+fi
 echo work >> fixed.txt
 git add -A && git commit -qm "fix"
 echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Fixed it.\",\"num_turns\":1,\"total_cost_usd\":0.01,\"usage\":{\"input_tokens\":10,\"output_tokens\":2},\"modelUsage\":{\"claude-fake\":{}}}"
@@ -125,6 +137,7 @@ async fn world() -> World {
                         max_turns: None,
                         max_budget_usd: None,
                         paths: vec![],
+                        when: None,
                         role: Default::default(),
                     }),
                     WorkflowStep::Approval { id: "human".into() },
@@ -232,6 +245,8 @@ async fn it_offers_these_tools_and_no_way_to_approve_anything() {
 
     for tool in [
         "answer_approval",
+        "answer_questions",
+        "send_back",
         "approve",
         "reject",
         "merge",
@@ -247,6 +262,37 @@ async fn it_offers_these_tools_and_no_way_to_approve_anything() {
 }
 
 /// A workflow any reader would want: a builder, a check, the person, and a pull request.
+#[tokio::test(flavor = "multi_thread")]
+async fn get_run_says_which_workflow_it_used_and_what_became_of_its_pull_request() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let started = ok(&call(&client, "start_run", w.start_args("Fix the bug")).await);
+    let run = started["id"].as_str().unwrap().to_owned();
+    assert_eq!(started["workflowId"], json!(w.workflow_id));
+    assert_eq!(started["workflowName"], "Build and ask");
+    assert_eq!(started["prState"], Json::Null, "no pull request yet");
+
+    w.store
+        .patch_run(
+            &run,
+            &[
+                (
+                    "pr_url",
+                    Value::Text("https://github.com/acme/app/pull/12".into()),
+                ),
+                ("pr_state", Value::Text("merged".into())),
+                ("pr_state_at", Value::Text("2026-11-06T10:00:00Z".into())),
+                ("pr_checked_at", Value::Text("2026-11-06T10:05:00Z".into())),
+            ],
+        )
+        .unwrap();
+    let view = ok(&call(&client, "get_run", json!({ "run": run })).await);
+    assert_eq!(view["prState"], "merged");
+    assert_eq!(view["prStateAt"], "2026-11-06T10:00:00Z");
+    assert_eq!(view["prCheckedAt"], "2026-11-06T10:05:00Z");
+    client.cancel().await.unwrap();
+}
+
 fn draft_args(project: &str) -> Json {
     json!({
         "project": project,
@@ -283,11 +329,66 @@ async fn it_tells_a_model_how_to_write_a_draft() {
         "prompt",
         "reworkTo",
         "maxRounds",
+        "specifier",
+        "verifier",
+        "when",
+        "notSmall",
     ] {
         assert!(schema.contains(word), "{word}: {schema}");
     }
     assert!(!schema.contains("setup"), "{schema}");
     assert!(!schema.contains("mapper"), "{schema}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_draft_can_ask_for_a_step_to_depend_on_the_change_and_it_is_kept_and_shown() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let args = json!({
+        "project": "app",
+        "name": "Fits",
+        "steps": [
+            { "type": "agent", "id": "builder", "model": "sonnet", "tools": "build", "prompt": "{{request}}" },
+            { "type": "parallel", "id": "reviews", "steps": [
+                { "id": "security", "model": "haiku", "prompt": "Review", "role": { "kind": "reviewer" }, "when": "notSmall" },
+            ] },
+            { "type": "agent", "id": "approver", "model": "opus", "prompt": "Decide", "role": { "kind": "approver", "reworkTo": "builder", "maxRounds": 2 }, "when": "notSmall" },
+            { "type": "approval", "id": "human" },
+        ],
+    });
+    let draft = ok(&call(&client, "draft_workflow", args).await);
+    assert_eq!(draft["steps"][1]["steps"][0]["when"], "notSmall");
+    assert_eq!(draft["steps"][2]["when"], "notSmall");
+    assert_eq!(draft["steps"][0]["when"], Json::Null);
+    let kept = w.engine.workflow_drafts().unwrap().remove(0);
+    let WorkflowStep::Agent(approver) = &kept.steps[2] else {
+        panic!()
+    };
+    assert_eq!(approver.when, Some(keel_core::StepCondition::NotSmall));
+
+    let refusal = call(
+        &client,
+        "draft_workflow",
+        json!({ "project": "app", "name": "Bad", "steps": [{ "type": "agent", "id": "a", "model": "opus", "prompt": "p", "when": "whenever" }] }),
+    )
+    .await;
+    assert!(
+        refused(&refusal).contains("whenever"),
+        "{}",
+        refused(&refusal)
+    );
+    // Only an agent can have one. On anything else it's refused, and not left to look like it worked.
+    let refusal = call(
+        &client,
+        "draft_workflow",
+        json!({ "project": "app", "name": "Bad", "steps": [
+            { "type": "agent", "id": "b", "model": "opus", "prompt": "p", "tools": "build" },
+            { "type": "approval", "id": "human", "when": "notSmall" },
+        ] }),
+    )
+    .await;
+    assert!(refused(&refusal).contains("when"), "{}", refused(&refusal));
     client.cancel().await.unwrap();
 }
 
@@ -445,6 +546,19 @@ async fn a_draft_that_breaks_the_rules_is_refused_and_says_where() {
             json!([{ "type": "parallel", "id": "g", "steps": [{ "id": "w", "model": "opus", "prompt": "p", "tools": "build" }] }]),
             "parallelMustReadOnly",
             "w",
+        ),
+        (
+            json!([{ "type": "agent", "id": "v", "model": "opus", "prompt": "p", "role": { "kind": "verifier" } }]),
+            "verifierNeedsSpecifier",
+            "v",
+        ),
+        (
+            json!([
+                { "type": "agent", "id": "r", "model": "opus", "prompt": "p", "role": { "kind": "reviewer" }, "when": "notSmall" },
+                { "type": "agent", "id": "b", "model": "opus", "prompt": "p", "tools": "build" },
+            ]),
+            "whenBeforeBuild",
+            "r",
         ),
     ];
     for (steps, problem, step) in cases {
@@ -815,6 +929,53 @@ async fn a_run_it_starts_shows_who_started_it_and_waits_for_the_person() {
         }
     }
     assert_eq!(finished["state"], "finished", "{finished}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_step_asking_the_person_something_reads_as_waiting_for_them() {
+    let w = world().await;
+    let workflow = w
+        .engine
+        .save_workflow(
+            &w.project_id,
+            &Workflow {
+                id: String::new(),
+                name: "Asks first".into(),
+                builtin: false,
+                steps: vec![WorkflowStep::Agent(StepSpec {
+                    id: "spec".into(),
+                    model: "haiku".into(),
+                    effort: None,
+                    tools: ToolProfile::ReadOnly,
+                    prompt: "{{request}}".into(),
+                    max_turns: None,
+                    max_budget_usd: None,
+                    paths: vec![],
+                    when: None,
+                    role: StepRole::Specifier,
+                })],
+            },
+        )
+        .unwrap();
+    let client = w.client(&w.token(true)).await;
+    let args = json!({ "project": w.project_id, "workflow": workflow.id, "request": "Fix it" });
+    let started = ok(&call(&client, "start_run", args).await);
+    let run = started["id"].as_str().unwrap().to_owned();
+
+    let mut view = json!({});
+    for _ in 0..20 {
+        view = ok(&call(&client, "wait_for_run", json!({ "run": run, "seconds": 5 })).await);
+        if view["state"] != "working" {
+            break;
+        }
+    }
+    assert_eq!(view["state"], "waitingForPerson", "{view}");
+    assert_eq!(view["waitingFor"]["state"], "waitingAnswers");
+    assert_eq!(view["steps"][0]["role"], "specifier");
+    // Stopping isn't a way round it either.
+    let refusal = refused(&call(&client, "stop_run", json!({ "run": run })).await);
+    assert!(refusal.contains("waiting for the person"), "{refusal}");
     client.cancel().await.unwrap();
 }
 

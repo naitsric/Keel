@@ -4,7 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18next from "../i18n";
-import type { Attempt, AttemptState, Run, WorkflowStep } from "../lib/api";
+import type { Attempt, AttemptState, AuditEvent, Run, WorkflowStep } from "../lib/api";
 import { useApp } from "../lib/store";
 import { RunDetail } from "./RunDetail";
 
@@ -28,13 +28,15 @@ const built = () => [attempt("spec", "succeeded"), attempt("builder", "succeeded
 const human = () => attempt("human", "waitingApproval", { kind: "approval", tools: "none", modelRequested: "" });
 
 /** What's allowed to be called by looking around a run. Anything else would be doing something. */
-const READS = ["run_get", "run_attempts", "attempt_events", "attempt_raw_check", "run_adds_secret", "run_proposals", "attempt_diff"];
+const READS = ["run_get", "run_look_at_pr", "run_attempts", "attempt_events", "attempt_raw_check", "run_adds_secret", "run_proposals", "attempt_diff"];
 
 describe("the run page's flow", () => {
   let root: Root;
   let attempts: Attempt[];
+  let events: Record<string, AuditEvent[]>;
   let run: Partial<Run>;
   let calls: string[];
+  let lookFails: boolean;
 
   const settle = (ms = 20) => act(() => vi.advanceTimersByTimeAsync(ms));
   const open = async () => {
@@ -70,13 +72,16 @@ describe("the run page's flow", () => {
     vi.useFakeTimers();
     await i18next.changeLanguage("en");
     attempts = [...built(), human()];
+    events = {};
     run = { id: "r1", projectId: "p1", title: "Fix add", round: 0, workflow: WORKFLOW, branch: "keel/abc", finishedAt: null, prUrl: null };
     calls = [];
-    mockIPC((command) => {
+    lookFails = false;
+    mockIPC((command, args) => {
       calls.push(command);
+      if (command === "run_look_at_pr" && lookFails) throw { code: "internal", reason: null, detail: "no" };
       if (command === "run_get") return run;
       if (command === "run_attempts") return attempts;
-      if (command === "attempt_events") return [];
+      if (command === "attempt_events") return events[(args as { attemptId: string }).attemptId] ?? [];
       if (command === "attempt_raw_check") return "intact";
       if (command === "run_adds_secret") return false;
       if (command === "run_proposals") return [];
@@ -93,6 +98,118 @@ describe("the run page's flow", () => {
     await act(async () => root.unmount());
     document.body.replaceChildren();
     vi.useRealTimers();
+  });
+
+  describe("what became of the pull request", () => {
+    const delivered = (fields: Partial<Run>) => {
+      attempts = [attempt("spec", "succeeded"), attempt("builder", "succeeded"), attempt("human", "succeeded"), attempt("pr", "succeeded")];
+      run = { ...run, prUrl: "https://github.com/acme/app/pull/12", prNumber: 12, finishedAt: "2026-11-06T09:00:00Z", prState: null, prStateAt: null, ...fields } as Run;
+    };
+
+    it("gets asked about when a person opens the run, once, whatever else changes", async () => {
+      await open();
+      expect(calls.filter((c) => c === "run_look_at_pr")).toEqual(["run_look_at_pr"]);
+      await update();
+      expect(calls.filter((c) => c === "run_look_at_pr")).toEqual(["run_look_at_pr"]);
+    });
+
+    it("stays quiet if asking fails", async () => {
+      lookFails = true;
+      await open();
+      expect(calls).toContain("run_look_at_pr");
+      expect(document.querySelector('[role="alert"][class*="text-danger"]')).toBeNull();
+      expect(page()).toContain("Fix add");
+    });
+
+    it("says nothing until Keel knows, and goes on saying what it did before", async () => {
+      delivered({});
+      await open();
+      expect(page()).not.toContain("merged");
+      expect(page()).toContain("Review and merge the draft on GitHub");
+    });
+
+    it("says when it was merged, and that nothing's left to decide", async () => {
+      delivered({ prState: "merged", prStateAt: "2026-11-06T10:00:00Z" });
+      await open();
+      expect(page()).toMatch(/Pull request merged on .*2026/);
+      expect(page()).toContain("Nothing. The pull request was merged.");
+      expect(page()).not.toContain("Review and merge");
+    });
+
+    it("says when it was closed without merging", async () => {
+      delivered({ prState: "closed", prStateAt: "2026-11-06T10:00:00Z" });
+      await open();
+      expect(page()).toMatch(/Pull request closed without merging on .*2026/);
+      expect(page()).toContain("Nothing. The pull request was closed without merging.");
+    });
+
+    it("doesn't call one that's ready for review a draft", async () => {
+      delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z" });
+      await open();
+      expect(page()).toContain("Pull request open");
+      expect(page()).toContain("Review and merge it on GitHub");
+      expect(page()).not.toContain("the draft");
+    });
+
+    it("says so while it's still a draft", async () => {
+      delivered({ prState: "draft", prStateAt: "2026-11-06T10:00:00Z" });
+      await open();
+      expect(page()).toContain("Pull request still a draft");
+      expect(page()).toContain("Review and merge the draft on GitHub");
+    });
+  });
+
+  describe("a workflow that fits the change", () => {
+    const decided = (attemptId: string, data: Record<string, unknown>): AuditEvent => ({ seq: 50, attemptId, at: "", kind: "sizeDecided", data });
+    const fitting = () => {
+      run = { ...run, workflow: WORKFLOW };
+      const asSmall = { reason: { code: "treatedAsSmall", lines: 3, files: 1 } };
+      return [...built(), attempt("check", "succeeded", { kind: "check", tools: "check", prompt: "make test" }), attempt("security", "skipped", { role: "reviewer", ...asSmall }), attempt("ux", "skipped", { role: "reviewer", ...asSmall }), attempt("approver", "skipped", { role: "approver", ...asSmall }), human()];
+    };
+
+    it("offers what was skipped, and asking for it is the one thing that changes anything", async () => {
+      attempts = fitting();
+      await open();
+      expect(page()).toContain("Keel treated this as a small change: 3 changed lines in 1 file.");
+      expect(node("security").textContent).toContain("Small change");
+      await settle(900);
+      calls = [];
+      const runNow = [...document.querySelectorAll("button")].find((b) => b.textContent === "Run them now");
+      await act(async () => runNow?.click());
+      await settle();
+      expect(calls).toContain("approval_run_skipped");
+      expect(calls).not.toContain("approval_answer");
+    });
+
+    it("finds why it went to full review on whichever step it was recorded", async () => {
+      attempts = [...built(), attempt("check", "succeeded", { kind: "check", tools: "check", prompt: "make test" }), attempt("security", "succeeded", { id: "security-a", role: "reviewer" }), attempt("ux", "succeeded", { role: "reviewer" }), attempt("approver", "succeeded", { role: "approver" }), human()];
+      events = { "security-a": [decided("security-a", { small: false, because: [{ code: "sensitiveFiles", files: [".github/workflows/ci.yml"], total: 1 }], round: 0 })] };
+      await open();
+      await settle();
+      expect(page()).toContain("It went to full review because:");
+      expect(page()).toContain("it touches .github/workflows/ci.yml");
+    });
+
+    it("says what it found in the step's own activity too", async () => {
+      attempts = fitting();
+      const reviewer = attempts.find((a) => a.stepId === "security") as Attempt;
+      events = { [reviewer.id]: [{ seq: 49, attemptId: reviewer.id, at: "", kind: "skipped", data: { reason: { code: "treatedAsSmall" } } }, decided(reviewer.id, { small: true, lines: 3, files: 1, round: 0 })] };
+      await open();
+      await act(async () => node("security").click());
+      await settle();
+      expect(page()).toContain("Skipped: Keel treated this as a small change");
+      expect(page()).toContain("Keel treated this as a small change: 3 changed lines in 1 file");
+    });
+
+    it("once a person has asked, says what's going on and offers nothing", async () => {
+      attempts = [...built(), attempt("security", "skipped", { role: "reviewer", reason: { code: "treatedAsSmall", lines: 3, files: 1 } }), attempt("human", "postponed", { kind: "approval", tools: "none", modelRequested: "" }), attempt("security", "running", { role: "reviewer", number: 2 })];
+      await open();
+      expect(document.querySelector('[role="alert"]')).toBeNull();
+      expect(node("human").textContent).toContain("Asked for more");
+      expect(page()).not.toContain("Run them now");
+      expect(page()).not.toContain("so these didn't run");
+      expect([...document.querySelectorAll("button")].some((b) => b.textContent === "Retry")).toBe(false);
+    });
   });
 
   describe("what opens", () => {
@@ -510,5 +627,124 @@ describe("the run page's flow", () => {
     expect(page()).toContain("Devuelto una vez");
     await choose(node("pr"));
     expect(page()).toContain("Este paso aún no empieza.");
+  });
+  describe("a step that checks what was asked", () => {
+    const output = {
+      summary: "A test proves the sum, and nothing covers the rest.",
+      criteria: [
+        { id: "C1", when: "add(1, 2)", then: "it returns 3", result: "met", evidence: "test_calc.py:1" },
+        { id: "C2", when: "one is negative", then: "it still adds", result: "unverified", evidence: "" },
+        { id: "C3", when: "it is a decimal", then: "it rounds as today", result: "unverified", evidence: "test_calc.py:9", corrected: "noCheckPassed" },
+      ],
+    };
+    const verifier = (state: AttemptState, fields: Partial<Attempt> = {}) => attempt("verify", state, { role: "verifier", output: output as unknown as Attempt["output"], ...fields });
+
+    it("reads as text in its details, and not as raw JSON", async () => {
+      attempts = [verifier("succeeded"), attempt("builder", "running")];
+      await open();
+      await choose(node("verify"));
+      await choose(radio("What it found"));
+      expect(page()).toContain("1 of 3 met, 2 not verified");
+      expect(page()).toContain("A test proves the sum, and nothing covers the rest.");
+      expect(page()).toContain("add(1, 2) → it returns 3");
+      expect(page()).toContain("test_calc.py:1");
+      expect(page()).toContain("It found nothing that proves this.");
+      expect(page()).toContain("It said this was met, but no check passed in this round.");
+      expect(page()).not.toContain('"criteria"');
+      expect(page()).not.toContain("C1");
+    });
+
+    it("says it gave its answer in the activity, and what Keel changed in words", async () => {
+      const verify = verifier("succeeded");
+      attempts = [verify, attempt("builder", "running")];
+      events = {
+        [verify.id]: [
+          { seq: 1, attemptId: verify.id, at: "2026-11-06T10:00:00Z", kind: "toolCall", data: { id: "t1", name: "StructuredOutput", input: output } },
+          { seq: 2, attemptId: verify.id, at: "2026-11-06T10:00:00Z", kind: "verificationCorrected", data: { corrected: [output.criteria[2]], dropped: ["C9"], check: { state: "notRun" } } },
+        ],
+      };
+      await open();
+      await choose(node("verify"));
+      await choose(radio("Activity"));
+      expect(page()).toContain("It wrote down what it found");
+      expect(page()).toContain("Keel didn't take its word for one thing");
+      expect(page()).toContain("it is a decimal → it rounds as today: It said this was met, but no check passed in this round.");
+      expect(page()).toContain("It also answered about something that wasn't asked");
+      expect(page()).not.toContain('"summary"');
+      expect(page()).not.toContain("C9");
+    });
+
+    it("one that couldn't be read says so and offers to try again, with nothing passed off as found", async () => {
+      attempts = [verifier("failed", { reason: { code: "noStructuredOutput" }, output: { verdict: "approved" } as unknown as Attempt["output"] })];
+      await open();
+      expect(page()).toContain("It finished without the answer it was asked for.");
+      expect(page()).toContain("Try again");
+      expect(page()).not.toContain("What it found");
+    });
+
+    it("an attempt stopped with an answer in hand shows nothing it said, since nobody corrected it", async () => {
+      attempts = [verifier("stopped")];
+      await open();
+      expect(page()).not.toContain("What it found");
+      expect(page()).not.toContain("1 of 3 met");
+    });
+
+    it("the summary of a finished run says how it went", async () => {
+      attempts = [verifier("succeeded")];
+      run = { ...run, finishedAt: "2026-11-06T10:00:00Z" };
+      await open();
+      expect(page()).toContain("What proves it");
+      expect(page()).toContain("1 of 3 met, 2 not verified");
+    });
+  });
+  describe("a step that works out what's asked", () => {
+    const output = { summary: "add returns the sum", criteria: [{ id: "C1", when: "add(1, 2)", then: "it returns 3" }], changes: [], limits: ["Its signature stays"], decided: [{ text: "Keeps the rounding" }], questions: [] };
+    const specifier = (state: AttemptState, fields: Partial<Attempt> = {}) => attempt("spec", state, { role: "specifier", output: output as unknown as Attempt["output"], ...fields });
+
+    it("reads as text in its details, and not as raw JSON", async () => {
+      attempts = [specifier("succeeded"), attempt("builder", "running")];
+      await open();
+      await choose(node("spec"));
+      await choose(radio("What it understood"));
+      expect(page()).toContain("add(1, 2) → it returns 3");
+      expect(page()).toContain("Its signature stays");
+      expect(page()).not.toContain('"criteria"');
+    });
+
+    it("says it gave its answer in the activity, instead of printing it", async () => {
+      const spec = specifier("succeeded");
+      attempts = [spec, attempt("builder", "running")];
+      events = { [spec.id]: [{ seq: 1, attemptId: spec.id, at: "2026-11-06T10:00:00Z", kind: "toolCall", data: { id: "t1", name: "StructuredOutput", input: output } }] };
+      await open();
+      await choose(node("spec"));
+      expect(page()).toContain("It wrote down what it understood");
+      expect(page()).not.toContain('"summary"');
+    });
+
+    it("asks with its card in place of what a finished step would show", async () => {
+      attempts = [specifier("waitingAnswers", { output: { ...output, questions: [{ id: "Q1", text: "What then?", options: [{ label: "Yes", recommended: true }, { label: "No", recommended: false }] }] } as unknown as Attempt["output"] })];
+      await open();
+      expect(page()).toContain("Keel needs a decision to continue");
+      expect(page()).toContain("What then?");
+      expect(page()).not.toContain("What you need to decide");
+    });
+
+    it("finishing with nothing built says what it understood, not that it explained nothing", async () => {
+      attempts = [specifier("succeeded")];
+      run = { ...run, finishedAt: "2026-11-06T10:00:00Z" };
+      await open();
+      expect(page()).toContain("add returns the sum");
+      expect(page()).not.toContain("It finished without an explanation.");
+    });
+
+    it("a person's return reads as that in the activity", async () => {
+      const returned = attempt("human", "returned", { kind: "approval", tools: "none", output: { instructions: "Return 0" } as unknown as Attempt["output"] });
+      attempts = [...built(), returned];
+      events = { [returned.id]: [{ seq: 1, attemptId: returned.id, at: "2026-11-06T10:00:00Z", kind: "returned", data: { instructions: "Return 0", round: 1 } }] };
+      await open();
+      await choose(node("human"));
+      expect(page()).toContain("You sent it back for round 2");
+      expect(page()).toContain("Return 0");
+    });
   });
 });

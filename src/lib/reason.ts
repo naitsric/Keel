@@ -24,6 +24,10 @@ export function reasonText(t: TFunction, reason: Reason): string {
       return t(`invalidSettings.${data.field}`, { value: data.value, defaultValue: t("reasons.invalidSetting", { value: data.value }) });
     case "invalidWorkflow":
       return t(`invalidWorkflow.${data.problem}`, { step: data.step, defaultValue: data.problem });
+    case "specNotUsable":
+      return t("reasons.specNotUsable", { problems: (data.problems ?? []).map((problem: Reason) => t(`specProblems.${problem.code}`, { ...problem, defaultValue: problem.code })).join("; ") });
+    case "invalidAnswer":
+      return t(`invalidAnswers.${data.problem}`, { question: data.question, defaultValue: t("reasons.invalidAnswer") });
     case "noMatchingPaths":
       return t("reasons.noMatchingPaths", { paths: (data.paths ?? []).join(", ") });
     case "setupFailed":

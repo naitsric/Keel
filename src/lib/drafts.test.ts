@@ -17,7 +17,7 @@ describe("what a proposed workflow would do", () => {
   });
 
   it("says when there's nothing to worry about", () => {
-    expect(draftFacts([agent("reader", "readOnly")])).toEqual({ commands: [], builders: [], delivers: false, afterApproval: [] });
+    expect(draftFacts([agent("reader", "readOnly")])).toEqual({ commands: [], builders: [], delivers: false, afterApproval: [], conditional: [] });
   });
 
   it("catches what would change the work once the person has approved it", () => {
@@ -32,6 +32,12 @@ describe("what a proposed workflow would do", () => {
 
   it("counts from the last approval before the pull request", () => {
     expect(draftFacts([human, agent("builder", "build"), { type: "approval", id: "again" }, pr]).afterApproval).toEqual([]);
+  });
+
+  it("says which agents a small change would skip, in a group or not", () => {
+    const skippable = (id: string): StepSpec => ({ id, model: "opus", effort: null, tools: "readOnly", prompt: "p", maxTurns: null, maxBudgetUsd: null, when: "notSmall" });
+    const facts = draftFacts([agent("builder", "build"), { type: "parallel", id: "reviews", steps: [skippable("security"), { ...skippable("always"), when: undefined }] }, { type: "agent", ...skippable("approver") }, human, pr]);
+    expect(facts.conditional).toEqual(["security", "approver"]);
   });
 
   it("doesn't call it after an approval when nothing delivers", () => {

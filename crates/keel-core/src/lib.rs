@@ -62,6 +62,12 @@ pub enum StepRole {
     Mapper,
     /// Says what this run taught. Nothing it proposes reaches an agent until a person accepts it.
     Learner,
+    /// Works out what a request will change, and may ask a person what only they can decide. It
+    /// can't edit anything.
+    Specifier,
+    /// Says, for each thing the specifier said has to be true, whether a test really proves it. The
+    /// engine corrects what it answers, and it can't edit anything or run anything.
+    Verifier,
 }
 
 impl StepRole {
@@ -72,12 +78,23 @@ impl StepRole {
             Self::Approver { .. } => "approver",
             Self::Mapper => "mapper",
             Self::Learner => "learner",
+            Self::Specifier => "specifier",
+            Self::Verifier => "verifier",
         }
     }
 
     fn is_worker(&self) -> bool {
         matches!(self, Self::Worker)
     }
+}
+
+/// Something that has to hold for a step to run. A closed list, since the engine has to be able to
+/// work out each one from facts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum StepCondition {
+    /// Only if the change isn't small. See `WhyNotSmall` for what small takes.
+    NotSmall,
 }
 
 /// One agent step as the user defined it, including its own model.
@@ -96,6 +113,10 @@ pub struct StepSpec {
     pub paths: Vec<String>,
     #[serde(default, skip_serializing_if = "StepRole::is_worker")]
     pub role: StepRole,
+    /// Runs only if this holds. Only agents can have one, so a person's approval and a check are
+    /// never skipped this way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<StepCondition>,
 }
 
 /// Something a project's commands need, such as a test database. Keel runs these outside the
@@ -211,9 +232,16 @@ pub enum AttemptState {
     Blocked,
     /// An approval step waiting for an answer. Nothing is running.
     WaitingApproval,
+    /// A step that asked a person something and waits for what they say. Nothing is running.
+    WaitingAnswers,
     /// A person rejected it at an approval step. The run ends here.
     Rejected,
-    /// Not needed for this change: nothing it covers was touched.
+    /// A person sent the work back at an approval step, with what to change. The run goes on.
+    Returned,
+    /// A person asked for what was skipped to run first. They didn't answer: the run goes on, and
+    /// the approval comes round again.
+    Postponed,
+    /// Not needed for this change. Its reason says why.
     Skipped,
     Abandoned,
 }
@@ -233,7 +261,10 @@ impl AttemptState {
             Self::Interrupted => "interrupted",
             Self::Blocked => "blocked",
             Self::WaitingApproval => "waitingApproval",
+            Self::WaitingAnswers => "waitingAnswers",
             Self::Rejected => "rejected",
+            Self::Returned => "returned",
+            Self::Postponed => "postponed",
             Self::Skipped => "skipped",
             Self::Abandoned => "abandoned",
         }
@@ -251,7 +282,10 @@ impl AttemptState {
             "interrupted" => Self::Interrupted,
             "blocked" => Self::Blocked,
             "waitingApproval" => Self::WaitingApproval,
+            "waitingAnswers" => Self::WaitingAnswers,
             "rejected" => Self::Rejected,
+            "returned" => Self::Returned,
+            "postponed" => Self::Postponed,
             "skipped" => Self::Skipped,
             "abandoned" => Self::Abandoned,
             _ => return None,
@@ -330,7 +364,8 @@ pub enum Reason {
     },
     /// The step ended, but Keel couldn't read what it changed.
     SnapshotFailed,
-    /// A reviewer or approver finished without the answer it was asked for.
+    /// A reviewer, approver or verifier finished without the answer it was asked for, or with one
+    /// Keel can't use.
     NoStructuredOutput,
     /// The approver kept sending work back, up to the limit. A person decides now.
     ReworkLimit {
@@ -338,6 +373,12 @@ pub enum Reason {
     },
     NoMatchingPaths {
         paths: Vec<String>,
+    },
+    /// The engine found the change small, going by what it could see for itself, and the step only
+    /// runs for one that isn't. `lines` and `files` are the size of the change at that moment.
+    TreatedAsSmall {
+        lines: usize,
+        files: usize,
     },
     /// `problem` is a code the UI translates, and `step` is the step it's about.
     InvalidWorkflow {
@@ -380,6 +421,167 @@ pub enum Reason {
     },
     /// The project was removed from Keel, so nothing new can start on it until it's added again.
     ProjectRemoved,
+    /// A specifier's answer broke its limits, and so did the answer it was given a chance to fix.
+    SpecNotUsable {
+        problems: Vec<SpecProblem>,
+    },
+    /// An answer to a step's questions doesn't belong to them. `problem` is a code the UI
+    /// translates: `unknownQuestion`, `repeatedQuestion`, `unanswered`, `optionNotOffered` or
+    /// `emptyText`. `question` is the one it's about.
+    InvalidAnswer {
+        problem: String,
+        question: String,
+    },
+    /// Work can't be sent back without saying what to change.
+    SendBackNeedsInstructions,
+    /// This approval has nothing before it that could do the work again.
+    NothingToSendBackTo,
+    /// Nothing was skipped for being a small change, so there's nothing to run now.
+    NothingSkippedToRun,
+    /// A specifier went on asking something with no recommended option after this many rounds of
+    /// questions, the extra one included. Keel doesn't answer that for a person, so it stops.
+    KeptAsking {
+        rounds: usize,
+    },
+}
+
+/// Why a run doesn't count as small. Each is a fact the engine checked for itself, and any one is
+/// enough. The UI puts them in words, and the results count them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "code",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum WhyNotSmall {
+    /// What was asked was worked out as not small, or didn't say, or there's nothing structured
+    /// that could say.
+    SpecNotSmall,
+    /// Keel stopped asking and took a recommended option itself, so nobody really decided it.
+    KeelChoseAnAnswer,
+    /// What was asked names these risks. Whatever they say counts, known or not.
+    SpecNamesRisks { risks: Vec<String> },
+    /// The workflow has no check, so nothing proves the change works.
+    NoCheck,
+    /// It has one, and it hasn't passed on the code as it is in this round.
+    CheckNotPassed,
+    /// The run came from an issue this person wrote, who isn't the project's GitHub account.
+    IssueFromSomeoneElse { author: String },
+    /// The run came from an issue, and it doesn't say who wrote it.
+    IssueFromUnknownAuthor,
+    /// The run came from an issue, and the project has no GitHub account to compare its author with.
+    IssueWithNoAccount,
+    /// An assistant started the run over MCP, so no person wrote or vouched for what it asks.
+    StartedByAssistant { client: String },
+    /// The change touches these files, out of `total`, which are too sensitive to count as small.
+    SensitiveFiles { files: Vec<String>, total: usize },
+    /// A pattern in the project's list can't be read, so it can't be said that nothing matched it.
+    BadSensitivePattern { pattern: String },
+    /// The change has this many changed lines, and small has to be under `limit`.
+    TooManyLines { lines: usize, limit: usize },
+    /// These files, out of `total`, have changes git won't count in lines, so the size isn't known.
+    FilesWithoutLines { files: Vec<String>, total: usize },
+    /// The change couldn't be read.
+    DiffUnreadable,
+    /// A verifier said this many things aren't so, in this round.
+    VerifierFoundUnmet { count: usize },
+    /// The workflow has a verifier that hasn't looked at the code as it is in this round.
+    VerifierHasNotRun,
+    /// A person asked for what was skipped to run.
+    PersonAsked,
+}
+
+/// What's wrong with a specifier's answer. The UI and the prompt asking for a fix each put it in
+/// their own words, so these only hold the facts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(
+    tag = "code",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum SpecProblem {
+    /// It isn't in the structure it was asked for.
+    Unreadable,
+    NoSummary,
+    SummaryTooLong {
+        chars: usize,
+        limit: usize,
+    },
+    NoCriteria,
+    CriterionNeedsText {
+        id: String,
+    },
+    QuestionNeedsText {
+        id: String,
+    },
+    TooManyChanges {
+        count: usize,
+        limit: usize,
+    },
+    TooManyLimits {
+        count: usize,
+        limit: usize,
+    },
+    TooManyCriteria {
+        count: usize,
+        limit: usize,
+    },
+    CriterionTooLong {
+        id: String,
+        chars: usize,
+        limit: usize,
+    },
+    CriterionNeedsId {
+        position: usize,
+    },
+    RepeatedCriterion {
+        id: String,
+    },
+    TooManyDecided {
+        count: usize,
+        limit: usize,
+    },
+    DecidedTooLong {
+        position: usize,
+        chars: usize,
+        limit: usize,
+    },
+    TooManyQuestions {
+        count: usize,
+        limit: usize,
+    },
+    QuestionTooLong {
+        id: String,
+        chars: usize,
+        limit: usize,
+    },
+    QuestionNeedsId {
+        position: usize,
+    },
+    RepeatedQuestion {
+        id: String,
+    },
+    WrongNumberOfOptions {
+        id: String,
+        count: usize,
+        min: usize,
+        max: usize,
+    },
+    OptionTooLong {
+        id: String,
+        chars: usize,
+        limit: usize,
+    },
+    RepeatedOption {
+        id: String,
+    },
+    /// A question can recommend one option, or none when nothing backs one up.
+    TooManyRecommended {
+        id: String,
+        count: usize,
+    },
+    /// Something was left marked as still to be decided.
+    LeftUnresolved,
 }
 
 impl Reason {
@@ -438,7 +640,46 @@ impl Reason {
             | Self::NoMatchingPaths { .. }
             | Self::NothingToDeliver
             | Self::RejectionNeedsReason
-            | Self::UnsafeBranch { .. } => false,
+            | Self::UnsafeBranch { .. }
+            | Self::SpecNotUsable { .. }
+            | Self::InvalidAnswer { .. }
+            | Self::SendBackNeedsInstructions
+            | Self::NothingToSendBackTo
+            | Self::TreatedAsSmall { .. }
+            | Self::NothingSkippedToRun
+            | Self::KeptAsking { .. } => false,
+        }
+    }
+}
+
+/// What became of a pull request after Keel opened it, as GitHub tells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PrState {
+    Open,
+    Draft,
+    Merged,
+    /// Closed without merging. It can still be reopened.
+    Closed,
+}
+
+impl PrState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Draft => "draft",
+            Self::Merged => "merged",
+            Self::Closed => "closed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "open" => Some(Self::Open),
+            "draft" => Some(Self::Draft),
+            "merged" => Some(Self::Merged),
+            "closed" => Some(Self::Closed),
+            _ => None,
         }
     }
 }
@@ -489,7 +730,8 @@ pub enum BoardColumn {
 /// run. A person has to look at it, and it mustn't hold a place in the queue forever.
 pub fn card_column(lane: CardLane, run_finished: bool, state: Option<AttemptState>) -> BoardColumn {
     use AttemptState::{
-        Abandoned, Blocked, Failed, Interrupted, Rejected, Stalled, Stopped, WaitingApproval,
+        Abandoned, Blocked, Failed, Interrupted, Rejected, Stalled, Stopped, WaitingAnswers,
+        WaitingApproval,
     };
     match lane {
         CardLane::Backlog => BoardColumn::Backlog,
@@ -500,8 +742,8 @@ pub fn card_column(lane: CardLane, run_finished: bool, state: Option<AttemptStat
             (
                 false,
                 Some(
-                    WaitingApproval | Blocked | Stalled | Failed | Stopped | Interrupted | Rejected
-                    | Abandoned,
+                    WaitingApproval | WaitingAnswers | Blocked | Stalled | Failed | Stopped
+                    | Interrupted | Rejected | Abandoned,
                 ),
             ) => BoardColumn::HumanReview,
             (false, _) => BoardColumn::InProgress,
@@ -516,7 +758,7 @@ mod tests {
     use BoardColumn::{Backlog as InBacklog, Done, HumanReview, InProgress, Todo as InTodo};
 
     /// Every state, with the run open and then finished.
-    const STARTED: [(AttemptState, BoardColumn, BoardColumn); 13] = [
+    const STARTED: [(AttemptState, BoardColumn, BoardColumn); 16] = [
         (Queued, InProgress, Done),
         (Preparing, InProgress, Done),
         (Running, InProgress, Done),
@@ -527,7 +769,12 @@ mod tests {
         (Interrupted, HumanReview, Done),
         (Blocked, HumanReview, Done),
         (WaitingApproval, HumanReview, Done),
+        (WaitingAnswers, HumanReview, Done),
         (Rejected, HumanReview, InBacklog),
+        // The work went back, and the next step is on its way.
+        (Returned, InProgress, Done),
+        // What was skipped is on its way, and the approval comes round again after it.
+        (Postponed, InProgress, Done),
         (Skipped, InProgress, Done),
         (Abandoned, HumanReview, InBacklog),
     ];
@@ -556,7 +803,8 @@ mod tests {
             // Adding a state stops this compiling until it's in the table.
             match parsed {
                 Queued | Preparing | Running | Stalled | Succeeded | Failed | Stopped
-                | Interrupted | Blocked | WaitingApproval | Rejected | Skipped | Abandoned => {}
+                | Interrupted | Blocked | WaitingApproval | WaitingAnswers | Rejected
+                | Returned | Postponed | Skipped | Abandoned => {}
             }
         }
         let mut unique = states.clone();
@@ -692,6 +940,19 @@ mod tests {
                 false,
             ),
             (Reason::ProjectRemoved, false),
+            (Reason::SpecNotUsable { problems: vec![] }, false),
+            (
+                Reason::InvalidAnswer {
+                    problem: text(),
+                    question: text(),
+                },
+                false,
+            ),
+            (Reason::SendBackNeedsInstructions, false),
+            (Reason::NothingToSendBackTo, false),
+            (Reason::TreatedAsSmall { lines: 1, files: 1 }, false),
+            (Reason::NothingSkippedToRun, false),
+            (Reason::KeptAsking { rounds: 3 }, false),
         ]
     }
 
@@ -735,6 +996,13 @@ mod tests {
             Reason::ClaudeNotResponding => 34,
             Reason::ProjectHasOpenRuns { .. } => 35,
             Reason::ProjectRemoved => 36,
+            Reason::SpecNotUsable { .. } => 37,
+            Reason::InvalidAnswer { .. } => 38,
+            Reason::SendBackNeedsInstructions => 39,
+            Reason::NothingToSendBackTo => 40,
+            Reason::TreatedAsSmall { .. } => 41,
+            Reason::NothingSkippedToRun => 42,
+            Reason::KeptAsking { .. } => 43,
         }
     }
 
@@ -748,7 +1016,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=36).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=43).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]
@@ -758,6 +1026,91 @@ mod tests {
         assert!(limit(Some(1_001)).stops_every_card(1_000));
         assert!(!limit(Some(1_000)).stops_every_card(1_000));
         assert!(!limit(Some(999)).stops_every_card(1_000));
+    }
+
+    #[test]
+    fn a_pull_request_state_reads_back_as_itself() {
+        for state in [
+            PrState::Open,
+            PrState::Draft,
+            PrState::Merged,
+            PrState::Closed,
+        ] {
+            assert_eq!(PrState::parse(state.as_str()), Some(state));
+            assert_eq!(serde_json::to_value(state).unwrap(), state.as_str());
+        }
+        assert_eq!(PrState::parse("MERGED"), None);
+    }
+
+    #[test]
+    fn a_specifier_is_a_role_of_its_own_and_states_read_back_as_themselves() {
+        assert_eq!(StepRole::Specifier.as_str(), "specifier");
+        assert_eq!(StepRole::Verifier.as_str(), "verifier");
+        for state in [
+            AttemptState::WaitingAnswers,
+            AttemptState::Returned,
+            AttemptState::Postponed,
+        ] {
+            assert_eq!(AttemptState::parse(state.as_str()), Some(state));
+            assert!(!state.is_active(), "nothing is running");
+        }
+    }
+
+    fn a_step() -> StepSpec {
+        StepSpec {
+            id: "a".into(),
+            model: "opus".into(),
+            effort: None,
+            tools: ToolProfile::ReadOnly,
+            prompt: "p".into(),
+            max_turns: None,
+            max_budget_usd: None,
+            paths: vec![],
+            role: StepRole::Reviewer,
+            when: None,
+        }
+    }
+
+    #[test]
+    fn a_condition_only_shows_up_on_a_step_that_has_one() {
+        let without = serde_json::to_value(a_step()).unwrap();
+        assert_eq!(
+            without.get("when"),
+            None,
+            "what was saved before stays as it was"
+        );
+        let with = StepSpec {
+            when: Some(StepCondition::NotSmall),
+            ..a_step()
+        };
+        let value = serde_json::to_value(&with).unwrap();
+        assert_eq!(value["when"], "notSmall");
+        assert_eq!(serde_json::from_value::<StepSpec>(value).unwrap(), with);
+        assert_eq!(
+            serde_json::from_value::<StepSpec>(without).unwrap(),
+            a_step()
+        );
+    }
+
+    #[test]
+    fn a_condition_nobody_knows_is_refused_rather_than_taken_as_no_condition() {
+        let mut value = serde_json::to_value(a_step()).unwrap();
+        value["when"] = serde_json::json!("whenever");
+        assert!(serde_json::from_value::<StepSpec>(value).is_err());
+    }
+
+    #[test]
+    fn why_a_run_is_not_small_reads_as_a_code_with_its_data() {
+        let why = WhyNotSmall::TooManyLines {
+            lines: 512,
+            limit: 400,
+        };
+        let value = serde_json::to_value(&why).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "code": "tooManyLines", "lines": 512, "limit": 400 })
+        );
+        assert_eq!(serde_json::from_value::<WhyNotSmall>(value).unwrap(), why);
     }
 
     #[test]

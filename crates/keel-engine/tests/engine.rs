@@ -101,6 +101,7 @@ fn step(tools: ToolProfile) -> StepSpec {
         max_turns: None,
         max_budget_usd: None,
         paths: vec![],
+        when: None,
         role: Default::default(),
     }
 }

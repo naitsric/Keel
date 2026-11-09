@@ -38,6 +38,7 @@ fn main() {
                 services: vec![],
                 env: vec![],
                 default_workflow: None,
+                sensitive_paths: vec![],
             },
         )
         .unwrap();
@@ -63,7 +64,8 @@ fn main() {
             workflow: full_workflow("es", &model, &model, Some("python3 test_calc.py")),
             language: "es".into(),
             source_issue: None,
-        })
+            saved_workflow: None,
+        started_by: None, })
         .unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(400);

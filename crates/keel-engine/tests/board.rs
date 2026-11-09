@@ -97,6 +97,7 @@ failure() {
 [ -n "$card" ] && [ -f "@FLAGS@/limit-$card" ] && failure "You have reached your usage limit"
 [ -n "$card" ] && [ -f "@FLAGS@/session-$card" ] && failure "Invalid API key"
 case "$schema" in
+*unverified*) output='{"criteria":[{"id":"C1","result":"met","evidence":"tests/fixed.rs:1"}],"summary":"A test proves it"}';;
 *verdict*)
   case "$prompt" in *SECURITY*) [ -f "@FLAGS@/fail-security" ] && failure "the review broke";; esac
   case "$prompt" in *"the CODE"*)
@@ -105,6 +106,7 @@ case "$schema" in
     fi;;
   esac
   output='{"verdict":"approved","findings":[],"summary":"fine"}';;
+*criteria*) output='{"summary":"It gets fixed","criteria":[{"id":"C1","when":"it runs","then":"it works"}],"changes":[],"limits":[],"decided":[],"questions":[]}';;
 *decision*) output='{"decision":"approve","risk":"low","reasons":"fine","instructions":""}';;
 *learnings*)
   [ -f "@FLAGS@/fail-learner" ] && failure "no proposals today"
@@ -250,6 +252,7 @@ fn agent(id: &str, tools: ToolProfile) -> WorkflowStep {
         max_turns: None,
         max_budget_usd: None,
         paths: vec![],
+        when: None,
         role: Default::default(),
     })
 }
@@ -475,6 +478,9 @@ impl World {
                     workflow: serde_json::to_string(&[&step]).unwrap(),
                     language: "en".into(),
                     source_issue: None,
+                    workflow_id: None,
+                    workflow_name: None,
+                    started_by: None,
                 },
                 &id,
             )
@@ -519,6 +525,8 @@ impl World {
                 workflow: vec![agent("work", ToolProfile::ReadOnly)],
                 language: "en".into(),
                 source_issue: None,
+                saved_workflow: None,
+                started_by: None,
             })
             .unwrap()
     }
@@ -698,6 +706,8 @@ fn outside_run(w: &World, workflow: Vec<WorkflowStep>, request: &str) -> StartRu
         workflow,
         language: "en".into(),
         source_issue: None,
+        saved_workflow: None,
+        started_by: None,
     }
 }
 
@@ -781,6 +791,7 @@ fn an_issue_keeps_its_one_card_when_a_run_starts_from_outside() {
     let request = StartRun {
         title: Some(format!("#{} {}", issue.number, issue.title)),
         source_issue: Some(issue.clone()),
+        saved_workflow: None,
         ..outside_run(&w, steps_of(&w, &workflow), &request_from_issue(&issue, ""))
     };
 
@@ -1684,6 +1695,8 @@ fn a_full_board_flow_asks_github_for_nothing_delivery_does_not_already_do() {
             workflow,
             language: "en".into(),
             source_issue: None,
+            saved_workflow: None,
+            started_by: None,
         })
         .unwrap();
     let deadline = Instant::now() + PATIENCE;
@@ -1949,6 +1962,8 @@ fn starting_a_run_by_hand_does_not_lock_up_with_the_scheduler() {
                     workflow: vec![agent("work", ToolProfile::ReadOnly)],
                     language: "en".into(),
                     source_issue: None,
+                    saved_workflow: None,
+                    started_by: None,
                 })
                 .unwrap();
         }
@@ -2133,6 +2148,8 @@ fn the_board_has_the_shape_the_contract_says() {
             "id",
             "issue",
             "position",
+            "prState",
+            "prStateAt",
             "prUrl",
             "projectId",
             "reason",
@@ -2788,6 +2805,9 @@ fn dying_with_the_run_linked_and_not_yet_begun_runs_the_card_once() {
                 workflow: serde_json::to_string(&steps).unwrap(),
                 language: "en".into(),
                 source_issue: None,
+                workflow_id: None,
+                workflow_name: None,
+                started_by: None,
             },
             &id,
         )

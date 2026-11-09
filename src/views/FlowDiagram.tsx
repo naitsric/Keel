@@ -1,9 +1,10 @@
-import { AlertTriangle, Bot, CheckCircle2, Eye, GitPullRequest, Layers, Lightbulb, Map as MapIcon, Plus, ShieldCheck, UserCheck, Wrench } from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, Eye, FileText, GitPullRequest, Layers, Lightbulb, ListChecks, Map as MapIcon, Plus, ShieldCheck, UserCheck, Wrench } from "lucide-react";
 import type { TFunction } from "i18next";
 import { type FocusEvent, Fragment, type KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AttemptState, StepRole } from "../lib/api";
 import { type Flow, type FlowAttempt, type FlowNode, layoutFlow, nextItem, type PlacedNode, scrollToShow } from "../lib/flow";
+import { skippedAsSmall } from "../lib/size";
 import { cx, StateBadge } from "../ui/primitives";
 
 const KIND_LABELS: Record<FlowNode["kind"], string> = {
@@ -19,6 +20,8 @@ const ROLE_LABELS: Record<StepRole["kind"], string> = {
   approver: "workflows.roleApprover",
   mapper: "flow.roleMapper",
   learner: "workflows.roleLearner",
+  specifier: "workflows.roleSpecifier",
+  verifier: "workflows.roleVerifier",
 };
 
 const NODE_TONES: Partial<Record<AttemptState | "pending", string>> = {
@@ -27,6 +30,7 @@ const NODE_TONES: Partial<Record<AttemptState | "pending", string>> = {
   running: "border-accent/60",
   // Whatever waits for the person stands out from the rest.
   waitingApproval: "border-warning/70 bg-warning/10",
+  waitingAnswers: "border-warning/70 bg-warning/10",
   stalled: "border-warning/70 bg-warning/10",
   blocked: "border-warning/70 bg-warning/10",
   interrupted: "border-warning/70 bg-warning/10",
@@ -34,6 +38,8 @@ const NODE_TONES: Partial<Record<AttemptState | "pending", string>> = {
   skipped: "border-dashed opacity-70",
   abandoned: "opacity-70",
   rejected: "opacity-70",
+  returned: "opacity-70",
+  postponed: "opacity-70",
   stopped: "opacity-70",
 };
 
@@ -49,6 +55,8 @@ function StepIcon({ node }: { node: FlowNode<FlowAttempt> }) {
     if (node.role === "approver") return <ShieldCheck size={12} />;
     if (node.role === "learner") return <Lightbulb size={12} />;
     if (node.role === "mapper") return <MapIcon size={12} />;
+    if (node.role === "specifier") return <FileText size={12} />;
+    if (node.role === "verifier") return <ListChecks size={12} />;
     return <Bot size={12} />;
   };
   return <span className="shrink-0 text-subtle">{icon()}</span>;
@@ -61,7 +69,10 @@ function roundText(t: TFunction, node: FlowNode<FlowAttempt>): string | null {
   return node.attempts.length > 1 ? t("flow.attempts", { count: node.attempts.length }) : null;
 }
 
+const skippedForBeingSmall = (node: FlowNode<FlowAttempt>) => node.attempt !== null && skippedAsSmall(node.attempt);
+
 function stateText(t: TFunction, node: FlowNode<FlowAttempt>): string {
+  if (skippedForBeingSmall(node)) return t("flow.skippedSmallWhy");
   return node.state === "pending" ? t("run.pending") : t(`states.${node.state}`);
 }
 
@@ -74,6 +85,7 @@ function describeNode(t: TFunction, node: FlowNode<FlowAttempt>, live: boolean, 
     live && stateText(t, node),
     live && node.outdated && t("flow.lastRan", { number: node.round + 1 }),
     live && roundText(t, node),
+    node.conditional && !skippedForBeingSmall(node) && t("flow.onlyIfNotSmall"),
     problem,
   ]
     .filter(Boolean)
@@ -104,6 +116,8 @@ function NodeButton<T extends FlowAttempt>({ placed, live, selected, tabbable, p
         live && !node.minor && !node.outdated && NODE_TONES[node.state],
         live && !node.minor && node.outdated && "border-dashed opacity-70",
         node.minor && "border-dashed border-border bg-transparent",
+        // The diagram of a workflow that's being edited has nothing else to tell these apart by.
+        !live && node.conditional && "border-dashed",
         problem && "border-danger bg-danger/10",
         selected && "opacity-100 ring-2 ring-accent",
       )}
@@ -126,7 +140,7 @@ function NodeButton<T extends FlowAttempt>({ placed, live, selected, tabbable, p
           {node.state === "pending" || node.outdated ? (
             <span className="min-w-0 truncate text-[11.5px] text-subtle">{node.outdated ? t("flow.lastRan", { number: node.round + 1 }) : t("run.pending")}</span>
           ) : (
-            <StateBadge state={node.state} label={t(`states.${node.state}`)} />
+            <StateBadge state={node.state} label={skippedForBeingSmall(node) ? t("flow.skippedSmall") : t(`states.${node.state}`)} />
           )}
         </span>
       )}

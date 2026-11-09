@@ -1,5 +1,5 @@
 import type { TFunction } from "i18next";
-import type { AttemptState, Board, BoardCard, BoardColumn, CommandError, Reason } from "./api";
+import type { AttemptState, Board, BoardCard, BoardColumn, CommandError, PrState, Reason } from "./api";
 import { formatDateTime } from "./format";
 import { errorText, needsProjectSettings, reasonText } from "./reason";
 
@@ -133,6 +133,9 @@ export interface CardLabel {
   detail: string | null;
 }
 
+/** Its badge's color. Only a merged one reads as a success: a closed one went nowhere, and an open one isn't over. */
+const PR_BADGES: Record<PrState, AttemptState> = { open: "queued", draft: "queued", merged: "succeeded", closed: "rejected" };
+
 /** What a card says about itself, beyond its title. */
 export function cardLabel(t: TFunction, card: BoardCard): CardLabel | null {
   const state = card.runState;
@@ -148,6 +151,9 @@ export function cardLabel(t: TFunction, card: BoardCard): CardLabel | null {
     case "humanReview":
       if (!state) return null;
       return { state, label: t(`board.labels.${state}`, { defaultValue: t(`states.${state}`) }), detail: reason ?? t(`board.needed.${state}`, { defaultValue: "" }) };
+    case "done":
+      if (!card.prState) return null;
+      return { state: PR_BADGES[card.prState], label: t(`board.pr.${card.prState}`), detail: card.prStateAt && (card.prState === "merged" || card.prState === "closed") ? formatDateTime(card.prStateAt) : null };
     default:
       return null;
   }
