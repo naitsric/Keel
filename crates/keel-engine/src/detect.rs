@@ -137,6 +137,17 @@ fn script_checks(tool: &str, package: &str) -> Vec<String> {
         .collect()
 }
 
+/// The script that type-checks, which is quick and catches what the tests don't. Lint, e2e and the
+/// rest stay as options, for being slow or fragile.
+fn typecheck_script(package: &str) -> Option<&'static str> {
+    let package = serde_json::from_str::<serde_json::Value>(package).ok()?;
+    ["typecheck", "types", "tsc"].into_iter().find(|name| {
+        package["scripts"][name]
+            .as_str()
+            .is_some_and(is_real_script)
+    })
+}
+
 /// Yarn 2 and later need a global folder that's in the home folder. Nobody has tried them in the
 /// sandbox, so a repo with a `.yarnrc.yml` gets no guess.
 fn javascript(root: &Path) -> Option<Stack> {
@@ -150,11 +161,19 @@ fn javascript(root: &Path) -> Option<Stack> {
     } else {
         return None;
     };
+    let mut check_options = script_checks(tool, &package);
+    // One that runs every script that checks something, for a person to pick.
+    if check_options.len() > 1 {
+        check_options.push(check_options.join(" && "));
+    }
     Some(Stack {
         setup: Some(setup.to_owned()),
-        check: has_test_script(&package).then(|| format!("{tool} test")),
+        check: has_test_script(&package).then(|| match typecheck_script(&package) {
+            Some(name) => format!("{tool} run {name} && {tool} test"),
+            None => format!("{tool} test"),
+        }),
         from: vec!["package.json", lock],
-        check_options: script_checks(tool, &package),
+        check_options,
         ..Stack::default()
     })
 }
@@ -296,10 +315,24 @@ fn uv(root: &Path) -> Option<Stack> {
     })
 }
 
+/// `cargo test` alone only tests the root package of a workspace.
 fn rust(root: &Path) -> Option<Stack> {
-    is_file(root, "Cargo.toml").then(|| Stack {
+    if !is_file(root, "Cargo.toml") {
+        return None;
+    }
+    let is_workspace = read(root, "Cargo.toml")
+        .and_then(|text| toml::from_str::<toml::Table>(&text).ok())
+        .is_some_and(|manifest| manifest.contains_key("workspace"));
+    Some(Stack {
         setup: Some("cargo fetch".to_owned()),
-        check: Some("cargo test".to_owned()),
+        check: Some(
+            if is_workspace {
+                "cargo test --workspace"
+            } else {
+                "cargo test"
+            }
+            .to_owned(),
+        ),
         from: vec!["Cargo.toml"],
         ..Stack::default()
     })
@@ -314,8 +347,9 @@ fn go(root: &Path) -> Option<Stack> {
     })
 }
 
-/// A Makefile's `test` target is what the project itself calls testing, so it wins. What to install
-/// comes from the first stack found. An unknown stack gets nothing rather than something plausible.
+/// A Makefile's `test` target is what the project itself calls testing, so it wins. Every stack found
+/// adds its setup and its check, chained so that each one has to pass. An unknown stack gets nothing
+/// rather than something plausible.
 pub fn guess(root: &Path) -> Guess {
     let mut guess = Guess::default();
     let makefile = ["Makefile", "GNUmakefile", "makefile"]
@@ -325,17 +359,28 @@ pub fn guess(root: &Path) -> Guess {
         guess.check = Some("make test".to_owned());
         guess.from.push(name.to_owned());
     }
-    let stack = [javascript, uv, rust, go]
+    let stacks: Vec<Stack> = [javascript, uv, rust, go]
         .iter()
-        .find_map(|find| find(root));
-    if let Some(stack) = stack {
-        guess.setup = stack.setup;
-        if guess.check.is_none() {
-            guess.check = stack.check;
-        }
+        .filter_map(|find| find(root))
+        .collect();
+    let chained = |parts: Vec<String>| (!parts.is_empty()).then(|| parts.join(" && "));
+    let setup = chained(stacks.iter().filter_map(|s| s.setup.clone()).collect());
+    let check = chained(stacks.iter().filter_map(|s| s.check.clone()).collect());
+    // With a single stack and no Makefile its check is the guess itself, or what it already offers.
+    let offer_checks = stacks.len() > 1 || makefile.is_some();
+    guess.setup = setup;
+    if guess.check.is_none() {
+        guess.check = check;
+    }
+    for stack in stacks {
         guess.from.extend(stack.from.into_iter().map(str::to_owned));
-        guess.setup_options = stack.setup_options;
-        guess.check_options = stack.check_options;
+        guess.setup_options.extend(stack.setup_options);
+        let own = stack.check.filter(|_| offer_checks);
+        for option in stack.check_options.into_iter().chain(own) {
+            if !guess.check_options.contains(&option) {
+                guess.check_options.push(option);
+            }
+        }
     }
     guess
 }
@@ -626,7 +671,8 @@ mod tests {
 
         let package = serde_json::json!({ "scripts": scripts }).to_string();
         let found = guess(repo(&[("package.json", &package), ("pnpm-lock.yaml", "")]).path());
-        assert_eq!(found.check_options.len(), MOST_OPTIONS);
+        // The scripts, and the one that joins them.
+        assert_eq!(found.check_options.len(), MOST_OPTIONS + 1);
     }
 
     #[test]
@@ -651,7 +697,10 @@ mod tests {
             "@scope/test": "true"
         }}"#;
         let found = guess(repo(&[("package.json", package), ("pnpm-lock.yaml", "")]).path());
-        assert_eq!(found.check.as_deref(), Some("pnpm test"));
+        assert_eq!(
+            found.check.as_deref(),
+            Some("pnpm run typecheck && pnpm test")
+        );
         assert_eq!(
             found.check_options,
             [
@@ -659,7 +708,8 @@ mod tests {
                 "pnpm run format:check",
                 "pnpm run lint",
                 "pnpm test",
-                "pnpm run typecheck"
+                "pnpm run typecheck",
+                "pnpm run check:i18n && pnpm run format:check && pnpm run lint && pnpm test && pnpm run typecheck",
             ]
         );
         assert_eq!(found.setup_options, Vec::<String>::new());
@@ -710,6 +760,115 @@ mod tests {
             found(&[("go.mod", "")]),
             both("go test ./...", "go mod download")
         );
+    }
+
+    const PNPM_BOTH: &str = r#"{"scripts":{"test":"vitest","typecheck":"tsc"}}"#;
+
+    #[test]
+    fn every_stack_found_is_chained() {
+        let guess = guess(
+            repo(&[
+                ("package.json", PNPM_BOTH),
+                ("pnpm-lock.yaml", ""),
+                ("Cargo.toml", "[workspace]\nmembers = [\"a\"]\n"),
+            ])
+            .path(),
+        );
+        assert_eq!(
+            guess.check.as_deref(),
+            Some("pnpm run typecheck && pnpm test && cargo test --workspace")
+        );
+        assert_eq!(
+            guess.setup.as_deref(),
+            Some("pnpm install --frozen-lockfile && cargo fetch")
+        );
+        assert_eq!(guess.from, ["package.json", "pnpm-lock.yaml", "Cargo.toml"]);
+        assert!(
+            guess
+                .check_options
+                .contains(&"cargo test --workspace".to_owned())
+        );
+        assert!(guess.check_options.contains(&"pnpm test".to_owned()));
+    }
+
+    #[test]
+    fn one_language_and_one_check_propose_what_they_did_before() {
+        assert_eq!(
+            found(&[("Cargo.toml", "[package]\nname = \"a\"\n")]),
+            both("cargo test", "cargo fetch")
+        );
+        assert_eq!(
+            found(&[("Cargo.toml", "not toml [[")]),
+            both("cargo test", "cargo fetch")
+        );
+        assert_eq!(
+            found(&[("package.json", WITH_TEST), ("pnpm-lock.yaml", "")]),
+            both("pnpm test", "pnpm install --frozen-lockfile")
+        );
+        let guess = guess(repo(&[("uv.lock", LOCK_WITH_PYTEST)]).path());
+        assert_eq!(guess.check_options, Vec::<String>::new());
+    }
+
+    #[test]
+    fn the_check_joins_only_typecheck_and_test() {
+        for (script, name) in [("types", "types"), ("tsc", "tsc")] {
+            let package = format!(r#"{{"scripts":{{"test":"x","{script}":"y"}}}}"#);
+            let found = found(&[("package.json", &package), ("package-lock.json", "{}")]);
+            assert_eq!(found.0, Some(format!("npm run {name} && npm test")),);
+        }
+        // Without a test script nothing is claimed, as before.
+        let package = r#"{"scripts":{"typecheck":"tsc"}}"#;
+        assert_eq!(
+            found(&[("package.json", package), ("pnpm-lock.yaml", "")]).0,
+            None
+        );
+    }
+
+    #[test]
+    fn a_makefile_still_wins_and_the_stacks_are_on_offer() {
+        let guess = guess(
+            repo(&[
+                ("Makefile", "test:\n\ttrue\n"),
+                ("package.json", WITH_TEST),
+                ("package-lock.json", "{}"),
+                ("Cargo.toml", ""),
+            ])
+            .path(),
+        );
+        assert_eq!(guess.check.as_deref(), Some("make test"));
+        assert_eq!(guess.setup.as_deref(), Some("npm ci && cargo fetch"));
+        assert!(guess.check_options.contains(&"npm test".to_owned()));
+        assert!(guess.check_options.contains(&"cargo test".to_owned()));
+    }
+
+    #[test]
+    fn javascript_without_a_lockfile_is_still_ignored_next_to_rust() {
+        assert_eq!(
+            found(&[("package.json", PNPM_BOTH), ("Cargo.toml", "")]),
+            both("cargo test", "cargo fetch")
+        );
+    }
+
+    #[test]
+    fn uv_and_another_language_chain_and_keep_their_flags() {
+        let pyproject = "[dependency-groups]\nstubs = [\"x\"]\n";
+        let guess = guess(
+            repo(&[
+                ("uv.lock", LOCK_WITH_PYTEST),
+                ("pyproject.toml", pyproject),
+                ("Cargo.toml", ""),
+            ])
+            .path(),
+        );
+        assert_eq!(
+            guess.setup.as_deref(),
+            Some("uv sync --frozen && cargo fetch")
+        );
+        assert_eq!(
+            guess.check.as_deref(),
+            Some("uv run --frozen pytest && cargo test")
+        );
+        assert_eq!(guess.setup_options, ["--group stubs"]);
     }
 
     #[test]
