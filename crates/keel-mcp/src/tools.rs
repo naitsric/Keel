@@ -27,6 +27,12 @@ use crate::{McpServer, ToolError};
 pub const MAX_OPEN_RUNS: i64 = keel_store::DEFAULT_MAX_OPEN_RUNS;
 /// Runs one wait_for_run can watch at once.
 const MAX_WAITED_RUNS: usize = 10;
+/// Attempts a run's view lists that a later attempt of the same step replaced. Past this, the
+/// oldest are left out and the view says how many, so a run that goes round many times still reads
+/// in one go.
+const MAX_EARLIER_ATTEMPTS: usize = 40;
+/// Files a run's report lists. Past this, it says how many more there are.
+const MAX_LISTED_FILES: usize = 100;
 /// How many times a client may send back, or retry, one of its runs. After that it's the person's.
 const MAX_FEEDBACK_PER_RUN: i64 = 3;
 const MAX_FINDINGS: usize = 20;
@@ -559,8 +565,9 @@ impl McpServer {
                     ToolError::new("Say which run to wait for with `run`, or several with `runs`.")
                 })?;
                 loop {
-                    let view = server.run_view(client, &run)?;
-                    if view["state"] != "working" || Instant::now() >= deadline {
+                    let (row, attempts) = server.run_with_attempts(&run)?;
+                    if run_state(&row, &attempts).0 != "working" || Instant::now() >= deadline {
+                        let view = server.view_of(client, &row, &attempts, false)?;
                         return Ok((view, Some(run)));
                     }
                     std::thread::sleep(WAIT_TICK);
@@ -585,17 +592,27 @@ impl McpServer {
                 })?;
             }
             loop {
-                let views = ids
+                let runs = ids
                     .iter()
-                    .map(|id| server.run_view(client, id))
+                    .map(|id| server.run_with_attempts(id))
                     .collect::<Result<Vec<_>, _>>()?;
-                let ready: Vec<&String> = ids
+                let ready: Vec<&str> = runs
                     .iter()
-                    .zip(&views)
-                    .filter(|(_, view)| view["state"] != "working")
-                    .map(|(id, _)| id)
+                    .filter(|(run, attempts)| run_state(run, attempts).0 != "working")
+                    .map(|(run, _)| run.id.as_str())
                     .collect();
                 if !ready.is_empty() || Instant::now() >= deadline {
+                    // Only the first that's ready comes in full, so this reads in one go however
+                    // many are ready at once. get_run has each of the others.
+                    let views = runs
+                        .iter()
+                        .map(|(run, attempts)| match ready.first() {
+                            Some(&first) if first == run.id => {
+                                server.view_of(client, run, attempts, false)
+                            }
+                            _ => Ok(brief_view(run, attempts)),
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     return Ok((json!({ "ready": ready, "runs": views }), None));
                 }
                 std::thread::sleep(WAIT_TICK);
@@ -1044,6 +1061,12 @@ impl McpServer {
         self.0.store.attempts_of_run(run).map_err(store_error)
     }
 
+    fn run_with_attempts(&self, run_id: &str) -> Result<(Run, Vec<Attempt>), ToolError> {
+        let attempts = self.attempts(run_id)?;
+        let run = self.0.store.run(run_id).map_err(store_error)?;
+        Ok((run, attempts))
+    }
+
     /// Refused once this client has as many runs open as the person allows it.
     fn room_for_another_run(&self, client: &McpClient) -> Result<(), ToolError> {
         let open = self
@@ -1127,37 +1150,34 @@ impl McpServer {
     }
 
     fn run_view(&self, client: &McpClient, run_id: &str) -> Result<Json, ToolError> {
-        self.run_view_of(client, run_id, false)
+        let (run, attempts) = self.run_with_attempts(run_id)?;
+        self.view_of(client, &run, &attempts, false)
     }
 
     /// For the call that started the run: its row, which is how a run is known to be this
     /// client's, is only written once it returns.
     fn new_run_view(&self, client: &McpClient, run_id: &str) -> Result<Json, ToolError> {
-        self.run_view_of(client, run_id, true)
+        let (run, attempts) = self.run_with_attempts(run_id)?;
+        self.view_of(client, &run, &attempts, true)
     }
 
-    fn run_view_of(
+    /// A run as get_run returns it. What it waits for and the report are whole, and each attempt
+    /// is listed without what it wrote, which get_step has, so it reads in one go however long the
+    /// run went on.
+    fn view_of(
         &self,
         client: &McpClient,
-        run_id: &str,
+        run: &Run,
+        attempts: &[Attempt],
         just_started: bool,
     ) -> Result<Json, ToolError> {
-        let attempts = self.attempts(run_id)?;
         let store = &self.0.store;
-        let run = store.run(run_id).map_err(store_error)?;
         let mine = just_started
             || store
-                .run_started_by_mcp_client(run_id, &client.id)
+                .run_started_by_mcp_client(&run.id, &client.id)
                 .map_err(store_error)?;
-        let steps = steps_of(&run);
-        let waiting = needs_person(&attempts).filter(|_| run.finished_at.is_none());
-        let state = if run.finished_at.is_some() {
-            "finished"
-        } else if waiting.is_some() {
-            "waitingForPerson"
-        } else {
-            "working"
-        };
+        let steps = steps_of(run);
+        let (state, waiting) = run_state(run, attempts);
         let waiting_for = match waiting {
             Some(attempt) => {
                 let mut view = json!({
@@ -1165,7 +1185,7 @@ impl McpServer {
                     "attemptId": attempt.id,
                     "state": attempt.state,
                     "reason": attempt.reason,
-                    "youCan": self.you_can(client, mine, &run, &steps, &attempts)?,
+                    "youCan": self.you_can(client, mine, run, &steps, attempts)?,
                     "who": who_decides(&attempt.state),
                 });
                 if attempt.state == AttemptState::WaitingAnswers.as_str() {
@@ -1180,17 +1200,18 @@ impl McpServer {
             None => None,
         };
         let total_cost: f64 = attempts.iter().filter_map(|a| a.cost_usd).sum();
-        Ok(json!({
+        let (step_views, left_out) = steps_view(attempts);
+        let mut view = json!({
             "id": run.id,
             "projectId": run.project_id,
             "title": run.title,
             "request": capped(&run.request, MAX_TEXT),
             "state": state,
             "waitingFor": waiting_for,
-            "report": self.report(&run, &attempts)?,
+            "report": self.report(run, attempts)?,
             "startedBy": run.started_by,
             "startedByYou": mine,
-            "cardId": store.card_of_run(run_id).map_err(store_error)?,
+            "cardId": store.card_of_run(&run.id).map_err(store_error)?,
             "language": run.language,
             "branch": run.branch,
             "prUrl": run.pr_url,
@@ -1203,23 +1224,35 @@ impl McpServer {
             "createdAt": run.created_at,
             "finishedAt": run.finished_at,
             "totalCostUsd": total_cost,
-            "steps": attempts.iter().map(attempt_view).collect::<Vec<_>>(),
-        }))
+            "steps": step_views,
+        });
+        if left_out > 0 {
+            view["earlierAttemptsLeftOut"] = json!(left_out);
+        }
+        Ok(view)
     }
 
     /// What the run did, in short, the way a subagent answers: what an orchestrator reads first.
-    /// What agents wrote is cut here, and masked on the way out like the rest.
+    /// What agents wrote is cut here, and masked on the way out like the rest. A change to many
+    /// files lists the first ones and says how many more there are.
     fn report(&self, run: &Run, attempts: &[Attempt]) -> Result<Json, ToolError> {
-        Ok(json!({
+        let mut files = files_changed(attempts);
+        let more_files = files.len().saturating_sub(MAX_LISTED_FILES);
+        files.truncate(MAX_LISTED_FILES);
+        let mut report = json!({
             "answer": answer(attempts),
-            "filesChanged": files_changed(attempts),
+            "filesChanged": files,
             "check": self.check_report(run, attempts)?,
             "notProven": not_proven(attempts),
             "reviews": reviews(attempts),
             "skipped": skipped_steps(attempts),
             "prUrl": run.pr_url,
             "prState": run.pr_state,
-        }))
+        });
+        if more_files > 0 {
+            report["moreFilesChanged"] = json!(more_files);
+        }
+        Ok(report)
     }
 
     /// Whether the check passed on the code as it is in this round, and what it printed when it
@@ -1266,6 +1299,17 @@ fn needs_person(attempts: &[Attempt]) -> Option<&Attempt> {
     latest_of_each_step(attempts)
         .into_iter()
         .find(|attempt| attempt.role != "learner" && NEEDS_PERSON.contains(&attempt.state.as_str()))
+}
+
+/// Where a run stands, and the attempt the person has to act on when it waits for them.
+fn run_state<'a>(run: &Run, attempts: &'a [Attempt]) -> (&'static str, Option<&'a Attempt>) {
+    if run.finished_at.is_some() {
+        return ("finished", None);
+    }
+    match needs_person(attempts) {
+        Some(attempt) => ("waitingForPerson", Some(attempt)),
+        None => ("working", None),
+    }
 }
 
 fn working(attempt: &Attempt) -> bool {
@@ -1462,7 +1506,35 @@ fn reviews(attempts: &[Attempt]) -> Vec<Json> {
         .collect()
 }
 
-fn attempt_view(attempt: &Attempt) -> Json {
+/// A run's attempts in order, for its view. One that a later attempt of the same step replaced
+/// comes back shorter, and past MAX_EARLIER_ATTEMPTS of those the oldest are left out. Also says
+/// how many were.
+fn steps_view(attempts: &[Attempt]) -> (Vec<Json>, usize) {
+    let latest: Vec<&str> = latest_of_each_step(attempts)
+        .into_iter()
+        .map(|attempt| attempt.id.as_str())
+        .collect();
+    let left_out = (attempts.len() - latest.len()).saturating_sub(MAX_EARLIER_ATTEMPTS);
+    let mut to_leave = left_out;
+    let views = attempts
+        .iter()
+        .filter_map(|attempt| {
+            if latest.contains(&attempt.id.as_str()) {
+                Some(step_view(attempt))
+            } else if to_leave > 0 {
+                to_leave -= 1;
+                None
+            } else {
+                Some(earlier_view(attempt))
+            }
+        })
+        .collect();
+    (views, left_out)
+}
+
+/// An attempt in a run's view: what it is and how it went. What it wrote and the files it changed
+/// are in get_step, and the report says what matters of them.
+fn step_view(attempt: &Attempt) -> Json {
     json!({
         "attemptId": attempt.id,
         "step": attempt.step_id,
@@ -1474,17 +1546,59 @@ fn attempt_view(attempt: &Attempt) -> Json {
         "reason": attempt.reason,
         "modelRequested": attempt.model_requested,
         "modelActual": attempt.model_actual,
-        "account": attempt.account,
         "costUsd": attempt.cost_usd,
         "inputTokens": attempt.input_tokens,
         "outputTokens": attempt.output_tokens,
         "turns": attempt.turns,
         "durationMs": attempt.duration_ms,
-        "filesChanged": attempt.files_changed,
-        "result": attempt.result_text.as_deref().map(|text| capped(text, MAX_TEXT)),
-        "output": attempt.output,
         "startedAt": attempt.started_at,
         "finishedAt": attempt.finished_at,
+    })
+}
+
+/// An attempt that a later one of the same step replaced: enough to know how it went and to find
+/// it with get_step.
+fn earlier_view(attempt: &Attempt) -> Json {
+    json!({
+        "attemptId": attempt.id,
+        "step": attempt.step_id,
+        "number": attempt.number,
+        "round": attempt.round,
+        "state": attempt.state,
+        "reason": attempt.reason,
+        "superseded": true,
+    })
+}
+
+/// One attempt in full, for get_step. What it answered comes once: its structured answer as Keel
+/// read it, which Keel may have corrected, or else what it wrote.
+fn attempt_view(attempt: &Attempt) -> Json {
+    let mut view = step_view(attempt);
+    view["account"] = json!(attempt.account);
+    view["filesChanged"] = json!(attempt.files_changed);
+    match &attempt.output {
+        Some(output) => view["output"] = output.clone(),
+        None => {
+            let text = attempt.result_text.as_deref();
+            view["result"] = json!(text.map(|text| capped(text, MAX_TEXT)));
+        }
+    }
+    view
+}
+
+/// A run in a few words, for a wait on several: where it stands and the step it's on, or the one
+/// it waits at. get_run has the rest.
+fn brief_view(run: &Run, attempts: &[Attempt]) -> Json {
+    let (state, waiting) = run_state(run, attempts);
+    let step = waiting.or(attempts.last());
+    json!({
+        "id": run.id,
+        "title": run.title,
+        "state": state,
+        "round": run.round,
+        "step": step.map(|a| &a.step_id),
+        "stepState": step.map(|a| &a.state),
+        "brief": true,
     })
 }
 
@@ -1783,5 +1897,90 @@ mod tests {
         assert_eq!(mask_secrets(&cut), cut);
         assert!(!cut.contains("ghp_"), "{cut}");
         assert!(cut.starts_with("the token is\n"), "{cut}");
+    }
+
+    /// An agent's attempt that answered with a verdict, also as its text.
+    fn attempt(step: &str, number: i64) -> Attempt {
+        let verdict = json!({ "verdict": "approved", "findings": [] });
+        Attempt {
+            id: format!("{step}-{number}"),
+            run_id: "run".into(),
+            step_id: step.into(),
+            kind: "agent".into(),
+            role: "reviewer".into(),
+            round: number - 1,
+            output: Some(verdict.clone()),
+            run_files: None,
+            exit_code: None,
+            number,
+            state: "succeeded".into(),
+            reason: None,
+            model_requested: "haiku".into(),
+            model_actual: None,
+            effort: None,
+            tools: "readOnly".into(),
+            max_turns: None,
+            max_budget_usd: None,
+            language: "en".into(),
+            cli_version: None,
+            api_key_source: None,
+            account: None,
+            prompt: String::new(),
+            system_prompt_sources: Json::Null,
+            settings: Json::Null,
+            session_id: String::new(),
+            resumed_from: None,
+            pid: None,
+            pid_started: None,
+            workspace: String::new(),
+            raw_path: String::new(),
+            raw_offset: 0,
+            raw_sha256: None,
+            diff_path: None,
+            sha_before: None,
+            sha_after: None,
+            files_changed: Some(json!(["a.rs"])),
+            result_text: Some(verdict.to_string()),
+            cost_usd: None,
+            input_tokens: None,
+            output_tokens: None,
+            turns: None,
+            duration_ms: None,
+            started_at: String::new(),
+            finished_at: None,
+            last_activity_at: None,
+        }
+    }
+
+    #[test]
+    fn a_run_that_went_round_many_times_leaves_out_its_oldest_attempts_and_says_how_many() {
+        let rounds = 30;
+        let attempts: Vec<Attempt> = (1..=rounds)
+            .flat_map(|number| [attempt("build", number), attempt("review", number)])
+            .collect();
+        let (views, left_out) = steps_view(&attempts);
+        let earlier = attempts.len() - 2;
+        assert_eq!(left_out, earlier - MAX_EARLIER_ATTEMPTS);
+        assert_eq!(views.len(), MAX_EARLIER_ATTEMPTS + 2);
+        // The newest stay, in the order they came, and each step's latest is whole.
+        let first_kept = &attempts[left_out];
+        assert_eq!(views[0]["attemptId"], json!(first_kept.id));
+        assert_eq!(views[0]["superseded"], true);
+        let [.., build, review] = views.as_slice() else {
+            panic!("{views:?}")
+        };
+        assert_eq!(build["attemptId"], "build-30");
+        assert_eq!(review["attemptId"], "review-30");
+        assert_eq!(review["role"], "reviewer");
+        assert!(review.get("superseded").is_none(), "{review}");
+        // None of them says what it wrote: get_step does, once.
+        assert!(views.iter().all(|view| view.get("output").is_none()));
+        let full = attempt_view(&attempts[0]);
+        assert_eq!(full["output"]["verdict"], "approved");
+        assert!(full.get("result").is_none(), "{full}");
+        assert_eq!(full["filesChanged"], json!(["a.rs"]));
+
+        let (views, left_out) = steps_view(&attempts[..8]);
+        assert_eq!((views.len(), left_out), (8, 0));
     }
 }

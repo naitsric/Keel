@@ -1007,10 +1007,12 @@ async fn a_run_it_starts_shows_who_started_it_and_waits_for_the_person() {
     assert_eq!(view["state"], "waitingForPerson", "{view}");
     assert_eq!(view["waitingFor"]["state"], "waitingApproval");
     assert_eq!(view["steps"][0]["modelRequested"], "haiku");
-    assert_eq!(view["steps"][0]["result"], "Fixed it.");
+    assert_eq!(view["report"]["answer"], "Fixed it.");
 
     let attempt = view["steps"][0]["attemptId"].as_str().unwrap();
     let step = ok(&call(&client, "get_step", json!({ "attempt": attempt })).await);
+    assert_eq!(step["result"], "Fixed it.");
+    assert_eq!(step["filesChanged"], json!(["fixed.txt"]), "{step}");
     assert!(step["prompt"].as_str().unwrap().contains("Fix the bug"));
     assert!(
         step["diff"].as_str().unwrap().contains("fixed.txt"),
@@ -1567,6 +1569,10 @@ async fn waiting_on_several_runs_returns_as_soon_as_one_of_them_stops_working() 
     .await);
     assert_eq!(waited["ready"], json!([]), "it waited it out");
     assert_eq!(waited["runs"][0]["state"], "working");
+    // One that's still working comes back in a few words.
+    assert_eq!(waited["runs"][0]["brief"], true, "{waited}");
+    assert_eq!(waited["runs"][0]["step"], "builder", "{waited}");
+    assert!(waited["runs"][0].get("steps").is_none(), "{waited}");
 
     let quick = id_of(&ok(
         &call(&client, "start_run", w.args_for(&asks, "Quick")).await
@@ -1581,8 +1587,11 @@ async fn waiting_on_several_runs_returns_as_soon_as_one_of_them_stops_working() 
     assert_eq!(waited["ready"], json!([quick]));
     assert_eq!(waited["runs"][0]["id"], json!(busy));
     assert_eq!(waited["runs"][0]["state"], "working");
+    assert_eq!(waited["runs"][0]["brief"], true, "{waited}");
     assert_eq!(waited["runs"][1]["state"], "waitingForPerson");
     assert_eq!(waited["runs"][1]["waitingFor"]["step"], "human");
+    assert!(waited["runs"][1].get("brief").is_none(), "{waited}");
+    assert!(waited["runs"][1]["report"].is_object(), "{waited}");
 
     // `run` counts as one of them.
     let args = json!({ "run": busy, "runs": [quick], "seconds": 1 });
@@ -1603,6 +1612,20 @@ async fn waiting_on_several_runs_returns_as_soon_as_one_of_them_stops_working() 
         }
     }
     assert_eq!(waited["ready"], json!([busy]), "{waited}");
+
+    // With several ready, only the first comes in full, so the answer stays short. get_run has the
+    // others.
+    let args = json!({ "runs": [busy, quick], "seconds": 1 });
+    let waited = ok(&call(&client, "wait_for_run", args).await);
+    assert_eq!(waited["ready"], json!([busy, quick]), "{waited}");
+    assert_eq!(waited["runs"][0]["waitingFor"]["step"], "human", "{waited}");
+    assert_eq!(
+        waited["runs"][1],
+        json!({
+            "id": quick, "title": "Quick", "state": "waitingForPerson", "round": 0,
+            "step": "human", "stepState": "waitingApproval", "brief": true,
+        })
+    );
 
     let refusal = refused(&call(&client, "wait_for_run", json!({ "seconds": 1 })).await);
     assert!(refusal.contains("Say which run"), "{refusal}");
@@ -1883,6 +1906,204 @@ async fn a_client_sends_its_run_back_from_the_approval_and_the_builder_hears_who
     assert!(refusal.contains("3 times"), "{refusal}");
     assert!(refusal.contains("Bring it to the person"), "{refusal}");
     assert_eq!(w.store.run(&run).unwrap().round, 3);
+    client.cancel().await.unwrap();
+}
+
+/// Words up to about `bytes`.
+fn at_length(words: &str, bytes: usize) -> String {
+    let mut text = String::new();
+    while text.len() < bytes {
+        text.push_str(words);
+        text.push(' ');
+    }
+    text
+}
+
+/// Makes what a run's agents wrote as long as a real run's: KBs of spec, reviews, evidence and
+/// answers, and a change to 150 files. A structured answer is also the attempt's text, as Claude
+/// Code returns it. Returns how many bytes that is.
+fn write_at_length(store: &Store, run: &str) -> usize {
+    let files: Vec<String> = (0..150)
+        .map(|n| format!("src/part_{n}/file_{n}.rs"))
+        .collect();
+    let files = json!(files).to_string();
+    let attempts = store.attempts_of_run(run).unwrap();
+    let mut written = 0;
+    for attempt in &attempts {
+        let mut fields = Vec::new();
+        if let Some(mut output) = attempt.output.clone() {
+            output["summary"] = json!(at_length("Every part of it holds up.", 6 * 1024));
+            let text = output.to_string();
+            written += 2 * text.len();
+            fields.push(("output", Value::Text(text.clone())));
+            fields.push(("result_text", Value::Text(text)));
+        } else if attempt.kind == "agent" {
+            let text = at_length("It's fixed and tested.", 2 * 1024);
+            written += text.len() + files.len();
+            fields.push(("result_text", Value::Text(text)));
+            fields.push(("files_changed", Value::Text(files.clone())));
+        }
+        if !fields.is_empty() {
+            store.patch_attempt(&attempt.id, &fields).unwrap();
+        }
+    }
+    let last = &attempts.last().unwrap().id;
+    store
+        .patch_attempt(last, &[("run_files", Value::Text(files))])
+        .unwrap();
+    written
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_that_went_round_again_reads_in_one_go_and_says_each_thing_once() {
+    let w = world().await;
+    let workflow = w.saved("Everything", reporting_steps());
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let run = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.args_for(&workflow, "Fix the bug"),
+    )
+    .await));
+
+    // While the spec asks, its questions come whole. The rest of what it wrote is in get_step, once.
+    let spec = waiting_attempt(&settled(&client, &run).await);
+    write_at_length(&w.store, &run);
+    let asking = view_of(&client, &run).await;
+    assert_eq!(
+        asking["waitingFor"]["questions"],
+        json!([{
+            "id": "Q1",
+            "text": "What then?",
+            "options": [{ "label": "Yes", "recommended": true }, { "label": "No", "recommended": false }],
+        }])
+    );
+    assert!(!asking.to_string().contains("holds up"), "{asking}");
+    let step = ok(&call(&client, "get_step", json!({ "attempt": spec })).await);
+    let summary = step["output"]["summary"].as_str().unwrap();
+    assert!(summary.contains("holds up"), "{step}");
+    assert!(step.get("result").is_none(), "{step}");
+
+    // The person answers, the client sends the work back once, and it's at the approval again.
+    let yes = Answer {
+        question: "Q1".into(),
+        choice: AnswerChoice::Option {
+            label: "Yes".into(),
+        },
+        remember: false,
+    };
+    w.engine.answer_questions(&spec, &[yes]).unwrap();
+    let approval = settled(&client, &run).await;
+    assert_eq!(approval["waitingFor"]["step"], "human", "{approval}");
+    let args = json!({ "run": run, "instructions": "Return 0 instead" });
+    ok(&call(&client, "send_back", args).await);
+    let settled_again = settled(&client, &run).await;
+    assert_eq!(settled_again["round"], 1, "{settled_again}");
+
+    let written = write_at_length(&w.store, &run);
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    let view = view_of(&client, &run).await;
+    // A real run of 22 attempts that wrote less than this one came to 72 KB when each attempt
+    // carried what it wrote, more than Claude Code shows of a tool's answer. Now a run's view is
+    // what it waits for and its report, whole, and a few hundred bytes per attempt, so 20 KB leaves
+    // room for a longer answer, more rounds and longer paths.
+    assert!(written > 80 * 1024, "{written}");
+    let size = view.to_string().len();
+    assert!(size < 20 * 1024, "{size} bytes: {view}");
+    // wait_for_run returns it the same way.
+    let waited = ok(&call(&client, "wait_for_run", json!({ "run": run, "seconds": 1 })).await);
+    assert_eq!(waited, view);
+
+    // What it waits for comes whole.
+    let human = attempts.last().unwrap();
+    assert_eq!(human.step_id, "human");
+    let waiting = &view["waitingFor"];
+    assert_eq!(waiting["attemptId"], json!(human.id), "{waiting}");
+    assert_eq!(waiting["state"], "waitingApproval");
+    assert_eq!(waiting["canSendBack"], true);
+    assert_eq!(waiting["youCan"], json!(["send_back", "close_run"]));
+    let who = waiting["who"].as_str().unwrap();
+    assert!(who.contains("Only the person approves"), "{who}");
+
+    // And so does the report, with the first 100 files and how many more there are.
+    let report = &view["report"];
+    assert_eq!(
+        report["answer"],
+        json!(at_length("It's fixed and tested.", 2 * 1024))
+    );
+    assert_eq!(report["filesChanged"].as_array().unwrap().len(), 100);
+    assert_eq!(report["filesChanged"][0], "src/part_0/file_0.rs");
+    assert_eq!(report["moreFilesChanged"], 50);
+    assert_eq!(
+        report["reviews"][0]["findings"],
+        json!(["Line 3 divides by zero"])
+    );
+    assert_eq!(report["reviews"][1]["decision"], "approve");
+
+    // Every attempt is there, in order, without what it wrote. One that a later attempt of the same
+    // step replaced is shorter.
+    let steps = view["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), attempts.len(), "{view}");
+    assert!(view.get("earlierAttemptsLeftOut").is_none(), "{view}");
+    let mut superseded = 0;
+    for (step, attempt) in steps.iter().zip(&attempts) {
+        assert_eq!(step["attemptId"], json!(attempt.id));
+        for in_get_step in ["result", "output", "filesChanged"] {
+            assert!(step.get(in_get_step).is_none(), "{step}");
+        }
+        let latest = attempts
+            .iter()
+            .rev()
+            .find(|a| a.step_id == attempt.step_id)
+            .unwrap();
+        let size = step.to_string().len();
+        if latest.id == attempt.id {
+            assert!(step.get("superseded").is_none(), "{step}");
+            assert_eq!(step["state"], json!(attempt.state));
+            assert_eq!(step["modelRequested"], json!(attempt.model_requested));
+            assert!(size < 500, "{size} bytes: {step}");
+        } else {
+            superseded += 1;
+            let mut keys: Vec<&str> = step
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|k| k.as_str())
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                [
+                    "attemptId",
+                    "number",
+                    "reason",
+                    "round",
+                    "state",
+                    "step",
+                    "superseded"
+                ]
+            );
+            assert_eq!(step["superseded"], true);
+            assert!(size < 250, "{size} bytes: {step}");
+        }
+    }
+    // The first round's builder, check, review, verifier, approver and approval.
+    assert!(superseded >= 6, "{view}");
+    let builder = steps.iter().rev().find(|s| s["step"] == "builder").unwrap();
+    assert_eq!(builder["round"], 1);
+
+    // get_step has each attempt in full, and what it answered once.
+    let latest = |id: &str| {
+        let step = steps.iter().rev().find(|s| s["step"] == id).unwrap();
+        json!({ "attempt": step["attemptId"] })
+    };
+    let review = ok(&call(&client, "get_step", latest("security")).await);
+    assert_eq!(review["output"]["verdict"], "changes", "{review}");
+    assert!(review.get("result").is_none(), "{review}");
+    let built = ok(&call(&client, "get_step", latest("builder")).await);
+    assert_eq!(built["result"], report["answer"], "{built}");
+    assert!(built.get("output").is_none(), "{built}");
+    assert_eq!(built["filesChanged"].as_array().unwrap().len(), 150);
     client.cancel().await.unwrap();
 }
 
