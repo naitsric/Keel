@@ -2463,16 +2463,13 @@ fn engine_error(error: Error) -> ToolError {
     }
 }
 
-/// Why start_run was refused. An issue that's a change across projects starts from the tool made
-/// for that, rather than from a card on the board.
+/// Why start_run was refused, with nothing created.
 fn start_run_error(error: Error, issue: Option<i64>) -> ToolError {
     match (error, issue) {
         (Error::InvalidState, Some(number)) => ToolError::new(format!(
             "Issue #{number} already has a run open on the board. list_runs shows it."
         )),
-        (Error::Blocked(Reason::StartsOnTheBoard), Some(number)) => ToolError::new(format!(
-            "Issue #{number} is a change across several projects, so start_run can't start it. Use propose_change, with the projects it also touches in `alsoTouches`, instead of copying its text into a card on the board."
-        )),
+        (Error::Blocked(Reason::StartsOnTheBoard), Some(number)) => already_across_projects(number),
         (error, _) => engine_error(error),
     }
 }
@@ -2483,11 +2480,17 @@ fn propose_change_error(error: Error, issue: Option<i64>) -> ToolError {
         (Error::InvalidState, Some(number)) => ToolError::new(format!(
             "Issue #{number} already has a run open on the board. list_runs shows it."
         )),
-        (Error::Blocked(Reason::StartsOnTheBoard), Some(number)) => ToolError::new(format!(
-            "Issue #{number} already is a change across several projects on the board, so nothing new was created. The person approves its agreement in Keel, and list_runs with `mine` shows what this client started."
-        )),
+        (Error::Blocked(Reason::StartsOnTheBoard), Some(number)) => already_across_projects(number),
         (error, _) => engine_error(error),
     }
+}
+
+/// The same answer from start_run and propose_change, since both refuse it. The person or another
+/// client may have started it, so `mine` wouldn't find it.
+fn already_across_projects(number: i64) -> ToolError {
+    ToolError::new(format!(
+        "Issue #{number} already is a change across several projects on the board, so nothing new was created. The person follows it in Keel and approves its agreement there. list_runs with this `project` shows its run once it has one, even if this client didn't start it."
+    ))
 }
 
 /// The person, or the run itself, can act between a client looking and the engine acting on it.
@@ -2540,14 +2543,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_issue_that_is_a_change_across_projects_points_to_propose_change() {
-        let refusal = start_run_error(Error::Blocked(Reason::StartsOnTheBoard), Some(47));
-        assert!(refusal.0.contains("propose_change"), "{}", refusal.0);
-        assert!(refusal.0.contains("#47"), "{}", refusal.0);
+    fn an_issue_that_already_is_a_change_across_projects_gets_the_same_answer_from_both_tools() {
+        let refusal = start_run_error(Error::Blocked(Reason::StartsOnTheBoard), Some(47)).0;
+        // propose_change refuses it too, so pointing there only costs a call.
+        assert!(!refusal.contains("propose_change"), "{refusal}");
+        assert!(refusal.contains("#47"), "{refusal}");
+        assert!(refusal.contains("nothing new was created"), "{refusal}");
+        // The person, or another client, may have started it, so `mine` wouldn't find it.
+        assert!(
+            refusal.contains("list_runs with this `project`"),
+            "{refusal}"
+        );
+        assert!(!refusal.contains("`mine`"), "{refusal}");
+        let again = propose_change_error(Error::Blocked(Reason::StartsOnTheBoard), Some(47));
+        assert_eq!(again.0, refusal);
         let open = start_run_error(Error::InvalidState, Some(47));
         assert!(open.0.contains("already has a run open"), "{}", open.0);
-        let again = propose_change_error(Error::Blocked(Reason::StartsOnTheBoard), Some(47));
-        assert!(again.0.contains("nothing new was created"), "{}", again.0);
     }
 
     #[test]
