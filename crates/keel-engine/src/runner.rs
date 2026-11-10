@@ -651,9 +651,11 @@ impl Inner {
         loop {
             match m.tail.read_new(&m.raw_path) {
                 Ok(lines) if !lines.is_empty() => {
-                    last_progress = Instant::now();
-                    self.handle_lines(&mut m, &lines);
-                    self.clear_stall(&m);
+                    let progressed = self.handle_lines(&mut m, &lines);
+                    if progressed {
+                        last_progress = Instant::now();
+                        self.clear_stall(&m);
+                    }
                     self.changed(&m.run_id);
                 }
                 _ => {}
@@ -765,22 +767,31 @@ impl Inner {
         self.changed(&m.run_id);
     }
 
-    fn handle_lines(&self, m: &mut Monitor, lines: &[String]) {
+    /// Returns whether the agent produced something. Claude Code's `tool_progress` heartbeats
+    /// arrive every 30 s while a command runs, so they are read and saved but are not progress.
+    /// Without this, a hung command could never be reported as a stall.
+    fn handle_lines(&self, m: &mut Monitor, lines: &[String]) -> bool {
         let store = &self.store;
+        let mut progressed = m.kind != "agent";
         if m.kind == "agent" {
             for line in lines {
-                for parsed in parse_line(line) {
+                let parsed = parse_line(line);
+                let heartbeat = !parsed.is_empty()
+                    && parsed
+                        .iter()
+                        .all(|p| matches!(p, Parsed::Other { kind } if kind == "tool_progress"));
+                progressed |= !heartbeat;
+                for parsed in parsed {
                     self.handle_parsed(m, parsed);
                 }
             }
         }
-        let _ = store.patch_attempt(
-            &m.attempt_id,
-            &[
-                ("raw_offset", Value::Integer(m.tail.offset as i64)),
-                ("last_activity_at", Value::Text(now())),
-            ],
-        );
+        let mut fields = vec![("raw_offset", Value::Integer(m.tail.offset as i64))];
+        if progressed {
+            fields.push(("last_activity_at", Value::Text(now())));
+        }
+        let _ = store.patch_attempt(&m.attempt_id, &fields);
+        progressed
     }
 
     fn handle_parsed(&self, m: &mut Monitor, parsed: Parsed) {
