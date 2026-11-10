@@ -9,6 +9,7 @@ import { Home } from "./views/Home";
 import { NewRunDialog } from "./views/NewRunDialog";
 import { ProjectProposals } from "./views/ProjectProposals";
 import { ProjectSetupDialog } from "./views/ProjectSetupDialog";
+import { ProjectsView } from "./views/ProjectsView";
 import { RunDetail } from "./views/RunDetail";
 import { SettingsView } from "./views/SettingsView";
 import { StatusBar } from "./views/StatusBar";
@@ -49,6 +50,7 @@ export default function App() {
         {view.name === "settings" && <SettingsView />}
         {view.name === "workflows" && <WorkflowsView />}
         {view.name === "brain" && <BrainPage />}
+        {view.name === "projects" && <ProjectsView projectId={view.projectId} />}
         {view.name === "board" && <BoardView initialProjectId={view.projectId} />}
       </div>
       <StatusBar />

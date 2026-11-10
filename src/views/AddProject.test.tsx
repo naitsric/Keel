@@ -13,7 +13,7 @@ import { Onboarding } from "./Onboarding";
 import { ProjectSetupDialog } from "./ProjectSetupDialog";
 import { ProjectsRow } from "./ProjectsRow";
 import { RemoveProjectDialog } from "./RemoveProjectDialog";
-import { SettingsView } from "./SettingsView";
+import { ProjectsView } from "./ProjectsView";
 import { WorkflowsView } from "./WorkflowsView";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -137,10 +137,10 @@ describe("adding a project", () => {
       await opensTheDialog();
     });
 
-    it("from Settings, by its heading", async () => {
+    it("from Projects, by its heading", async () => {
       await show(
         <>
-          <SettingsView />
+          <ProjectsView />
           <ProjectSetupDialog />
         </>,
         [READY],
@@ -148,15 +148,15 @@ describe("adding a project", () => {
       await opensTheDialog();
     });
 
-    it("from an empty Settings", async () => {
+    it("from an empty Projects", async () => {
       await show(
         <>
-          <SettingsView />
+          <ProjectsView />
           <ProjectSetupDialog />
         </>,
         [],
       );
-      expect(page()).toContain(i18next.t("settings.noProjects"));
+      expect(page()).toContain(i18next.t("projects.none"));
       await opensTheDialog();
     });
 
@@ -288,7 +288,7 @@ describe("adding a project", () => {
       expect(page()).toContain(i18next.t("newRun.checkNone"));
       expect(document.querySelector('[role="alert"]')).toBeNull();
       expect(buttons("Start")[0].disabled).toBe(false);
-      expect(buttons(i18next.t("newRun.openSettings"))).toHaveLength(0);
+      expect(buttons(i18next.t("newRun.openProject"))).toHaveLength(0);
 
       await click("Finish setup");
       expect(useApp.getState().projectSetup).toMatchObject({ projectId: "new-one", added: null, returnToNewRun: true });
@@ -365,11 +365,11 @@ describe("adding a project", () => {
     });
   });
 
-  describe("Settings' card", () => {
+  describe("the project form", () => {
     const field = (label: string) => [...document.querySelectorAll("label")].find((l) => l.textContent?.startsWith(label))?.querySelector("input") as HTMLInputElement;
 
     it("takes what the dialog saved, so its own Save can't put the old value back", async () => {
-      await show(<SettingsView />, [READY]);
+      await show(<ProjectsView />, [READY]);
       expect(field(i18next.t("settings.checkCommand")).value).toBe("make test");
       await act(async () => useApp.setState({ overview: { ...useApp.getState().overview, projects: [{ ...READY, checkCommand: "pnpm test", setupCommand: "pnpm i" }] } }));
       await settle();
@@ -379,7 +379,7 @@ describe("adding a project", () => {
     });
 
     it("still says it saved, even though saving can start the card over", async () => {
-      await show(<SettingsView />, [READY]);
+      await show(<ProjectsView />, [READY]);
       mockIPC((command) => (command === "overview" ? { ...useApp.getState().overview, projects: [{ ...READY, setupCommand: "uv sync" }] } : command === "workflows_list" ? [WORKFLOW] : null));
       await click(i18next.t("settings.save"));
       expect(field(i18next.t("settings.setupCommand")).value).toBe("uv sync");
@@ -387,7 +387,7 @@ describe("adding a project", () => {
     });
 
     it("saves the files too sensitive for a small change, one pattern per line", async () => {
-      await show(<SettingsView />, [{ ...READY, sensitivePaths: ["billing/"] }]);
+      await show(<ProjectsView />, [{ ...READY, sensitivePaths: ["billing/"] }]);
       const box = [...document.querySelectorAll("label")].find((l) => l.textContent?.startsWith(i18next.t("settings.sensitive")))?.querySelector("textarea") as HTMLTextAreaElement;
       expect(box.value).toBe("billing/");
       await act(async () => {
@@ -400,7 +400,7 @@ describe("adding a project", () => {
     });
 
     it("says which pattern it can't read", async () => {
-      await show(<SettingsView />, [READY]);
+      await show(<ProjectsView />, [READY]);
       mockIPC((command) => {
         if (command === "project_update") throw { code: "blocked", reason: { code: "invalidSetting", field: "sensitivePaths", value: "a[" }, detail: null };
         return command === "workflows_list" ? [WORKFLOW] : null;
@@ -410,7 +410,7 @@ describe("adding a project", () => {
     });
 
     it("carries the default workflow when it saves", async () => {
-      await show(<SettingsView />, [{ ...READY, defaultWorkflow: "builtin:full" }]);
+      await show(<ProjectsView />, [{ ...READY, defaultWorkflow: "builtin:full" }]);
       await click(i18next.t("settings.save"));
       expect(called("project_update")).toHaveLength(1);
     });
@@ -418,7 +418,7 @@ describe("adding a project", () => {
 
   describe("removing", () => {
     it("says what it does and doesn't do, and does nothing until confirmed", async () => {
-      await show(<SettingsView />, [READY]);
+      await show(<ProjectsView />, [READY]);
       await click(i18next.t("remove.confirm"));
       expect(page()).toContain("Remove ready from Keel?");
       expect(page()).toContain(i18next.t("remove.doesNot"));
@@ -431,7 +431,7 @@ describe("adding a project", () => {
     });
 
     it("removes it from the list once confirmed", async () => {
-      await show(<SettingsView />, [READY]);
+      await show(<ProjectsView />, [READY]);
       await click(i18next.t("remove.confirm"));
       const dialog = document.querySelector('[role="dialog"]') as HTMLElement;
       await act(async () => [...dialog.querySelectorAll("button")].find((b) => b.textContent === i18next.t("remove.confirm"))?.click());
@@ -439,7 +439,7 @@ describe("adding a project", () => {
       expect(called("project_remove")[0].args).toEqual({ projectId: "ready" });
       expect(useApp.getState().overview.projects).toEqual([]);
       expect(document.querySelector('[role="dialog"]')).toBeNull();
-      expect(page()).toContain(i18next.t("settings.noProjects"));
+      expect(page()).toContain(i18next.t("projects.none"));
     });
 
     it("says why it's refused, with a way to the run", async () => {

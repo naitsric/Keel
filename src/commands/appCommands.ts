@@ -52,6 +52,7 @@ export function registerAppCommands(): () => void {
     { id: "navigate.board", title: "shortcuts.board", category: NAVIGATE, keybinding: KEYS.board, run: goTo({ name: "board" }) },
     { id: "navigate.workflows", title: "shortcuts.workflows", category: NAVIGATE, keybinding: KEYS.workflows, run: goTo({ name: "workflows" }) },
     { id: "navigate.brain", title: "shortcuts.brain", category: NAVIGATE, keybinding: KEYS.brain, run: goTo({ name: "brain" }) },
+    { id: "navigate.projects", title: "shortcuts.projects", category: NAVIGATE, keybinding: KEYS.projects, run: goTo({ name: "projects" }) },
     // The native menu takes ⌘, first, so here it's only findable.
     { id: "navigate.settings", title: "shortcuts.settings", category: NAVIGATE, displayKey: KEYS.settings, run: goTo({ name: "settings" }) },
     { id: "navigate.back", title: "shortcuts.back", category: NAVIGATE, keybinding: KEYS.back, keybindingOutsideFields: KEYS.backOutsideFields, enabled: () => backTarget() !== null, run: goBack },

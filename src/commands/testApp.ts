@@ -74,6 +74,8 @@ function backend(command: string, args: unknown) {
       return { settings: { enabled: false, port: 7413 }, status: { running: false, port: null, url: null, error: null }, clients: [], calls: [] };
     case "github_status":
       return { repo: "acme/demo", accounts: [], info: null, excessScopes: [], error: null };
+    case "overview":
+      return useApp.getState().overview;
     case "max_agents_get":
       return 2;
     default:

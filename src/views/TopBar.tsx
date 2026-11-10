@@ -10,6 +10,7 @@ const PAGES = [
   { page: "board", label: "app.board", command: "navigate.board", key: KEYS.board },
   { page: "workflows", label: "app.workflows", command: "navigate.workflows", key: KEYS.workflows },
   { page: "brain", label: "app.brain", command: "navigate.brain", key: KEYS.brain },
+  { page: "projects", label: "app.projects", command: "navigate.projects", key: KEYS.projects },
 ] as const;
 
 /** A run sits below the page it was opened from, so that page stays the current one. */

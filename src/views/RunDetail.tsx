@@ -840,7 +840,7 @@ export function QuestionsCard({ attempt, attempts, onError }: { attempt: Attempt
   );
 }
 
-function Actions({ attempt, onError }: { attempt: Attempt; onError: (message: string) => void }) {
+function Actions({ attempt, projectId, onError }: { attempt: Attempt; projectId: string; onError: (message: string) => void }) {
   const { t } = useTranslation();
   const navigate = useApp((s) => s.navigate);
   const act = (run: () => Promise<unknown>) => run().catch((e) => onError(errorText(t, e)));
@@ -896,7 +896,7 @@ function Actions({ attempt, onError }: { attempt: Attempt; onError: (message: st
       {attempt.reason && <p className="selectable text-[12.5px] text-warning">{reasonText(t, attempt.reason)}</p>}
       <div className={cx("flex flex-wrap gap-2", attempt.reason && "mt-2.5")}>
         {needsSignIn(attempt.reason) && <Button onClick={() => void act(() => api.openClaudeLogin())}>{t("run.signIn")}</Button>}
-        {needsProjectSettings(attempt.reason) && <Button onClick={() => navigate({ name: "settings" })}>{t("newRun.openSettings")}</Button>}
+        {needsProjectSettings(attempt.reason) && <Button onClick={() => navigate({ name: "projects", projectId })}>{t("newRun.openProject")}</Button>}
         {canResume && <Button variant="primary" onClick={() => void act(() => api.attemptRetry(attempt.id, true))}>{t("run.resume")}</Button>}
         <Button onClick={() => void act(() => api.attemptRetry(attempt.id, false))}>{t("run.retry")}</Button>
         <Button variant="ghost" onClick={() => void act(() => api.attemptAbandon(attempt.id))}>
@@ -1524,7 +1524,7 @@ export function RunDetail({ runId }: { runId: string }) {
           <QuestionsCard key={latest.id} attempt={latest} attempts={attempts} onError={setError} />
         ) : (
           <>
-            <Actions attempt={latest} onError={setError} />
+            <Actions attempt={latest} projectId={run.projectId} onError={setError} />
             {!going && outcome}
           </>
         )}

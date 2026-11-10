@@ -4,7 +4,7 @@ import i18next, { type Language, systemLanguage } from "../i18n";
 import { api, type McpOverview, type Overview, type Preflight, type ProjectAdded } from "./api";
 import type { QuestionPick } from "./questions";
 
-export type View = { name: "home" } | { name: "run"; runId: string; backTo?: View } | { name: "settings" } | { name: "workflows" } | { name: "brain" } | { name: "board"; projectId?: string };
+export type View = { name: "home" } | { name: "run"; runId: string; backTo?: View } | { name: "settings" } | { name: "workflows" } | { name: "brain" } | { name: "board"; projectId?: string } | { name: "projects"; projectId?: string };
 
 export interface ProjectSetupRequest {
   projectId: string;

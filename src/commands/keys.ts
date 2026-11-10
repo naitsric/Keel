@@ -17,6 +17,7 @@ export const KEYS = {
   board: "$mod+Digit2",
   workflows: "$mod+Digit3",
   brain: "$mod+Digit4",
+  projects: "$mod+Digit5",
   settings: "$mod+Comma",
   back: "$mod+BracketLeft",
   backOutsideFields: "$mod+ArrowUp",

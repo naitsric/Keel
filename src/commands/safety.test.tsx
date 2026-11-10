@@ -37,6 +37,7 @@ const PAGES: { name: string; view: View }[] = [
   { name: "the board", view: { name: "board" } },
   { name: "workflows", view: { name: "workflows" } },
   { name: "brain", view: { name: "brain" } },
+  { name: "projects", view: { name: "projects" } },
   { name: "settings", view: { name: "settings" } },
 ];
 const RUNS = [row(WAITING, "waitingApproval"), row("r2", "waitingApproval"), row("empty", "waitingApproval"), row("working", "running"), row("stuck", "blocked")];
@@ -63,7 +64,7 @@ describe("safety", () => {
 
     it("sees every command there is, so the walks below mean something", async () => {
       const ids = (await everyCommand()).map((command) => command.id);
-      expect(ids).toEqual(expect.arrayContaining(["search.everywhere", "search.findAction", "navigate.goToRun", "navigate.runs", "navigate.board", "navigate.workflows", "navigate.brain", "navigate.settings", "navigate.back", "run.nextWaiting", "run.previousWaiting", "run.new", "run.showChanges", "run.stopStep", "board.newTask"]));
+      expect(ids).toEqual(expect.arrayContaining(["search.everywhere", "search.findAction", "navigate.goToRun", "navigate.runs", "navigate.board", "navigate.workflows", "navigate.brain", "navigate.projects", "navigate.settings", "navigate.back", "run.nextWaiting", "run.previousWaiting", "run.new", "run.showChanges", "run.stopStep", "board.newTask"]));
     });
 
     it("no command is about deciding, in any language", async () => {
@@ -398,6 +399,7 @@ describe("safety", () => {
         "navigate.board": "CmdOrCtrl+2",
         "navigate.workflows": "CmdOrCtrl+3",
         "navigate.brain": "CmdOrCtrl+4",
+        "navigate.projects": "CmdOrCtrl+5",
         "navigate.settings": "CmdOrCtrl+Comma",
         "navigate.back": "CmdOrCtrl+BracketLeft",
         "run.nextWaiting": null,

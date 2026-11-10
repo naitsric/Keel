@@ -24,13 +24,13 @@ const KEYBOARD_CODES = { start: ["Space"], cancel: ["Escape"], end: ["Space", "E
 
 const focusClass = "focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
 
-function NoticeBar({ notice, onDismiss }: { notice: BoardNotice; onDismiss?: () => void }) {
+function NoticeBar({ notice, projectId, onDismiss }: { notice: BoardNotice; projectId?: string; onDismiss?: () => void }) {
   const { t } = useTranslation();
   const navigate = useApp((s) => s.navigate);
   return (
     <div role="alert" className="flex flex-wrap items-center gap-2 rounded-md border border-border-strong bg-inset px-3 py-2 text-[12.5px] text-warning">
       <span className="selectable min-w-0 flex-1">{notice.text}</span>
-      {notice.settings && <Button onClick={() => navigate({ name: "settings" })}>{t("newRun.openSettings")}</Button>}
+      {notice.settings && <Button onClick={() => navigate({ name: "projects", projectId })}>{t("newRun.openProject")}</Button>}
       {onDismiss && (
         <Button variant="ghost" aria-label={t("board.dismiss")} title={t("board.dismiss")} className="px-1.5" onClick={onDismiss}>
           <X size={13} />
@@ -111,7 +111,7 @@ function CardShell({ card, actions, nodeRef, style, faded, handleRef, handleProp
       </button>
       {needsProjectSettings(card.startBlocked) && (
         <button type="button" className="mx-2 mb-1 block text-[11.5px] text-accent hover:underline" onClick={actions.onOpenSettings}>
-          {t("newRun.openSettings")}
+          {t("newRun.openProject")}
         </button>
       )}
       {hasFooter && (
@@ -262,7 +262,7 @@ export function TaskDialog({ projectId, card, onClose, onSaved }: { projectId: s
           <textarea rows={5} value={body} onChange={(e) => setBody(e.target.value)} placeholder={card?.issue ? undefined : t("newRun.promptPlaceholder")} className={`${inputClass} resize-y leading-relaxed`} />
         </Field>
         {canTouchOthers && <AlsoTouches projectId={projectId} chosen={touches} disabled={busy} onChange={setTouches} />}
-        {notice && <NoticeBar notice={notice} />}
+        {notice && <NoticeBar notice={notice} projectId={projectId} />}
         <div className="flex justify-end gap-2">
           <Button onClick={onClose}>{t("newRun.cancel")}</Button>
           <Button type="submit" variant="primary" disabled={busy || title.trim() === ""}>
@@ -295,7 +295,7 @@ function DeleteDialog({ card, onClose, onDeleted }: { card: BoardCard; onClose: 
     <Modal open onOpenChange={(open) => !open && onClose()} title={t("board.deleteTitle")} description={t("board.deleteBody", { title: card.title })}>
       {notice && (
         <div className="mb-3">
-          <NoticeBar notice={notice} />
+          <NoticeBar notice={notice} projectId={card.projectId} />
         </div>
       )}
       <div className="flex justify-end gap-2">
@@ -351,7 +351,7 @@ function ImportDialog({ projectId, cards, onClose, onImported }: { projectId: st
       <div className="space-y-3">
         {issues === null && <p className="text-[12px] text-subtle">{t("newRun.issuesLoading")}</p>}
         {issues?.length === 0 && !notice && <p className="text-[12.5px] text-muted">{t("newRun.issuesEmpty")}</p>}
-        {notice && <NoticeBar notice={notice} />}
+        {notice && <NoticeBar notice={notice} projectId={projectId} />}
         {issues && issues.length > 0 && (
           <ul aria-label={t("board.import.title")} className="max-h-72 overflow-y-auto rounded-md border border-border-strong bg-inset">
             {issues.map((issue) => {
@@ -541,7 +541,7 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
     onOpenPr: (url) => {
       api.openGithubUrl(url).catch((error) => setNotice(boardNotice(t, error)));
     },
-    onOpenSettings: () => navigate({ name: "settings" }),
+    onOpenSettings: () => navigate({ name: "projects", projectId }),
     onOpenJoint: (changeId) => setDialog({ kind: "joint", changeId }),
   };
 
@@ -612,7 +612,7 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
           </div>
         )}
         {paused && <BlockerNotice blocker={paused} text={pausedText(t, paused)} />}
-        {notice && <NoticeBar notice={notice} onDismiss={() => setNotice(null)} />}
+        {notice && <NoticeBar notice={notice} projectId={projectId} onDismiss={() => setNotice(null)} />}
         {board && board.cards.length === 0 && <p className="text-[12.5px] text-muted">{t("board.empty")}</p>}
         {projects.length > 0 && board && (
           <DndContext sensors={sensors} collisionDetection={collisionDetection} measuring={MEASURING} accessibility={{ announcements, screenReaderInstructions: { draggable: t("board.drag.help") } }} onDragStart={onDragStart} onDragOver={onDragOver} onDragEnd={onDragEnd} onDragCancel={onDragCancel}>
