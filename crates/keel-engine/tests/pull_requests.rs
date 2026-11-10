@@ -686,7 +686,7 @@ fn opening_a_run_finds_out_what_became_of_its_pull_request_and_only_reads() {
     let gh = w.gh_log();
     assert!(
         gh.contains(
-            "gh pr view 12 --repo acme/app --json state,isDraft,mergedAt,closedAt,updatedAt"
+            "gh pr view 12 --repo acme/app --json state,isDraft,mergedAt,closedAt,updatedAt,headRefOid"
         ),
         "{gh}"
     );

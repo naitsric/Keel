@@ -1,5 +1,5 @@
 import type { TFunction } from "i18next";
-import type { AttemptState, Board, BoardCard, BoardColumn, CommandError, PrState, Reason } from "./api";
+import type { AttemptState, Board, BoardCard, BoardColumn, CommandError, PartOf, PartWarning, PrState, Reason } from "./api";
 import { formatDateTime } from "./format";
 import { errorText, needsProjectSettings, reasonText } from "./reason";
 
@@ -157,6 +157,36 @@ export function cardLabel(t: TFunction, card: BoardCard): CardLabel | null {
     default:
       return null;
   }
+}
+
+export const partText = (t: TFunction, part: PartOf) => t("board.joint.part", { position: part.position, total: part.total });
+
+/** What a part waits for, while it does. */
+export function waitsForText(t: TFunction, part: PartOf): string | null {
+  const before = part.waitsFor;
+  if (!before) return null;
+  return before.position === null ? t("board.joint.waitsForCard", { project: before.project }) : t("board.joint.waitsFor", { position: before.position, project: before.project });
+}
+
+export const partWarningText = (t: TFunction, warning: PartWarning) => t(`board.joint.warnings.${warning.kind}`, { position: warning.position, project: warning.project });
+
+export interface JointLabel {
+  /** A part, or where a change across projects is agreed. */
+  text: string;
+  /** What a part waits for, or what else the request touches. */
+  detail: string | null;
+  warnings: string[];
+}
+
+/**
+ * What a card says about the change across projects it's in. `cardLabel` says nothing in Todo,
+ * where a part waits, so this comes on top of it. `nameOf` gives a project's name by its id.
+ */
+export function jointLabel(t: TFunction, card: BoardCard, nameOf: (projectId: string) => string): JointLabel | null {
+  if (card.part) return { text: partText(t, card.part), detail: waitsForText(t, card.part), warnings: card.part.warnings.map((warning) => partWarningText(t, warning)) };
+  if (!card.jointChangeId) return null;
+  const others = card.alsoTouches.map(nameOf);
+  return { text: t("board.joint.agreeing"), detail: others.length > 0 ? t("board.joint.alsoTouches", { projects: others.join(", ") }) : null, warnings: [] };
 }
 
 export interface BoardNotice {

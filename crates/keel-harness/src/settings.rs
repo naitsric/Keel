@@ -49,6 +49,36 @@ pub fn step_settings(
     })
 }
 
+/// Lets an agent read these folders and change nothing in them. `--add-dir` has to name them too,
+/// or the file tools can't reach them, and it opens them to writes as well: the `Edit` rule is what
+/// closes that, for the file tools and, through the sandbox, for Bash.
+pub fn with_read_only(mut settings: Value, folders: &[String]) -> Value {
+    for folder in folders {
+        let folder = folder.trim_end_matches('/');
+        if let Some(allow) = settings["sandbox"]["filesystem"]["allowRead"].as_array_mut() {
+            allow.push(json!(folder));
+        }
+        if let Some(deny) = settings["permissions"]["deny"].as_array_mut() {
+            deny.push(json!(format!("Edit(/{folder}/**)")));
+        }
+    }
+    settings
+}
+
+/// Whether these settings let an agent read this folder and change nothing in it. Only then may
+/// `--add-dir` name it.
+pub fn is_read_only(settings: &Value, folder: &str) -> bool {
+    let folder = folder.trim_end_matches('/');
+    let listed = |path: &str, value: Value| {
+        settings
+            .pointer(path)
+            .and_then(Value::as_array)
+            .is_some_and(|list| list.contains(&value))
+    };
+    listed("/sandbox/filesystem/allowRead", json!(folder))
+        && listed("/permissions/deny", json!(format!("Edit(/{folder}/**)")))
+}
+
 /// The same policy for a `check` step, which Keel runs itself. Tests and Makefiles can be edited
 /// by an agent, so they get no more trust than the agent does. A Seatbelt profile for
 /// `sandbox-exec`: no home folder except what's listed, no network, and writes only here.
@@ -182,6 +212,38 @@ mod tests {
             !deny
                 .iter()
                 .any(|rule| rule == "Edit(//w/.git/**)" || rule == "Edit(//w/.git)")
+        );
+    }
+
+    #[test]
+    fn a_folder_only_read_is_readable_and_closed_to_changes() {
+        let settings = with_read_only(
+            step_settings(Path::new("/w"), &[], &[], &[]),
+            &["/data/runs/r1/context/p2/".into()],
+        );
+        let allow = settings["sandbox"]["filesystem"]["allowRead"]
+            .as_array()
+            .unwrap();
+        assert!(allow.contains(&json!("/data/runs/r1/context/p2")));
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.contains(&json!("Edit(//data/runs/r1/context/p2/**)")));
+        assert!(
+            deny.contains(&json!("Edit(//w/.git/config)")),
+            "what was denied stays denied"
+        );
+        assert!(is_read_only(&settings, "/data/runs/r1/context/p2"));
+        assert!(!is_read_only(&settings, "/data/runs/r1/context/p3"));
+        assert!(
+            !is_read_only(
+                &step_settings(
+                    Path::new("/w"),
+                    &[],
+                    &["/data/runs/r1/context/p2".into()],
+                    &[]
+                ),
+                "/data/runs/r1/context/p2"
+            ),
+            "readable isn't enough"
         );
     }
 

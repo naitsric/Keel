@@ -706,6 +706,51 @@ describe("the approval card", () => {
     expect(answers).toEqual([{ attemptId: "human", approve: true, text: "Keep changes small." }]);
   });
 
+  describe("where a change across projects is agreed", () => {
+    const agreement = [
+      { type: "agent", id: "spec" },
+      { type: "approval", id: "human" },
+    ];
+    const parts = [
+      { project: "valora", text: "Sends the token" },
+      { project: "app", text: "Reads the token" },
+    ];
+    const agreed = specifier({ parts, together: ["Log in on Valora and land in back-adm"] });
+
+    it("shows each part in order and what's tried together, without having to open anything", () => {
+      show([agreed, human], [], agreement);
+      expect(page()).toContain("Approve what was agreed?");
+      expect(page()).toContain("What changes in each project");
+      const items = [...document.querySelectorAll("ol li")].map((item) => item.textContent);
+      expect(items).toEqual(["valora: Sends the token", "app: Reads the token"]);
+      expect(page()).toContain("Log in on Valora and land in back-adm");
+      act(() => vi.advanceTimersByTime(800));
+      press("Approve and open the parts");
+      expect(answers).toEqual([{ attemptId: "human", approve: true, text: "" }]);
+    });
+
+    it("is an ordinary approval when nothing has parts", () => {
+      show([specifier(), human], [], agreement);
+      expect(page()).not.toContain("Approve what was agreed?");
+      expect(button("Approve and open the parts")).toBeUndefined();
+    });
+
+    it("says it in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      show([agreed, human], [], agreement);
+      expect(page()).toContain("¿Apruebas lo acordado?");
+      expect(button("Aprobar y abrir las partes")).toBeDefined();
+    });
+  });
+
+  it("warns, before approving a part, about what became of the parts before it", () => {
+    const joint = { changeId: "plan", agrees: false, part: { changeId: "plan", position: 2, total: 2, waitsFor: null, warnings: [{ kind: "closed" as const, position: 1, project: "valora" }] } };
+    act(() => root.render(<ApprovalCard attempt={human} run={runWith(deliverNext)} attempts={[builder(["calc.py"]), human]} files={["calc.py"]} commands={[]} rawCheck="intact" joint={joint} onShowChanges={() => {}} onError={() => {}} />));
+    expect(page()).toContain("Part 1, in valora: its pull request was closed.");
+    act(() => vi.advanceTimersByTime(800));
+    expect(button("Approve and open a draft")?.disabled).toBe(false);
+  });
+
   describe("back after the work was sent back", () => {
     const returned = (output: Record<string, unknown>) => attempt({ id: "human-0", stepId: "human", kind: "approval", tools: "none", state: "returned", output: output as unknown as Attempt["output"] });
     const again = { ...human, round: 1 };

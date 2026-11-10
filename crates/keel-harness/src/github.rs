@@ -75,6 +75,8 @@ pub struct Issue {
 pub struct PrStatus {
     pub state: PrState,
     pub at: Option<String>,
+    /// The commit its branch is at. Someone can push to it after Keel opened it.
+    pub head: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -148,10 +150,20 @@ pub fn github_repo(remote: &str) -> Option<String> {
 /// `owner/name` and the number of a pull request, from its URL. It's the URL that says which repo,
 /// since a project's folder can point at another one by now, where that number means something else.
 pub fn pull_request_of(url: &str) -> Option<(String, i64)> {
+    numbered(url, "pull")
+}
+
+/// `owner/name` and the number of an issue, from its URL. A card keeps an issue as it was copied,
+/// with no other record of the repo it came from.
+pub fn issue_in(url: &str) -> Option<(String, i64)> {
+    numbered(url, "issues")
+}
+
+fn numbered(url: &str, kind: &str) -> Option<(String, i64)> {
     let path = url.trim().strip_prefix("https://github.com/")?;
     let mut parts = path.split('/');
-    let (owner, name, pull, number) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
-    if owner.is_empty() || name.is_empty() || pull != "pull" || parts.next().is_some() {
+    let (owner, name, found, number) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    if owner.is_empty() || name.is_empty() || found != kind || parts.next().is_some() {
         return None;
     }
     let number = number.parse().ok().filter(|number| *number > 0)?;
@@ -395,7 +407,7 @@ impl Gh {
                 "--repo",
                 repo,
                 "--json",
-                "state,isDraft,mergedAt,closedAt,updatedAt",
+                "state,isDraft,mergedAt,closedAt,updatedAt,headRefOid",
             ],
             limit,
         )?;
@@ -484,7 +496,12 @@ fn parse_pr_status(value: &serde_json::Value) -> Option<PrStatus> {
         .and_then(|v| v.as_str())
         .filter(|at| !at.is_empty())
         .map(str::to_owned);
-    Some(PrStatus { state, at })
+    let head = value
+        .get("headRefOid")
+        .and_then(|v| v.as_str())
+        .filter(|head| !head.is_empty())
+        .map(str::to_owned);
+    Some(PrStatus { state, at, head })
 }
 
 /// The arguments that make `git` authenticate through `gh`, with nothing written to any config.
@@ -603,6 +620,23 @@ mod tests {
     }
 
     #[test]
+    fn an_issues_repo_and_number_come_from_its_url() {
+        assert_eq!(
+            issue_in("https://github.com/acme/back/issues/434"),
+            Some(("acme/back".to_owned(), 434))
+        );
+        for url in [
+            "https://github.com/acme/back/pull/434",
+            "https://github.com/acme/back/issues/434#issuecomment-1",
+            "https://github.com/acme/back/issues/0",
+            "https://example.com/acme/back/issues/434",
+            "",
+        ] {
+            assert_eq!(issue_in(url), None, "{url}");
+        }
+    }
+
+    #[test]
     fn a_gh_that_hangs_is_given_up_on_along_with_what_it_started() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -628,6 +662,7 @@ mod tests {
             Some(PrStatus {
                 state,
                 at: Some(at.to_owned()),
+                head: None,
             })
         };
         assert_eq!(
@@ -659,8 +694,14 @@ mod tests {
             status(serde_json::json!({ "state": "MERGED", "mergedAt": null })),
             Some(PrStatus {
                 state: PrState::Merged,
-                at: None
+                at: None,
+                head: None,
             })
+        );
+        assert_eq!(
+            status(serde_json::json!({ "state": "OPEN", "isDraft": true, "updatedAt": "t8", "headRefOid": "abc123" }))
+                .and_then(|status| status.head),
+            Some("abc123".to_owned())
         );
         assert_eq!(
             status(serde_json::json!({ "state": "SOMETHING_NEW" })),
@@ -699,7 +740,7 @@ mod tests {
         let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
         assert_eq!(
             calls.trim(),
-            "pr view 12 --repo acme/app --json state,isDraft,mergedAt,closedAt,updatedAt [token:gho_secret]"
+            "pr view 12 --repo acme/app --json state,isDraft,mergedAt,closedAt,updatedAt,headRefOid [token:gho_secret]"
         );
     }
 

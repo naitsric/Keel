@@ -166,7 +166,8 @@
     "nothingSkippedToRun": "No se omitió nada por ser un cambio pequeño, así que no hay nada que correr.",
     "keptAsking": "Después de {{rounds}} rondas de preguntas, siguió preguntando algo que solo tú puedes decidir, así que Keel lo detuvo en vez de elegir por ti.",
     "partsNotOpened": "Lo aprobaste, pero Keel no pudo poner en el tablero la parte de cada proyecto: {{detail}}. Inténtalo de nuevo cuando eso esté resuelto.",
-    "startsOnTheBoard": "Este issue es un cambio en varios proyectos, así que arranca desde su tarjeta en el tablero."
+    "startsOnTheBoard": "Este issue es un cambio en varios proyectos, así que arranca desde su tarjeta en el tablero.",
+    "readCopyFailed": "Keel no pudo traer una copia de {{project}} para leerla: {{detail}}. Inténtalo de nuevo cuando se pueda alcanzar."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
@@ -282,6 +283,11 @@
     "decideRejected": "Nada. Lo rechazaste, y tu motivo llegará a las próximas ejecuciones de este proyecto.",
     "approvalTitle": "¿Esto debe convertirse en un pull request?",
     "approvalContinueTitle": "¿Debe seguir esta ejecución?",
+    "agreementTitle": "¿Apruebas lo acordado?",
+    "agreementBody": "Al aprobar, cada parte recibe una tarjeta en el tablero, en este orden. Cada una arranca cuando la anterior tiene pull request. Hasta entonces no cambia nada en ningún proyecto.",
+    "agreementParts": "Qué cambia en cada proyecto",
+    "agreementApprove": "Aprobar y abrir las partes",
+    "agreementApproveHint": "Cada parte corre el workflow de siempre de su proyecto, y una persona la aprueba antes de su pull request.",
     "approvalEmptyTitle": "El agente no cambió nada",
     "approvalBody": "Nada ha salido de tu Mac todavía.",
     "approvalEmptyBody": "No hay nada que convertir en un pull request.",
@@ -380,6 +386,8 @@
     "specLimits": "Qué se queda igual",
     "specAsked": "Lo que te preguntó",
     "specAnswered": "Lo que respondiste",
+    "specParts": "Qué cambia en cada proyecto",
+    "specTogether": "Para probar juntos",
     "verifyMet_one": "{{count}} de {{total}} se cumple",
     "verifyMet_other": "{{count}} de {{total}} se cumplen",
     "verifyUnmet_one": "{{count}} no se cumple",
@@ -872,7 +880,9 @@
       "title": "Título",
       "description": "Descripción (opcional)",
       "create": "Crear",
-      "save": "Guardar"
+      "save": "Guardar",
+      "alsoTouches": "También toca",
+      "alsoTouchesHint": "Primero Keel acuerda contigo qué cambia en cada proyecto. Después pone una tarjeta en el tablero por cada proyecto que cambia."
     },
     "deleteTitle": "¿Eliminar esta tarjeta?",
     "deleteBody": "«{{title}}» sale del tablero. En GitHub no cambia nada, y si tuvo una ejecución, sigue en tu historial.",
@@ -892,6 +902,18 @@
       "over": "Sobre {{column}}.",
       "dropped": "Soltaste {{title}}.",
       "cancelled": "Movimiento cancelado. {{title}} se quedó donde estaba."
+    },
+    "joint": {
+      "agreeing": "Cambio en varios proyectos",
+      "alsoTouches": "También toca {{projects}}",
+      "part": "Parte {{position}} de {{total}}",
+      "waitsFor": "Espera a que la parte {{position}}, en {{project}}, tenga pull request",
+      "waitsForCard": "Espera a que la parte anterior, en {{project}}, tenga pull request",
+      "open": "Ver el cambio",
+      "warnings": {
+        "closed": "Parte {{position}}, en {{project}}: su pull request se cerró.",
+        "changed": "La parte {{position}}, en {{project}}, tiene commits que esta parte no leyó."
+      }
     }
   },
   "onboarding": {
@@ -1082,6 +1104,7 @@
       "verifierFoundUnmet": "algo que tenía que cumplirse no se cumple",
       "verifierHasNotRun": "nadie ha comprobado todavía que este código haga lo que se pidió",
       "personAsked": "lo pediste",
+      "partOfJointChange": "es una parte de un cambio en varios proyectos, y las partes solo funcionan juntas",
       "unknown": "Keel encontró una razón que no puede explicar aquí"
     },
     "risks": {
@@ -1113,7 +1136,27 @@
       "verifierFoundUnmet": "algo sin cumplir",
       "verifierHasNotRun": "sin comprobar",
       "personAsked": "lo pediste",
+      "partOfJointChange": "parte de un cambio en varios proyectos",
       "unknown": "otra razón"
     }
+  },
+  "joint": {
+    "title": "Cambio en varios proyectos",
+    "loading": "Cargando…",
+    "notAgreed": "Todavía no se acuerda. Eso pasa en “{{title}}”, en {{project}}.",
+    "agreedIn": "Se acordó en “{{title}}”, en {{project}}.",
+    "agreedInGone": "La tarjeta donde se acordó ya no está en el tablero.",
+    "projects": "Proyectos",
+    "parts": "Partes",
+    "readOnly": "Solo se leen, sin cambios: {{projects}}",
+    "agreed": "Lo acordado",
+    "together": "Para probar juntos",
+    "togetherHint": "Ninguna parte lo prueba por sí sola. Pruébalo cuando todas las partes estén en su lugar, y marca lo que funciona.",
+    "stopWaiting": "No esperar",
+    "stopWaitingHint": "Deja que esta parte arranque sin el pull request de la anterior.",
+    "openRun": "Abrir run",
+    "openPr": "Pull request",
+    "notStarted": "Sin empezar",
+    "close": "Cerrar"
   }
 }

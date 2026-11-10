@@ -2188,11 +2188,14 @@ fn the_board_has_the_shape_the_contract_says() {
     assert_eq!(
         keys,
         [
+            "alsoTouches",
             "body",
             "column",
             "createdAt",
             "id",
             "issue",
+            "jointChangeId",
+            "part",
             "position",
             "prState",
             "prStateAt",
@@ -2206,6 +2209,10 @@ fn the_board_has_the_shape_the_contract_says() {
             "title",
         ]
     );
+    // An ordinary card is in no change across projects.
+    assert_eq!(card["jointChangeId"], serde_json::Value::Null);
+    assert_eq!(card["alsoTouches"], serde_json::json!([]));
+    assert_eq!(card["part"], serde_json::Value::Null);
     assert_eq!(card["column"], "humanReview");
     assert_eq!(card["runState"], "waitingApproval");
     assert_eq!(card["projectId"], w.project_id);

@@ -13,8 +13,8 @@ use keel_core::{
 };
 use keel_engine::{
     AddedProject, Answer, Board, BrainView, Config, Engine, Error as EngineError, GithubStatus,
-    Preflight, ProjectProposalReview, ProjectSetup, RawCheck, StartRun, Workflow, WorkflowDraft,
-    request_from_issue, title_from_issue,
+    JointChangeView, Preflight, ProjectProposalReview, ProjectSetup, RawCheck, RunJoint, StartRun,
+    Workflow, WorkflowDraft, request_from_issue, title_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
@@ -469,6 +469,46 @@ fn card_move(
 #[tauri::command(async)]
 fn card_delete(state: State<'_, AppState>, card_id: String) -> CommandResult<()> {
     Ok(state.engine.card_delete(&card_id)?)
+}
+
+/// Which other projects a card's request touches. None makes it an ordinary card again.
+#[tauri::command(async)]
+fn card_set_projects(
+    state: State<'_, AppState>,
+    card_id: String,
+    projects: Vec<String>,
+) -> CommandResult<()> {
+    Ok(state.engine.card_set_projects(&card_id, &projects)?)
+}
+
+#[tauri::command(async)]
+fn card_stop_waiting(state: State<'_, AppState>, card_id: String) -> CommandResult<()> {
+    Ok(state.engine.card_stop_waiting(&card_id)?)
+}
+
+/// What was agreed is what an agent wrote.
+#[tauri::command(async)]
+fn joint_change_get(
+    state: State<'_, AppState>,
+    change_id: String,
+) -> CommandResult<Masked<JointChangeView>> {
+    Ok(Masked(state.engine.joint_change(&change_id)?))
+}
+
+/// Only from here: no agent and no assistant can say these work.
+#[tauri::command(async)]
+fn joint_check_set(
+    state: State<'_, AppState>,
+    change_id: String,
+    seq: i64,
+    works: bool,
+) -> CommandResult<()> {
+    Ok(state.engine.joint_check_set(&change_id, seq, works)?)
+}
+
+#[tauri::command(async)]
+fn run_joint(state: State<'_, AppState>, run_id: String) -> CommandResult<Option<RunJoint>> {
+    Ok(state.engine.run_joint(&run_id)?)
 }
 
 #[tauri::command(async)]
@@ -939,6 +979,11 @@ pub fn run() {
             card_update,
             card_move,
             card_delete,
+            card_set_projects,
+            card_stop_waiting,
+            joint_change_get,
+            joint_check_set,
+            run_joint,
             max_agents_get,
             max_agents_set,
             workflows_list,
@@ -1119,6 +1164,9 @@ mod tests {
                 rejection: Some(said.clone()),
                 start_blocked: Some(failed.clone()),
                 created_at: "2026-11-05T10:00:00Z".into(),
+                joint_change_id: None,
+                also_touches: Vec::new(),
+                part: None,
             }],
             working: 0,
             max_agents: 2,

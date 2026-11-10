@@ -302,6 +302,10 @@ export interface SpecOutput {
   questions: SpecQuestion[];
   /** What a person said to `questions`. Only the engine writes this. */
   answered?: GivenAnswer[];
+  /** Only where a change across projects is agreed: what changes in each project, in order. */
+  parts?: { project: string; text: string }[];
+  /** Only there too: what only works with every part in place, for a person to try. */
+  together?: string[];
 }
 
 /** One thing the specifier said has to be true, in its words, and what became of it. */
@@ -548,6 +552,72 @@ export interface BoardCard {
   rejection: string | null;
   startBlocked: Reason | null;
   createdAt: string;
+  /** The change across several projects it's in, as the card where it's agreed or as a part. */
+  jointChangeId: string | null;
+  /** On the card where it's agreed: the ids of the other projects its request touches. */
+  alsoTouches: string[];
+  part: PartOf | null;
+}
+
+/** Something about an earlier part a person should know before approving this one. */
+export interface PartWarning {
+  kind: "closed" | "changed";
+  position: number;
+  project: string;
+}
+
+/** Where a card stands as one part of a change across projects. */
+export interface PartOf {
+  changeId: string;
+  /** From 1. */
+  position: number;
+  total: number;
+  /** The part it starts after, while it still waits for that one's pull request. */
+  waitsFor: { cardId: string; position: number | null; project: string } | null;
+  warnings: PartWarning[];
+}
+
+export interface JointCard {
+  cardId: string;
+  projectId: string;
+  project: string;
+  title: string;
+  column: BoardColumn;
+  runId: string | null;
+  runState: AttemptState | null;
+  prUrl: string | null;
+  prState: PrState | null;
+  /** Null on the card where it's agreed. */
+  part: PartOf | null;
+}
+
+export interface JointCheck {
+  seq: number;
+  text: string;
+  /** When a person said it works. */
+  confirmedAt: string | null;
+}
+
+/** A change across several projects, in one place. */
+export interface JointChange {
+  id: string;
+  /** Null once that card is deleted. */
+  agreedIn: JointCard | null;
+  projects: { id: string; name: string }[];
+  /** What a person approved. Null until then. */
+  agreed: SpecOutput | null;
+  parts: JointCard[];
+  /** What it touches that no part changes. */
+  readOnly: { id: string; name: string }[];
+  checks: JointCheck[];
+}
+
+/** What a run's page says about the change across projects it's in. */
+export interface RunJoint {
+  changeId: string;
+  /** Whether this run is where it's agreed. */
+  agrees: boolean;
+  part: PartOf | null;
 }
 
 export interface Board {
@@ -635,6 +705,14 @@ export const api = {
   cardUpdate: (cardId: string, title: string, body: string) => invoke<void>("card_update", { cardId, title, body }),
   cardMove: (cardId: string, lane: "backlog" | "todo", index: number, language: string) => invoke<void>("card_move", { cardId, lane, index, language }),
   cardDelete: (cardId: string) => invoke<void>("card_delete", { cardId }),
+  /** The other projects a card's request touches. None makes it an ordinary card again. */
+  cardSetProjects: (cardId: string, projects: string[]) => invoke<void>("card_set_projects", { cardId, projects }),
+  /** Lets a part start without the pull request of the one before it. */
+  cardStopWaiting: (cardId: string) => invoke<void>("card_stop_waiting", { cardId }),
+  jointChangeGet: (changeId: string) => invoke<JointChange>("joint_change_get", { changeId }),
+  /** Only a person, from here, says what only works with every part in place works. */
+  jointCheckSet: (changeId: string, seq: number, works: boolean) => invoke<void>("joint_check_set", { changeId, seq, works }),
+  runJoint: (runId: string) => invoke<RunJoint | null>("run_joint", { runId }),
   maxAgentsGet: () => invoke<number>("max_agents_get"),
   maxAgentsSet: (value: number) => invoke<void>("max_agents_set", { value }),
 };

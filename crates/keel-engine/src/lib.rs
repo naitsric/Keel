@@ -27,6 +27,7 @@ pub use board::{Board, BoardCard, BoardIssue};
 pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
 pub use detect::Guess;
 pub use git::{ChangeSize, Git, GitError, Snapshot};
+pub use joint::{JointCard, JointChangeView, Named, Neighbour, PartOf, PartWarning, RunJoint};
 use keel_core::{AttemptState, CardLane, Reason, StepCondition, StepRole, StepSpec, WorkflowStep};
 use keel_harness::auth::{self, AuthStatus, VersionCheck};
 use keel_harness::github::{self, Account, Gh, GhError, Issue, RepoInfo};
@@ -333,6 +334,9 @@ struct Inner {
     /// Starting a step reads what ran and then adds to it. One at a time, or a step could start twice.
     advancing: Mutex<()>,
     creating_workspace: Mutex<()>,
+    /// One lock for each project being fetched to read and each run making its copies. See
+    /// `joint::prepare_read_copies`.
+    read_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 #[derive(Clone)]
@@ -399,6 +403,7 @@ impl Engine {
                 controls: Mutex::default(),
                 advancing: Mutex::new(()),
                 creating_workspace: Mutex::new(()),
+                read_locks: Mutex::default(),
             }),
         }
     }
@@ -1695,13 +1700,25 @@ impl Inner {
                     spec.max_turns,
                     spec.max_budget_usd,
                     text,
-                    settings::step_settings(
-                        &workspace,
-                        &project.allowed_domains,
-                        &project.allowed_read,
-                        // Only steps that run commands get anywhere near a service.
-                        &if spec.tools == keel_core::ToolProfile::Build {
-                            services::socket_dirs(&services::root_for(&project.id), &project.services)
+                    settings::with_read_only(
+                        settings::step_settings(
+                            &workspace,
+                            &project.allowed_domains,
+                            &project.allowed_read,
+                            // Only steps that run commands get anywhere near a service.
+                            &if spec.tools == keel_core::ToolProfile::Build {
+                                services::socket_dirs(&services::root_for(&project.id), &project.services)
+                            } else {
+                                Vec::new()
+                            },
+                        ),
+                        // The other projects of a change across several. Their copies are made when
+                        // the step starts, and only what's here can be read.
+                        &if joint::reads_others(&spec.role) {
+                            self.read_copies(run_id)?
+                                .iter()
+                                .map(|copy| copy.path.to_string_lossy().into_owned())
+                                .collect()
                         } else {
                             Vec::new()
                         },
@@ -1776,6 +1793,7 @@ impl Inner {
         self.changed(run_id);
         if matches!(step, WorkflowStep::Approval { .. }) {
             self.store.append_event(&id, "waiting", &json!({}))?;
+            self.look_at_earlier_parts(run_id);
             return Ok(id);
         }
         locked(&self.controls).insert(id.clone(), Control::default());
@@ -2045,6 +2063,7 @@ impl Inner {
             sensitive: &project.sensitive_paths,
             commands: &commands,
             change: self.change_of_run(&run.id, attempts),
+            part_of_joint_change: self.is_part(&run.id)?,
         }))
     }
 

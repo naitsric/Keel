@@ -64,6 +64,9 @@ pub struct StepCommand {
     pub resume: Option<String>,
     /// Makes the step return JSON matching this schema, in `structured_output`.
     pub json_schema: Option<String>,
+    /// Folders outside the workspace the file tools may reach. They're writable too unless the
+    /// settings deny it, which `settings::with_read_only` does.
+    pub add_dirs: Vec<PathBuf>,
 }
 
 impl StepCommand {
@@ -81,6 +84,15 @@ impl StepCommand {
         .iter()
         .map(|s| (*s).to_owned())
         .collect();
+        // It takes any number of folders, up to the next flag.
+        if !self.add_dirs.is_empty() {
+            args.push("--add-dir".to_owned());
+            args.extend(
+                self.add_dirs
+                    .iter()
+                    .map(|dir| dir.to_string_lossy().into_owned()),
+            );
+        }
         let mut pair = |flag: &str, value: String| {
             args.push(flag.to_owned());
             args.push(value);
@@ -161,6 +173,7 @@ mod tests {
             session_id: "sid".into(),
             resume: None,
             json_schema: None,
+            add_dirs: Vec::new(),
         }
     }
 
@@ -206,6 +219,23 @@ mod tests {
         assert_eq!(
             value_after(&c.args(&step(ToolProfile::ReadOnly)), "--json-schema").as_deref(),
             Some("{}")
+        );
+    }
+
+    #[test]
+    fn folders_outside_the_workspace_are_named_only_when_there_are_some() {
+        let mut c = command();
+        assert!(
+            !c.args(&step(ToolProfile::ReadOnly))
+                .contains(&"--add-dir".to_owned())
+        );
+        c.add_dirs = vec!["/r/context/a".into(), "/r/context/b".into()];
+        let args = c.args(&step(ToolProfile::ReadOnly));
+        let at = args.iter().position(|a| a == "--add-dir").unwrap();
+        assert_eq!(args[at + 1..at + 3], ["/r/context/a", "/r/context/b"]);
+        assert!(
+            args[at + 3].starts_with("--"),
+            "the next flag ends the list"
         );
     }
 

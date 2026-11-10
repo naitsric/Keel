@@ -10,8 +10,9 @@ use keel_core::{AttemptState, BoardColumn, CardLane, PrState, Reason};
 use keel_harness::github::Issue;
 use keel_store::{Card, NewCard, Project, Store};
 
+use crate::prompts::part_request;
 use crate::{
-    Engine, Error, Result, StartRun, Workflow, joint, locked, new_id, request_from_issue,
+    Engine, Error, PartOf, Result, StartRun, Workflow, joint, locked, new_id, request_from_issue,
     title_from, title_from_issue,
 };
 
@@ -97,6 +98,12 @@ pub struct BoardCard {
     #[serde(serialize_with = "keel_core::serialize_masked")]
     pub start_blocked: Option<Reason>,
     pub created_at: String,
+    /// The change across several projects it's part of, as the card where it's agreed or as a part.
+    pub joint_change_id: Option<String>,
+    /// On the card where it's agreed: the other projects its request touches, as the person chose.
+    pub also_touches: Vec<String>,
+    /// On a part: which one it is, and what it waits for.
+    pub part: Option<PartOf>,
 }
 
 impl From<Card> for BoardCard {
@@ -125,6 +132,9 @@ impl From<Card> for BoardCard {
             pr_state_at: card.pr_state_at,
             rejection: card.rejection,
             created_at: card.created_at,
+            joint_change_id: card.joint_change_id,
+            also_touches: Vec::new(),
+            part: None,
         }
     }
 }
@@ -152,12 +162,27 @@ impl Engine {
     pub fn board(&self, project_id: &str) -> Result<Board> {
         let store = &self.inner.store;
         let project = store.project(project_id)?;
+        let mut cards = Vec::new();
+        for card in store.cards(project_id)? {
+            // What it says about a change across projects is extra. Not finding it out mustn't keep
+            // the person from their board.
+            let part = self.inner.part_of(&card).unwrap_or_default();
+            let also_touches = if joint::agrees(&card) {
+                store
+                    .joint_change(&card.id)
+                    .map(|change| change.projects)
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            cards.push(BoardCard {
+                part,
+                also_touches,
+                ..BoardCard::from(card)
+            });
+        }
         Ok(Board {
-            cards: store
-                .cards(project_id)?
-                .into_iter()
-                .map(BoardCard::from)
-                .collect(),
+            cards,
             working: store.working_runs()?,
             max_agents: self.max_agents(),
             default_workflow: project.default_workflow,
@@ -502,6 +527,11 @@ impl Engine {
         };
         let issue = issue_of(card);
         let (title, request) = match &issue {
+            // A part may be in another repo, where the issue's number would point at something else.
+            _ if card.joint_position.is_some() => (
+                card.title.clone(),
+                part_request(&card.title, &card.body, issue.as_ref()),
+            ),
             Some(issue) => (
                 title_from_issue(issue.number, &card.title),
                 request_from_issue(issue, &card.body),

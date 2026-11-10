@@ -51,10 +51,27 @@ impl Engine {
     /// A person opened this run, so they may be wondering. Returns at once: what it finds arrives as
     /// a change, and a run with no pull request, or a merged one, has nothing to find. One closed
     /// long ago is looked at too, since this is the only way Keel finds out it was reopened.
+    /// A part of a change across projects is looked at with the parts before it, whose pull
+    /// requests it was built on.
     pub fn look_at_pr(&self, run_id: &str) {
         let Ok(run) = self.inner.store.run(run_id) else {
             return;
         };
+        self.inner.look_soon(run);
+        self.inner.look_at_earlier_parts(run_id);
+    }
+}
+
+impl Inner {
+    /// Before a person approves a part, what became of the parts before it matters, and the look in
+    /// the background can be half an hour old. It doesn't wait for the answers.
+    pub(crate) fn look_at_earlier_parts(self: &Arc<Self>, run_id: &str) {
+        for run in self.earlier_part_runs(run_id).unwrap_or_default() {
+            self.look_soon(run);
+        }
+    }
+
+    fn look_soon(self: &Arc<Self>, run: Run) {
         let looked_lately = run
             .pr_checked_at
             .as_deref()
@@ -62,12 +79,10 @@ impl Engine {
         if run.pr_url.is_none() || run.pr_state == Some(PrState::Merged) || looked_lately {
             return;
         }
-        let inner = self.inner.clone();
+        let inner = self.clone();
         std::thread::spawn(move || inner.look_at_pr(&run));
     }
-}
 
-impl Inner {
     fn look_at_due_prs(&self) {
         let before = time_ago(self.config.pr_look_again);
         let closed_before = time_ago(CLOSED_LOOK_FOR);
@@ -111,7 +126,10 @@ impl Inner {
         else {
             return;
         };
-        if run.pr_state == Some(status.state) && run.pr_state_at == status.at {
+        // An answer that doesn't say which commit leaves what Keel knew of it.
+        let head = status.head.or_else(|| run.pr_head.clone());
+        if run.pr_state == Some(status.state) && run.pr_state_at == status.at && run.pr_head == head
+        {
             return;
         }
         let saved = self.store.patch_run(
@@ -119,6 +137,7 @@ impl Inner {
             &[
                 ("pr_state", Value::Text(status.state.as_str().to_owned())),
                 ("pr_state_at", status.at.map_or(Value::Null, Value::Text)),
+                ("pr_head", head.map_or(Value::Null, Value::Text)),
             ],
         );
         if saved.is_ok() {
