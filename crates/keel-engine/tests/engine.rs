@@ -428,6 +428,66 @@ fn a_quiet_idle_step_is_reported_as_stalled_and_never_killed_on_its_own() {
     assert!(kinds.iter().any(|k| k == "stallCleared"));
 }
 
+/// A fake whose only output after init is a `tool_progress` heartbeat every second, as Claude
+/// Code writes while a command runs. `command` runs in the background below it. The loop uses
+/// only builtins so the command stays the leaf of the process tree.
+fn heartbeat_only(command: &str) -> String {
+    format!(
+        "cat > /dev/null\n{}\n{command} &\nbg=$!\ntrap 'kill $bg; exit 0' INT\nmkfifo hb\nexec 3<>hb\nwhile true; do\necho '{{\"type\":\"tool_progress\",\"tool_name\":\"Bash\",\"elapsed_time_seconds\":30}}'\nread -t 1 -u 3\ndone",
+        init(BUILD_TOOLS, "none")
+    )
+}
+
+#[test]
+fn a_hung_command_is_stalled_even_while_heartbeats_keep_coming() {
+    let h = harness_with(
+        &heartbeat_only("sleep 2345"),
+        LOGGED_IN,
+        "2.1.318",
+        |c| c.stall_after = Duration::from_millis(300),
+    );
+    let run = h.start(ToolProfile::Build);
+    let a = h.wait_for(&run, &[AttemptState::Stalled]);
+    let Reason::Stalled { command, pid, .. } = reason(&a) else {
+        panic!("wrong reason")
+    };
+    assert_eq!(command.as_deref(), Some("sleep 2345"));
+    assert!(pid.is_some());
+
+    // More heartbeats arrive and the warning stays: they don't clear it.
+    let before = h.store.attempt(&a.id).unwrap();
+    std::thread::sleep(Duration::from_millis(2500));
+    let after = h.store.attempt(&a.id).unwrap();
+    assert_eq!(after.state, "stalled");
+    assert!(after.raw_offset > before.raw_offset, "heartbeats were read");
+    assert_eq!(
+        after.last_activity_at, before.last_activity_at,
+        "and they don't move the last activity"
+    );
+    assert!(!h.kinds(&a.id).iter().any(|k| k == "stallCleared"));
+
+    h.engine.stop(&a.id).unwrap();
+    h.wait_for(&run, &[AttemptState::Stopped, AttemptState::Succeeded]);
+}
+
+#[test]
+fn a_command_using_cpu_is_not_stalled_by_heartbeats_alone() {
+    let h = harness_with(
+        &heartbeat_only("while :; do :; done"),
+        LOGGED_IN,
+        "2.1.318",
+        |c| c.stall_after = Duration::from_millis(300),
+    );
+    let run = h.start(ToolProfile::Build);
+    let a = h.wait_for(&run, &[AttemptState::Running]);
+    h.wait_until_kind(&a.id, "init");
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(h.latest(&run).state, "running");
+    assert!(!h.kinds(&a.id).iter().any(|k| k == "stalled"));
+    h.engine.stop(&a.id).unwrap();
+    h.wait_for(&run, &[AttemptState::Stopped, AttemptState::Succeeded]);
+}
+
 #[test]
 fn waiting_silences_the_stall_warning() {
     let body = format!(
