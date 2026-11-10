@@ -125,7 +125,7 @@ pub fn mcp_client_set_can_run(
     Ok(())
 }
 
-/// Lets it send work back, retry and close the runs it started. It also needs `can_run`.
+/// Lets it send work back and retry on the runs it started. It also needs `can_run`.
 #[tauri::command(async)]
 pub fn mcp_client_set_can_steer(
     id: String,

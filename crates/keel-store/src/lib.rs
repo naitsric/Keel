@@ -341,9 +341,9 @@ pub struct McpClient {
     pub name: String,
     /// The token's first characters, to tell tokens apart.
     pub token_prefix: String,
-    /// May start and stop runs, and not only read.
+    /// May start and stop runs, close the ones it started, and not only read.
     pub can_run: bool,
-    /// May send work back, retry and close the runs it started, besides `can_run`. Off unless the
+    /// May send work back and retry on the runs it started, besides `can_run`. Off unless the
     /// person turns it on.
     pub can_steer: bool,
     /// How many of its runs may be open at once, counting those that wait for the person.

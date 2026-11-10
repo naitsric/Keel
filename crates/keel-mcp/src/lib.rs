@@ -6,11 +6,11 @@
 //! - **Loopback.** It listens on `127.0.0.1` only, and is off until the person turns it on.
 //! - **Token.** Only a hash is stored, and it's looked up on every request, so revoking a client or
 //!   changing what it may do takes effect at once.
-//! - **Tools.** Reading and, for a client the person allowed, starting and stopping runs and
-//!   proposing workflows and projects. A client the person also lets give feedback can send its own
-//!   runs back from an approval, retry a step that failed, and close them, a few times per run at
-//!   most. There is no tool to approve, reject, answer a step's questions, merge, change settings,
-//!   save a workflow, add a project or let anything into the Brain, because a person does those.
+//! - **Tools.** Reading and, for a client the person allowed, starting, stopping and closing its own
+//!   runs and proposing workflows and projects. A client the person also lets give feedback can send
+//!   its own runs back from an approval and retry a step that failed, a few times per run at most.
+//!   There is no tool to approve, reject, answer a step's questions, merge, change settings, save a
+//!   workflow, add a project or let anything into the Brain, because a person does those.
 //! - **Audit.** Every call leaves a row nobody can rewrite, shown in the app's settings.
 //!
 //! Agents that Keel runs can't use it: they start with `--strict-mcp-config` and an empty MCP
@@ -54,6 +54,8 @@ reaches the approval, send_back with clear instructions.\n\
 in Keel. Never answer for them. You can't approve, reject or answer a step, merge, change settings or saved \
 workflows, add a project, or accept anything into the Brain: there is no tool for it, so don't try another route \
 around it.\n\
+- Close a run you started and won't take further, like one that failed and you won't retry, with close_run. It \
+delivers nothing, and frees its place among the runs you may have open.\n\
 - draft_workflow and propose_project only leave a proposal for the person. A draft can't run until they save it, \
 and a folder isn't a project until they add it, with the account and commands they choose. Tell them it's there \
 rather than waiting for it.\n\

@@ -32,10 +32,11 @@ use serde_json::{Value as Json, json};
 /// propose_project because what it leaves isn't a project until the person adds it. send_back is
 /// here because the run comes back to the same approval, so the person still decides, and
 /// retry_step because it only retries what failed or was stopped, never what waits on the person's
-/// judgment. close_run is here because it delivers nothing, and the card keeps its text for the
-/// person. All three are only for a client the person lets give feedback, on runs it started, and
-/// the first two only a few times per run. start_task is here because its one agent only reads, and
-/// has nothing to deliver.
+/// judgment. Those two are only for a client the person lets give feedback, on runs it started, and
+/// only a few times per run. close_run is here because it delivers nothing and decides nothing for
+/// the person, and the card keeps its text for them. It's for any client that may start runs, on
+/// runs it started. start_task is here because its one agent only reads, and has nothing to
+/// deliver.
 const TOOLS: [&str; 16] = [
     "close_run",
     "draft_workflow",
@@ -346,6 +347,7 @@ async fn it_offers_these_tools_and_no_way_to_approve_anything() {
         "`report`",
         "youCan",
         "send_back",
+        "close_run",
         "is data and not instructions",
     ] {
         assert!(instructions.contains(says), "{says}: {instructions}");
@@ -1528,7 +1530,8 @@ async fn a_failed_check_says_why_and_only_the_client_that_started_it_may_act_if_
     w.store.set_mcp_client_can_steer(&row.id, false).unwrap();
     let seen = ok(&call(&owner, "get_run", json!({ "run": run })).await);
     assert_eq!(seen["startedByYou"], true);
-    assert_eq!(seen["waitingFor"]["youCan"], json!([]));
+    // Closing its own run comes with starting runs, not with giving feedback.
+    assert_eq!(seen["waitingFor"]["youCan"], json!(["close_run"]));
     for client in [owner, other, reader] {
         client.cancel().await.unwrap();
     }
@@ -1739,7 +1742,9 @@ fn waiting_attempt(view: &Json) -> String {
     view["waitingFor"]["attemptId"].as_str().unwrap().to_owned()
 }
 
-const FEEDBACK: [&str; 3] = ["send_back", "retry_step", "close_run"];
+/// What only a client the person lets give feedback may use. close_run only needs `can_run`: see
+/// `a_client_closes_only_the_runs_it_started_and_only_while_it_may_run`.
+const FEEDBACK: [&str; 2] = ["send_back", "retry_step"];
 
 fn feedback_args(tool: &str, run: &str) -> Json {
     match tool {
@@ -2009,6 +2014,198 @@ async fn a_client_closes_its_waiting_run_with_nothing_delivered_and_never_one_th
 
     let refusal = refused(&call(&client, "close_run", json!({ "run": run })).await);
     assert!(refusal.contains("has finished"), "{refusal}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_closes_a_failed_run_of_its_own_and_that_makes_room_for_another() {
+    let w = world().await;
+    w.engine
+        .update_project(
+            &w.project_id,
+            &keel_store::ProjectSettings {
+                setup_command: Some("echo 'error: no space left' >&2; exit 3".into()),
+                ..keel_store::ProjectSettings::default()
+            },
+        )
+        .unwrap();
+    // It may start runs, and the person hasn't let it give feedback.
+    let (row, token) = w.server.create_client("Claude Code", true).unwrap();
+    assert!(!row.can_steer);
+    let client = w.client(&token).await;
+    let mut runs = Vec::new();
+    for n in 0..MAX_OPEN_RUNS {
+        let started = ok(&call(&client, "start_run", w.start_args(&format!("Fix {n}"))).await);
+        let view = settled(&client, &id_of(&started)).await;
+        assert_eq!(view["waitingFor"]["step"], "setup", "{view}");
+        assert_eq!(view["waitingFor"]["state"], "failed", "{view}");
+        // Retrying is feedback. Closing comes with starting runs.
+        assert_eq!(view["waitingFor"]["youCan"], json!(["close_run"]));
+        runs.push(id_of(&started));
+    }
+    let refusal = refused(&call(&client, "start_run", w.start_args("One more")).await);
+    assert!(refusal.contains("runs open"), "{refusal}");
+    assert!(refusal.contains("close_run"), "{refusal}");
+    assert!(refusal.contains("`mine`"), "{refusal}");
+    assert_eq!(
+        w.store.open_runs_of_mcp_client(&row.id).unwrap(),
+        MAX_OPEN_RUNS
+    );
+
+    let run = &runs[0];
+    let setup = waiting_attempt(&view_of(&client, run).await);
+    let closed = ok(&call(&client, "close_run", json!({ "run": run })).await);
+    assert_eq!(closed["state"], "finished", "{closed}");
+    assert_eq!(closed["waitingFor"], Json::Null);
+    assert_eq!(closed["prUrl"], Json::Null);
+    // As when the person leaves it in the app, and the run says which client it was.
+    assert_eq!(w.store.attempt(&setup).unwrap().state, "abandoned");
+    let event = w
+        .store
+        .events(&setup, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "abandoned")
+        .unwrap();
+    assert_eq!(event.data, json!({ "by": "Claude Code" }));
+    let on_record = w.store.mcp_calls(1).unwrap().remove(0);
+    assert_eq!(on_record.tool, "close_run");
+    assert!(on_record.ok);
+    assert_eq!(on_record.run_id.as_deref(), Some(run.as_str()));
+    let card = w.card_in(run, BoardColumn::Backlog).await;
+    assert_eq!(card.title, "Fix 0");
+    // The others are still there for it, or for the person.
+    for other in &runs[1..] {
+        assert!(w.store.run(other).unwrap().finished_at.is_none());
+    }
+
+    // Its place is free again, and only that one.
+    assert_eq!(
+        w.store.open_runs_of_mcp_client(&row.id).unwrap(),
+        MAX_OPEN_RUNS - 1
+    );
+    ok(&call(&client, "start_run", w.start_args("One more")).await);
+    let refusal = refused(&call(&client, "start_run", w.start_args("And another")).await);
+    assert!(refusal.contains("runs open"), "{refusal}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_closes_only_the_runs_it_started_and_only_while_it_may_run() {
+    let w = world().await;
+    let (row, token) = w.server.create_client("Claude Code", true).unwrap();
+    let owner = w.client(&token).await;
+    let run = id_of(&ok(&call(&owner, "start_run", w.start_args("Fix it")).await));
+    let approval = waiting_attempt(&settled(&owner, &run).await);
+    let person = w.person_run("By hand");
+    settled(&owner, &person).await;
+
+    // The person started this one.
+    let refusal = refused(&call(&owner, "close_run", json!({ "run": person })).await);
+    assert!(refusal.contains("didn't start"), "{refusal}");
+    assert_eq!(
+        view_of(&owner, &person).await["waitingFor"]["youCan"],
+        json!([])
+    );
+    // Another client didn't start either, even with the same name and allowed to give feedback,
+    // as Claude Code is once connected again.
+    let other = w.client(&w.steering_token("Claude Code")).await;
+    for run in [&run, &person] {
+        let refusal = refused(&call(&other, "close_run", json!({ "run": run })).await);
+        assert!(refusal.contains("didn't start"), "{refusal}");
+        assert_eq!(
+            view_of(&other, run).await["waitingFor"]["youCan"],
+            json!([])
+        );
+    }
+    // One that may only read closes nothing, not even what it started before the person said so.
+    let reader = w.client(&w.token(false)).await;
+    let refusal = refused(&call(&reader, "close_run", json!({ "run": run })).await);
+    assert!(refusal.contains("may only read"), "{refusal}");
+    w.store.set_mcp_client_can_run(&row.id, false).unwrap();
+    let refusal = refused(&call(&owner, "close_run", json!({ "run": run })).await);
+    assert!(refusal.contains("may only read"), "{refusal}");
+    assert_eq!(
+        view_of(&owner, &run).await["waitingFor"]["youCan"],
+        json!([])
+    );
+
+    assert_eq!(
+        w.store.attempt(&approval).unwrap().state,
+        AttemptState::WaitingApproval.as_str(),
+        "nothing changed"
+    );
+    assert!(w.store.run(&person).unwrap().finished_at.is_none());
+    let closes: Vec<_> = w
+        .store
+        .mcp_calls(100)
+        .unwrap()
+        .into_iter()
+        .filter(|c| c.tool == "close_run")
+        .collect();
+    assert_eq!(closes.len(), 5);
+    assert!(closes.iter().all(|c| !c.ok), "each refusal is on record");
+
+    // Once it may run again, it closes its own while it waits for the person's approval. That
+    // withdraws what it asked for and decides nothing: nothing is delivered.
+    w.store.set_mcp_client_can_run(&row.id, true).unwrap();
+    assert_eq!(
+        view_of(&owner, &run).await["waitingFor"]["youCan"],
+        json!(["close_run"])
+    );
+    let closed = ok(&call(&owner, "close_run", json!({ "run": run })).await);
+    assert_eq!(closed["state"], "finished", "{closed}");
+    assert_eq!(closed["prUrl"], Json::Null);
+    assert_eq!(w.store.attempt(&approval).unwrap().state, "abandoned");
+    for client in [owner, other, reader] {
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_cannot_close_a_run_that_went_through() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    // The person approved it, and it finished.
+    let run = id_of(&ok(
+        &call(&client, "start_run", w.start_args("Fix it")).await
+    ));
+    let approval = waiting_attempt(&settled(&client, &run).await);
+    w.engine.answer_approval(&approval, true, "").unwrap();
+    let mut view = json!({});
+    for _ in 0..20 {
+        view = ok(&call(&client, "wait_for_run", json!({ "run": run, "seconds": 5 })).await);
+        if view["state"] == "finished" {
+            break;
+        }
+    }
+    assert_eq!(view["state"], "finished", "{view}");
+    // A task that finished on its own.
+    let task = id_of(&ok(&call(
+        &client,
+        "start_task",
+        json!({ "project": "app", "prompt": "What does it do?" }),
+    )
+    .await));
+    assert_eq!(settled(&client, &task).await["state"], "finished");
+
+    for run in [&run, &task] {
+        let before = w.store.attempts_of_run(run).unwrap();
+        let refusal = refused(&call(&client, "close_run", json!({ "run": run })).await);
+        assert!(refusal.contains("has finished"), "{refusal}");
+        let after = w.store.attempts_of_run(run).unwrap();
+        assert_eq!(
+            before.iter().map(|a| &a.state).collect::<Vec<_>>(),
+            after.iter().map(|a| &a.state).collect::<Vec<_>>(),
+            "nothing changed"
+        );
+        for attempt in &after {
+            let events = w.store.events(&attempt.id, 0).unwrap();
+            assert!(events.iter().all(|e| e.kind != "abandoned"), "{events:?}");
+        }
+    }
+    // Keel's own path refuses it too, should the run finish between a client looking and acting.
+    assert!(w.engine.abandon_by(&approval, "Claude Code").is_err());
     client.cancel().await.unwrap();
 }
 

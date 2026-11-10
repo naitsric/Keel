@@ -4,9 +4,10 @@
 //!
 //! There is deliberately no tool to approve, reject or answer a step, to merge, to change a project's
 //! settings or saved workflows, or to let anything into the Brain. Those stay with the person, in the
-//! app. Sending work back, retrying a step and closing a run are only for a client the person lets
-//! give feedback, and only on runs it started. A client can propose a workflow or a project, and
-//! only the person can save the one or add the other.
+//! app. A client that may start runs can close the ones it started, which delivers nothing. Sending
+//! work back and retrying a step are only for a client the person also lets give feedback, and only
+//! on runs it started. A client can propose a workflow or a project, and only the person can save
+//! the one or add the other.
 //! `tests/http.rs` fails if the list of tools grows without someone deciding so.
 
 use std::sync::Arc;
@@ -66,7 +67,8 @@ const START_RUN: &str = "Start a run of a saved workflow, from `request` text, a
                          open is refused. It spends the person's Claude usage. A workflow that delivers stops for \
                          the person's approval before any pull request, and you can't approve or answer what a step \
                          asks them. Refused if this client may only read, or already has as many runs open as \
-                         the person allows (3 unless they changed it).";
+                         the person allows (3 unless they changed it). close_run closes one you started and \
+                         won't take further.";
 const START_TASK: &str = "Start one agent that only reads a project, to read, investigate or review code, with \
                           your own `prompt`. It works in its own copy of the project and can't change files, \
                           run commands or open a pull request. When it's done, its finding is in \
@@ -97,8 +99,9 @@ const PROPOSE_PROJECT: &str = "Propose adding a git repository on this Mac to Ke
                                folder again returns the same proposal, and one already in Keel returns its project. \
                                Refused if this client may only read, if it isn't a git repository with commits, or \
                                if 10 proposals are waiting.";
-const STOP_RUN: &str = "Ask whatever a run has working to stop. It doesn't reject or abandon the run: what \
-                        happens next is the person's decision in Keel. Refused if this client may only read.";
+const STOP_RUN: &str = "Ask whatever a run has working to stop. It doesn't close the run: close_run does that \
+                        for one this client started, and otherwise what happens next is the person's decision \
+                        in Keel. Refused if this client may only read.";
 const SEND_BACK: &str = "Send the work of a run this client started back from the person's approval, with what \
                          to change. Everything from where the work is done runs again, the check included, and \
                          the run comes back to the same approval: the person still approves. Use it when \
@@ -110,10 +113,13 @@ const RETRY_STEP: &str = "Try again the step of a run this client started that f
                           or stalled is the person's to decide. A failed delivery retries only the delivery, \
                           which reaches GitHub. At most 3 times per run, then it's the person's. Refused unless \
                           the person lets this client give feedback, and on runs it didn't start.";
-const CLOSE_RUN: &str = "Close a run this client started without delivering anything: no pull request, and its \
-                         card goes back to the Backlog with its text. Refused while anything in it is working, \
-                         so stop that with stop_run first, and once it has finished. Refused unless the person \
-                         lets this client give feedback, and on runs it didn't start.";
+const CLOSE_RUN: &str = "Close a run this client started and won't take further, like one whose setup failed \
+                         and that you won't retry. Nothing is delivered: no pull request, and its card goes back \
+                         to the Backlog with its text. The person sees this client closed it, and it no longer \
+                         counts toward this client's open runs. A run waiting for the person can be closed too: \
+                         that withdraws your request, and doesn't approve or reject anything. Refused while \
+                         anything in it is working, so stop that with stop_run first, and once it has \
+                         finished. Refused if this client may only read, and on runs it didn't start.";
 
 /// What rmcp serves: one per session, or per request without one.
 #[derive(Clone)]
