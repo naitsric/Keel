@@ -1137,7 +1137,8 @@ describe("the run summary", () => {
 
   it("says it's the run's so far, and names the step that's working", () => {
     show([attempt({ id: "spec", stepId: "spec" }), attempt({ id: "builder", stepId: "builder", state: "running" })], []);
-    expect(page()).toContain("The run so far");
+    expect(document.querySelector("h2")?.textContent).toBe("The run so far");
+    expect(document.querySelector("h2")?.parentElement?.className).toContain("border-l-accent");
     expect(page()).toContain("builder is still working. Its explanation appears here when it finishes.");
     expect(page()).not.toContain("spec is still working");
   });
@@ -1159,8 +1160,14 @@ describe("the run summary", () => {
 
   it("is titled as the run's once it's over", () => {
     show([spec("Done.")], [], "2026-01-01T00:00:00Z");
-    expect(page()).toContain("The run");
+    expect(document.querySelector("h2")?.textContent).toBe("The run");
+  });
+
+  it("is titled as the run's, and not set apart, while it waits for a person", () => {
+    show([spec("Done."), attempt({ id: "human", stepId: "human", kind: "approval", tools: "none", state: "waitingApproval" })], []);
+    expect(document.querySelector("h2")?.textContent).toBe("The run");
     expect(page()).not.toContain("The run so far");
+    expect(document.querySelector("h2")?.parentElement?.className).not.toContain("border-l-accent");
   });
 
   it("is all in Spanish too", async () => {
