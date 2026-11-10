@@ -7,7 +7,7 @@ import type { Attempt, Run, SpecOutput } from "../lib/api";
 import type { CommandRun } from "../lib/audit";
 import { useApp } from "../lib/store";
 import type { SizeDecision } from "../lib/size";
-import { ApprovalCard, QuestionsCard } from "./RunDetail";
+import { ApprovalCard, QuestionsCard, Summary } from "./RunDetail";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -1113,5 +1113,61 @@ describe("the card that asks", () => {
     for (const text of ["Keel necesita una decisión para continuar", "Recomendada", "Otra", "Recordar para este proyecto", "Usar lo recomendado", "Responder", "Cancelar"]) {
       expect(page()).toContain(text);
     }
+  });
+});
+
+describe("the run summary", () => {
+  let root: Root;
+  const page = () => document.body.textContent ?? "";
+  const show = (attempts: Attempt[], commands: CommandRun[], finishedAt: string | null = null) => {
+    const run = { ...runWith(deliverNext), finishedAt } as Run;
+    act(() => root.render(<Summary run={run} attempts={attempts} current={attempts[attempts.length - 1]} commands={commands} rawCheck="intact" closedBy={null} onShowChanges={() => {}} />));
+  };
+  const command = (status: string) => ({ status }) as unknown as CommandRun;
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    mockIPC(() => null);
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("says it's the run's so far, and names the step that's working", () => {
+    show([attempt({ id: "spec", stepId: "spec" }), attempt({ id: "builder", stepId: "builder", state: "running" })], []);
+    expect(page()).toContain("The run so far");
+    expect(page()).toContain("builder is still working. Its explanation appears here when it finishes.");
+    expect(page()).not.toContain("spec is still working");
+  });
+
+  it("names the last step that started when several are working", () => {
+    show([attempt({ id: "a", stepId: "code", state: "running" }), attempt({ id: "b", stepId: "tests", state: "running" })], []);
+    expect(page()).toContain("tests is still working.");
+  });
+
+  it("counts the commands as the run's", () => {
+    show([spec("Done.")], [...Array(8).fill(command("ok")), command("failed")]);
+    expect(page()).toContain("8 of 9 commands of the run succeeded.");
+  });
+
+  it("says when the run ran no commands", () => {
+    show([spec("Done.")], []);
+    expect(page()).toContain("The run didn't run any commands.");
+  });
+
+  it("is titled as the run's once it's over", () => {
+    show([spec("Done.")], [], "2026-01-01T00:00:00Z");
+    expect(page()).toContain("The run");
+    expect(page()).not.toContain("The run so far");
+  });
+
+  it("is all in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    show([attempt({ id: "spec", stepId: "spec" }), attempt({ id: "builder", stepId: "builder", state: "running" })], [command("ok"), command("failed")]);
+    expect(page()).toContain("La corrida hasta ahora");
+    expect(page()).toContain("builder sigue trabajando.");
+    expect(page()).toContain("1 de 2 comandos de la corrida salieron bien.");
   });
 });
