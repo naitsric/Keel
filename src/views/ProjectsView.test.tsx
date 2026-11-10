@@ -102,6 +102,32 @@ describe("the Projects page", () => {
     expect(main().textContent).toContain(i18next.t("settings.saved"));
   });
 
+  describe("the hint under a service's socket file", () => {
+    const postgres = () => i18next.t("settings.serviceSocketHintPostgres");
+    const general = () => i18next.t("settings.serviceSocketHint");
+    const portBox = () => [...document.querySelectorAll("label")].find((l) => l.textContent?.startsWith(i18next.t("settings.servicePort")))?.querySelector("input") as HTMLInputElement;
+
+    it("shows no Postgres hint on a command service, only the general one", async () => {
+      const services = [{ type: "command" as const, name: "cache", start: "redis-server", socket: null }];
+      await showApp(RUNS, { name: "projects" }, [project("alpha", { services })]);
+      expect(main().textContent).not.toContain("PGSQL");
+      expect(main().textContent).toContain(general());
+    });
+
+    it("shows the Postgres hint only on a bridge to 5432, and follows the port as it is typed", async () => {
+      const services = [{ type: "bridge" as const, name: "db", port: 6379, socket: null }];
+      await showApp(RUNS, { name: "projects" }, [project("alpha", { services })]);
+      expect(main().textContent).not.toContain(postgres());
+      expect(main().textContent).toContain(general());
+      await typeInto(portBox(), "5432");
+      expect(main().textContent).toContain(postgres());
+      expect(main().textContent).not.toContain(general());
+      await typeInto(portBox(), "6379");
+      expect(main().textContent).not.toContain(postgres());
+      expect(main().textContent).toContain(general());
+    });
+  });
+
   it("drops the unsaved changes when another project is chosen", async () => {
     await showApp(RUNS, { name: "projects" }, THREE);
     await typeInto(envBox(), "A=1");
