@@ -3348,9 +3348,8 @@ async fn once_the_person_agrees_the_parts_open_and_are_the_client_s_to_follow_an
     assert_eq!(back["id"], json!(part_run));
     assert!(w.store.attempts_of_run(&part_run).unwrap().len() > 1);
 
-    // A client that wasn't the one who proposed it, or can't give feedback, can't.
-    let (_, token) = w.server.create_client("Someone else", true).unwrap();
-    let stranger = w.client(&token).await;
+    // A client that wasn't the one who proposed it can't, even one allowed to give feedback.
+    let stranger = w.client(&w.steering_token("Someone else")).await;
     let refusal = refused(
         &call(
             &stranger,
