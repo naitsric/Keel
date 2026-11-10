@@ -396,7 +396,23 @@ fn mcp_client_from(r: &Row) -> rusqlite::Result<McpClient> {
 }
 
 /// The tools that start a run, which is how a client's runs are told from everyone else's.
-const MCP_STARTS_A_RUN: &str = "('start_run', 'start_task')";
+const MCP_STARTS_A_RUN: &str = "('start_run', 'start_task', 'propose_change')";
+
+/// Whether the run `{run}` is the client `{client}`'s: it started it, or the run is a part of a
+/// change across projects whose agreement it started. The parts open later, from the board, with
+/// no call of the client's, and are still the client's to follow.
+fn run_of_client(run: &str, client: &str) -> String {
+    format!(
+        "(exists (select 1 from mcp_call c
+                  where c.run_id = {run} and c.client_id = {client}
+                    and c.tool in {MCP_STARTS_A_RUN} and c.ok = 1)
+          or exists (select 1 from card part
+                     join card agreeing on agreeing.id = part.joint_change_id
+                     join mcp_call c on c.run_id = agreeing.run_id
+                     where part.run_id = {run} and part.joint_position is not null
+                       and c.client_id = {client} and c.tool = 'propose_change' and c.ok = 1))"
+    )
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -969,6 +985,42 @@ fn bottom_of(conn: &Connection, project_id: &str, column: BoardColumn) -> rusqli
         .unwrap_or(0))
 }
 
+/// The projects a change touches besides the card's own, in the order given and without repeats.
+/// One that's missing or was removed is an error.
+fn chosen_projects(conn: &Connection, own: &str, projects: &[String]) -> Result<Vec<String>> {
+    let mut chosen: Vec<String> = Vec::new();
+    for project in projects {
+        if project == own || chosen.contains(project) {
+            continue;
+        }
+        let there: bool = conn.query_row(
+            "select exists (select 1 from project where id = ?1 and removed_at is null)",
+            [project],
+            |r| r.get(0),
+        )?;
+        if !there {
+            return Err(Error::NotFound(format!("project {project}")));
+        }
+        chosen.push(project.clone());
+    }
+    Ok(chosen)
+}
+
+/// Makes a card the one where a change across these projects is agreed.
+fn write_joint_change(conn: &Connection, card_id: &str, chosen: &[String]) -> Result<()> {
+    let chosen = serde_json::to_string(chosen).unwrap_or_default();
+    conn.execute(
+        "insert into joint_change (id, projects, created_at) values (?1, ?2, ?3)
+         on conflict (id) do update set projects = excluded.projects",
+        params![card_id, chosen, now()],
+    )?;
+    conn.execute(
+        "update card set joint_change_id = ?1 where id = ?1",
+        [card_id],
+    )?;
+    Ok(())
+}
+
 fn read_joint_change(conn: &Connection, id: &str) -> Result<JointChange> {
     let found = conn
         .query_row(
@@ -1291,10 +1343,7 @@ impl Store {
     /// Whether this client started that run. A client only acts on its own runs.
     pub fn run_started_by_mcp_client(&self, run_id: &str, client_id: &str) -> Result<bool> {
         Ok(self.lock().query_row(
-            &format!(
-                "select exists (select 1 from mcp_call
-                 where run_id = ?1 and client_id = ?2 and tool in {MCP_STARTS_A_RUN} and ok = 1)"
-            ),
+            &format!("select {}", run_of_client("?1", "?2")),
             [run_id, client_id],
             |r| r.get(0),
         )?)
@@ -1303,13 +1352,7 @@ impl Store {
     /// The runs this client started, newest first, as `runs` has them. So a client that lost track
     /// can find its own again.
     pub fn runs_started_by_mcp_client(&self, client_id: &str, limit: i64) -> Result<Vec<RunRow>> {
-        self.run_rows(
-            &format!(
-                "exists (select 1 from mcp_call c
-                 where c.run_id = r.id and c.client_id = ?2 and c.tool in {MCP_STARTS_A_RUN} and c.ok = 1)"
-            ),
-            params![limit, client_id],
-        )
+        self.run_rows(&run_of_client("r.id", "?2"), params![limit, client_id])
     }
 
     /// How many times this client called that tool on that run and it went through. What caps how
@@ -2131,21 +2174,7 @@ impl Store {
         if agreed == Some(true) {
             return Ok(false);
         }
-        let mut chosen: Vec<&String> = Vec::new();
-        for project in projects {
-            if *project == card.project_id || chosen.contains(&project) {
-                continue;
-            }
-            let there: bool = tx.query_row(
-                "select exists (select 1 from project where id = ?1 and removed_at is null)",
-                [project],
-                |r| r.get(0),
-            )?;
-            if !there {
-                return Err(Error::NotFound(format!("project {project}")));
-            }
-            chosen.push(project);
-        }
+        let chosen = chosen_projects(&tx, &card.project_id, projects)?;
         if chosen.is_empty() {
             tx.execute("delete from joint_change where id = ?1", [card_id])?;
             tx.execute(
@@ -2153,16 +2182,7 @@ impl Store {
                 [card_id],
             )?;
         } else {
-            let chosen = serde_json::to_string(&chosen).unwrap_or_default();
-            tx.execute(
-                "insert into joint_change (id, projects, created_at) values (?1, ?2, ?3)
-                 on conflict (id) do update set projects = excluded.projects",
-                params![card_id, chosen, now()],
-            )?;
-            tx.execute(
-                "update card set joint_change_id = ?1 where id = ?1",
-                [card_id],
-            )?;
+            write_joint_change(&tx, card_id, &chosen)?;
         }
         tx.commit()?;
         Ok(true)
@@ -2397,10 +2417,27 @@ impl Store {
     /// A card for a run that's starting right now from outside the board, left as the scheduler
     /// leaves one it has claimed, so nothing starts it a second time. An issue only ever has one
     /// card, so this takes over the one it has. `None`, with nothing changed, if that card's run is
-    /// still open.
-    pub fn add_started_card(&self, card: &NewCard, language: &str) -> Result<Option<String>> {
+    /// still open. With `joint`, the card is where a change across those projects is agreed, and
+    /// that's written with it, so no card is left without it: a project that's missing or removed is
+    /// an error with nothing created, and so is having none besides the card's own. A card that
+    /// already is part of a change across projects isn't taken over: `None`.
+    pub fn add_started_card(
+        &self,
+        card: &NewCard,
+        language: &str,
+        joint: &[String],
+    ) -> Result<Option<String>> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
+        let chosen = if joint.is_empty() {
+            Vec::new()
+        } else {
+            let chosen = chosen_projects(&tx, &card.project_id, joint)?;
+            if chosen.is_empty() {
+                return Err(Error::NotFound("another project".into()));
+            }
+            chosen
+        };
         let existing = match card.issue_number {
             Some(number) => read_cards(
                 &tx,
@@ -2417,6 +2454,9 @@ impl Store {
                     BoardColumn::InProgress | BoardColumn::HumanReview
                 ) =>
             {
+                return Ok(None);
+            }
+            Some(existing) if !chosen.is_empty() && existing.joint_change_id.is_some() => {
                 return Ok(None);
             }
             Some(existing) => {
@@ -2446,6 +2486,9 @@ impl Store {
                 card.id.clone()
             }
         };
+        if !chosen.is_empty() {
+            write_joint_change(&tx, &id, &chosen)?;
+        }
         tx.commit()?;
         Ok(Some(id))
     }

@@ -46,6 +46,10 @@ workflows and projects. Each run appears in the app at once, as a card on the pr
 - Start with list_projects, then list_workflows. start_run takes a workflow's id.\n\
 - Split a job into independent pieces, each its own run: start_task to read, investigate or review code, and \
 start_run to change code, with its own pull request.\n\
+- A change that touches several projects starts with propose_change, not start_run: it starts the run that agrees \
+what changes in each project and in what order, and the person approves that in Keel. Then each part opens in \
+its own project, in order, and `jointChange` in get_run lists them with their runs. You can't approve the \
+agreement or a part.\n\
 - Wait on several at once with wait_for_run and `runs`, rather than calling get_run in a loop, and read the \
 `report` of each one that's ready. get_run has any that came back brief. A run lists its steps without what they \
 wrote, which get_step has. A long diff, prompt or output comes in pieces: get_step says what it left out and how to \

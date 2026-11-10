@@ -371,6 +371,34 @@ impl Engine {
     /// starts now rather than waiting for a place: whoever asked is waiting for a run, and it counts
     /// as working, so Todo cards wait for it. `InvalidState` if its issue's card has a run still open.
     pub fn start_run_on_board(&self, request: StartRun) -> Result<String> {
+        self.start_on_board(request, &[])
+    }
+
+    /// Starts the run where a change across several projects is agreed, from outside the board: a
+    /// card in the request's project, with `also_touches` as the other projects the change
+    /// touches, as «Also touches» would on the board. The run only reads and waits for a person to
+    /// approve; each part opens after that, as it does from a card. Whatever workflow the request
+    /// came with is ignored, since the agreement is always the same. The project's own and repeats
+    /// are left out as on the board. `InvalidState` if that leaves none, or if the issue's card has
+    /// a run still open; `NotFound` for a project that's missing or was removed, with no card
+    /// created; `Blocked(StartsOnTheBoard)` if the issue already is a change across projects.
+    pub fn propose_change_on_board(
+        &self,
+        mut request: StartRun,
+        also_touches: &[String],
+    ) -> Result<String> {
+        if also_touches
+            .iter()
+            .all(|project| *project == request.project_id)
+        {
+            return Err(Error::InvalidState);
+        }
+        request.workflow = joint::plan_workflow(&request.language);
+        request.saved_workflow = None;
+        self.start_on_board(request, also_touches)
+    }
+
+    fn start_on_board(&self, request: StartRun, joint_projects: &[String]) -> Result<String> {
         if let Some(reason) = self.preflight().blocker {
             return Err(Error::Blocked(reason));
         }
@@ -411,6 +439,7 @@ impl Engine {
                     issue_number: issue.map(|issue| issue.number),
                 },
                 &request.language,
+                joint_projects,
             )?
             .ok_or(Error::InvalidState)?;
         match self.start_run_in_session(request, Some(&card)) {

@@ -25,8 +25,8 @@ use serde_json::Value as Json;
 
 use crate::tools::{
     CloseRunArgs, DraftWorkflowArgs, GetBrainArgs, GetRunArgs, GetStepArgs, ListIssuesArgs,
-    ListProjectsArgs, ListRunsArgs, ListWorkflowsArgs, ProposeProjectArgs, RetryStepArgs,
-    SendBackArgs, StartRunArgs, StartTaskArgs, StopRunArgs, WaitForRunArgs,
+    ListProjectsArgs, ListRunsArgs, ListWorkflowsArgs, ProposeChangeArgs, ProposeProjectArgs,
+    RetryStepArgs, SendBackArgs, StartRunArgs, StartTaskArgs, StopRunArgs, WaitForRunArgs,
 };
 use crate::{INSTRUCTIONS, McpServer, ToolError};
 
@@ -79,6 +79,21 @@ const START_RUN: &str = "Start a run of a saved workflow, from `request` text, a
                          asks them. Refused if this client may only read, or already has as many runs open as \
                          the person allows (3 unless they changed it). close_run closes one you started and \
                          won't take further.";
+const PROPOSE_CHANGE: &str = "Propose a change that touches several projects, from `request` text, a GitHub `issue` \
+                              number of `project`, or both. It starts one run that only reads, in `project`, which \
+                              works out what changes in each project (`alsoTouches` are the others, by id or name) \
+                              and in what order, as a card on that project's board marked as started by this \
+                              client. Nothing is built until the person approves that agreement in Keel: then \
+                              each part opens in its own project with its default workflow, in order, each \
+                              waiting for the one before it to have a pull request. There's no workflow to \
+                              choose, and you can't approve the agreement or a part. Follow the agreement with \
+                              wait_for_run or get_run: `jointChange.parts` lists each part with its project, its \
+                              order and the `runId` of those that have started. Those runs are this client's \
+                              to follow, and to send_back if the person lets it give feedback. The agreement \
+                              counts toward this client's open runs, and the parts don't. Refused if this client may \
+                              only read, if a project isn't in Keel, if `alsoTouches` has none besides `project`, \
+                              or if the issue already has a run open or is a change across projects on the \
+                              board. For a change in one project, use start_run.";
 const START_TASK: &str = "Start one agent that only reads a project, to read, investigate or review code, with \
                           your own `prompt`. It works in its own copy of the project and can't change files, \
                           run commands or open a pull request. When it's done, its finding is in \
@@ -278,6 +293,21 @@ impl Handler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         reply(self.server.start_run(client(&context)?, args).await)
+    }
+
+    #[tool(
+        name = "propose_change",
+        title = "Propose a change across projects",
+        description = PROPOSE_CHANGE,
+        input_schema = input_schema::<ProposeChangeArgs>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn propose_change(
+        &self,
+        Parameters(args): Parameters<ProposeChangeArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        reply(self.server.propose_change(client(&context)?, args).await)
     }
 
     #[tool(

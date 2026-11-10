@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use keel_core::{
-    AttemptState, StepCondition, StepRole, StepSpec, ToolProfile, WorkflowStep, mask_secrets,
-    mask_value,
+    AttemptState, Reason, StepCondition, StepRole, StepSpec, ToolProfile, WorkflowStep,
+    mask_secrets, mask_value,
 };
 use keel_engine::{
     Error, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
@@ -207,6 +207,25 @@ pub struct StartRunArgs {
     #[serde(default)]
     pub request: Option<String>,
     /// An open issue's number, from list_issues.
+    #[serde(default)]
+    pub issue: Option<i64>,
+    /// `en` or `es`, for what agents write. The app's language by default.
+    #[serde(default)]
+    pub language: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposeChangeArgs {
+    /// The project where the change is agreed, by id or name.
+    pub project: String,
+    /// The other projects the change touches, each by id or name. The project above and repeats are
+    /// left out. At least one is needed.
+    pub also_touches: Vec<String>,
+    /// What to change, across all of them. With `issue`, what to add to it.
+    #[serde(default)]
+    pub request: Option<String>,
+    /// An open issue's number in `project`, from list_issues.
     #[serde(default)]
     pub issue: Option<i64>,
     /// `en` or `es`, for what agents write. The app's language by default.
@@ -740,12 +759,87 @@ impl McpServer {
                     source_issue: issue,
                     started_by: Some(client.name.clone()),
                 })
-                .map_err(|error| match (error, issue_number) {
-                    (Error::InvalidState, Some(number)) => ToolError::new(format!(
-                        "Issue #{number} already has a run open on the board. list_runs shows it."
-                    )),
-                    (error, _) => engine_error(error),
-                })?;
+                .map_err(|error| start_run_error(error, issue_number))?;
+            engine.announce(&run);
+            Ok((server.new_run_view(client, &run)?, Some(run)))
+        })
+        .await
+    }
+
+    /// Starts the run where a change across several projects is agreed, in the first project. It
+    /// only reads, and waits for the person to approve in the app: then each part opens as it does
+    /// from a card on the board. There's no workflow to choose, and nothing here approves.
+    pub(crate) async fn propose_change(
+        &self,
+        client: McpClient,
+        args: ProposeChangeArgs,
+    ) -> Result<Json, ToolError> {
+        self.call(client, "propose_change", args, |server, client, args| {
+            if !client.can_run {
+                return Err(may_only_read());
+            }
+            server.room_for_another_run(client)?;
+            let project = server.project(&args.project)?;
+            let language = server.language(args.language.as_deref())?;
+            let mut also_touches: Vec<String> = Vec::new();
+            for wanted in &args.also_touches {
+                let other = server
+                    .project(wanted)
+                    .map_err(|error| ToolError::new(format!("alsoTouches: {}", error.0)))?;
+                if other.id != project.id && !also_touches.contains(&other.id) {
+                    also_touches.push(other.id);
+                }
+            }
+            if also_touches.is_empty() {
+                return Err(ToolError::new(format!(
+                    "A change across projects needs at least one project besides {} in `alsoTouches`. For a change in one project, use start_run.",
+                    project.name
+                )));
+            }
+            let engine = &server.0.engine;
+            let extra = args.request.as_deref().unwrap_or("").trim();
+            let issue = args
+                .issue
+                .map(|number| {
+                    engine
+                        .issues(&project.id)
+                        .map_err(engine_error)?
+                        .into_iter()
+                        .find(|issue| issue.number == number)
+                        .ok_or_else(|| {
+                            ToolError::new(format!(
+                                "{} has no open issue #{number}. list_issues lists them.",
+                                project.name
+                            ))
+                        })
+                })
+                .transpose()?;
+            let request = match &issue {
+                Some(issue) => request_from_issue(issue, extra),
+                None if extra.is_empty() => {
+                    return Err(ToolError::new("Say what to do with `request` or `issue`."));
+                }
+                None => extra.to_owned(),
+            };
+            let issue_number = issue.as_ref().map(|issue| issue.number);
+            let run = engine
+                .propose_change_on_board(
+                    StartRun {
+                        project_id: project.id,
+                        title: issue
+                            .as_ref()
+                            .map(|issue| format!("#{} {}", issue.number, issue.title)),
+                        request,
+                        // The agreement is always the same, so the engine puts it in.
+                        saved_workflow: None,
+                        workflow: Vec::new(),
+                        language,
+                        source_issue: issue,
+                        started_by: Some(client.name.clone()),
+                    },
+                    &also_touches,
+                )
+                .map_err(|error| propose_change_error(error, issue_number))?;
             engine.announce(&run);
             Ok((server.new_run_view(client, &run)?, Some(run)))
         })
@@ -1340,7 +1434,69 @@ impl McpServer {
         if left_out > 0 {
             view["earlierAttemptsLeftOut"] = json!(left_out);
         }
+        if let Some(joint) = self.joint_view(run)? {
+            view["jointChange"] = joint;
+        }
         Ok(view)
+    }
+
+    /// What a run says about the change across projects it's in, if it's in one: whether it's where
+    /// the change is agreed or one of its parts, which part it is and what it waits for, and every
+    /// part with its project, its order and the run it started, if it has. So a client that follows
+    /// the agreement finds each part's run, and one that follows a part sees where it stands.
+    fn joint_view(&self, run: &Run) -> Result<Option<Json>, ToolError> {
+        let engine = &self.0.engine;
+        let Some(here) = engine.run_joint(&run.id).map_err(engine_error)? else {
+            return Ok(None);
+        };
+        let change = engine.joint_change(&here.change_id).map_err(engine_error)?;
+        let project = self
+            .0
+            .store
+            .project(&run.project_id)
+            .map_err(store_error)?
+            .name;
+        let parts: Vec<Json> = change
+            .parts
+            .iter()
+            .map(|card| {
+                let part = card.part.as_ref();
+                let position = part.map(|part| part.position);
+                let waits_for = part
+                    .and_then(|part| part.waits_for.as_ref())
+                    .map(neighbour_view);
+                json!({
+                    "position": position,
+                    "project": card.project,
+                    "projectId": card.project_id,
+                    "column": card.column,
+                    "runId": card.run_id,
+                    "runState": card.run_state,
+                    "waitsFor": waits_for,
+                    "prUrl": card.pr_url,
+                    "prState": card.pr_state,
+                })
+            })
+            .collect();
+        let role = if here.agrees { "agreement" } else { "part" };
+        let mut view = json!({
+            "changeId": here.change_id,
+            "role": role,
+            "project": project,
+            "agreed": change.agreed.is_some(),
+            "projects": change.projects,
+            "parts": parts,
+        });
+        if let Some(part) = &here.part {
+            let waits_for = part.waits_for.as_ref().map(neighbour_view);
+            view["part"] = json!({
+                "position": part.position,
+                "of": part.total,
+                "waitsFor": waits_for,
+                "warnings": part.warnings,
+            });
+        }
+        Ok(Some(view))
     }
 
     /// What the run did, in short, the way a subagent answers: what an orchestrator reads first.
@@ -1388,6 +1544,10 @@ impl McpServer {
         }
         Ok(view)
     }
+}
+
+fn neighbour_view(neighbour: &keel_engine::Neighbour) -> Json {
+    json!({ "position": neighbour.position, "project": neighbour.project })
 }
 
 /// Each step's latest attempt, in the order they came.
@@ -2282,6 +2442,33 @@ fn engine_error(error: Error) -> ToolError {
     }
 }
 
+/// Why start_run was refused. An issue that's a change across projects starts from the tool made
+/// for that, rather than from a card on the board.
+fn start_run_error(error: Error, issue: Option<i64>) -> ToolError {
+    match (error, issue) {
+        (Error::InvalidState, Some(number)) => ToolError::new(format!(
+            "Issue #{number} already has a run open on the board. list_runs shows it."
+        )),
+        (Error::Blocked(Reason::StartsOnTheBoard), Some(number)) => ToolError::new(format!(
+            "Issue #{number} is a change across several projects, so start_run can't start it. Use propose_change, with the projects it also touches in `alsoTouches`, instead of copying its text into a card on the board."
+        )),
+        (error, _) => engine_error(error),
+    }
+}
+
+/// Why propose_change was refused, with nothing created.
+fn propose_change_error(error: Error, issue: Option<i64>) -> ToolError {
+    match (error, issue) {
+        (Error::InvalidState, Some(number)) => ToolError::new(format!(
+            "Issue #{number} already has a run open on the board. list_runs shows it."
+        )),
+        (Error::Blocked(Reason::StartsOnTheBoard), Some(number)) => ToolError::new(format!(
+            "Issue #{number} already is a change across several projects on the board, so nothing new was created. The person approves its agreement in Keel, and list_runs with `mine` shows what this client started."
+        )),
+        (error, _) => engine_error(error),
+    }
+}
+
 /// The person, or the run itself, can act between a client looking and the engine acting on it.
 fn changed_meanwhile(error: Error) -> ToolError {
     match error {
@@ -2330,6 +2517,17 @@ fn capped_end(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_issue_that_is_a_change_across_projects_points_to_propose_change() {
+        let refusal = start_run_error(Error::Blocked(Reason::StartsOnTheBoard), Some(47));
+        assert!(refusal.0.contains("propose_change"), "{}", refusal.0);
+        assert!(refusal.0.contains("#47"), "{}", refusal.0);
+        let open = start_run_error(Error::InvalidState, Some(47));
+        assert!(open.0.contains("already has a run open"), "{}", open.0);
+        let again = propose_change_error(Error::Blocked(Reason::StartsOnTheBoard), Some(47));
+        assert!(again.0.contains("nothing new was created"), "{}", again.0);
+    }
 
     #[test]
     fn a_model_name_cannot_pass_for_a_flag_or_anything_else() {
