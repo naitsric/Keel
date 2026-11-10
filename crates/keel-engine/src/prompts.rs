@@ -45,6 +45,9 @@ pub fn system_prompt(
             "Write commit messages in {}, unless the project's instructions say otherwise.\n",
             language_name(language),
         ));
+        text.push_str(
+            "Run tests and checks without piping them into grep, head or tail, which hides whether they failed, or start with `set -o pipefail`.\n",
+        );
     }
     text.push_str(&format!(
         "\nEnd with a short message for the person, in {}: what you did, what changed, how you checked it, and anything they need to decide. It may become a pull request description, so write it for a reviewer, and don't mention this environment, pushing, or pull requests.\n",
@@ -443,6 +446,20 @@ mod tests {
             let (reader, _) =
                 system_prompt(dir.path(), language, ToolProfile::ReadOnly, &empty, "");
             assert!(!reader.contains("no network"));
+        }
+    }
+
+    #[test]
+    fn who_runs_tests_is_told_a_pipe_hides_whether_they_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = Block::default();
+        for language in ["en", "es"] {
+            let (builder, _) = system_prompt(dir.path(), language, ToolProfile::Build, &empty, "");
+            assert!(builder.contains("Run tests and checks without piping them"));
+            assert!(builder.contains("set -o pipefail"));
+            let (reader, _) =
+                system_prompt(dir.path(), language, ToolProfile::ReadOnly, &empty, "");
+            assert!(!reader.contains("pipefail"));
         }
     }
 

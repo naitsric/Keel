@@ -1,10 +1,10 @@
-import { AlertTriangle, Check, ExternalLink, FileDiff, GitPullRequest, Layers, Loader2, X } from "lucide-react";
+import { AlertTriangle, Check, CircleQuestionMark, ExternalLink, FileDiff, GitPullRequest, Layers, Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Run, type RunJoint, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -923,6 +923,22 @@ function Output({ text, truncated }: { text: string; truncated?: boolean }) {
   );
 }
 
+/** What a command's exit code can't say on its own: that its output mentions a failure, or that a pipe can hide one. */
+function CommandNotes({ end }: { end: CommandEnd }) {
+  const { t } = useTranslation();
+  return (
+    <>
+      {end.failureMark && (
+        <p className="mt-1 flex items-center gap-1 text-[11.5px] text-warning">
+          <AlertTriangle size={12} className="shrink-0" />
+          {t("commands.outputSays", { mark: end.failureMark })}
+        </p>
+      )}
+      {end.piped && <p className="mt-1 text-[11.5px] text-subtle">{t("commands.pipedNote")}</p>}
+    </>
+  );
+}
+
 function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role"] }) {
   const { t } = useTranslation();
   const { event, result } = item;
@@ -936,6 +952,8 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
       if (role === "specifier" && data.name === "StructuredOutput") return line(t("activity.specAnswer"), "text-subtle");
       if (role === "verifier" && data.name === "StructuredOutput") return line(t("activity.verifyAnswer"), "text-subtle");
       const failed = result?.data.isError === true;
+      // Only a command's output is read for failures: a file that was read can say anything.
+      const end = data.name === "Bash" ? commandEnd(String(data.input?.command ?? ""), result) : null;
       return (
         <div>
           <p className="flex items-baseline gap-2 text-[12.5px]">
@@ -948,6 +966,7 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
               </span>
             )}
           </p>
+          {end && <CommandNotes end={end} />}
           {result && <Output text={result.data.text} truncated={result.data.truncated} />}
         </div>
       );
@@ -1083,7 +1102,7 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
   }
 }
 
-function ActivityTab({ events, role }: { events: AuditEvent[]; role: Attempt["role"] }) {
+export function ActivityTab({ events, role }: { events: AuditEvent[]; role: Attempt["role"] }) {
   const { t } = useTranslation();
   const items = useMemo(() => activityFrom(events), [events]);
   if (items.length === 0) return <p className="text-[12.5px] text-subtle">{t("activity.empty")}</p>;
@@ -1098,7 +1117,7 @@ function ActivityTab({ events, role }: { events: AuditEvent[]; role: Attempt["ro
   );
 }
 
-function CommandsTab({ commands }: { commands: CommandRun[] }) {
+export function CommandsTab({ commands }: { commands: CommandRun[] }) {
   const { t } = useTranslation();
   if (commands.length === 0) return <p className="text-[12.5px] text-subtle">{t("commands.empty")}</p>;
   return (
@@ -1108,12 +1127,14 @@ function CommandsTab({ commands }: { commands: CommandRun[] }) {
           <div className="flex items-start gap-2">
             {command.status === "ok" && <Check size={14} className="mt-0.5 shrink-0 text-success" />}
             {command.status === "failed" && <X size={14} className="mt-0.5 shrink-0 text-danger" />}
+            {command.status === "unclear" && (command.failureMark ? <AlertTriangle size={14} className="mt-0.5 shrink-0 text-warning" /> : <CircleQuestionMark size={14} className="mt-0.5 shrink-0 text-subtle" />)}
             {command.status === "running" && <Loader2 size={14} className="mt-0.5 shrink-0 animate-spin text-accent" />}
             <code className="selectable min-w-0 flex-1 font-mono text-[12px] break-all">{command.command}</code>
-            <span className={cx("shrink-0 text-[11.5px]", command.status === "failed" ? "text-danger" : "text-subtle")}>
+            <span className={cx("shrink-0 text-[11.5px]", command.status === "failed" ? "text-danger" : command.failureMark ? "text-warning" : "text-subtle")}>
               {command.status === "failed" && command.exitCode != null ? t("commands.failedCode", { code: command.exitCode }) : t(`commands.${command.status}`)}
             </span>
           </div>
+          <CommandNotes end={command} />
           <Output text={command.output} truncated={command.truncated} />
         </li>
       ))}

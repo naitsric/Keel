@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandsFrom, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, stillGoing, toolSummary, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, stillGoing, toolSummary, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -72,6 +72,67 @@ describe("commandsFrom", () => {
       ["echo ok", "ok", null],
       ["sleep 9", "running", null],
     ]);
+  });
+
+  it("doesn't call tests that failed behind a pipe a success", () => {
+    // What the builder ran in run 40c0fe47: head ended with 0, so Claude Code saw no error.
+    const command = 'cargo test --workspace 2>&1 | grep -E "^test result|FAILED|failed|panicked|error" | head -30';
+    const [piped] = commandsFrom([
+      event(1, "toolCall", { id: "1", name: "Bash", input: { command } }),
+      event(2, "toolResult", { id: "1", isError: false, text: "test prompts::it_works ... FAILED\ntest result: FAILED. 120 passed; 15 failed" }),
+    ]);
+    expect(piped).toMatchObject({ status: "unclear", piped: true, failureMark: "FAILED" });
+  });
+
+  it("still says a plain command that failed failed, with its code", () => {
+    const [plain] = commandsFrom([
+      event(1, "toolCall", { id: "1", name: "Bash", input: { command: "cargo test --workspace" } }),
+      event(2, "toolResult", { id: "1", isError: true, text: "Exit code 101\ntest result: FAILED. 120 passed; 15 failed", exitCode: 101 }),
+    ]);
+    // That it failed already says it: the word in the output adds nothing.
+    expect(plain).toMatchObject({ status: "failed", exitCode: 101, piped: false, failureMark: null });
+  });
+});
+
+describe("how a command ended", () => {
+  const result = (fields: Record<string, unknown>) => event(2, "toolResult", { id: "1", isError: false, text: "", ...fields });
+
+  it("is a success only when nothing can hide a failure", () => {
+    expect(commandEnd("cargo test", result({ text: "test result: ok. 3 passed; 0 failed" }))).toEqual({ status: "ok", exitCode: null, piped: false, failureMark: null });
+    expect(commandEnd("cargo test | tail -5", result({ text: "test result: ok. 3 passed; 0 failed" }))).toEqual({ status: "unclear", exitCode: null, piped: true, failureMark: null });
+    expect(commandEnd("cargo test || true", result({ text: "test result: FAILED. 2 passed; 1 failed" }))).toEqual({ status: "unclear", exitCode: null, piped: false, failureMark: "FAILED" });
+  });
+
+  it("is still going without a result", () => {
+    expect(commandEnd("cargo test | head", undefined)).toEqual({ status: "running", exitCode: null, piped: false, failureMark: null });
+  });
+
+  it("keeps the pipe when a piped command fails, since its code may be the last one's", () => {
+    expect(commandEnd("cargo test | grep nothing", result({ isError: true, text: "Exit code 1", exitCode: 1 }))).toEqual({ status: "failed", exitCode: 1, piped: true, failureMark: null });
+  });
+
+  it("knows a pipe from an or, a pipe in quotes, and one that keeps the failure", () => {
+    expect(pipeHidesExitCode("cargo test 2>&1 | head -30")).toBe(true);
+    expect(pipeHidesExitCode("cargo test |& tee log")).toBe(true);
+    expect(pipeHidesExitCode("cargo test||echo broke")).toBe(false);
+    expect(pipeHidesExitCode("make test || true")).toBe(false);
+    expect(pipeHidesExitCode('grep -E "a|b" src/main.rs')).toBe(false);
+    expect(pipeHidesExitCode("grep -E 'a|b' src/main.rs")).toBe(false);
+    expect(pipeHidesExitCode("grep a\\|b src/main.rs")).toBe(false);
+    expect(pipeHidesExitCode('echo "say \\"|\\"" | wc -c')).toBe(true);
+    expect(pipeHidesExitCode("set -o pipefail; cargo test 2>&1 | tail -20")).toBe(false);
+    expect(pipeHidesExitCode("set -euo pipefail && pnpm test | tail")).toBe(false);
+    expect(pipeHidesExitCode("cargo test")).toBe(false);
+  });
+
+  it("finds what failing tests and builds print, and not every mention of a failure", () => {
+    expect(failureMarkIn("test calc::adds ... FAILED")).toBe("FAILED");
+    expect(failureMarkIn("thread 'calc::adds' panicked at src/calc.rs:3:5")).toBe("panicked");
+    expect(failureMarkIn("error: could not compile `calc`")).toBe("error");
+    expect(failureMarkIn("error[E0308]: mismatched types")).toBe("error");
+    expect(failureMarkIn("test result: ok. 3 passed; 0 failed; 0 ignored")).toBeNull();
+    expect(failureMarkIn("fn reports_error() {}\nlet my_error: u8 = 0;")).toBeNull();
+    expect(failureMarkIn("")).toBeNull();
   });
 });
 

@@ -1,15 +1,57 @@
 import type { TFunction } from "i18next";
 import type { AuditEvent, GivenAnswer, SpecOutput, VerificationOutput } from "./api";
 
-export interface CommandRun {
+export interface CommandEnd {
+  /** `unclear` is a command that finished with code 0, but where that 0 may hide a failure. */
+  status: "ok" | "failed" | "running" | "unclear";
+  exitCode: number | null;
+  /** It finished through a pipe, so its exit code is only the last command's. */
+  piped: boolean;
+  /** A word in its output that usually means something failed, when the exit code doesn't say so. */
+  failureMark: string | null;
+}
+
+export interface CommandRun extends CommandEnd {
   id: string;
   command: string;
   description: string | null;
-  status: "ok" | "failed" | "running";
-  exitCode: number | null;
   output: string;
   truncated: boolean;
   at: string;
+}
+
+/**
+ * Whether a shell command sends one command's output into another, which leaves it with the exit
+ * code of the last one. `||` isn't a pipe, nor is a `|` in quotes, and `pipefail` keeps the failure.
+ */
+export function pipeHidesExitCode(command: string): boolean {
+  if (/-[a-zA-Z]*o\s+pipefail\b/.test(command)) return false;
+  let quote: string | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i];
+    if (c === "\\" && quote !== "'") i++;
+    else if (quote) quote = c === quote ? null : quote;
+    else if (c === "'" || c === '"') quote = c;
+    else if (c === "|" && command[i + 1] === "|") i++;
+    else if (c === "|") return true;
+  }
+  return false;
+}
+
+/** The first word in a command's output that usually means something failed, such as a test or a build. */
+export const failureMarkIn = (output: string): string | null => output.match(/\b(?:FAILED\b|panicked\b|error(?=[:[]))/)?.[0] ?? null;
+
+/**
+ * How a command ended. Its exit code alone can say "it went well" over tests that failed, so the
+ * command and what it printed have a say too.
+ */
+export function commandEnd(command: string, result: AuditEvent | undefined): CommandEnd {
+  if (!result) return { status: "running", exitCode: null, piped: false, failureMark: null };
+  const exitCode = result.data.exitCode ?? null;
+  const piped = pipeHidesExitCode(command);
+  if (result.data.isError === true) return { status: "failed", exitCode, piped, failureMark: null };
+  const failureMark = failureMarkIn(String(result.data.text ?? ""));
+  return { status: piped || failureMark ? "unclear" : "ok", exitCode, piped, failureMark };
 }
 
 /** The commands a step ran, each with how it ended. A pending result means it's still going. */
@@ -19,13 +61,12 @@ export function commandsFrom(events: AuditEvent[]): CommandRun[] {
     .filter((e) => e.kind === "toolCall" && e.data.name === "Bash")
     .map((call) => {
       const result = results.get(call.data.id);
-      const failed = result?.data.isError === true;
+      const command = String(call.data.input?.command ?? "");
       return {
         id: call.data.id,
-        command: String(call.data.input?.command ?? ""),
+        command,
         description: call.data.input?.description ?? null,
-        status: !result ? "running" : failed ? "failed" : "ok",
-        exitCode: result?.data.exitCode ?? null,
+        ...commandEnd(command, result),
         output: String(result?.data.text ?? ""),
         truncated: result?.data.truncated === true,
         at: call.at,
