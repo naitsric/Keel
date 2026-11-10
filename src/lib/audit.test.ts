@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, stillGoing, toolSummary, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -300,6 +300,34 @@ describe("the reviews of a round", () => {
   it("takes the approver's last answer, not a try that gave none", () => {
     const answered = a("approver", 0, { decision: "approve" });
     expect(reviewsOfRound([answered, a("approver", 0)], 0).approver).toBe(answered);
+  });
+});
+
+describe("what the reviews couldn't check by reading the code", () => {
+  const review = (stepId: string, unchecked: unknown, round = 0) => ({ stepId, role: "reviewer", round, output: { verdict: "approved", findings: [], summary: "Fine.", unread: [], unchecked } });
+
+  it("lists each thing with the review that said it, even when every review approved", () => {
+    const attempts = [review("ux", ["How the Save bar looks in dark mode", "  "]), review("ui", [" The page in a wide window "]), review("code", [])];
+    expect(uncheckedInRound(attempts, 0)).toEqual([
+      { step: "ux", text: "How the Save bar looks in dark mode" },
+      { step: "ui", text: "The page in a wide window" },
+    ]);
+  });
+
+  it("only takes each review's latest answer, in the round it's asked about", () => {
+    const attempts = [review("ux", ["Before it was tried again"]), review("ux", ["After"]), review("ui", ["About code that has changed since"], 0), review("ui", [], 1)];
+    expect(uncheckedInRound(attempts.slice(0, 2), 0)).toEqual([{ step: "ux", text: "After" }]);
+    expect(uncheckedInRound(attempts.slice(2), 1)).toEqual([]);
+  });
+
+  it("is nothing for an answer from before Keel asked, one it can't read, or anything but a review", () => {
+    const attempts = [
+      { stepId: "ux", role: "reviewer", round: 0, output: { verdict: "approved", findings: [], summary: "" } },
+      { stepId: "ui", role: "reviewer", round: 0, output: null },
+      { stepId: "code", role: "reviewer", round: 0, output: { unchecked: "Not a list" } },
+      { stepId: "builder", role: "worker", round: 0, output: { unchecked: ["Not a review"] } },
+    ];
+    expect(uncheckedInRound(attempts, 0)).toEqual([]);
   });
 });
 

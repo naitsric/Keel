@@ -405,6 +405,44 @@ describe("the approval card", () => {
     });
   });
 
+  describe("what the reviews couldn't check by reading the code", () => {
+    const looked = (stepId: string, unchecked: string[]) => attempt({ id: stepId, stepId, role: "reviewer", output: { verdict: "approved", findings: [], summary: "Fine.", unread: [], unchecked } as unknown as Attempt["output"] });
+    const met = said("C1", "met", "test_calc.py:1");
+    const proves = (label = "What proves it") => [...document.querySelectorAll("dt")].find((dt) => dt.textContent === label)?.nextElementSibling?.textContent ?? "";
+    const greenCheck = () => document.querySelector("details summary svg.text-success");
+
+    it("comes first in what proves it, as not proven, though everything that had to be true was met", () => {
+      show([builder(["calc.py"]), check, verifier([met]), looked("ux", ["How the Save bar looks in dark mode"]), looked("code", []), human], ["calc.py"]);
+      const row = proves();
+      expect(row.startsWith("Not proven")).toBe(true);
+      expect(row).toContain("How the Save bar looks in dark mode");
+      expect(row).toContain("ux");
+      expect(row.indexOf("How the Save bar")).toBeLessThan(row.indexOf("1 of 1 met"));
+      // What the verifier found stays as it was, without the check that says it's all proven.
+      expect(document.querySelector("details summary")?.textContent).toBe("1 of 1 met");
+      expect(greenCheck()).toBeNull();
+    });
+
+    it("isn't there when the reviews could check all of it", () => {
+      show([builder(["calc.py"]), check, verifier([met]), looked("ux", []), human], ["calc.py"]);
+      expect(page()).not.toContain("Not proven");
+      expect(greenCheck()).not.toBeNull();
+    });
+
+    it("is there without a verifier too", () => {
+      show([builder(["calc.py"]), looked("ui", ["The page in a wide window"]), human], ["calc.py"]);
+      expect(proves().startsWith("Not proven")).toBe(true);
+      expect(proves()).toContain("The page in a wide window");
+    });
+
+    it("is in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      show([builder(["calc.py"]), check, verifier([met]), looked("ux", ["Cómo se ve en tema oscuro"]), human], ["calc.py"]);
+      expect(proves("Qué lo demuestra").startsWith("Sin probar")).toBe(true);
+      expect(proves("Qué lo demuestra")).toContain("Cómo se ve en tema oscuro");
+    });
+  });
+
   describe("when the workflow fits the change", () => {
     const small = { code: "treatedAsSmall", lines: 12, files: 2 };
     const skip = (id: string, role: Attempt["role"]) => attempt({ id, stepId: id, role, state: "skipped", reason: small });

@@ -137,7 +137,7 @@ pub fn part_request(title: &str, part: &str, issue: Option<&Issue>) -> String {
 const SPEC_PROMPT_EN: &str = r#"Work out what this request will change, without editing anything, and answer in the structure you were given. Read the code involved first. Whoever reads your answer asked for the change and may not know the code, so say what happens, in plain words, and not how it's built.
 
 - summary: one sentence saying what will change, up to 200 characters.
-- criteria: up to 7, with ids C1, C2 and so on. Each says when something happens and what must then be true, so that a test could prove it. Its `when` and `then` together take up to 200 characters.
+- criteria: up to 7, with ids C1, C2 and so on. Each says when something happens and what must then be true, so that a test could prove it. Its `when` and `then` together take up to 200 characters. If the request is about how something looks, at least one says what a person sees on screen, such as that in a wide window the content stays centered, even if only a person can check it.
 - changes: what this adds, changes or removes in what people can see today.
 - limits: what must not change.
 - decided: up to 5, each up to 140 characters: what you decided on your own because it wasn't worth asking.
@@ -162,7 +162,7 @@ Request:
 const SPEC_PROMPT_ES: &str = r#"Averigua qué va a cambiar este pedido, sin editar nada, y responde con la estructura que te dieron. Lee primero el código involucrado. Quien lea tu respuesta pidió el cambio y puede no conocer el código, así que di qué pasa, en palabras simples, y no cómo se construye. Responde en español.
 
 - summary: una frase que diga qué va a cambiar, hasta 200 caracteres.
-- criteria: hasta 7, con ids C1, C2 y así. Cada uno dice cuándo pasa algo y qué debe ser cierto entonces, de modo que una prueba lo pueda demostrar. Su `when` y su `then` juntos llegan hasta 200 caracteres.
+- criteria: hasta 7, con ids C1, C2 y así. Cada uno dice cuándo pasa algo y qué debe ser cierto entonces, de modo que una prueba lo pueda demostrar. Su `when` y su `then` juntos llegan hasta 200 caracteres. Si el pedido habla de cómo se ve algo, al menos uno dice lo que una persona ve en pantalla, como que en una ventana ancha el contenido queda centrado, aunque solo una persona pueda comprobarlo.
 - changes: lo que esto agrega, cambia o quita en lo que la gente puede ver hoy.
 - limits: lo que no debe cambiar.
 - decided: hasta 5, cada uno hasta 140 caracteres: lo que decidiste por tu cuenta porque no valía la pena preguntarlo.
@@ -241,7 +241,7 @@ const VERIFY_PROMPT_EN: &str = r#"You check whether a change really does what wa
 For each item in `criteria` below, find the test that really proves it, and read that test to be sure.
 - met: a test proves it, and it's a test that the command Keel ran this round executed (see below). `evidence` is that test's name, or its file and line.
 - unmet: the code shows it isn't so. `evidence` is the file and line that shows it.
-- unverified: no test proves it, or you can't tell. That's a normal answer, so give it rather than stretch a test that's only related. If the test exists but that command doesn't run it (another language, runner or package), it's unverified too: put that test in `evidence` and say in `evidence` that it didn't run.
+- unverified: no test proves it, or you can't tell. That's a normal answer, so give it rather than stretch a test that's only related. If the test exists but that command doesn't run it (another language, runner or package), it's unverified too: put that test in `evidence` and say in `evidence` that it didn't run. How something looks on screen is unverified too, unless a test that command ran looks at the screen, such as one that takes a screenshot.
 
 Each `evidence` is one line of up to 140 characters. `summary` is one sentence for the person who asked for the change. Answer for every item, using its `id`, and don't add any. If work was sent back below and that changes what an item asks for, what was sent back wins, so don't call the item `unmet` for following it.
 
@@ -261,7 +261,7 @@ const VERIFY_PROMPT_ES: &str = r#"Compruebas si un cambio de verdad hace lo que 
 Para cada elemento de `criteria` de abajo, busca la prueba que de verdad lo demuestra, y léela para estar seguro.
 - met: lo demuestra una prueba que el comando que Keel corrió en esta ronda ejecutó (ver abajo). `evidence` es el nombre de esa prueba, o su archivo y línea.
 - unmet: el código muestra que no es así. `evidence` es el archivo y la línea que lo muestran.
-- unverified: ninguna prueba lo demuestra, o no puedes saberlo. Es una respuesta normal, así que dala en vez de estirar una prueba que solo se relaciona. Si la prueba existe pero ese comando no la ejecuta (otro lenguaje, runner o paquete), también es unverified: pon esa prueba en `evidence` y di en `evidence` que no corrió.
+- unverified: ninguna prueba lo demuestra, o no puedes saberlo. Es una respuesta normal, así que dala en vez de estirar una prueba que solo se relaciona. Si la prueba existe pero ese comando no la ejecuta (otro lenguaje, runner o paquete), también es unverified: pon esa prueba en `evidence` y di en `evidence` que no corrió. Cómo se ve algo en pantalla también es unverified, salvo que lo mire una prueba que ese comando ejecutó, como una que toma una captura.
 
 Cada `evidence` es una línea de hasta 140 caracteres. `summary` es una frase para la persona que pidió el cambio. Responde por cada elemento, usando su `id`, y no agregues ninguno. Si abajo se devolvió trabajo y eso cambia lo que pide un elemento, manda lo que se devolvió, así que no lo marques `unmet` por seguirlo.
 
@@ -651,6 +651,41 @@ mod tests {
             }
             // The rule sits before the fact it refers to.
             assert!(prompt.find(ran) < prompt.find("{{check}}"), "{language}");
+        }
+    }
+
+    #[test]
+    fn a_request_about_how_something_looks_gets_something_to_see_that_no_test_proves() {
+        for (language, seen, unverified) in [
+            (
+                "en",
+                "If the request is about how something looks, at least one says what a person sees on screen",
+                "How something looks on screen is unverified too, unless a test that command ran looks at the screen",
+            ),
+            (
+                "es",
+                "Si el pedido habla de cómo se ve algo, al menos uno dice lo que una persona ve en pantalla",
+                "Cómo se ve algo en pantalla también es unverified, salvo que lo mire una prueba que ese comando ejecutó",
+            ),
+        ] {
+            let steps = full_workflow(language, "o", "s", None);
+            let WorkflowStep::Agent(spec) = &steps[0] else {
+                panic!()
+            };
+            for prompt in [
+                spec.prompt.clone(),
+                spec_prompt_with_size(language),
+                agreement_prompt(language),
+            ] {
+                assert!(prompt.contains(seen), "{language}");
+                assert!(prompt.find(seen) < prompt.find("{{request}}"), "{language}");
+            }
+            let verify = verify_prompt(language);
+            assert!(verify.contains(unverified), "{language}");
+            assert!(
+                verify.find(unverified) < verify.find("{{check}}"),
+                "{language}"
+            );
         }
     }
 

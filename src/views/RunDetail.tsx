@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Run, type RunJoint, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -206,16 +206,17 @@ function VerificationItems({ verification }: { verification: VerificationOutput 
 }
 
 /**
- * One line that opens to the list. The green check only goes with all of it met: anything else says
- * what it is, and not being able to verify something is a normal thing to find, not an alarm.
+ * One line that opens to the list. The green check only goes with all of it met and nothing else left
+ * unproven: anything else says what it is, and not being able to verify something is a normal thing to
+ * find, not an alarm.
  */
-function VerificationProof({ verification }: { verification: VerificationOutput }) {
+function VerificationProof({ verification, allProven = true }: { verification: VerificationOutput; allProven?: boolean }) {
   const { t } = useTranslation();
   const { met, unmet, total } = verificationCounts(verification);
   return (
     <details className="my-0.5">
       <summary className="cursor-pointer">
-        {total > 0 && met === total && <Check size={13} className="mr-1 inline align-[-2px] text-success" />}
+        {allProven && total > 0 && met === total && <Check size={13} className="mr-1 inline align-[-2px] text-success" />}
         <span className={cx(unmet > 0 && "font-medium text-warning")}>{verificationLine(t, verification)}</span>
       </summary>
       <div className="mt-1 mb-1.5 pl-3">
@@ -242,8 +243,23 @@ function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { atte
   const checks = latestOfEachStep(attempts.filter((a) => a.kind === "check"));
   const passed = commands.filter((c) => c.status === "ok").length;
   const verification = verificationInRound(attempts, round);
+  // What nobody could check comes first, so a count of what was met can't stand for all of it.
+  const unchecked = uncheckedInRound(attempts, round);
   return (
     <>
+      {unchecked.length > 0 && (
+        <div className="mb-1.5">
+          <p className="font-medium">{t("run.notProvenByReviews")}</p>
+          <ul className="selectable list-disc space-y-0.5 pl-4 break-words">
+            {unchecked.map((item, index) => (
+              // Lines of a fixed text: their position is their identity.
+              <li key={index}>
+                {item.text} <span className="font-mono text-[11.5px] text-muted">{item.step}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {checks.map((check) =>
         check.state === "succeeded" ? (
           <p key={check.id} className="selectable flex gap-1.5">
@@ -262,7 +278,7 @@ function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { atte
           {reviewed && ` ${t("run.approvalReviewsOnlyRead")}`}
         </p>
       )}
-      {verification && <VerificationProof verification={verification} />}
+      {verification && <VerificationProof verification={verification} allProven={unchecked.length === 0} />}
       <p className="text-muted">
         {commands.length === 0 ? t("run.noCommands") : t("run.commandsPassed", { passed, total: commands.length })} <span className={cx((rawCheck === "changed" || rawCheck === "missing") && "font-medium text-danger")}>{t(auditKey(rawCheck))}</span>
       </p>
