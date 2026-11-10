@@ -22,6 +22,7 @@ const lines = (text: string) =>
 const NONE = "__none__";
 // A project with no default workflow runs this one, so it's what the setting shows and saves as nothing.
 const FULL_WORKFLOW = "builtin:full";
+const POSTGRES_PORT = 5432;
 const ENV_EXAMPLE = "DB_HOST={{socketDir:db}}";
 
 /** Turns `NAME=value` lines into variables, or says which line isn't one. */
@@ -53,7 +54,7 @@ function ServiceRow({ service, onChange, onRemove }: { service: Service; onChang
             <input value={service.start} onChange={(e) => onChange({ ...service, start: e.target.value })} className={`${inputClass} font-mono`} />
           </Field>
         )}
-        <Field label={t("settings.serviceSocket")} hint={t("settings.serviceSocketHint")}>
+        <Field label={t("settings.serviceSocket")} hint={service.type === "bridge" && service.port === POSTGRES_PORT ? t("settings.serviceSocketHintPostgres") : t("settings.serviceSocketHint")}>
           <input value={service.socket ?? ""} onChange={(e) => onChange({ ...service, socket: e.target.value.trim() || null })} className={`${inputClass} font-mono`} />
         </Field>
       </div>
