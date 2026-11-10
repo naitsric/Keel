@@ -406,7 +406,14 @@ impl Inner {
             } else {
                 workflows::schema_for(&spec.role).map(str::to_owned)
             },
-            add_dirs: copies.iter().map(|ready| ready.copy.path.clone()).collect(),
+            add_dirs: copies
+                .iter()
+                .map(|ready| ready.copy.path.clone())
+                .chain(Some(self.change_dir(&attempt.run_id)).filter(|dir| {
+                    dir.is_dir()
+                        && settings::is_read_only(&attempt.settings, &dir.to_string_lossy())
+                }))
+                .collect(),
         };
         let args = command.args(spec);
         let version = auth::read_version(&claude, &tools.path_env);
@@ -1082,6 +1089,9 @@ impl Inner {
             state = AttemptState::Failed;
             reason = Some(Reason::NoStructuredOutput);
         }
+        if state == AttemptState::Succeeded && m.role == "reviewer" {
+            self.correct_review(&m);
+        }
         let _ = store.set_state(&m.attempt_id, state, reason.as_ref());
         let _ = store.append_event(
             &m.attempt_id,
@@ -1219,6 +1229,26 @@ impl Inner {
             );
         }
         true
+    }
+
+    /// A review that couldn't read part of the change isn't an approval of it, and the record says
+    /// what it left out. What it answered as it came stays in the `result` event.
+    fn correct_review(&self, m: &Monitor) {
+        let Some((kept, unread)) = self
+            .store
+            .attempt(&m.attempt_id)
+            .ok()
+            .and_then(|attempt| attempt.output)
+            .and_then(|output| workflows::review_as_kept(&output))
+        else {
+            return;
+        };
+        self.keep_output(m, &kept);
+        let _ = self.store.append_event(
+            &m.attempt_id,
+            "reviewIncomplete",
+            &json!({ "unread": unread }),
+        );
     }
 
     /// Resumes the same session once, saying exactly what to fix.

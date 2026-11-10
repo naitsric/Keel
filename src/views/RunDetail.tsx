@@ -991,6 +991,8 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
       return line(t("activity.questionsTaken", { rounds: data.rounds }), "text-warning");
     case "specCorrected":
       return line(t("activity.specCorrected"), "text-warning");
+    case "reviewIncomplete":
+      return line(t("activity.reviewIncomplete", { files: (data.unread ?? []).join(", ") }), "text-warning");
     case "verificationCorrected":
       return (
         <div>
@@ -1198,6 +1200,7 @@ function ProposalsCard({ runId, revision }: { runId: string; revision: number })
 function ReviewVerdict({ review }: { review: Attempt }) {
   const { t } = useTranslation();
   if (!review.output) return <StateBadge state={review.state} label={t(`states.${review.state}`)} />;
+  if ((review.output.unread ?? []).length > 0) return <span className="text-warning">{t("run.verdictUnread")}</span>;
   return <span className={review.output.verdict === "approved" ? "text-success" : "text-warning"}>{review.output.verdict === "approved" ? t("run.verdictApproved") : t("run.verdictChanges")}</span>;
 }
 
@@ -1229,6 +1232,7 @@ function ReviewsList({ attempts, round }: { attempts: Attempt[]; round: number }
             </div>
             {review.state === "skipped" && review.reason && <p className="selectable mt-0.5 text-muted">{reasonText(t, review.reason)}</p>}
             {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
+            {(review.output?.unread ?? []).length > 0 && <p className="selectable mt-0.5 text-warning">{t("run.unreadFiles", { files: review.output?.unread?.join(", ") })}</p>}
             {(review.output?.findings ?? []).length > 0 && (
               <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 text-muted">
                 {review.output?.findings.map((finding, index) => (

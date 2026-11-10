@@ -489,6 +489,13 @@ describe("the approval card", () => {
       expect(row("Small change")).toBeNull();
     });
 
+    it("never shows a review that couldn't read all of the change as no problems", () => {
+      const partly = attempt({ id: "code", stepId: "code", role: "reviewer", output: { verdict: "changes", findings: [], summary: "Fine as far as I got.", unread: ["src/b.ts"] } as unknown as Attempt["output"] });
+      show([builder(["calc.py"]), check, partly, human], ["calc.py"]);
+      expect(row("Reviews")).toContain("Didn't read all of it");
+      expect(row("Reviews")).not.toContain("No problems");
+    });
+
     it("says every reason it went to full review, in plain words", () => {
       const every = [
         { code: "specNotSmall" },
