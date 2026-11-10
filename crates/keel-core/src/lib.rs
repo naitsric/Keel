@@ -357,7 +357,8 @@ pub enum Reason {
     SetupFailed {
         exit_code: Option<i32>,
     },
-    /// Accepting this would go over what the Brain can send. Something has to be retired first.
+    /// Accepting this would go over the room for decisions and learnings. One of them has to be
+    /// retired first.
     BrainFull {
         used: usize,
         limit: usize,

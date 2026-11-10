@@ -1,6 +1,7 @@
 //! What Keel knows about a project, kept on this machine and sent to every agent. A map an agent
 //! wrote from the code, decisions people made, and things earlier runs learned that a person
-//! accepted. It stays small on purpose: when it's full, adding something means retiring something.
+//! accepted. It stays small on purpose: the map has its own room, and when what people let in fills
+//! theirs, adding something means retiring something.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -13,8 +14,11 @@ use serde_json::{Value, json};
 use crate::git::Git;
 use crate::{Engine, Error, Inner, Result, StartRun, locked};
 
-/// How much of it reaches each step. Decisions go first, then what was learned, then the map.
+/// How much of what people decided and accepted reaches each step. Decisions go first, then what
+/// was learned.
 pub const BRAIN_LIMIT: usize = 4 * 1024;
+/// The map has its own room, so it never crowds out what people let in.
+pub const MAP_LIMIT: usize = 3 * 1024;
 /// Writes the map when a project is added. On the Brain screen, a person picks another if they like.
 pub const DEFAULT_BRAIN_MODEL: &str = "sonnet";
 const MAX_MAP_LINES: usize = 12;
@@ -86,8 +90,10 @@ pub struct Block {
     pub sources: Option<Value>,
     pub notes_in: HashSet<i64>,
     pub decisions_in: HashSet<i64>,
-    /// How much all of it takes, whether it fits or not.
+    /// How much decisions and learnings take, whether they fit or not.
     pub used: usize,
+    /// How much the map takes, whether it fits or not.
+    pub map_used: usize,
 }
 
 fn note_line(note: &BrainNote, stale: bool) -> String {
@@ -124,11 +130,12 @@ fn decision_line(decision: &Decision) -> String {
     format!("- On {date}, a person {about}: {}\n", decision.text.trim())
 }
 
-/// Puts it together within the limit. What people decided outranks what was learned, which
-/// outranks the map, and whatever doesn't fit stays on record but isn't sent.
+/// Puts it together within the limits. What people decided outranks what was learned, the map fills
+/// its own room, and whatever doesn't fit stays on record but isn't sent.
 pub fn block(decisions: &[Decision], notes: &[BrainNote], stale: &HashSet<i64>) -> Block {
     let mut result = Block::default();
     let mut room = BRAIN_LIMIT;
+    let mut map_room = MAP_LIMIT;
     let active = |kind: &'static str| {
         notes
             .iter()
@@ -148,9 +155,9 @@ pub fn block(decisions: &[Decision], notes: &[BrainNote], stale: &HashSet<i64>) 
     }
     decision_lines.reverse();
 
-    let mut take = |note: &BrainNote, room: &mut usize| -> Option<String> {
+    let mut take = |note: &BrainNote, room: &mut usize, used: &mut usize| -> Option<String> {
         let line = note_line(note, stale.contains(&note.seq));
-        result.used += line.len();
+        *used += line.len();
         (line.len() <= *room).then(|| {
             *room -= line.len();
             result.notes_in.insert(note.seq);
@@ -161,13 +168,13 @@ pub fn block(decisions: &[Decision], notes: &[BrainNote], stale: &HashSet<i64>) 
     let mut newest_first: Vec<&BrainNote> = active("learning").collect();
     newest_first.sort_by_key(|n| std::cmp::Reverse(n.seq));
     for note in newest_first {
-        if let Some(line) = take(note, &mut room) {
+        if let Some(line) = take(note, &mut room, &mut result.used) {
             learned.push((note.seq, line));
         }
     }
     learned.sort_by_key(|(seq, _)| *seq);
     let map: Vec<String> = active("map")
-        .filter_map(|note| take(note, &mut room))
+        .filter_map(|note| take(note, &mut map_room, &mut result.map_used))
         .collect();
 
     if decision_lines.is_empty() && learned.is_empty() && map.is_empty() {
@@ -202,7 +209,7 @@ pub fn block(decisions: &[Decision], notes: &[BrainNote], stale: &HashSet<i64>) 
         "notes": notes_in,
         "decisions": decisions_in,
         "leftOut": left_out,
-        "bytes": BRAIN_LIMIT - room,
+        "bytes": BRAIN_LIMIT - room + MAP_LIMIT - map_room,
     }));
     result.text = text;
     result
@@ -276,8 +283,12 @@ pub struct BrainView {
     pub learnings: Vec<NoteView>,
     pub proposals: Vec<BrainNote>,
     pub decisions: Vec<DecisionView>,
+    /// What decisions and learnings take, and their room.
     pub used: usize,
     pub limit: usize,
+    /// What the map takes, and its own room.
+    pub map_used: usize,
+    pub map_limit: usize,
     /// The exact text the next agent gets.
     pub prompt: String,
     /// The run writing the map right now, if any.
@@ -535,6 +546,8 @@ impl Engine {
                 .collect(),
             used: built.used,
             limit: BRAIN_LIMIT,
+            map_used: built.map_used,
+            map_limit: MAP_LIMIT,
             prompt: built.text,
             map_run: self.inner.open_map_run(project_id)?,
         })
@@ -545,7 +558,8 @@ impl Engine {
     }
 
     /// Only a person lets a proposal in, since it reaches every agent after that. If it doesn't
-    /// fit, something else has to go first.
+    /// fit beside the decisions and other learnings, one of them has to go first. The map doesn't
+    /// count, since it has its own room.
     pub fn accept_note(&self, seq: i64) -> Result<()> {
         let store = &self.inner.store;
         let note = store.brain_note(seq)?;
@@ -694,20 +708,33 @@ mod tests {
     }
 
     #[test]
-    fn when_it_is_full_people_outrank_agents_and_nothing_is_lost_quietly() {
+    fn the_map_has_its_own_room_and_nothing_is_lost_quietly() {
         let long = "x".repeat(200);
         let map: Vec<BrainNote> = (1..=30)
             .map(|seq| note(seq, "map", "active", &format!("{seq} {long}")))
             .collect();
+        let learned: Vec<BrainNote> = (31..=40)
+            .map(|seq| note(seq, "learning", "active", &format!("{seq} {long}")))
+            .collect();
         let decisions: Vec<Decision> = (1..=3).map(|s| decision(s, &long)).collect();
-        let built = block(&decisions, &map, &HashSet::new());
+        let notes: Vec<BrainNote> = map.into_iter().chain(learned).collect();
+        let built = block(&decisions, &notes, &HashSet::new());
 
         assert_eq!(built.decisions_in.len(), 3, "every decision got in");
-        assert!(built.notes_in.len() < 30, "the map didn't");
-        assert!(built.used > BRAIN_LIMIT);
+        assert!(
+            (31..=40).all(|seq| built.notes_in.contains(&seq)),
+            "a map too big for its room didn't push out what people accepted"
+        );
+        assert!(
+            built.notes_in.iter().any(|seq| *seq <= 30),
+            "the map got in"
+        );
+        assert!(built.notes_in.len() < 40, "but not all of it");
+        assert!(built.used <= BRAIN_LIMIT);
+        assert!(built.map_used > MAP_LIMIT);
         let sources = built.sources.unwrap();
-        assert_eq!(sources["leftOut"], 30 - built.notes_in.len());
-        assert!(sources["bytes"].as_u64().unwrap() <= BRAIN_LIMIT as u64);
+        assert_eq!(sources["leftOut"], 40 - built.notes_in.len());
+        assert!(sources["bytes"].as_u64().unwrap() <= (BRAIN_LIMIT + MAP_LIMIT) as u64);
     }
 
     #[test]

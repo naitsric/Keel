@@ -223,8 +223,12 @@ export interface BrainView {
   learnings: NoteView[];
   proposals: BrainNote[];
   decisions: DecisionView[];
+  /** Decisions and learnings, and their room. */
   used: number;
   limit: number;
+  /** The map has its own room. */
+  mapUsed: number;
+  mapLimit: number;
   prompt: string;
   mapRun: string | null;
 }

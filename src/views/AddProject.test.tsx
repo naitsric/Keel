@@ -95,7 +95,7 @@ describe("adding a project", () => {
         case "workflows_list":
           return [WORKFLOW];
         case "brain_get":
-          return { map: [], learnings: [], proposals: [], decisions: [], used: 0, limit: 4096, prompt: "", mapRun: null };
+          return { map: [], learnings: [], proposals: [], decisions: [], used: 0, limit: 4096, mapUsed: 0, mapLimit: 3072, prompt: "", mapRun: null };
         case "board_get":
           return { cards: [], working: 0, maxAgents: 2, defaultWorkflow: null, paused: null };
         case "max_agents_get":

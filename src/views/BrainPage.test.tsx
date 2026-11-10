@@ -19,6 +19,8 @@ const brain: BrainView = {
   ],
   used: 100,
   limit: 4096,
+  mapUsed: 3000,
+  mapLimit: 3072,
   prompt: "",
   mapRun: null,
 };
@@ -47,6 +49,14 @@ describe("a decision on the Brain page", () => {
     const page = document.body.textContent ?? "";
     expect(page).toContain("You were asked: If `whole` is 0, what should happen?");
     expect(page).toContain("You answered: Show an error, as today");
+  });
+
+  it("shares its room with learnings, and the map has its own", async () => {
+    await open();
+    const page = document.body.textContent ?? "";
+    expect(page).toContain("Learned and decisions: 0.1 KB of 4 KB");
+    expect(page).toContain("Map: 2.9 KB of 3 KB");
+    expect(page).not.toContain("Not everything fits");
   });
 
   it("that came from an approval reads as it always has", async () => {

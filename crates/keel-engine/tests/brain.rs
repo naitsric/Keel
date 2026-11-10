@@ -440,7 +440,7 @@ fn an_agent_gets_three_proposals_at_most_and_cannot_repeat_itself() {
 #[test]
 fn when_the_brain_is_full_something_has_to_go_first() {
     let w = world();
-    // Twelve full lines of map, and proposals long enough to go past the limit.
+    // Twelve full lines of map, more than its room, and proposals long enough to go past theirs.
     let long = "x".repeat(230);
     let lines: Vec<String> = (0..12)
         .map(|i| format!(r#"{{"text":"{i} {long}","paths":["src/a.py"]}}"#))
@@ -464,6 +464,7 @@ fn when_the_brain_is_full_something_has_to_go_first() {
     };
     assert_eq!(limit, 4096);
     assert!(used <= limit);
+    assert!(accepted.len() > 12, "the map didn't take their room");
 
     let brain = w.engine.brain(&w.project_id).unwrap();
     assert_eq!(brain.proposals.len(), 1, "it's still there, waiting");
@@ -472,7 +473,7 @@ fn when_the_brain_is_full_something_has_to_go_first() {
 }
 
 #[test]
-fn a_decision_always_gets_in_and_the_map_makes_room() {
+fn a_decision_gets_in_without_pushing_out_the_map() {
     let w = world();
     let long = "x".repeat(200);
     let lines: Vec<String> = (0..12)
@@ -521,14 +522,13 @@ fn a_decision_always_gets_in_and_the_map_makes_room() {
     w.engine.answer_approval(&approval.id, true, &said).unwrap();
 
     let brain = w.engine.brain(&w.project_id).unwrap();
-    assert!(
-        brain.decisions.iter().all(|d| d.included),
-        "people come first"
-    );
+    assert!(brain.decisions.iter().all(|d| d.included), "it got in");
     assert!(brain.prompt.contains("DECIDED"));
-    let left_out = brain.map.iter().filter(|n| !n.included).count();
-    assert!(left_out > 0, "the map made room");
-    assert!(brain.used > brain.limit, "and the screen can say why");
+    assert!(
+        brain.map.iter().all(|n| n.included),
+        "the map has its own room"
+    );
+    assert!(brain.used <= brain.limit && brain.map_used <= brain.map_limit);
 }
 
 #[test]
