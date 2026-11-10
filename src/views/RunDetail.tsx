@@ -87,7 +87,7 @@ function Explanations({ attempts }: { attempts: Attempt[] }) {
 const auditKey = (rawCheck: RawCheck) => `run.audit${rawCheck[0].toUpperCase()}${rawCheck.slice(1)}`;
 
 /** The rule of the product: never just "finished". What it did, changed, proved, and what's next. */
-function Summary({ run, attempts, current, commands, rawCheck, closedBy, onShowChanges }: { run: Run | null; attempts: Attempt[]; current: Attempt; commands: CommandRun[]; rawCheck: RawCheck; closedBy: string | null; onShowChanges: () => void }) {
+export function Summary({ run, attempts, current, commands, rawCheck, closedBy, onShowChanges }: { run: Run | null; attempts: Attempt[]; current: Attempt; commands: CommandRun[]; rawCheck: RawCheck; closedBy: string | null; onShowChanges: () => void }) {
   const { t } = useTranslation();
   const files = filesChangedBy(attempts);
   const explaining = explainingAttempts(attempts);
@@ -98,6 +98,10 @@ function Summary({ run, attempts, current, commands, rawCheck, closedBy, onShowC
   const latestChecks = checks.filter((a, i) => !checks.slice(i + 1).some((b) => b.stepId === a.stepId));
   const checksPassed = latestChecks.filter((a) => a.state === "succeeded").length;
   const anyActive = attempts.some((a) => isActive(a.state));
+  // One answer for the title and the separation, so they never disagree. Without a run, the steps decide.
+  const going = run ? stillGoing(run, attempts) : anyActive;
+  // Of the steps working, the one that started last is the one to name.
+  const working = attempts.filter((a) => isActive(a.state)).at(-1);
   const verification = verificationInRound(attempts, run?.round ?? 0);
   const skipped = skippedSteps(attempts);
   // A step that's done says nothing about the run while others are still to come.
@@ -106,7 +110,8 @@ function Summary({ run, attempts, current, commands, rawCheck, closedBy, onShowC
   const onlyUnderstood = !mapper && explaining.length === 0 && current.state === "succeeded" ? specOf(current) : null;
   const decision = mapper && current.state === "succeeded" ? "run.decideMap" : run?.prUrl ? PR_DECISIONS[run.prState ?? "draft"] : current.reason?.code === "reworkLimit" ? "run.decideReworkLimit" : between ? "run.decideActive" : DECISIONS[current.state];
   return (
-    <Card className="grid gap-5 p-4 md:grid-cols-2">
+    <Card className={cx("grid gap-5 p-4 md:grid-cols-2", going && "mt-6 border-l-2 border-l-accent")}>
+      <h2 className="text-[13px] font-semibold md:col-span-2">{t(going ? "run.summaryTitle" : "run.summaryTitleDone")}</h2>
       <SummaryBlock title={t("run.whatItDid")} note={explaining.length > 0 ? t("run.generated") : undefined}>
         {mapper && (
           <>
@@ -117,7 +122,7 @@ function Summary({ run, attempts, current, commands, rawCheck, closedBy, onShowC
           </>
         )}
         {onlyUnderstood && <p className="selectable whitespace-pre-wrap">{onlyUnderstood.summary}</p>}
-        {!mapper && !onlyUnderstood && explaining.length === 0 && <p className="selectable whitespace-pre-wrap">{(anyActive ? t("run.noResultYet") : current.state === "succeeded" ? t("run.noResult") : t("run.noResultEnded"))}</p>}
+        {!mapper && !onlyUnderstood && explaining.length === 0 && <p className="selectable whitespace-pre-wrap">{(anyActive ? t("run.noResultYet", { step: working?.stepId }) : current.state === "succeeded" ? t("run.noResult") : t("run.noResultEnded"))}</p>}
         <Explanations attempts={explaining} />
       </SummaryBlock>
       <div className="space-y-4">
@@ -144,7 +149,7 @@ function Summary({ run, attempts, current, commands, rawCheck, closedBy, onShowC
           )}
           {verification && <VerificationProof verification={verification} />}
           {skipped.length > 0 && <p className="text-muted">{t("fits.summary", { names: skipped.map((step) => step.stepId).join(", ") })}</p>}
-          <p className="text-muted">{commands.length === 0 ? t("run.noCommands") : t("run.commandsPassed", { passed, total: commands.length })}</p>
+          <p className="text-muted">{commands.length === 0 ? t("run.noRunCommands") : t("run.runCommandsPassed", { passed, total: commands.length })}</p>
           <p className={cx("mt-0.5", rawCheck === "changed" || rawCheck === "missing" ? "font-medium text-danger" : "text-muted")}>
             {t(auditKey(rawCheck))}
           </p>
