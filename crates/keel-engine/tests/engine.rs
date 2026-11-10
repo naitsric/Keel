@@ -780,3 +780,21 @@ fn abandon_closes_an_interrupted_run() {
     assert_eq!(h.latest(&run).state, "abandoned");
     assert!(h.kinds(&a.id).contains(&"abandoned".to_owned()));
 }
+
+#[test]
+fn a_new_run_works_in_runs_dir_not_in_the_data_folder() {
+    let h = harness_with("echo hi > new.txt\n", LOGGED_IN, "2.1.318", |c| {
+        c.runs_dir = std::env::temp_dir().join(format!("keel-runs-{}", std::process::id()));
+    });
+    let run = h.start(ToolProfile::Build);
+    let a = h.wait_for(&run, &[AttemptState::Succeeded, AttemptState::Failed]);
+    let workspace = Path::new(&a.workspace);
+    assert!(
+        workspace
+            .starts_with(std::env::temp_dir().join(format!("keel-runs-{}", std::process::id()))),
+        "{workspace:?}"
+    );
+    assert!(!workspace.to_string_lossy().contains(' '));
+    assert!(!h.dir.path().join("data/runs").join(&run).exists());
+    let _ = std::fs::remove_dir_all(workspace.parent().unwrap().parent().unwrap());
+}

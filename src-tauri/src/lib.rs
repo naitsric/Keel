@@ -904,14 +904,14 @@ pub fn run() {
             std::fs::create_dir_all(&data_dir)?;
             let store = Arc::new(Store::open(&data_dir.join("keel.db"))?);
             let handle = app.handle().clone();
-            let engine = Engine::new(
-                store.clone(),
-                Config::new(data_dir.clone()),
-                Tools::default(),
-                move |run_id| {
-                    let _ = handle.emit(CHANGED_EVENT, run_id);
-                },
-            );
+            let mut config = Config::new(data_dir.clone());
+            // No spaces, and macOS doesn't clear it on its own.
+            if let Some(home) = std::env::var_os("HOME") {
+                config.runs_dir = std::path::PathBuf::from(home).join(".keel").join("runs");
+            }
+            let engine = Engine::new(store.clone(), config, Tools::default(), move |run_id| {
+                let _ = handle.emit(CHANGED_EVENT, run_id);
+            });
             let ready = Arc::new(Ready::default());
             let tools_shared = Arc::new(Mutex::new(Tools::default()));
             let mcp_server = keel_mcp::McpServer::new(engine.clone(), store.clone());

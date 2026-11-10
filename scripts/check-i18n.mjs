@@ -1,8 +1,9 @@
 // Fails if a translation is missing or a component has text written directly in it.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = new URL("../", import.meta.url).pathname;
+const root = fileURLToPath(new URL("../", import.meta.url));
 const en = JSON.parse(readFileSync(join(root, "src/i18n/en.json"), "utf8"));
 const es = JSON.parse(readFileSync(join(root, "src/i18n/es.json"), "utf8"));
 const problems = [];

@@ -89,6 +89,9 @@ fn gh_blocked(error: GhError) -> Error {
 #[derive(Debug, Clone)]
 pub struct Config {
     pub data_dir: PathBuf,
+    /// Where new runs keep their folder. Apart from `data_dir` so it can be a path without
+    /// spaces: scripts that don't quote paths break in "Application Support".
+    pub runs_dir: PathBuf,
     /// Quiet this long, with the process tree idle, counts as stalled.
     pub stall_after: Duration,
     /// Quiet this long counts as stalled even if something is using CPU.
@@ -112,6 +115,7 @@ pub struct Config {
 impl Config {
     pub fn new(data_dir: PathBuf) -> Self {
         Self {
+            runs_dir: data_dir.join("runs"),
             data_dir,
             stall_after: Duration::from_secs(180),
             stall_hard_limit: Duration::from_secs(1800),
@@ -1592,6 +1596,17 @@ fn resumed_prompt(attempt: &keel_store::Attempt) -> Option<String> {
         .then(|| attempt.prompt.clone())
 }
 
+/// A run made before `runs_dir` existed keeps its folder under the data folder; any other run
+/// gets one in `runs_dir`.
+fn run_dir_for(config: &Config, run_id: &str) -> PathBuf {
+    let old = config.data_dir.join("runs").join(run_id);
+    if old.exists() {
+        old
+    } else {
+        config.runs_dir.join(run_id)
+    }
+}
+
 fn restrict_dir(dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
@@ -1622,7 +1637,7 @@ impl Inner {
     }
 
     fn run_dir(&self, run_id: &str) -> PathBuf {
-        self.config.data_dir.join("runs").join(run_id)
+        run_dir_for(&self.config, run_id)
     }
 
     fn workspace(&self, run_id: &str) -> PathBuf {
@@ -2196,6 +2211,24 @@ impl Inner {
 mod tests {
     use super::*;
     use keel_core::ToolProfile;
+
+    #[test]
+    fn new_runs_use_runs_dir_and_old_ones_keep_their_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = Config::new(dir.path().join("Application Support"));
+        config.runs_dir = dir.path().join("keel-runs");
+        assert_eq!(
+            run_dir_for(&config, "new"),
+            dir.path().join("keel-runs/new")
+        );
+        let old = config.data_dir.join("runs").join("old");
+        std::fs::create_dir_all(&old).unwrap();
+        assert_eq!(run_dir_for(&config, "old"), old);
+        assert_eq!(
+            run_dir_for(&config, "new"),
+            dir.path().join("keel-runs/new")
+        );
+    }
 
     #[test]
     fn long_requests_get_a_short_title() {
