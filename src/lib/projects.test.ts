@@ -112,9 +112,17 @@ describe("what the repo offers to add to a command", () => {
   });
 
   it("offers flags only on a single uv sync", () => {
-    for (const other of ["make deps", "uv sync --frozen && make deps", "uv sync; make deps", "uv pip install x", "uv syncing"]) {
+    for (const other of ["make deps", "uv sync; make deps", "make deps; uv sync", "uv sync | tee log", "uv pip install x", "uv syncing"]) {
       expect(setupOptionsLeft(other, uv)).toEqual([]);
     }
+  });
+
+  it("finds the uv sync inside a chain of setups and adds the flag there", () => {
+    const chained = "pnpm install --frozen-lockfile && uv sync --frozen && cargo fetch";
+    expect(setupOptionsLeft(chained, uv)).toEqual(uv.setupOptions);
+    expect(setupOptionsLeft("uv sync --frozen --group stubs && cargo fetch", uv)).toEqual(["--group test", "--group test-uv"]);
+    expect(withSetupOption(chained, uv, "--group stubs")).toBe("pnpm install --frozen-lockfile && uv sync --frozen --group stubs && cargo fetch");
+    expect(withSetupOption("uv sync --frozen && make deps", uv, "--group stubs")).toBe("uv sync --frozen --group stubs && make deps");
   });
 
   it("starts an empty field from the guess", () => {

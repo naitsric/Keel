@@ -440,12 +440,9 @@ fn heartbeat_only(command: &str) -> String {
 
 #[test]
 fn a_hung_command_is_stalled_even_while_heartbeats_keep_coming() {
-    let h = harness_with(
-        &heartbeat_only("sleep 2345"),
-        LOGGED_IN,
-        "2.1.318",
-        |c| c.stall_after = Duration::from_millis(300),
-    );
+    let h = harness_with(&heartbeat_only("sleep 2345"), LOGGED_IN, "2.1.318", |c| {
+        c.stall_after = Duration::from_millis(300)
+    });
     let run = h.start(ToolProfile::Build);
     let a = h.wait_for(&run, &[AttemptState::Stalled]);
     let Reason::Stalled { command, pid, .. } = reason(&a) else {

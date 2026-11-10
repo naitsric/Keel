@@ -41,15 +41,30 @@ const hasOption = (command: string, option: string) => ` ${command.trim().replac
 /** A flag only means something on a single `uv sync`, not on `make deps` or the end of a longer line. */
 const BARE_UV_SYNC = /^uv sync\b[^;&|]*$/;
 
+/** Setups chained with `&&` are each a step; the flags belong to the one that is `uv sync`. */
+const STEP = " && ";
+
+function uvSyncStep(command: string): { steps: string[]; at: number } | null {
+  const steps = command.split("&&").map((step) => step.trim());
+  const at = steps.findIndex((step) => BARE_UV_SYNC.test(step));
+  return at < 0 ? null : { steps, at };
+}
+
 /** The flags left to offer for this setup command. An empty one starts from the guess. */
 export function setupOptionsLeft(setup: string, guess: Guess): string[] {
   const command = setup.trim() || (guess.setup ?? "");
-  if (!BARE_UV_SYNC.test(command)) return [];
-  return guess.setupOptions.filter((option) => !hasOption(command, option));
+  const found = uvSyncStep(command);
+  if (!found) return [];
+  const step = found.steps[found.at];
+  return guess.setupOptions.filter((option) => !hasOption(step, option));
 }
 
 export function withSetupOption(setup: string, guess: Guess, option: string): string {
-  return `${setup.trim() || guess.setup} ${option}`;
+  const command = setup.trim() || (guess.setup ?? "");
+  const found = uvSyncStep(command);
+  if (!found) return `${command} ${option}`;
+  found.steps[found.at] = `${found.steps[found.at]} ${option}`;
+  return found.steps.join(STEP);
 }
 
 export function checkOptionsLeft(check: string, guess: Guess): string[] {
