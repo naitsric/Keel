@@ -494,7 +494,10 @@
     "ok": "succeeded",
     "failed": "failed",
     "running": "running",
-    "failedCode": "failed with code {{code}}"
+    "unclear": "finished",
+    "failedCode": "failed with code {{code}}",
+    "pipedNote": "With pipes, the exit code may not reflect the result.",
+    "outputSays": "The output says “{{mark}}”."
   },
   "changes": {
     "empty": "No changes in this step.",

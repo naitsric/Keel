@@ -494,7 +494,10 @@
     "ok": "salió bien",
     "failed": "falló",
     "running": "en curso",
-    "failedCode": "falló con código {{code}}"
+    "unclear": "terminó",
+    "failedCode": "falló con código {{code}}",
+    "pipedNote": "Con tuberías, el código de salida puede no reflejar el resultado.",
+    "outputSays": "La salida dice «{{mark}}»."
   },
   "changes": {
     "empty": "Este paso no hizo cambios.",

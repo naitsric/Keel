@@ -3,11 +3,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18next from "../i18n";
-import type { Attempt, Run, SpecOutput } from "../lib/api";
-import type { CommandRun } from "../lib/audit";
+import type { Attempt, AuditEvent, Run, SpecOutput } from "../lib/api";
+import { type CommandRun, commandsFrom } from "../lib/audit";
 import { useApp } from "../lib/store";
 import type { SizeDecision } from "../lib/size";
-import { ApprovalCard, QuestionsCard, Summary } from "./RunDetail";
+import { ActivityTab, ApprovalCard, CommandsTab, QuestionsCard, Summary } from "./RunDetail";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -1176,5 +1176,85 @@ describe("the run summary", () => {
     expect(page()).toContain("La corrida hasta ahora");
     expect(page()).toContain("builder sigue trabajando.");
     expect(page()).toContain("1 de 2 comandos de la corrida salieron bien.");
+  });
+});
+
+describe("the commands a step ran", () => {
+  let root: Root;
+  const page = () => document.body.textContent ?? "";
+  const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "builder", at: "2026-01-01T00:00:00Z", kind, data });
+  // What the builder ran in run 40c0fe47: fifteen tests failed, and head still ended with 0.
+  const pipedTests = 'cargo test --workspace 2>&1 | grep -E "^test result|FAILED|failed|panicked|error" | head -30';
+  const ran = (command: string, result: Record<string, unknown>) => [event(1, "toolCall", { id: "1", name: "Bash", input: { command } }), event(2, "toolResult", { id: "1", isError: false, text: "", ...result })];
+  const failedBehindPipe = ran(pipedTests, { text: "test prompts::it_works ... FAILED\ntest result: FAILED. 120 passed; 15 failed" });
+  const failedPlain = ran("cargo test --workspace", { isError: true, exitCode: 101, text: "Exit code 101\ntest result: FAILED. 120 passed; 15 failed" });
+  const passedPlain = ran("cargo test --workspace", { text: "test result: ok. 135 passed; 0 failed" });
+  const listed = (events: AuditEvent[]) => act(() => root.render(<CommandsTab commands={commandsFrom(events)} />));
+  const inActivity = (events: AuditEvent[]) => act(() => root.render(<ActivityTab events={events} role="worker" />));
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    mockIPC(() => null);
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("doesn't say tests that failed behind a pipe went well, and says why it can't tell", () => {
+    listed(failedBehindPipe);
+    expect(page()).not.toContain("succeeded");
+    expect(page()).toContain("finished");
+    expect(page()).toContain("With pipes, the exit code may not reflect the result.");
+    expect(page()).toContain("The output says “FAILED”.");
+  });
+
+  it("still says a plain run of the tests that failed failed, with its code", () => {
+    listed(failedPlain);
+    expect(page()).toContain("failed with code 101");
+    expect(page()).not.toContain("The output says");
+    expect(page()).not.toContain("With pipes");
+  });
+
+  it("says a plain run that went well went well, with nothing to warn about", () => {
+    listed(passedPlain);
+    expect(page()).toContain("succeeded");
+    expect(page()).not.toContain("The output says");
+    expect(page()).not.toContain("With pipes");
+  });
+
+  it("warns about a failure in the output even when the code is 0 and there's no pipe", () => {
+    listed(ran("cargo build || true", { text: "error[E0308]: mismatched types" }));
+    expect(page()).not.toContain("succeeded");
+    expect(page()).toContain("The output says “error”.");
+    expect(page()).not.toContain("With pipes");
+  });
+
+  it("tells the same in the activity, from the same answer", () => {
+    inActivity(failedBehindPipe);
+    expect(page()).toContain("With pipes, the exit code may not reflect the result.");
+    expect(page()).toContain("The output says “FAILED”.");
+
+    inActivity(failedPlain);
+    expect(page()).toContain("exit code 101");
+    expect(page()).not.toContain("The output says");
+  });
+
+  it("only reads a command's output for failures, not a file that was read", () => {
+    inActivity([event(1, "toolCall", { id: "1", name: "Read", input: { file_path: "notes.md" } }), event(2, "toolResult", { id: "1", isError: false, text: "error: this is what it prints when it fails" })]);
+    expect(page()).not.toContain("The output says");
+  });
+
+  it("is all in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    listed(failedBehindPipe);
+    expect(page()).not.toContain("salió bien");
+    expect(page()).toContain("terminó");
+    expect(page()).toContain("Con tuberías, el código de salida puede no reflejar el resultado.");
+    expect(page()).toContain("La salida dice «FAILED».");
+
+    listed(failedPlain);
+    expect(page()).toContain("falló con código 101");
   });
 });
