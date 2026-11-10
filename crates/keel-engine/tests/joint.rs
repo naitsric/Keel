@@ -1295,3 +1295,99 @@ fn a_person_sees_the_whole_change_and_only_they_say_what_works_together() {
         Err(Error::InvalidState)
     ));
 }
+
+fn proposal(w: &World, issue: Option<Issue>) -> StartRun {
+    StartRun {
+        project_id: w.app.clone(),
+        title: issue.as_ref().map(|issue| issue.title.clone()),
+        request: "Log in through Valora".into(),
+        // Whatever it comes with is ignored: an agreement is always the same.
+        saved_workflow: None,
+        workflow: Vec::new(),
+        language: "en".into(),
+        source_issue: issue,
+        started_by: Some("client".into()),
+    }
+}
+
+#[test]
+fn a_change_proposed_from_outside_the_board_is_agreed_like_one_started_from_a_card() {
+    let w = world();
+    w.answers(&[both()]);
+    // The project's own and repeats are left out, as on the board.
+    let run = w
+        .engine
+        .propose_change_on_board(
+            proposal(&w, None),
+            &[w.valora.clone(), w.app.clone(), w.valora.clone()],
+        )
+        .unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    let stored = w.store.card(&card).unwrap();
+    assert_eq!(stored.project_id, w.app);
+    assert_eq!(stored.joint_change_id.as_deref(), Some(card.as_str()));
+    assert_eq!(
+        w.store.joint_change(&card).unwrap().projects,
+        [w.valora.clone()]
+    );
+    assert_eq!(
+        w.store.run(&run).unwrap().started_by.as_deref(),
+        Some("client")
+    );
+    let spec = &w.attempts(&run, "spec")[0];
+    assert_eq!(spec.tools, "readOnly");
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    assert!(
+        w.parts(&card).is_empty(),
+        "nothing opens before it's approved"
+    );
+
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[0].project_id, w.valora);
+}
+
+#[test]
+fn a_change_that_names_no_other_project_or_one_that_is_missing_creates_nothing() {
+    let w = world();
+    let own = std::slice::from_ref(&w.app);
+    assert!(matches!(
+        w.engine.propose_change_on_board(proposal(&w, None), own),
+        Err(Error::InvalidState)
+    ));
+    assert!(
+        w.engine
+            .propose_change_on_board(proposal(&w, None), &["missing".into()])
+            .is_err()
+    );
+    assert!(w.store.cards(&w.app).unwrap().is_empty());
+    assert!(w.store.runs(10).unwrap().is_empty());
+    assert!(w.calls().is_empty());
+}
+
+#[test]
+fn an_issue_that_is_already_a_change_across_projects_is_not_proposed_again() {
+    let w = world();
+    let issue = Issue {
+        number: 434,
+        title: "Log in through Valora".into(),
+        author: "someone".into(),
+        url: "https://github.com/acme/back/issues/434".into(),
+        body: "Valora logs in, back-adm lets them in.".into(),
+    };
+    let card = w.engine.card_import_issue(&w.app, &issue).unwrap();
+    w.engine
+        .card_set_projects(&card, std::slice::from_ref(&w.valora))
+        .unwrap();
+    let proposed = w
+        .engine
+        .propose_change_on_board(proposal(&w, Some(issue)), std::slice::from_ref(&w.valora));
+    assert!(
+        matches!(proposed, Err(Error::Blocked(Reason::StartsOnTheBoard))),
+        "{proposed:?}"
+    );
+    assert_eq!(w.store.cards(&w.app).unwrap().len(), 1, "no second card");
+    assert_eq!(w.store.card(&card).unwrap().column(), BoardColumn::Backlog);
+    assert!(w.calls().is_empty());
+}

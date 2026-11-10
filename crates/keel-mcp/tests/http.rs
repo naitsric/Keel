@@ -36,8 +36,9 @@ use serde_json::{Value as Json, json};
 /// only a few times per run. close_run is here because it delivers nothing and decides nothing for
 /// the person, and the card keeps its text for them. It's for any client that may start runs, on
 /// runs it started. start_task is here because its one agent only reads, and has nothing to
-/// deliver.
-const TOOLS: [&str; 16] = [
+/// deliver. propose_change is here because it only starts the run that agrees what changes where,
+/// which reads and waits for the person's approval, and the parts open only once they give it.
+const TOOLS: [&str; 17] = [
     "close_run",
     "draft_workflow",
     "get_brain",
@@ -47,6 +48,7 @@ const TOOLS: [&str; 16] = [
     "list_projects",
     "list_runs",
     "list_workflows",
+    "propose_change",
     "propose_project",
     "retry_step",
     "send_back",
@@ -103,6 +105,7 @@ if [ -n "$schema" ]; then
   *verdict*) out='{"verdict":"changes","findings":["Line 3 divides by zero"],"summary":"One problem"}';;
   *decision*) out='{"decision":"approve","risk":"low","reasons":"It does what was asked","instructions":"Only a note"}';;
   *unverified*) out='{"criteria":[{"id":"C1","result":"met","evidence":""}],"summary":"It works"}';;
+  *parts*) out='{"size":"normal","risks":[],"summary":"Log in through lib","criteria":[{"id":"C1","when":"someone logs in","then":"app lets them in"}],"changes":[],"limits":[],"decided":[],"questions":[],"parts":[{"project":"lib","text":"Sends the token"},{"project":"app","text":"Reads the token"}],"together":["Log in and land in app"]}';;
   *) out='{"summary":"It gets fixed","criteria":[{"id":"C1","when":"it runs","then":"it works"}],"changes":[],"limits":[],"decided":[],"questions":[{"id":"Q1","text":"What then?","options":[{"label":"Yes","recommended":true},{"label":"No","recommended":false}]}]}';;
   esac
   echo "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"num_turns\":1,\"structured_output\":$out}"
@@ -220,6 +223,52 @@ impl World {
             .set_mcp_client_can_steer(&client.id, true)
             .unwrap();
         token
+    }
+
+    /// Another project, whose cards start with a builder and the person's approval, as app's do.
+    fn other_project(&self, name: &str) -> String {
+        let repo = self._dir.path().join(name);
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.name", "Tester"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        std::fs::write(repo.join("README.md"), "hello\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let project = self.engine.add_project(&repo).unwrap();
+        let workflow = Workflow {
+            id: String::new(),
+            name: "Build and ask".into(),
+            builtin: false,
+            steps: vec![
+                WorkflowStep::Agent(agent("builder", ToolProfile::Build, StepRole::default())),
+                WorkflowStep::Approval { id: "human".into() },
+            ],
+        };
+        let workflow = self.engine.save_workflow(&project.id, &workflow).unwrap();
+        self.use_by_default(&project.id, &workflow.id);
+        project.id
+    }
+
+    fn use_by_default(&self, project: &str, workflow: &str) {
+        self.engine
+            .update_project(
+                project,
+                &keel_store::ProjectSettings {
+                    default_workflow: Some(workflow.to_owned()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+
+    fn cards_everywhere(&self) -> usize {
+        self.store
+            .projects()
+            .unwrap()
+            .iter()
+            .map(|project| self.store.cards(&project.id).unwrap().len())
+            .sum()
     }
 
     fn saved(&self, name: &str, steps: Vec<WorkflowStep>) -> String {
@@ -3093,4 +3142,227 @@ async fn a_long_list_of_runs_to_wait_for_is_refused_at_once() {
     let refusal = refused(&call(&client, "wait_for_run", args).await);
     assert!(refusal.contains("up to 10"), "{refusal}");
     client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_across_projects_starts_its_agreement_in_the_first_one_and_waits_for_the_person() {
+    let w = world().await;
+    let lib = w.other_project("lib");
+    let docs = w.other_project("docs");
+    let client = w.client(&w.token(true)).await;
+
+    let args = json!({
+        "project": "app",
+        "alsoTouches": ["lib", docs],
+        "request": "Log in through lib",
+    });
+    let started = ok(&call(&client, "propose_change", args).await);
+    let run = id_of(&started);
+    assert_eq!(started["startedBy"], "Claude Code");
+    assert_eq!(started["startedByYou"], true);
+    assert_eq!(started["jointChange"]["role"], "agreement");
+
+    let view = settled(&client, &run).await;
+    assert_eq!(view["state"], "waitingForPerson", "{view}");
+    assert_eq!(view["waitingFor"]["state"], "waitingApproval");
+    assert_eq!(view["projectId"], json!(w.project_id));
+
+    // The card is in app, started by the client, and the change is agreed on it.
+    let card = w.store.card(view["cardId"].as_str().unwrap()).unwrap();
+    assert_eq!(card.project_id, w.project_id);
+    assert_eq!(card.joint_change_id.as_deref(), Some(card.id.as_str()));
+    assert_eq!(
+        w.store.joint_change(&card.id).unwrap().projects,
+        [lib.clone(), docs.clone()]
+    );
+    let board = w.engine.board(&w.project_id).unwrap();
+    assert_eq!(board.cards[0].also_touches, [lib, docs]);
+    let row = w.store.runs(10).unwrap().remove(0);
+    assert_eq!(row.started_by.as_deref(), Some("Claude Code"));
+
+    // It only reads, and nothing but the person's approval opens a part.
+    assert_eq!(w.store.attempts_of_run(&run).unwrap()[0].tools, "readOnly");
+    assert_eq!(w.cards_everywhere(), 1);
+    assert!(view["jointChange"]["parts"].as_array().unwrap().is_empty());
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_change_across_projects_is_refused_when_it_should_be_and_creates_nothing() {
+    let w = world().await;
+    let lib = w.other_project("lib");
+    let reader = w.client(&w.token(false)).await;
+    let args = json!({ "project": "app", "alsoTouches": ["lib"], "request": "Do it" });
+    let start_run_refusal = refused(&call(&reader, "start_run", w.start_args("Do it")).await);
+    let refusal = refused(&call(&reader, "propose_change", args.clone()).await);
+    assert_eq!(refusal, start_run_refusal);
+    reader.cancel().await.unwrap();
+
+    let client = w.client(&w.token(true)).await;
+    let refusal = refused(
+        &call(
+            &client,
+            "propose_change",
+            json!({ "project": "app", "alsoTouches": ["lib", "billing"], "request": "Do it" }),
+        )
+        .await,
+    );
+    assert!(refusal.contains("billing"), "{refusal}");
+    // Only its own project, by name or id, or none at all, isn't a change across projects.
+    for also in [
+        json!(["app"]),
+        json!([w.project_id]),
+        json!([]),
+        json!(["app", "app"]),
+    ] {
+        let refusal = refused(
+            &call(
+                &client,
+                "propose_change",
+                json!({ "project": "app", "alsoTouches": also, "request": "Do it" }),
+            )
+            .await,
+        );
+        assert!(refusal.contains("alsoTouches"), "{refusal}");
+    }
+    let refusal = refused(
+        &call(
+            &client,
+            "propose_change",
+            json!({ "project": "app", "alsoTouches": ["lib"] }),
+        )
+        .await,
+    );
+    assert!(refusal.contains("request"), "{refusal}");
+    let refusal = refused(
+        &call(
+            &client,
+            "propose_change",
+            json!({ "project": "nope", "alsoTouches": ["lib"], "request": "x" }),
+        )
+        .await,
+    );
+    assert!(refusal.contains("nope"), "{refusal}");
+    assert_eq!(w.cards_everywhere(), 0);
+    assert!(w.store.runs(10).unwrap().is_empty());
+
+    // The limit on open runs applies to the agreement.
+    let (limited, token) = w.server.create_client("Limited", true).unwrap();
+    w.store
+        .set_mcp_client_max_open_runs(&limited.id, 1)
+        .unwrap();
+    let limited = w.client(&token).await;
+    ok(&call(&limited, "propose_change", args.clone()).await);
+    let refusal = refused(&call(&limited, "propose_change", args).await);
+    assert!(refusal.contains("as many runs open"), "{refusal}");
+    assert_eq!(w.cards_everywhere(), 1);
+    // Duplicates and the project's own are ignored, as on the board.
+    let (_, token) = w.server.create_client("Other", true).unwrap();
+    let other = w.client(&token).await;
+    let started = ok(&call(
+        &other,
+        "propose_change",
+        json!({ "project": "app", "alsoTouches": ["app", "lib", lib, "lib"], "request": "Again" }),
+    )
+    .await);
+    let card = w.store.card(started["cardId"].as_str().unwrap()).unwrap();
+    assert_eq!(w.store.joint_change(&card.id).unwrap().projects, [lib]);
+    for client in [limited, other, client] {
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn once_the_person_agrees_the_parts_open_and_are_the_client_s_to_follow_and_send_back() {
+    let w = world().await;
+    let lib = w.other_project("lib");
+    w.use_by_default(&w.project_id, &w.workflow_id);
+    w.engine.start_board();
+    let (row, token) = w.server.create_client("Claude Code", true).unwrap();
+    w.store.set_mcp_client_can_steer(&row.id, true).unwrap();
+    // As few open runs as it can be allowed: the parts open all the same.
+    w.store.set_mcp_client_max_open_runs(&row.id, 1).unwrap();
+    let steering = w.client(&token).await;
+    let started = ok(&call(
+        &steering,
+        "propose_change",
+        json!({ "project": "app", "alsoTouches": ["lib"], "request": "Log in through lib" }),
+    )
+    .await);
+    let agreement = id_of(&started);
+    let view = settled(&steering, &agreement).await;
+    let approval = view["waitingFor"]["attemptId"].as_str().unwrap().to_owned();
+    // The client can't answer it, and nothing in its view says how to.
+    assert!(!view["waitingFor"]["youCan"].to_string().contains("approve"));
+
+    w.engine
+        .answer_approval(&approval, true, "Go ahead")
+        .unwrap();
+
+    // The first part, in lib, starts on its own, and the one in app waits for it.
+    let mut parts = json!([]);
+    for _ in 0..200 {
+        let view = ok(&call(&steering, "get_run", json!({ "run": agreement })).await);
+        parts = view["jointChange"]["parts"].clone();
+        if parts.as_array().is_some_and(|p| p.len() == 2) && parts[0]["runId"].is_string() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(parts[0]["position"], 1, "{parts}");
+    assert_eq!(parts[0]["project"], "lib");
+    assert_eq!(parts[0]["projectId"], json!(lib));
+    assert_eq!(parts[1]["position"], 2);
+    assert_eq!(parts[1]["project"], "app");
+    assert_eq!(
+        parts[1]["runId"],
+        Json::Null,
+        "it waits for the part before it"
+    );
+    let part_run = parts[0]["runId"].as_str().unwrap().to_owned();
+
+    let part = settled(&steering, &part_run).await;
+    assert_eq!(part["state"], "waitingForPerson", "{part}");
+    assert_eq!(part["startedByYou"], true);
+    assert_eq!(part["jointChange"]["role"], "part");
+    assert_eq!(part["jointChange"]["part"]["position"], 1);
+    assert_eq!(part["jointChange"]["part"]["of"], 2);
+    assert_eq!(part["jointChange"]["project"], "lib");
+    assert_eq!(part["jointChange"]["part"]["waitsFor"], Json::Null);
+    assert!(
+        part["waitingFor"]["youCan"]
+            .to_string()
+            .contains("send_back")
+    );
+
+    let mine = ok(&call(&steering, "list_runs", json!({ "mine": true })).await);
+    assert!(mine.to_string().contains(&part_run), "{mine}");
+
+    // Sent back like its other runs, and only that many times.
+    let back = ok(&call(
+        &steering,
+        "send_back",
+        json!({ "run": part_run, "instructions": "Name it better" }),
+    )
+    .await);
+    assert_eq!(back["id"], json!(part_run));
+    assert!(w.store.attempts_of_run(&part_run).unwrap().len() > 1);
+
+    // A client that wasn't the one who proposed it, or can't give feedback, can't.
+    let (_, token) = w.server.create_client("Someone else", true).unwrap();
+    let stranger = w.client(&token).await;
+    let refusal = refused(
+        &call(
+            &stranger,
+            "send_back",
+            json!({ "run": part_run, "instructions": "x" }),
+        )
+        .await,
+    );
+    assert!(refusal.contains("didn't start"), "{refusal}");
+    let view = ok(&call(&stranger, "get_run", json!({ "run": part_run })).await);
+    assert_eq!(view["startedByYou"], false);
+    for client in [steering, stranger] {
+        client.cancel().await.unwrap();
+    }
 }
