@@ -17,7 +17,7 @@ use crate::{brain, prompts, sizing, specs, verification};
 
 const MAX_ROUNDS: u32 = 5;
 
-pub const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"verdict":{"type":"string","enum":["approved","changes"]},"findings":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"},"unread":{"type":"array","items":{"type":"string"},"description":"Each file of the change you could not read, if any. A review that left one out is not an approval."}},"required":["verdict","findings","summary","unread"],"additionalProperties":false}"#;
+pub const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"verdict":{"type":"string","enum":["approved","changes"]},"findings":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"},"unread":{"type":"array","items":{"type":"string"},"description":"Each file of the change you could not read, if any. A review that left one out is not an approval."},"unchecked":{"type":"array","items":{"type":"string"},"description":"Each thing in this change you could not check by reading the code, such as how it looks on screen, in one line, if any. Keel shows them to the person as not proven."}},"required":["verdict","findings","summary","unread","unchecked"],"additionalProperties":false}"#;
 pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"}},"required":["decision","risk","reasons","instructions"],"additionalProperties":false}"#;
 
 /// What a reviewer answered, as Keel keeps it. One that says it couldn't read part of the change
@@ -1956,7 +1956,27 @@ mod tests {
                 }
             }
         }
-        assert!(VERDICT_SCHEMA.contains(r#""required":["verdict","findings","summary","unread"]"#));
+        assert!(VERDICT_SCHEMA.contains(r#""required":["verdict","findings","summary","unread","#));
+    }
+
+    #[test]
+    fn every_reviewer_says_apart_what_it_could_not_check_by_reading_the_code() {
+        let schema: Value = serde_json::from_str(VERDICT_SCHEMA).unwrap();
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["verdict", "findings", "summary", "unread", "unchecked"])
+        );
+        let unchecked = &schema["properties"]["unchecked"];
+        assert_eq!(unchecked["type"], "array");
+        assert_eq!(unchecked["items"]["type"], "string");
+        let description = unchecked["description"].as_str().unwrap();
+        assert!(
+            description.contains("how it looks on screen"),
+            "{description}"
+        );
+        assert!(description.contains("not proven"), "{description}");
+        // Every reviewer answers with it, built in or saved by the person.
+        assert_eq!(schema_for(&StepRole::Reviewer), Some(VERDICT_SCHEMA));
     }
 
     #[test]

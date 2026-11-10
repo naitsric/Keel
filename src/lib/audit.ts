@@ -242,6 +242,18 @@ export function reviewsOfRound<T extends { role: string; round: number; output: 
   };
 }
 
+/**
+ * What a round's reviews said they couldn't check by reading the code, such as how it looks on screen,
+ * with the review that said it. No test proves it either, whatever their verdict.
+ */
+export function uncheckedInRound(attempts: { stepId: string; role: string; round: number; output: unknown }[], round: number): { step: string; text: string }[] {
+  return latestOfEachStep(reviewsOfRound(attempts, round).reviewers).flatMap((review) => {
+    const unchecked = (review.output as { unchecked?: unknown } | null)?.unchecked;
+    if (!Array.isArray(unchecked)) return [];
+    return unchecked.filter((text): text is string => typeof text === "string" && text.trim() !== "").map((text) => ({ step: review.stepId, text: text.trim() }));
+  });
+}
+
 export type ApprovalOutcome = "delivers" | "deliversLater" | "noDelivery" | "nothingToDeliver";
 
 /**

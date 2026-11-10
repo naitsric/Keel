@@ -322,6 +322,7 @@
     "approvalCheckFailed": "Keel corrió `{{command}}` y no pasó.",
     "approvalNoCheck": "Keel no corrió ninguna verificación propia, así que si el agente dice que las pruebas pasan, es su palabra.",
     "approvalReviewsOnlyRead": "Las revisiones solo leyeron el código. No lo corrieron.",
+    "notProvenByReviews": "Sin probar: las revisiones no pudieron comprobar esto leyendo el código.",
     "approvalSkipped": "{{names}}: omitidas, no cambió nada de lo que cubren",
     "workflowWarning": "Este cambio edita `.github/workflows`. Esos archivos pueden correr con los secretos del repo en cuanto se suba la rama. Léelos primero.",
     "secretWarning": "Este cambio podría contener un secreto. Aquí solo se oculta: al aprobar, se sube con la rama. Revisa los cambios antes.",
