@@ -1,6 +1,7 @@
 //! What each tool does: plain methods of [`McpServer`], each leaving a row in the audit log. The
 //! engine blocks, so they run on tokio's blocking threads.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -48,7 +49,15 @@ const MAX_MODEL_NAME: usize = 100;
 const MAX_PROPOSED_PATH: usize = 1024;
 
 const MAX_TEXT: usize = 16 * 1024;
-const MAX_DIFF: usize = 64 * 1024;
+/// About the most get_step returns at once, as JSON: Claude Code won't show a tool's answer much
+/// longer than this. What doesn't fit is named in `leftOut`, to read in pieces with `part`.
+const MAX_STEP: usize = 18 * 1024;
+/// What an attempt answered, as get_step shows it before cutting it.
+const MAX_ANSWER: usize = 8 * 1024;
+/// The end of each of what a setup or check printed, stdout and stderr, as get_step shows it.
+const MAX_TAIL: usize = 6 * 1024;
+/// One piece of a part read with `part`, as JSON, so that with the rest it stays under MAX_STEP.
+const MAX_PIECE: usize = 16 * 1024;
 const MAX_LOGGED_ARGS: usize = 4 * 1024;
 const MAX_LOGGED_ERROR: usize = 4 * 1024;
 const WAIT_DEFAULT_SECS: u64 = 30;
@@ -128,6 +137,42 @@ pub struct GetRunArgs {
 pub struct GetStepArgs {
     /// An `attemptId` from get_run.
     pub attempt: String,
+    /// One part to read whole, in pieces, instead of the attempt: `diff`, `files`, every file it
+    /// changed, `prompt`, `answer`, or what a setup or check printed, `stdout` or `stderr`.
+    /// `leftOut` names the ones too long to come with the attempt.
+    #[serde(default)]
+    pub part: Option<StepPart>,
+    /// Only this file's diff: a `path` from filesChanged. It goes with `part` diff, or alone.
+    #[serde(default)]
+    pub file: Option<String>,
+    /// Where the piece starts, in bytes: 0 by default, then what the last piece's `next` says.
+    #[serde(default)]
+    pub from: Option<u64>,
+}
+
+// Plain comments, as doc comments on variants would split the schema's list of names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum StepPart {
+    Diff,
+    Files,
+    Prompt,
+    Answer,
+    Stdout,
+    Stderr,
+}
+
+impl StepPart {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Diff => "diff",
+            Self::Files => "files",
+            Self::Prompt => "prompt",
+            Self::Answer => "answer",
+            Self::Stdout => "stdout",
+            Self::Stderr => "stderr",
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -517,24 +562,35 @@ impl McpServer {
             let attempt = server.0.store.attempt(&args.attempt).map_err(|_| {
                 ToolError::new("Keel has no attempt with that id. get_run lists them.")
             })?;
-            let diff = server.0.engine.diff(&attempt.id).ok();
-            let mut view = attempt_view(&attempt);
-            view["prompt"] = json!(capped(&attempt.prompt, MAX_TEXT));
-            view["brainReceived"] = attempt.system_prompt_sources.clone();
-            view["diff"] = json!(diff.as_deref().map(|text| capped(text, MAX_DIFF)));
-            // An agent's events can be many, and only a command has this.
-            if matches!(attempt.kind.as_str(), "setup" | "check")
-                && let Some(output) = server
-                    .0
-                    .store
-                    .events(&attempt.id, 0)
-                    .ok()
-                    .as_deref()
-                    .and_then(command_output)
-            {
-                view["commandOutput"] = output;
-            }
-            Ok((view, Some(attempt.run_id.clone())))
+            let run = Some(attempt.run_id.clone());
+            let part = match (args.part, &args.file) {
+                (None, Some(_)) => Some(StepPart::Diff),
+                (Some(part), Some(_)) if part != StepPart::Diff => {
+                    return Err(ToolError::new("`file` only goes with part diff."));
+                }
+                (part, _) => part,
+            };
+            let Some(part) = part else {
+                if args.from.is_some() {
+                    return Err(ToolError::new(
+                        "`from` goes with `part`, to say where a piece of it starts.",
+                    ));
+                }
+                let long = LongParts {
+                    prompt: mask_secrets(&attempt.prompt),
+                    diff: server.diff_of(&attempt),
+                    printed: server.printed(&attempt),
+                };
+                return Ok((step_overview(&attempt, &long), run));
+            };
+            let text = server.part_text(&attempt, part)?;
+            let text = match &args.file {
+                Some(file) => file_diff(&text, file)?,
+                None => &text,
+            };
+            let from = usize::try_from(args.from.unwrap_or(0)).unwrap_or(usize::MAX);
+            let view = piece_view(&attempt, part, args.file.as_deref(), text, from)?;
+            Ok((view, run))
         })
         .await
     }
@@ -1070,6 +1126,50 @@ impl McpServer {
         Ok((run, attempts))
     }
 
+    /// An attempt's diff, masked. Empty when it changed nothing, and None when Keel can't say.
+    fn diff_of(&self, attempt: &Attempt) -> Option<String> {
+        let diff = self.0.engine.diff(&attempt.id).ok()?;
+        Some(mask_secrets(&diff))
+    }
+
+    /// What a setup or check printed. An agent's events can be many, and only a command has this.
+    fn printed(&self, attempt: &Attempt) -> Option<Printed> {
+        if !ran_a_command(attempt) {
+            return None;
+        }
+        let events = self.0.store.events(&attempt.id, 0).ok()?;
+        printed(&events)
+    }
+
+    /// One part of an attempt whole, masked, to read in pieces.
+    fn part_text(&self, attempt: &Attempt, part: StepPart) -> Result<String, ToolError> {
+        Ok(match part {
+            StepPart::Diff => self.diff_of(attempt).unwrap_or_default(),
+            StepPart::Files => {
+                let diff = self.diff_of(attempt).unwrap_or_default();
+                let diff = diff_files(&diff);
+                let files = changed_files(attempt.files_changed.as_ref(), &diff);
+                mask_secrets(&files_text(&files.unwrap_or_default()))
+            }
+            StepPart::Prompt => mask_secrets(&attempt.prompt),
+            StepPart::Answer => answer_text(attempt),
+            StepPart::Stdout | StepPart::Stderr => {
+                if !ran_a_command(attempt) {
+                    return Err(ToolError::new(
+                        "Only a setup or check prints `stdout` and `stderr`, and this attempt isn't one.",
+                    ));
+                }
+                // Nothing yet while it runs.
+                let printed = self.printed(attempt);
+                match (part, printed) {
+                    (StepPart::Stdout, Some(printed)) => printed.stdout,
+                    (_, Some(printed)) => printed.stderr,
+                    (_, None) => String::new(),
+                }
+            }
+        })
+    }
+
     /// Refused once this client has as many runs open as the person allows it.
     fn room_for_another_run(&self, client: &McpClient) -> Result<(), ToolError> {
         let open = self
@@ -1581,20 +1681,413 @@ fn earlier_view(attempt: &Attempt) -> Json {
     })
 }
 
-/// One attempt in full, for get_step. What it answered comes once: its structured answer as Keel
-/// read it, which Keel may have corrected, or else what it wrote.
-fn attempt_view(attempt: &Attempt) -> Json {
+/// What an attempt has that can be long, masked whole: a cut, or a piece, could part a value from
+/// the name that gets it masked. `from` counts bytes of these.
+struct LongParts {
+    prompt: String,
+    diff: Option<String>,
+    printed: Option<Printed>,
+}
+
+/// What a setup or check printed, masked.
+#[derive(Debug, PartialEq)]
+struct Printed {
+    exit_code: Json,
+    stdout: String,
+    stderr: String,
+}
+
+/// What get_step says when it leaves something out.
+const TO_READ: &str = "leftOut names what's too long to come whole here, with its size in bytes. \
+                       get_step with `part` set to one of them reads it in pieces: each says how much \
+                       is `left` and gives the arguments for the `next`. `file` reads one file's diff.";
+/// Kept for `leftOut` and TO_READ while the rest of the overview is fitted.
+const LEFT_OUT_ROOM: usize = 512;
+/// Kept for what a cut says about itself.
+const CUT_NOTE_ROOM: usize = 100;
+
+/// One attempt as get_step returns it without `part`: what it is and how it went, what it
+/// answered, once, the files it changed with the lines each adds and removes, and the end of what
+/// a command printed. Its diff and prompt come whole when there's room. Whatever is cut or left out
+/// is in `leftOut` with its size, to read with `part`, so it stays about MAX_STEP long however much
+/// the attempt wrote.
+fn step_overview(attempt: &Attempt, long: &LongParts) -> Json {
     let mut view = step_view(attempt);
     view["account"] = json!(attempt.account);
-    view["filesChanged"] = json!(attempt.files_changed);
+    view["brainReceived"] = attempt.system_prompt_sources.clone();
+    let mut left_out = serde_json::Map::new();
+    // Its structured answer as Keel read it, which Keel may have corrected, or else what it wrote.
     match &attempt.output {
-        Some(output) => view["output"] = output.clone(),
+        Some(output) => {
+            let output = mask_value(output.clone());
+            if output.to_string().len() <= MAX_ANSWER {
+                view["output"] = output;
+            } else {
+                left_out.insert("answer".into(), json!(answer_text(attempt).len()));
+            }
+        }
         None => {
-            let text = attempt.result_text.as_deref();
-            view["result"] = json!(text.map(|text| capped(text, MAX_TEXT)));
+            let text = attempt.result_text.as_deref().map(mask_secrets);
+            let answer =
+                text.map(|text| cut_head(&text, MAX_ANSWER, StepPart::Answer, &mut left_out));
+            view["result"] = json!(answer);
         }
     }
+    if let Some(printed) = &long.printed {
+        view["commandOutput"] = json!({
+            "exitCode": printed.exit_code,
+            "stdout": cut_tail(&printed.stdout, MAX_TAIL, StepPart::Stdout, &mut left_out),
+            "stderr": cut_tail(&printed.stderr, MAX_TAIL, StepPart::Stderr, &mut left_out),
+        });
+    }
+    let diff_files = long.diff.as_deref().map(diff_files).unwrap_or_default();
+    let room = MAX_STEP.saturating_sub(view.to_string().len() + LEFT_OUT_ROOM);
+    match changed_files(attempt.files_changed.as_ref(), &diff_files) {
+        Some(files) => {
+            let listed = files_view(&files, room);
+            let more = files.len() - listed.len();
+            view["filesChanged"] = json!(listed);
+            if more > 0 {
+                view["moreFilesChanged"] = json!(more);
+                let all = mask_secrets(&files_text(&files));
+                left_out.insert("files".into(), json!(all.len()));
+            }
+        }
+        None => view["filesChanged"] = Json::Null,
+    }
+    // Whole or not at all: a diff or a prompt cut short would read as if it were all of it.
+    let mut room = MAX_STEP.saturating_sub(view.to_string().len() + LEFT_OUT_ROOM);
+    let mut whole = |key: &str, text: &str, view: &mut Json| {
+        let size = key.len() + json_len(text) + 6;
+        if size <= room {
+            room -= size;
+            view[key] = json!(text);
+        } else {
+            left_out.insert(key.into(), json!(text.len()));
+        }
+    };
+    match &long.diff {
+        Some(diff) => whole("diff", diff, &mut view),
+        None => view["diff"] = Json::Null,
+    }
+    whole("prompt", &long.prompt, &mut view);
+    if !left_out.is_empty() {
+        view["leftOut"] = Json::Object(left_out);
+        view["toRead"] = json!(TO_READ);
+    }
     view
+}
+
+/// What an attempt answered, as text: its structured answer as Keel read it, laid out, or else
+/// what it wrote. Masked.
+fn answer_text(attempt: &Attempt) -> String {
+    match &attempt.output {
+        Some(output) => {
+            serde_json::to_string_pretty(&mask_value(output.clone())).unwrap_or_default()
+        }
+        None => attempt
+            .result_text
+            .as_deref()
+            .map(mask_secrets)
+            .unwrap_or_default(),
+    }
+}
+
+fn ran_a_command(attempt: &Attempt) -> bool {
+    matches!(attempt.kind.as_str(), "setup" | "check")
+}
+
+/// A file an attempt changed, and its part of the diff when the diff has it.
+type ChangedFile<'a> = (&'a str, Option<&'a DiffFile>);
+
+/// The files an attempt changed: Keel's list of them, or else the diff's.
+fn changed_files<'a>(
+    listed: Option<&'a Json>,
+    diff: &'a [DiffFile],
+) -> Option<Vec<ChangedFile<'a>>> {
+    let paths: Vec<&str> = match listed.and_then(Json::as_array) {
+        Some(listed) => listed.iter().filter_map(Json::as_str).collect(),
+        None if !diff.is_empty() => diff.iter().map(|file| file.path.as_str()).collect(),
+        None => return None,
+    };
+    let by_path: HashMap<&str, &DiffFile> =
+        diff.iter().map(|file| (file.path.as_str(), file)).collect();
+    let files = paths
+        .into_iter()
+        .map(|path| (path, by_path.get(plain_name(path)).copied()))
+        .collect();
+    Some(files)
+}
+
+/// As many of the files as fit in `room`, and at most MAX_LISTED_FILES, each with the lines its
+/// diff adds and removes.
+fn files_view(files: &[ChangedFile], room: usize) -> Vec<Json> {
+    let mut used = 2;
+    let mut listed = Vec::new();
+    for (path, diff) in files.iter().take(MAX_LISTED_FILES) {
+        let mut entry = json!({ "path": path });
+        if let Some(diff) = diff {
+            entry["added"] = json!(diff.added);
+            entry["removed"] = json!(diff.removed);
+        }
+        used += entry.to_string().len() + 1;
+        if used > room {
+            break;
+        }
+        listed.push(entry);
+    }
+    listed
+}
+
+/// Every file, a line each, as `git diff --numstat` writes them: the lines it adds, the lines it
+/// removes, and its path, with `-` when the diff doesn't have it.
+fn files_text(files: &[ChangedFile]) -> String {
+    files
+        .iter()
+        .map(|(path, diff)| match diff {
+            Some(diff) => format!("{}\t{}\t{path}\n", diff.added, diff.removed),
+            None => format!("-\t-\t{path}\n"),
+        })
+        .collect()
+}
+
+/// A piece of one part of an attempt, from `from`, as long as fits in one answer. It says how much
+/// is left and how to ask for the next piece, so any size reads in a few calls.
+fn piece_view(
+    attempt: &Attempt,
+    part: StepPart,
+    file: Option<&str>,
+    text: &str,
+    from: usize,
+) -> Result<Json, ToolError> {
+    if from > text.len() {
+        return Err(ToolError::new(format!(
+            "That part has {} bytes, so `from` goes up to {}.",
+            text.len(),
+            text.len()
+        )));
+    }
+    let mut from = from;
+    while !text.is_char_boundary(from) {
+        from -= 1;
+    }
+    let end = piece_end(text, from, MAX_PIECE);
+    let mut view = json!({
+        "attemptId": attempt.id,
+        "part": part.as_str(),
+        "bytes": text.len(),
+        "from": from,
+        "text": &text[from..end],
+        "left": text.len() - end,
+    });
+    if let Some(file) = file {
+        view["file"] = json!(file);
+    }
+    if end < text.len() {
+        let mut next = json!({ "attempt": attempt.id, "part": part.as_str(), "from": end });
+        if let Some(file) = file {
+            next["file"] = json!(file);
+        }
+        view["next"] = next;
+    }
+    Ok(view)
+}
+
+/// `text` whole if it's at most `room` long as JSON, or else its start, saying where it was cut,
+/// and `part` named in `left_out`.
+fn cut_head(
+    text: &str,
+    room: usize,
+    part: StepPart,
+    left_out: &mut serde_json::Map<String, Json>,
+) -> String {
+    if json_len(text) <= room {
+        return text.to_owned();
+    }
+    left_out.insert(part.as_str().into(), json!(text.len()));
+    let end = piece_end(text, 0, room.saturating_sub(CUT_NOTE_ROOM));
+    format!(
+        "{}\n… [cut here: get_step with part {} reads it all]",
+        &text[..end],
+        part.as_str()
+    )
+}
+
+/// Like `cut_head` but keeping the end, where a command says what went wrong.
+fn cut_tail(
+    text: &str,
+    room: usize,
+    part: StepPart,
+    left_out: &mut serde_json::Map<String, Json>,
+) -> String {
+    if json_len(text) <= room {
+        return text.to_owned();
+    }
+    left_out.insert(part.as_str().into(), json!(text.len()));
+    let start = tail_start(text, room.saturating_sub(CUT_NOTE_ROOM));
+    format!(
+        "… [cut here: get_step with part {} reads it all]\n{}",
+        part.as_str(),
+        &text[start..]
+    )
+}
+
+/// How long `text` is once written as a JSON string, without its quotes: what a client reads.
+fn json_len(text: &str) -> usize {
+    text.chars().map(json_char_len).sum()
+}
+
+fn json_char_len(c: char) -> usize {
+    match c {
+        '"' | '\\' | '\n' | '\r' | '\t' | '\u{8}' | '\u{c}' => 2,
+        c if u32::from(c) < 0x20 => 6,
+        c => c.len_utf8(),
+    }
+}
+
+/// Where a piece of `text` that starts at `from` ends, to be at most `room` long as JSON. It ends
+/// after a whole line when one ends in its second half, so each piece reads on its own. It always
+/// takes something, so reading piece after piece gets to the end.
+fn piece_end(text: &str, from: usize, room: usize) -> usize {
+    let mut used = 0;
+    let mut line_end = None;
+    for (at, c) in text[from..].char_indices() {
+        used += json_char_len(c);
+        if used > room {
+            let cut = from + at;
+            return match line_end {
+                _ if cut == from => cut + c.len_utf8(),
+                Some(end) if end - from > (cut - from) / 2 => end,
+                _ => cut,
+            };
+        }
+        if c == '\n' {
+            line_end = Some(from + at + 1);
+        }
+    }
+    text.len()
+}
+
+/// Where the end of `text` that's at most `room` long as JSON starts. It starts on a whole line
+/// when one starts in its first half, since Keel keeps only the end of what a command prints and
+/// the line a cut goes through reads as nonsense.
+fn tail_start(text: &str, room: usize) -> usize {
+    let mut used = 0;
+    let mut start = text.len();
+    for (at, c) in text.char_indices().rev() {
+        used += json_char_len(c);
+        if used > room {
+            break;
+        }
+        start = at;
+    }
+    let kept = &text[start..];
+    match kept.find('\n') {
+        Some(newline) if start > 0 && newline < kept.len() / 2 => start + newline + 1,
+        _ => start,
+    }
+}
+
+/// One file's part of a diff: where it is in it, and the lines it adds and removes.
+#[derive(Debug, PartialEq)]
+struct DiffFile {
+    path: String,
+    start: usize,
+    end: usize,
+    added: usize,
+    removed: usize,
+}
+
+/// The files of a diff as git writes it, in order. Each goes from its `diff --git` line to the
+/// next one.
+fn diff_files(diff: &str) -> Vec<DiffFile> {
+    let mut starts = Vec::new();
+    let mut at = 0;
+    for line in diff.split_inclusive('\n') {
+        if line.starts_with("diff --git ") {
+            starts.push(at);
+        }
+        at += line.len();
+    }
+    let ends = starts.iter().skip(1).copied().chain([diff.len()]);
+    starts
+        .iter()
+        .zip(ends)
+        .map(|(&start, end)| diff_file(&diff[start..end], start, end))
+        .collect()
+}
+
+fn diff_file(text: &str, start: usize, end: usize) -> DiffFile {
+    let mut lines = text.split_inclusive('\n');
+    let header = lines.next().unwrap_or_default();
+    let (mut old, mut new, mut moved_to) = (None, None, None);
+    let (mut added, mut removed, mut in_hunk) = (0, 0, false);
+    for line in lines {
+        if line.starts_with("@@") {
+            in_hunk = true;
+        } else if in_hunk {
+            match line.as_bytes().first() {
+                Some(b'+') => added += 1,
+                Some(b'-') => removed += 1,
+                _ => {}
+            }
+        } else if let Some(name) = line.strip_prefix("--- ") {
+            old = Some(name);
+        } else if let Some(name) = line.strip_prefix("+++ ") {
+            new = Some(name);
+        } else if let Some(name) = line.strip_prefix("rename to ") {
+            moved_to = Some(name);
+        }
+    }
+    // The file as it is after the change, or as it was if it's gone.
+    let side = |name: Option<&str>, prefix: &str| {
+        name.map(plain_name)
+            .filter(|name| *name != "/dev/null")
+            .and_then(|name| name.strip_prefix(prefix))
+            .map(str::to_owned)
+    };
+    let path = side(new, "b/")
+        .or_else(|| side(old, "a/"))
+        .or_else(|| moved_to.map(|name| plain_name(name).to_owned()))
+        .unwrap_or_else(|| header_name(header).to_owned());
+    DiffFile {
+        path,
+        start,
+        end,
+        added,
+        removed,
+    }
+}
+
+/// A name as git writes it, without the line's end, the tab git adds after a name with spaces, or
+/// the quotes around one with unusual characters.
+fn plain_name(name: &str) -> &str {
+    let name = name.trim_end_matches(['\n', '\r']);
+    let name = name.strip_suffix('\t').unwrap_or(name);
+    name.strip_prefix('"')
+        .and_then(|name| name.strip_suffix('"'))
+        .unwrap_or(name)
+}
+
+/// The name in a `diff --git a/name b/name` line, for a file whose diff names it nowhere else, like
+/// one that's binary or only changed mode.
+fn header_name(header: &str) -> &str {
+    let names = header.strip_prefix("diff --git ").unwrap_or(header);
+    let names = names.trim_end_matches(['\n', '\r']);
+    names.split_once(" b/").map_or(names, |(_, new)| new)
+}
+
+/// One file's diff in a diff, by a path from filesChanged.
+fn file_diff<'a>(diff: &'a str, file: &str) -> Result<&'a str, ToolError> {
+    diff_files(diff)
+        .into_iter()
+        .find(|found| found.path == plain_name(file))
+        .map(|found| &diff[found.start..found.end])
+        .ok_or_else(|| {
+            ToolError::new(format!(
+                "This attempt's diff has no file {file:?}. Its filesChanged lists the files it changed."
+            ))
+        })
 }
 
 /// A run in a few words, for a wait on several: where it stands and the step it's on, or the one
@@ -1613,23 +2106,28 @@ fn brief_view(run: &Run, attempts: &[Attempt]) -> Json {
     })
 }
 
-/// What a setup or check printed, which is how a client learns why it failed. Masked before it's
-/// cut, because a cut can part a value from the name that gets it masked.
-fn command_output(events: &[keel_store::Event]) -> Option<Json> {
+/// What a setup or check printed, masked whole: a cut can part a value from the name that gets it
+/// masked.
+fn printed(events: &[keel_store::Event]) -> Option<Printed> {
     let result = &events
         .iter()
         .find(|event| event.kind == "checkResult")?
         .data;
-    let text = |name: &str| {
-        capped_end(
-            &mask_secrets(result[name].as_str().unwrap_or_default()),
-            MAX_TEXT,
-        )
-    };
+    let text = |name: &str| mask_secrets(result[name].as_str().unwrap_or_default());
+    Some(Printed {
+        exit_code: result["exitCode"].clone(),
+        stdout: text("stdout"),
+        stderr: text("stderr"),
+    })
+}
+
+/// What a check printed, for a run's report, which is how a client learns why it failed.
+fn command_output(events: &[keel_store::Event]) -> Option<Json> {
+    let printed = printed(events)?;
     Some(json!({
-        "exitCode": result["exitCode"],
-        "stdout": text("stdout"),
-        "stderr": text("stderr"),
+        "exitCode": printed.exit_code,
+        "stdout": capped_end(&printed.stdout, MAX_TEXT),
+        "stderr": capped_end(&printed.stderr, MAX_TEXT),
     }))
 }
 
@@ -1986,12 +2484,155 @@ mod tests {
         assert!(review.get("superseded").is_none(), "{review}");
         // None of them says what it wrote: get_step does, once.
         assert!(views.iter().all(|view| view.get("output").is_none()));
-        let full = attempt_view(&attempts[0]);
+        let long = LongParts {
+            prompt: String::new(),
+            diff: None,
+            printed: None,
+        };
+        let full = step_overview(&attempts[0], &long);
         assert_eq!(full["output"]["verdict"], "approved");
         assert!(full.get("result").is_none(), "{full}");
-        assert_eq!(full["filesChanged"], json!(["a.rs"]));
+        assert_eq!(full["filesChanged"], json!([{ "path": "a.rs" }]));
 
         let (views, left_out) = steps_view(&attempts[..8]);
         assert_eq!((views.len(), left_out), (8, 0));
+    }
+
+    #[test]
+    fn a_text_is_as_long_as_json_writes_it() {
+        for text in [
+            "",
+            "plain",
+            "ñandú 🦀",
+            "a \"quoted\" \\ name\n\ttab\r",
+            "\u{1}\u{1f}\u{7f}\u{8}\u{c}",
+        ] {
+            let written = Json::String(text.into()).to_string();
+            assert_eq!(json_len(text) + 2, written.len(), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn pieces_fit_end_after_whole_lines_and_together_are_the_text() {
+        let text = format!("{}\n{}\n", "ñ\"🦀\\".repeat(500), "x".repeat(300)).repeat(20);
+        for room in [7, 100, 1000, 5000] {
+            let mut joined = String::new();
+            let mut from = 0;
+            while from < text.len() {
+                let end = piece_end(&text, from, room);
+                assert!(end > from);
+                assert!(json_len(&text[from..end]) <= room, "{room}");
+                joined.push_str(&text[from..end]);
+                from = end;
+            }
+            assert_eq!(joined, text);
+        }
+        // After a whole line when one ends in its second half, and through one when it doesn't.
+        let text = "one line\nand another one\n";
+        assert_eq!(piece_end(text, 0, 16), "one line\n".len());
+        assert_eq!(piece_end(text, 0, 22), "one line\nand another ".len());
+        // A character too long for the room still goes, so reading goes on.
+        assert_eq!(piece_end("🦀", 0, 1), "🦀".len());
+    }
+
+    #[test]
+    fn the_end_of_long_output_starts_on_a_whole_line_and_a_character_boundary() {
+        let text = format!("{}\nthe error\n", "x".repeat(100));
+        assert_eq!(&text[tail_start(&text, 20)..], "the error\n");
+        assert_eq!(tail_start("short", 20), 0);
+        assert_eq!(&"ñññ"[tail_start("ñññ", 3)..], "ñ");
+        // One long line keeps its end rather than nothing.
+        let line = "y".repeat(100);
+        assert_eq!(&line[tail_start(&line, 10)..], "y".repeat(10));
+    }
+
+    #[test]
+    fn a_diff_splits_into_its_files_with_the_lines_each_adds_and_removes() {
+        let diff = concat!(
+            "diff --git a/src/a.rs b/src/b.rs\nsimilarity index 90%\nrename from src/a.rs\n",
+            "rename to src/b.rs\nindex 1..2 100644\n--- a/src/a.rs\n+++ b/src/b.rs\n",
+            "@@ -1,2 +1,2 @@\n-old\n+new\n+++ added, not a header\n context\n",
+            "diff --git a/gone.txt b/gone.txt\ndeleted file mode 100644\n--- a/gone.txt\n",
+            "+++ /dev/null\n@@ -1 +0,0 @@\n-bye\n\\ No newline at end of file\n",
+            "diff --git a/logo.png b/logo.png\nBinary files a/logo.png and b/logo.png differ\n",
+            "diff --git a/moved b/elsewhere\nsimilarity index 100%\nrename from moved\n",
+            "rename to elsewhere\n",
+            "diff --git a/my notes.md b/my notes.md\n--- a/my notes.md\t\n+++ b/my notes.md\t\n",
+            "@@ -1 +1 @@\n-a\n+b\n",
+            "diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"\n",
+            "--- \"a/caf\\303\\251.txt\"\n+++ \"b/caf\\303\\251.txt\"\n@@ -1 +1 @@\n-x\n+y\n",
+        );
+        let files = diff_files(diff);
+        let summary: Vec<(&str, usize, usize)> = files
+            .iter()
+            .map(|file| (file.path.as_str(), file.added, file.removed))
+            .collect();
+        assert_eq!(
+            summary,
+            [
+                ("src/b.rs", 2, 1),
+                ("gone.txt", 0, 1),
+                ("logo.png", 0, 0),
+                ("elsewhere", 0, 0),
+                ("my notes.md", 1, 1),
+                ("caf\\303\\251.txt", 1, 1),
+            ]
+        );
+        let joined: String = files
+            .iter()
+            .map(|file| &diff[file.start..file.end])
+            .collect();
+        assert_eq!(joined, diff);
+        // A path as git lists it finds its file, quotes and all.
+        let quoted = file_diff(diff, "\"caf\\303\\251.txt\"").unwrap();
+        assert_eq!(quoted, &diff[files[5].start..]);
+        assert_eq!(
+            file_diff(diff, "gone.txt").unwrap(),
+            &diff[files[1].start..files[1].end]
+        );
+        assert!(file_diff(diff, "nope").is_err());
+        assert!(diff_files("").is_empty());
+    }
+
+    #[test]
+    fn an_attempt_that_wrote_a_lot_still_comes_in_one_go_and_says_what_it_left_out() {
+        let mut long = attempt("review", 1);
+        let findings = vec!["a finding that goes on and on"; 3000];
+        long.output = Some(json!({ "verdict": "changes", "findings": findings }));
+        let deep = "deep/".repeat(20);
+        let paths: Vec<String> = (0..3000)
+            .map(|n| format!("src/{deep}file_{n}.rs"))
+            .collect();
+        long.files_changed = Some(json!(paths));
+        let parts = LongParts {
+            prompt: "p".repeat(100_000),
+            diff: Some("+".repeat(300_000)),
+            printed: Some(Printed {
+                exit_code: json!(1),
+                stdout: "o\n".repeat(50_000),
+                stderr: "\u{1}".repeat(50_000),
+            }),
+        };
+        let view = step_overview(&long, &parts);
+        let size = view.to_string().len();
+        assert!(size <= MAX_STEP, "{size}");
+        let left_out = &view["leftOut"];
+        assert_eq!(left_out["answer"], answer_text(&long).len());
+        assert_eq!(left_out["diff"], 300_000);
+        assert_eq!(left_out["prompt"], 100_000);
+        assert_eq!(left_out["stdout"], 100_000);
+        assert_eq!(left_out["stderr"], 50_000);
+        let every_file: String = paths.iter().map(|path| format!("-\t-\t{path}\n")).collect();
+        assert_eq!(left_out["files"], every_file.len());
+        assert_eq!(view["toRead"], TO_READ);
+        for gone in ["output", "result", "diff", "prompt"] {
+            assert!(view.get(gone).is_none(), "{gone}");
+        }
+        let listed = view["filesChanged"].as_array().unwrap().len();
+        let more = view["moreFilesChanged"].as_u64().unwrap() as usize;
+        assert!(listed > 0 && listed + more == 3000, "{listed} {more}");
+        let output = &view["commandOutput"];
+        assert!(output["stdout"].as_str().unwrap().ends_with("o\no\n"));
+        assert!(output["stderr"].as_str().unwrap().ends_with('\u{1}'));
     }
 }
