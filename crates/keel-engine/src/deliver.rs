@@ -149,7 +149,13 @@ impl Inner {
         let workspace = PathBuf::from(&attempt.workspace);
         let mirror = self.mirror(&project.id);
         let branch = git.current_branch(&workspace).map_err(git_failed)?;
-        if git.commits_ahead(&mirror, &workspace).map_err(git_failed)? == 0 {
+        // Counted from the commit the run started at. With none, no step ever worked on it.
+        let base = store
+            .attempts_of_run(&run.id)?
+            .into_iter()
+            .find_map(|a| a.sha_before)
+            .ok_or(Error::Blocked(Reason::NothingToDeliver))?;
+        if git.commits_ahead(&workspace, &base).map_err(git_failed)? == 0 {
             return Err(Error::Blocked(Reason::NothingToDeliver));
         }
 
@@ -183,7 +189,7 @@ impl Inner {
         let title = if run.source_issue.is_some() {
             run.title.clone()
         } else {
-            git.first_subject(&mirror, &workspace)
+            git.first_subject(&workspace, &base)
                 .filter(|subject| !subject.is_empty() && !subject.starts_with("keel:"))
                 .unwrap_or_else(|| run.title.clone())
         };

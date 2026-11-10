@@ -34,7 +34,8 @@ impl GitError {
 
 /// The branch prefix Keel owns. A push to anything else is refused here, whatever the caller says.
 pub const BRANCH_PREFIX: &str = "keel/";
-/// What a run of the project starts from, and counts its own commits from.
+/// What a new run of the project starts from. It moves on with the project, so a run already going
+/// counts its own commits from the commit it started at, not from here.
 pub const BASE_REF: &str = "keel-base";
 /// Where a run's tools keep their caches. Inside the private copy, since the real ones live in the
 /// home folder, which sandboxed commands can't reach.
@@ -262,7 +263,7 @@ impl Git {
     }
 
     /// Brings a branch from GitHub into the mirror as `into`, for a run in another project to read.
-    /// Never into `keel-base`: a run of this project counts its own commits from there.
+    /// Never into `keel-base`: a run of this project starts from there.
     pub fn fetch_for_reading(
         &self,
         mirror: &Path,
@@ -421,22 +422,19 @@ impl Git {
         self.run_in_workspace(workspace, &["symbolic-ref", "--short", "HEAD"])
     }
 
-    /// How many commits the run's branch has beyond what it started from.
-    pub fn commits_ahead(&self, mirror: &Path, workspace: &Path) -> Result<usize, GitError> {
-        let head = self.head(workspace)?;
-        let base = self.run(mirror, &["rev-parse", &format!("refs/heads/{BASE_REF}")])?;
+    /// How many commits the run's branch has beyond `base`, the commit it started from. Not the
+    /// mirror's `keel-base`: another run of the project may have moved that on to a commit this
+    /// workspace has never seen.
+    pub fn commits_ahead(&self, workspace: &Path, base: &str) -> Result<usize, GitError> {
         let count = self.run_in_workspace(
             workspace,
-            &["rev-list", "--count", &format!("{base}..{head}")],
+            &["rev-list", "--count", &format!("{base}..HEAD")],
         )?;
         Ok(count.trim().parse().unwrap_or(0))
     }
 
-    /// The subject of the run's first commit, which usually says what the change is.
-    pub fn first_subject(&self, mirror: &Path, workspace: &Path) -> Option<String> {
-        let base = self
-            .run(mirror, &["rev-parse", &format!("refs/heads/{BASE_REF}")])
-            .ok()?;
+    /// The subject of the run's first commit since `base`, which usually says what the change is.
+    pub fn first_subject(&self, workspace: &Path, base: &str) -> Option<String> {
         let log = self
             .run_in_workspace(
                 workspace,
@@ -921,8 +919,8 @@ mod tests {
         std::fs::write(p.workspace.join("a.txt"), "three\n").unwrap();
         assert!(p.git.is_dirty(&p.workspace));
         assert_eq!(p.git.current_branch(&p.workspace).unwrap(), "keel/test");
-        assert_eq!(p.git.commits_ahead(&p.mirror, &p.workspace).unwrap(), 1);
-        assert!(p.git.first_subject(&p.mirror, &p.workspace).is_some());
+        assert_eq!(p.git.commits_ahead(&p.workspace, &p.base).unwrap(), 1);
+        assert!(p.git.first_subject(&p.workspace, &p.base).is_some());
         p.git
             .fetch_run_branch(&p.mirror, &p.workspace, "keel/test")
             .unwrap();

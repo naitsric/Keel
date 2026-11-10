@@ -830,7 +830,7 @@ fn agreeing_reads_a_copy_of_each_other_project_and_can_change_none() {
     assert_eq!(
         git_out(&mirror, &["rev-parse", "refs/heads/keel-base"]),
         first,
-        "what Valora's own runs count their commits from stays put"
+        "what Valora's own runs start from stays put"
     );
 
     // The file tools can reach it, and nothing can change it.

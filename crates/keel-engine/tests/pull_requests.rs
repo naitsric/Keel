@@ -1027,3 +1027,64 @@ fn a_cards_run_remembers_the_workflow_it_started_with_and_a_single_step_remember
         .unwrap();
     assert_eq!(w.store.run(&single).unwrap().workflow_id, None);
 }
+
+impl World {
+    /// Someone merges a commit on GitHub, as happens while a run waits for a person.
+    fn merged_upstream(&self) -> String {
+        let repo = self._dir.path().join("app");
+        std::fs::write(repo.join("later.md"), "merged meanwhile\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "merged meanwhile"]);
+        let remote = self._dir.path().join("remotes/acme/app.git");
+        git(&repo, &["push", "-q", &remote.to_string_lossy(), "main"]);
+        git_out(&repo, &["rev-parse", "HEAD"])
+    }
+
+    fn keel_base(&self) -> String {
+        let mirror = self
+            ._dir
+            .path()
+            .join("data/projects")
+            .join(&self.project_id)
+            .join("mirror.git");
+        git_out(&mirror, &["rev-parse", "refs/heads/keel-base"])
+    }
+}
+
+fn git_out(repo: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .current_dir(repo)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+#[test]
+fn a_run_still_delivers_after_another_run_of_its_project_starts_from_newer_code() {
+    let w = world();
+    let run = w.start(&w.saved(delivering_steps()));
+    let human = w.wait_step(&run, "human", AttemptState::WaitingApproval);
+
+    let newer = w.merged_upstream();
+    let other = w.start(&w.saved(vec![agent("look", ToolProfile::ReadOnly)]));
+    w.until("the other run finishing", || {
+        w.store.run(&other).unwrap().finished_at.is_some()
+    });
+    assert_eq!(
+        w.keel_base(),
+        newer,
+        "the other run started from what's on GitHub now"
+    );
+
+    w.engine.answer_approval(&human.id, true, "").unwrap();
+    w.until("delivery ending", || {
+        w.step(&run, "pr").is_some_and(|a| a.finished_at.is_some())
+    });
+    let pr = w.step(&run, "pr").unwrap();
+    assert_eq!(pr.state, "succeeded", "{:?}", pr.reason);
+    assert!(w.store.run(&run).unwrap().pr_url.is_some());
+    // Its title still comes from its own first commit.
+    assert!(w.gh_log().contains("--title fix "), "{}", w.gh_log());
+}
