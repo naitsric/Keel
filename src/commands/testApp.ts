@@ -69,7 +69,7 @@ function backend(command: string, args: unknown) {
     case "board_get":
       return { cards: projectId === "p1" ? [card("c1", "A task in the backlog", projectId), card("c2", "Another task", projectId)] : [], working: 0, maxAgents: 2, defaultWorkflow: null, paused: null };
     case "brain_get":
-      return { map: [], learnings: [], proposals: [], decisions: [], used: 0, limit: 4096, prompt: "", mapRun: null };
+      return { map: [], learnings: [], proposals: [], decisions: [], used: 0, limit: 4096, mapUsed: 0, mapLimit: 3072, prompt: "", mapRun: null };
     case "mcp_overview":
       return { settings: { enabled: false, port: 7413 }, status: { running: false, port: null, url: null, error: null }, clients: [], calls: [] };
     case "github_status":

@@ -131,7 +131,7 @@ export function BrainPage() {
   const generate = () => act(() => api.brainGenerateMap(projectId, model, i18n.language));
 
   const staleCount = brain?.map.filter((n) => n.stale).length ?? 0;
-  const over = brain ? brain.used > brain.limit : false;
+  const over = brain ? brain.used > brain.limit || brain.mapUsed > brain.mapLimit : false;
 
   return (
     <>
@@ -159,10 +159,12 @@ export function BrainPage() {
                 </Field>
               </div>
               {brain && (
-                <p className={cx("pb-1.5 text-[12px]", over ? "text-warning" : "text-muted")}>
-                  {t("brain.usage", { used: kilobytes(brain.used), limit: kilobytes(brain.limit) })}
-                  {over && `. ${t("brain.overLimit")}`}
-                </p>
+                <div className={cx("pb-1.5 text-[12px]", over ? "text-warning" : "text-muted")}>
+                  {/* Two rooms, so the map never crowds out what you let in. */}
+                  <p>{t("brain.usage", { used: kilobytes(brain.used), limit: kilobytes(brain.limit) })}</p>
+                  <p>{t("brain.mapUsage", { used: kilobytes(brain.mapUsed), limit: kilobytes(brain.mapLimit) })}</p>
+                  {over && <p>{t("brain.overLimit")}</p>}
+                </div>
               )}
             </div>
             {error && (
