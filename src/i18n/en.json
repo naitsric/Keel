@@ -166,7 +166,8 @@
     "nothingSkippedToRun": "Nothing was skipped for being a small change, so there's nothing to run.",
     "keptAsking": "After {{rounds}} rounds of questions, it still asked something only you can decide, so Keel stopped it rather than choose for you.",
     "partsNotOpened": "You approved it, but Keel couldn't put each project's part on the board: {{detail}}. Try again once that's fixed.",
-    "startsOnTheBoard": "This issue is a change across several projects, so it starts from its card on the board."
+    "startsOnTheBoard": "This issue is a change across several projects, so it starts from its card on the board.",
+    "readCopyFailed": "Keel couldn't get a copy of {{project}} to read: {{detail}}. Try again once it can be reached."
   },
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",
@@ -282,6 +283,11 @@
     "decideRejected": "Nothing. You rejected this, and your reason will reach this project's next runs.",
     "approvalTitle": "Should this become a pull request?",
     "approvalContinueTitle": "Should this run go on?",
+    "agreementTitle": "Approve what was agreed?",
+    "agreementBody": "Approving puts a card on the board for each part, in this order. Each one starts once the one before it has a pull request. Nothing changes in any project until then.",
+    "agreementParts": "What changes in each project",
+    "agreementApprove": "Approve and open the parts",
+    "agreementApproveHint": "Each part runs its project's usual workflow, and a person approves it before its pull request.",
     "approvalEmptyTitle": "The agent changed nothing",
     "approvalBody": "Nothing has left your Mac yet.",
     "approvalEmptyBody": "There's nothing to turn into a pull request.",
@@ -380,6 +386,8 @@
     "specLimits": "What stays as it is",
     "specAsked": "What it asked you",
     "specAnswered": "What you answered",
+    "specParts": "What changes in each project",
+    "specTogether": "To try together",
     "verifyMet_one": "{{count}} of {{total}} met",
     "verifyMet_other": "{{count}} of {{total}} met",
     "verifyUnmet_one": "{{count}} not met",
@@ -872,7 +880,9 @@
       "title": "Title",
       "description": "Description (optional)",
       "create": "Create",
-      "save": "Save"
+      "save": "Save",
+      "alsoTouches": "Also touches",
+      "alsoTouchesHint": "First Keel agrees with you on what changes in each project. Then it puts a card on the board for each project that changes."
     },
     "deleteTitle": "Delete this card?",
     "deleteBody": "“{{title}}” leaves the board. Nothing changes on GitHub, and any run it had stays in your history.",
@@ -892,6 +902,18 @@
       "over": "Over {{column}}.",
       "dropped": "Dropped {{title}}.",
       "cancelled": "Move cancelled. {{title}} stayed where it was."
+    },
+    "joint": {
+      "agreeing": "Change across several projects",
+      "alsoTouches": "Also touches {{projects}}",
+      "part": "Part {{position}} of {{total}}",
+      "waitsFor": "Waits for part {{position}}, in {{project}}, to have a pull request",
+      "waitsForCard": "Waits for the part before it, in {{project}}, to have a pull request",
+      "open": "See the change",
+      "warnings": {
+        "closed": "Part {{position}}, in {{project}}: its pull request was closed.",
+        "changed": "Part {{position}}, in {{project}}, has commits this part didn't read."
+      }
     }
   },
   "onboarding": {
@@ -1082,6 +1104,7 @@
       "verifierFoundUnmet": "something that had to be true isn't",
       "verifierHasNotRun": "nobody has checked yet that this code does what was asked",
       "personAsked": "you asked for it",
+      "partOfJointChange": "it's one part of a change across several projects, and the parts only work together",
       "unknown": "Keel found a reason it can't put in words here"
     },
     "risks": {
@@ -1113,7 +1136,27 @@
       "verifierFoundUnmet": "something not met",
       "verifierHasNotRun": "not checked yet",
       "personAsked": "you asked",
+      "partOfJointChange": "part of a change across projects",
       "unknown": "another reason"
     }
+  },
+  "joint": {
+    "title": "Change across several projects",
+    "loading": "Loading…",
+    "notAgreed": "Not agreed yet. That happens on “{{title}}”, in {{project}}.",
+    "agreedIn": "Agreed on “{{title}}”, in {{project}}.",
+    "agreedInGone": "The card where it was agreed is no longer on the board.",
+    "projects": "Projects",
+    "parts": "Parts",
+    "readOnly": "Only read, not changed: {{projects}}",
+    "agreed": "What was agreed",
+    "together": "To try together",
+    "togetherHint": "No part proves these on its own. Try them once every part is in place, and mark what works.",
+    "stopWaiting": "Don't wait",
+    "stopWaitingHint": "Lets this part start without the pull request of the one before it.",
+    "openRun": "Open run",
+    "openPr": "Pull request",
+    "notStarted": "Not started",
+    "close": "Close"
   }
 }

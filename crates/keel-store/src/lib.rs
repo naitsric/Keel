@@ -2273,6 +2273,21 @@ impl Store {
         Ok(true)
     }
 
+    /// Notes which commit a part read of an earlier part, by that part's run. What it read before
+    /// stays, and a run read again replaces its commit.
+    pub fn add_card_basis(&self, card_id: &str, run_id: &str, commit: &str) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let mut basis = read_card(&tx, card_id)?.basis;
+        basis.insert(run_id.to_owned(), commit.to_owned());
+        tx.execute(
+            "update card set basis = ?2 where id = ?1",
+            params![card_id, serde_json::to_string(&basis).unwrap_or_default()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Moves a card to a place in Backlog or Todo and renumbers both. `false`, with nothing
     /// changed, if the card isn't in one of them, which is also how this loses the race against
     /// the scheduler taking it. Reordering a rejected card leaves it attached to its run.
@@ -5015,6 +5030,21 @@ mod tests {
             )
             .unwrap();
         assert!(!store.stop_waiting("first").unwrap());
+    }
+
+    #[test]
+    fn a_part_keeps_which_commit_it_read_of_each_earlier_part() {
+        let (_dir, store) = store();
+        seeded(&store);
+        agreed(&store, &[("one", "q"), ("two", "q")]);
+        store.add_card_basis("two", "r1", "aaa").unwrap();
+        store.add_card_basis("two", "r0", "bbb").unwrap();
+        store.add_card_basis("two", "r1", "ccc").unwrap();
+        let basis = store.card("two").unwrap().basis;
+        assert_eq!(basis.len(), 2);
+        assert_eq!(basis["r1"], "ccc");
+        assert_eq!(basis["r0"], "bbb");
+        assert!(store.card("one").unwrap().basis.is_empty());
     }
 
     fn agreed_again(store: &Store) {

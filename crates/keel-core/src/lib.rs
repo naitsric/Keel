@@ -449,6 +449,12 @@ pub enum Reason {
     },
     /// This issue's card is where a change across projects is agreed, which only the board starts.
     StartsOnTheBoard,
+    /// A run that's part of a change across projects reads a copy of another project, and Keel
+    /// couldn't get one: not from where the project lives, and not from an earlier copy.
+    ReadCopyFailed {
+        project: String,
+        detail: String,
+    },
 }
 
 /// Why a run doesn't count as small. Each is a fact the engine checked for itself, and any one is
@@ -495,6 +501,9 @@ pub enum WhyNotSmall {
     VerifierHasNotRun,
     /// A person asked for what was skipped to run.
     PersonAsked,
+    /// It's one part of a change across projects, and the parts only work together, which nobody
+    /// can prove from one project.
+    PartOfJointChange,
 }
 
 /// What's wrong with a specifier's answer. The UI and the prompt asking for a fix each put it in
@@ -674,6 +683,8 @@ impl Reason {
             | Self::KeptAsking { .. }
             | Self::PartsNotOpened { .. }
             | Self::StartsOnTheBoard => false,
+            // One project that's only read. Its account being signed out must not hold up the rest.
+            Self::ReadCopyFailed { .. } => false,
         }
     }
 }
@@ -981,6 +992,13 @@ mod tests {
             (Reason::KeptAsking { rounds: 3 }, false),
             (Reason::PartsNotOpened { detail: text() }, false),
             (Reason::StartsOnTheBoard, false),
+            (
+                Reason::ReadCopyFailed {
+                    project: text(),
+                    detail: text(),
+                },
+                false,
+            ),
         ]
     }
 
@@ -1033,6 +1051,7 @@ mod tests {
             Reason::KeptAsking { .. } => 43,
             Reason::PartsNotOpened { .. } => 44,
             Reason::StartsOnTheBoard => 45,
+            Reason::ReadCopyFailed { .. } => 46,
         }
     }
 
@@ -1046,7 +1065,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=45).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=46).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]

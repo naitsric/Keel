@@ -21,7 +21,7 @@ const PR_BODY_ROOM: usize = 65_000;
 const SMALLEST_FRAGMENT: usize = 200;
 
 /// The URL git reaches a repo at. Only ever the configured host and a repo name from the project.
-fn repo_url(base: &str, repo: &str) -> String {
+pub(crate) fn repo_url(base: &str, repo: &str) -> String {
     format!("{}/{repo}.git", base.trim_end_matches('/'))
 }
 
@@ -199,6 +199,8 @@ impl Inner {
         )?;
 
         let number = url.rsplit('/').next().and_then(|n| n.parse::<i64>().ok());
+        // What it was pushed at, so that a commit someone adds on GitHub later shows.
+        let head = git.head(&workspace).ok();
         // One just opened is a draft, with no need to ask. Of one that was already there Keel knows
         // nothing, so the next look finds out, and until then nothing claims anything about it.
         let known = |value: Value| if opened_now { value } else { Value::Null };
@@ -214,6 +216,7 @@ impl Inner {
                 ),
                 ("pr_state_at", known(Value::Text(now()))),
                 ("pr_checked_at", known(Value::Text(now()))),
+                ("pr_head", head.map_or(Value::Null, Value::Text)),
             ],
         )?;
         store.patch_attempt(&attempt.id, &[("account", Value::Text(account.clone()))])?;
@@ -288,15 +291,24 @@ impl Inner {
             body.push_str(attempt.result_text.as_deref().unwrap_or_default().trim());
             body.push_str("\n\n");
         }
-        if let Some(issue) = &run.source_issue
-            && let Some(number) = issue.get("number").and_then(|n| n.as_i64())
+        let repo = project.github_repo.as_deref().unwrap_or_default();
+        // A part of a change across projects says so first, where nothing gets cut, and names the
+        // issue there: it may be in another repo.
+        let joint = self.pr_section(run, repo, spanish)?;
+        if joint.is_none()
+            && let Some(issue) = &run.source_issue
+            && let Some(line) = crate::joint::issue_ref(issue, repo).or_else(|| {
+                let number = issue.get("number").and_then(|n| n.as_i64())?;
+                Some(format!("Refs #{number}"))
+            })
         {
-            body.push_str(&format!("Refs #{number}\n\n"));
+            body.push_str(&format!("{line}\n\n"));
         }
 
         let top = std::mem::take(&mut body);
         let asked =
             crate::workflows::specifying_attempt(&attempts).and_then(crate::workflows::asked_text);
+        body.push_str(&joint.unwrap_or_default());
 
         let answered = crate::specs::answered_in_run(&attempts);
         if !answered.is_empty() {
@@ -554,6 +566,20 @@ mod tests {
         assert!(body.ends_with("### What changed\n"), "and so does the rest");
         assert!(body.contains(NOTE), "it says so");
         assert!(body.contains("</details>"), "the section still closes");
+    }
+
+    #[test]
+    fn a_part_says_which_it_is_and_names_its_issue_however_long_the_rest_is() {
+        let section = "### Part 2 of 2 of a change across several projects\n\nRefs acme/back#434\n\n- Part 1, **valora**: acme/valora#7\n";
+        let body = fit_body(
+            &"done ".repeat(20_000),
+            Some(&"word ".repeat(20_000)),
+            &format!("{section}### What changed\n"),
+            false,
+        );
+        assert!(chars(&body) <= PR_BODY_ROOM, "{}", chars(&body));
+        assert!(body.contains(NOTE), "something gave way");
+        assert!(body.contains(section), "{body}");
     }
 
     #[test]

@@ -1,20 +1,21 @@
 import { type Announcements, type CollisionDetection, closestCenter, DndContext, type DragEndEvent, type DragOverEvent, DragOverlay, type DragStartEvent, KeyboardSensor, MeasuringStrategy, PointerSensor, pointerWithin, rectIntersection, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
-import { Check, Download, GitPullRequest, Lock, Pencil, Plus, Trash2, X } from "lucide-react";
+import { AlertTriangle, Check, Download, GitPullRequest, Layers, Lock, Pencil, Plus, Trash2, X } from "lucide-react";
 import { type ComponentProps, type CSSProperties, type FormEvent, type ReactNode, type Ref, useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useKeymapHold } from "../commands/keymapHold";
 import { useBoardCommands } from "../commands/pageCommands";
 import { api, type Board, type BoardCard, type BoardColumn, type Issue } from "../lib/api";
-import { type BoardNotice, boardNotice, canDelete, canEdit, cardLabel, clickAction, COLUMNS, dragOver, dropDestination, groupCards, importedIssues, importNotice, isColumn, isLane, type Lane, type Layout, layoutOf, moveNotice, newestOnly, otherLane, overColumn, pausedText, waitingForRoom, withLayout } from "../lib/board";
+import { type BoardNotice, boardNotice, canDelete, canEdit, cardLabel, clickAction, COLUMNS, dragOver, dropDestination, groupCards, importedIssues, importNotice, isColumn, isLane, jointLabel, type Lane, type Layout, layoutOf, moveNotice, newestOnly, otherLane, overColumn, pausedText, waitingForRoom, withLayout } from "../lib/board";
 import { needsSetup } from "../lib/projects";
 import { needsProjectSettings } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, cx, Field, inputClass, Modal, StateBadge } from "../ui/primitives";
 import { AddProject, useAddProject } from "./AddProject";
 import { BlockerNotice } from "./Home";
+import { JointChangeDialog } from "./JointChangeDialog";
 
-type Dialog = { kind: "task"; card: BoardCard | null } | { kind: "delete"; card: BoardCard } | { kind: "import" };
+type Dialog = { kind: "task"; card: BoardCard | null } | { kind: "delete"; card: BoardCard } | { kind: "import" } | { kind: "joint"; changeId: string };
 
 // Columns keep their place during a drag, but the cards inside them don't, so measure all the time.
 const MEASURING = { droppable: { strategy: MeasuringStrategy.Always } };
@@ -42,13 +43,30 @@ function NoticeBar({ notice, onDismiss }: { notice: BoardNotice; onDismiss?: () 
 /** The title and what the card says about itself. It lives inside a button, so only spans. */
 function CardFace({ card }: { card: BoardCard }) {
   const { t } = useTranslation();
+  const projects = useApp((s) => s.overview.projects);
   const label = cardLabel(t, card);
+  const joint = jointLabel(t, card, (id) => projects.find((project) => project.id === id)?.name ?? id);
   return (
     <>
       <span className="line-clamp-3 text-[12.5px] leading-snug font-medium break-words">
         {card.issue && <span className="font-normal text-subtle">#{card.issue.number} </span>}
         {card.title}
       </span>
+      {joint && (
+        <span className="mt-1 block text-[11.5px] leading-snug">
+          <span className="inline-flex items-center gap-1 font-medium text-accent">
+            <Layers size={11} />
+            {joint.text}
+          </span>
+          {joint.detail && <span className="mt-0.5 line-clamp-2 block break-words text-muted">{joint.detail}</span>}
+          {joint.warnings.map((warning) => (
+            <span key={warning} className="mt-0.5 flex gap-1 break-words text-warning">
+              <AlertTriangle size={11} className="mt-0.5 shrink-0" />
+              {warning}
+            </span>
+          ))}
+        </span>
+      )}
       {label && (
         <span className="mt-1 block">
           <StateBadge state={label.state} label={label.label} />
@@ -70,6 +88,7 @@ interface CardActions {
   onDelete: (card: BoardCard) => void;
   onOpenPr: (url: string) => void;
   onOpenSettings: () => void;
+  onOpenJoint: (changeId: string) => void;
 }
 
 function IconAction({ label, children, ...props }: { label: string; children: ReactNode } & ComponentProps<"button">) {
@@ -84,7 +103,7 @@ function IconAction({ label, children, ...props }: { label: string; children: Re
 function CardShell({ card, actions, nodeRef, style, faded, handleRef, handleProps, cursor }: { card: BoardCard; actions: CardActions; nodeRef?: Ref<HTMLLIElement>; style?: CSSProperties; faded?: boolean; handleRef?: Ref<HTMLButtonElement>; handleProps?: ComponentProps<"button">; cursor: string }) {
   const { t } = useTranslation();
   const target = isLane(card.column) ? (card.column === "backlog" ? "todo" : "backlog") : null;
-  const hasFooter = target !== null || canDelete(card) || card.prUrl !== null;
+  const hasFooter = target !== null || canDelete(card) || card.prUrl !== null || card.jointChangeId !== null;
   return (
     <li ref={nodeRef} style={style} className={cx("rounded-md border border-border bg-elevated hover:border-border-strong", faded && "opacity-40")}>
       <button ref={handleRef} type="button" data-card={card.id} className={cx("block w-full rounded-md px-2 py-1.5 text-left", cursor, focusClass)} {...handleProps} onClick={() => actions.onOpen(card)}>
@@ -113,6 +132,12 @@ function CardShell({ card, actions, nodeRef, style, faded, handleRef, handleProp
             >
               <GitPullRequest size={12} />
               {t("board.openPr")}
+            </Button>
+          )}
+          {card.jointChangeId && (
+            <Button variant="ghost" className="h-6 px-1 text-[11px]" onClick={() => actions.onOpenJoint(card.jointChangeId as string)}>
+              <Layers size={12} />
+              {t("board.joint.open")}
             </Button>
           )}
           <span className="flex-1" />
@@ -177,20 +202,48 @@ function Column({ column, cards, dragging, refused, moving, actions, children }:
   );
 }
 
-function TaskDialog({ projectId, card, onClose, onSaved }: { projectId: string; card: BoardCard | null; onClose: () => void; onSaved: () => void }) {
+/** The other projects a request can touch, as checkboxes. Only on a card that hasn't started and isn't a part itself. */
+function AlsoTouches({ projectId, chosen, disabled, onChange }: { projectId: string; chosen: string[]; disabled: boolean; onChange: (chosen: string[]) => void }) {
+  const { t } = useTranslation();
+  const others = useApp((s) => s.overview.projects).filter((project) => project.id !== projectId);
+  if (others.length === 0) return null;
+  const toggle = (id: string, on: boolean) => onChange(on ? [...chosen, id] : chosen.filter((other) => other !== id));
+  return (
+    <fieldset>
+      <legend className="text-[12px] font-medium text-muted">{t("board.task.alsoTouches")}</legend>
+      <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+        {others.map((project) => (
+          <label key={project.id} className="flex items-center gap-1.5 text-[12.5px]">
+            <input type="checkbox" checked={chosen.includes(project.id)} disabled={disabled} onChange={(e) => toggle(project.id, e.target.checked)} />
+            {project.name}
+          </label>
+        ))}
+      </div>
+      <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t("board.task.alsoTouchesHint")}</p>
+    </fieldset>
+  );
+}
+
+const sameProjects = (a: string[], b: string[]) => a.length === b.length && a.every((id) => b.includes(id));
+
+export function TaskDialog({ projectId, card, onClose, onSaved }: { projectId: string; card: BoardCard | null; onClose: () => void; onSaved: () => void }) {
   const { t } = useTranslation();
   const [title, setTitle] = useState(card?.title ?? "");
   const [body, setBody] = useState(card?.body ?? "");
+  const [touches, setTouches] = useState<string[]>(card?.alsoTouches ?? []);
   const [notice, setNotice] = useState<BoardNotice | null>(null);
   const [busy, setBusy] = useState(false);
+  // A part is already one project's share of a change.
+  const canTouchOthers = !card?.part;
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setBusy(true);
     setNotice(null);
     try {
+      const id = card ? card.id : await api.cardCreate(projectId, title.trim(), body);
       if (card) await api.cardUpdate(card.id, title.trim(), body);
-      else await api.cardCreate(projectId, title.trim(), body);
+      if (canTouchOthers && !sameProjects(touches, card?.alsoTouches ?? [])) await api.cardSetProjects(id, touches);
       onSaved();
     } catch (error) {
       setNotice(boardNotice(t, error));
@@ -208,6 +261,7 @@ function TaskDialog({ projectId, card, onClose, onSaved }: { projectId: string; 
         <Field label={card?.issue ? t("newRun.issueExtra") : t("board.task.description")}>
           <textarea rows={5} value={body} onChange={(e) => setBody(e.target.value)} placeholder={card?.issue ? undefined : t("newRun.promptPlaceholder")} className={`${inputClass} resize-y leading-relaxed`} />
         </Field>
+        {canTouchOthers && <AlsoTouches projectId={projectId} chosen={touches} disabled={busy} onChange={setTouches} />}
         {notice && <NoticeBar notice={notice} />}
         <div className="flex justify-end gap-2">
           <Button onClick={onClose}>{t("newRun.cancel")}</Button>
@@ -488,6 +542,7 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
       api.openGithubUrl(url).catch((error) => setNotice(boardNotice(t, error)));
     },
     onOpenSettings: () => navigate({ name: "settings" }),
+    onOpenJoint: (changeId) => setDialog({ kind: "joint", changeId }),
   };
 
   const titleOf = (id: string | number) => cardsById.get(String(id))?.title ?? "";
@@ -594,6 +649,7 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
       {dialog?.kind === "task" && <TaskDialog projectId={projectId} card={dialog.card} onClose={() => setDialog(null)} onSaved={changed} />}
       {dialog?.kind === "delete" && <DeleteDialog card={dialog.card} onClose={() => setDialog(null)} onDeleted={changed} />}
       {dialog?.kind === "import" && <ImportDialog projectId={projectId} cards={board?.cards ?? []} onClose={() => setDialog(null)} onImported={load} />}
+      {dialog?.kind === "joint" && <JointChangeDialog changeId={dialog.changeId} backTo={{ name: "board", projectId }} onClose={() => setDialog(null)} />}
     </>
   );
 }

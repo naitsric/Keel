@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
+import enText from "../i18n/en.json";
+import esText from "../i18n/es.json";
 import type { AttemptState, Board, BoardCard, BoardColumn, Reason } from "./api";
-import { boardNotice, canDelete, canDrag, canEdit, cardLabel, clickAction, dragOver, dropDestination, groupCards, importedIssues, importNotice, type Layout, layoutOf, moveNotice, newestOnly, otherLane, overColumn, pausedText, waitingForRoom, withLayout } from "./board";
+import { boardNotice, canDelete, canDrag, canEdit, cardLabel, clickAction, dragOver, dropDestination, groupCards, importedIssues, importNotice, jointLabel, type Layout, layoutOf, moveNotice, newestOnly, otherLane, overColumn, pausedText, waitingForRoom, withLayout } from "./board";
 import { needsProjectSettings, needsSignIn, reasonText } from "./reason";
 
 const t = (language: string) => i18next.getFixedT(language);
@@ -24,6 +26,9 @@ const card = (id: string, column: BoardColumn, extra: Partial<BoardCard> = {}): 
   rejection: null,
   startBlocked: null,
   createdAt: "2026-11-05T00:00:00Z",
+  jointChangeId: null,
+  alsoTouches: [],
+  part: null,
   ...extra,
 });
 
@@ -442,5 +447,52 @@ describe("notices", () => {
     expect(importNotice(en, blocked("noGithubRemote"))).toEqual({ text: en("board.import.noRemote"), settings: true });
     expect(importNotice(en, blocked("githubAccountMissing"))).toEqual({ text: en("board.import.noAccount"), settings: true });
     expect(importNotice(en, blocked("ghMissing")).text).toContain("GitHub CLI");
+  });
+});
+
+describe("what a card says about a change across several projects", () => {
+  const names = (id: string) => ({ p2: "valora", p3: "dupplaBack" })[id] ?? id;
+  const part = (extra: Partial<NonNullable<BoardCard["part"]>> = {}) => ({ changeId: "plan", position: 2, total: 2, waitsFor: null, warnings: [], ...extra });
+
+  it("says nothing on an ordinary card", () => {
+    expect(jointLabel(en, card("a", "todo"), names)).toBeNull();
+  });
+
+  it("names the other projects where it's agreed", () => {
+    const agreeing = card("plan", "backlog", { jointChangeId: "plan", alsoTouches: ["p2", "p3"] });
+    expect(jointLabel(en, agreeing, names)).toEqual({ text: "Change across several projects", detail: "Also touches valora, dupplaBack", warnings: [] });
+    expect(jointLabel(t("es"), agreeing, names)?.text).toBe("Cambio en varios proyectos");
+  });
+
+  it("says which part it is in Todo, and what it waits for", () => {
+    const waiting = card("b", "todo", { jointChangeId: "plan", part: part({ waitsFor: { cardId: "a", position: 1, project: "valora" } }) });
+    expect(jointLabel(en, waiting, names)).toEqual({ text: "Part 2 of 2", detail: "Waits for part 1, in valora, to have a pull request", warnings: [] });
+    expect(jointLabel(t("es"), waiting, names)?.detail).toBe("Espera a que la parte 1, en valora, tenga pull request");
+    expect(jointLabel(en, card("b", "todo", { jointChangeId: "plan", part: part() }), names)?.detail).toBeNull();
+  });
+
+  it("warns about what became of the parts before it", () => {
+    const warned = card("b", "humanReview", {
+      jointChangeId: "plan",
+      part: part({
+        warnings: [
+          { kind: "changed", position: 1, project: "valora" },
+          { kind: "closed", position: 1, project: "valora" },
+        ],
+      }),
+    });
+    expect(jointLabel(en, warned, names)?.warnings).toEqual(["Part 1, in valora, has commits this part didn't read.", "Part 1, in valora: its pull request was closed."]);
+  });
+});
+
+describe("the words for a change across several projects", () => {
+  it("never say plan, which already means the subscription, nor what Keel calls things inside", () => {
+    const flatten = (value: unknown): string[] => (typeof value === "string" ? [value] : Object.values(value as object).flatMap(flatten));
+    const ofRun = (run: object) => Object.entries(run).flatMap(([key, text]) => (typeof text === "string" && (key.startsWith("agreement") || key === "specParts" || key === "specTogether") ? [text] : []));
+    for (const text of [enText, esText].flatMap((words) => [...flatten(words.joint), ...flatten(words.board.joint), words.board.task.alsoTouches, words.board.task.alsoTouchesHint, ...ofRun(words.run)])) {
+      for (const word of ["plan", "planes", "plans", "joint", "spec", "specifier", "mirror", "basis", "worktree", "agreement"]) {
+        expect(text.toLowerCase().split(/[^\p{L}]+/u), text).not.toContain(word);
+      }
+    }
   });
 });

@@ -217,6 +217,8 @@ pub struct Facts<'a> {
     pub commands: &'a [String],
     /// `None` if it couldn't be read.
     pub change: Option<ChangeSize>,
+    /// Whether the run does one part of a change across projects.
+    pub part_of_joint_change: bool,
 }
 
 pub fn skipped_as_small(attempt: &Attempt) -> bool {
@@ -478,6 +480,10 @@ pub fn decide(facts: &Facts) -> Decision {
         facts.commands,
     ));
     why.extend(why_from_verifier(facts.steps, facts.attempts, facts.round));
+    // However small it looks here, it only works with the other parts, and nothing here proves that.
+    if facts.part_of_joint_change {
+        why.push(WhyNotSmall::PartOfJointChange);
+    }
     match (&facts.change, why.is_empty()) {
         (Some(change), true) => Decision::Small {
             lines: change.lines,
@@ -787,5 +793,29 @@ mod tests {
         assert_eq!(up["small"], false);
         assert_eq!(up["because"][0]["code"], "noCheck");
         assert_eq!(Decision::StaysUp.on_record(1), None);
+    }
+
+    #[test]
+    fn a_part_of_a_change_across_projects_is_never_small() {
+        let why = |part| {
+            let facts = Facts {
+                steps: &[],
+                attempts: &[],
+                round: 0,
+                issue: None,
+                account: None,
+                started_by: None,
+                sensitive: &[],
+                commands: &[],
+                change: Some(change(&["src/visita.mts"], 3)),
+                part_of_joint_change: part,
+            };
+            match decide(&facts) {
+                Decision::NotSmall(why) => why,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!(why(true).contains(&WhyNotSmall::PartOfJointChange));
+        assert!(!why(false).contains(&WhyNotSmall::PartOfJointChange));
     }
 }

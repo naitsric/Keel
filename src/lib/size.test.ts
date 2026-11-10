@@ -64,6 +64,7 @@ describe("why it isn't small", () => {
     { code: "verifierFoundUnmet", count: 2 },
     { code: "verifierHasNotRun" },
     { code: "personAsked" },
+    { code: "partOfJointChange" },
   ];
 
   it("has words for every reason, in both languages, with nothing left to fill in", async () => {

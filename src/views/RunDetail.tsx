@@ -1,10 +1,11 @@
-import { AlertTriangle, Check, ExternalLink, FileDiff, GitPullRequest, Loader2, X } from "lucide-react";
+import { AlertTriangle, Check, ExternalLink, FileDiff, GitPullRequest, Layers, Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Run, type SpecDecided, type SpecOutput, type SpecQuestion, type VerificationOutput } from "../lib/api";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Run, type RunJoint, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
 import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
@@ -14,6 +15,8 @@ import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
 import { ProposalRow } from "./BrainPage";
 import { FlowDiagram } from "./FlowDiagram";
+import { JointChangeDialog } from "./JointChangeDialog";
+import { SpecView } from "./SpecView";
 
 type Tab = "understood" | "found" | "activity" | "commands" | "changes" | "prompt" | "details" | "output";
 
@@ -378,54 +381,6 @@ function useArmed() {
   return armed;
 }
 
-function SpecList({ title, items }: { title: string; items: React.ReactNode[] }) {
-  if (items.length === 0) return null;
-  return (
-    <div>
-      <h4 className="text-[12px] font-semibold text-muted">{title}</h4>
-      <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 break-words">
-        {items.map((item, index) => (
-          // Lines of a fixed text: their position is their identity.
-          <li key={index}>{item}</li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-/** What a specifier understood, as text to read. */
-function SpecView({ spec }: { spec: SpecOutput }) {
-  const { t } = useTranslation();
-  const kinds = { adds: "run.specAdds", changes: "run.specAlters", removes: "run.specRemoves" };
-  return (
-    <div className="space-y-3 text-[13px] leading-relaxed">
-      <p className="selectable break-words">{spec.summary}</p>
-      <SpecList
-        title={t("run.specHolds")}
-        items={spec.criteria.map((criterion) => (
-          <>
-            <span className="font-mono text-[12px] text-muted">{criterion.id}</span> {criterion.when} → {criterion.then}
-          </>
-        ))}
-      />
-      <SpecList title={t("run.specChanges")} items={spec.changes.map((change) => `${t(kinds[change.kind])}: ${change.text}`)} />
-      <SpecList title={t("run.specLimits")} items={spec.limits} />
-      <SpecList
-        title={t("run.decidedTitle")}
-        items={spec.decided.map((decided) => (
-          <>
-            {decided.text}
-            {decided.taken === "person" && <span className="block text-[11.5px] text-subtle">{t("run.decidedYouChose")}</span>}
-            {decided.taken === "roundsLimit" && <span className="block text-[11.5px] text-warning">{t("run.decidedKeelTook")}</span>}
-          </>
-        ))}
-      />
-      <SpecList title={t("run.specAsked")} items={spec.questions.map((question) => `${question.text} ${question.options.map((option) => option.label).join(" / ")}`)} />
-      <SpecList title={t("run.specAnswered")} items={(spec.answered ?? []).map((answer) => `${answer.asked} ${answer.answer}`)} />
-    </div>
-  );
-}
-
 /** What it settled by itself. Each line can go back to whoever does the work, without starting over. */
 function DecidedList({ attemptId, decided, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
   const { t } = useTranslation();
@@ -474,7 +429,7 @@ function DecidedList({ attemptId, decided, canChange, armed, busy, onSend }: { a
  * so the focus starts on the note, where Enter only adds a line. Enter never answers, and approve
  * arms after a moment.
  */
-export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck, sizeDecision = null, onShowChanges, onError }: { attempt: Attempt; run: Run; attempts: Attempt[]; files: string[]; commands: CommandRun[]; rawCheck: RawCheck; sizeDecision?: SizeDecision | null; onShowChanges: () => void; onError: (message: string) => void }) {
+export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck, sizeDecision = null, joint = null, onShowChanges, onError }: { attempt: Attempt; run: Run; attempts: Attempt[]; files: string[]; commands: CommandRun[]; rawCheck: RawCheck; sizeDecision?: SizeDecision | null; joint?: RunJoint | null; onShowChanges: () => void; onError: (message: string) => void }) {
   const { t } = useTranslation();
   const project = useApp((s) => s.overview.projects.find((p) => p.id === run.projectId));
   const draft = useApp((s) => s.approvalDrafts[attempt.id] ?? "");
@@ -542,6 +497,10 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const asked = specifying && !explaining.some((a) => a.id === specifying.id) ? askedText(specifying) : null;
   const askedGist = asked ? gist(asked, 160) : null;
   const spec = specifying ? specOf(specifying) : null;
+  // Where a change across projects is agreed, what's approved is mostly its parts, and they mustn't hide behind "Read all".
+  const parts = spec?.parts ?? [];
+  const agreeing = parts.length > 0;
+  const together = agreeing ? (spec?.together ?? []) : [];
   // Right after working out what's asked, nobody has done anything yet. Saying it finished without
   // an explanation would read as something gone wrong.
   const nothingToExplain = asked !== null && !attempts.some((a) => a.kind === "agent" && a.role === "worker");
@@ -555,10 +514,31 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
     // Short enough for its buttons to show without scrolling: the window less the top bar (38), the
     // status bar (24), and the run's title and the page's padding above and below (102).
     <Card role="alert" className="flex max-h-[calc(100vh-164px)] flex-col overflow-y-auto border-warning/40 p-4">
-      <p className="text-[14px] font-semibold">{t(empty ? "run.approvalEmptyTitle" : outcome === "delivers" ? "run.approvalTitle" : "run.approvalContinueTitle")}</p>
-      <p className="mt-1 mb-3 text-[12.5px] text-muted">{t(empty ? "run.approvalEmptyBody" : "run.approvalBody")}</p>
+      <p className="text-[14px] font-semibold">{t(agreeing ? "run.agreementTitle" : empty ? "run.approvalEmptyTitle" : outcome === "delivers" ? "run.approvalTitle" : "run.approvalContinueTitle")}</p>
+      <p className="mt-1 mb-3 text-[12.5px] text-muted">{t(agreeing ? "run.agreementBody" : empty ? "run.approvalEmptyBody" : "run.approvalBody")}</p>
       {/* What's being approved never shrinks away: in a short window the card scrolls instead. */}
       <dl className="max-h-[50vh] min-h-24 shrink-0 overflow-y-auto">
+        {agreeing && (
+          <ApprovalRow label={t("run.agreementParts")} note={t("run.generated")}>
+            <ol className="selectable list-decimal space-y-0.5 pl-4 break-words">
+              {parts.map((part, index) => (
+                // Lines of a fixed text: their position is their identity.
+                <li key={index}>
+                  <span className="font-medium">{part.project}</span>: {part.text}
+                </li>
+              ))}
+            </ol>
+          </ApprovalRow>
+        )}
+        {together.length > 0 && (
+          <ApprovalRow label={t("run.specTogether")} note={t("run.generated")}>
+            <ul className="selectable list-disc space-y-0.5 pl-4 break-words">
+              {together.map((text, index) => (
+                <li key={index}>{text}</li>
+              ))}
+            </ul>
+          </ApprovalRow>
+        )}
         {askedGist && (
           <ApprovalRow
             label={t("run.whatWasAsked")}
@@ -656,6 +636,12 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
           </ApprovalRow>
         )}
       </dl>
+      {joint?.part?.warnings.map((warning) => (
+        <p key={`${warning.kind}-${warning.position}`} className="mt-2 flex gap-1.5 rounded-md border border-warning/40 bg-inset p-2 text-[12.5px] font-medium text-warning">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          {partWarningText(t, warning)}
+        </p>
+      ))}
       {touchesWorkflows(files) && (
         <p className="mt-2 flex gap-1.5 rounded-md border border-warning/40 bg-inset p-2 text-[12.5px] font-medium text-warning">
           <AlertTriangle size={14} className="mt-0.5 shrink-0" />
@@ -698,9 +684,9 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
                 onClick={() => answer(true)}
               >
                 {outcome === "delivers" && <GitPullRequest size={14} />}
-                {t(outcome === "delivers" ? "run.approve" : "run.approveContinue")}
+                {t(agreeing ? "run.agreementApprove" : outcome === "delivers" ? "run.approve" : "run.approveContinue")}
               </Button>
-              <p className="mt-1 text-[11.5px] text-muted">{t(outcome === "delivers" ? "run.approvalApproveHint" : outcome === "deliversLater" ? "run.approvalLaterHint" : "run.approvalNoPushHint")}</p>
+              <p className="mt-1 text-[11.5px] text-muted">{t(agreeing ? "run.agreementApproveHint" : outcome === "delivers" ? "run.approvalApproveHint" : outcome === "deliversLater" ? "run.approvalLaterHint" : "run.approvalNoPushHint")}</p>
               {delivers && (
                 <p className="selectable mt-0.5 flex flex-wrap gap-x-2 text-[11.5px] text-muted">
                   {t("run.approvalWhere")}
@@ -1404,6 +1390,9 @@ export function RunDetail({ runId }: { runId: string }) {
   const revision = useApp((s) => s.revision);
   const [run, setRun] = useState<Run | null>(null);
   const [attempts, setAttempts] = useState<Attempt[]>([]);
+  const [joint, setJoint] = useState<RunJoint | null>(null);
+  const [jointOpen, setJointOpen] = useState(false);
+  const view = useApp((s) => s.view);
   // A node, and which of its attempts if the person chose one. Until then the page follows the run.
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   const [selectedAttempt, setSelectedAttempt] = useState<string | null>(null);
@@ -1421,9 +1410,11 @@ export function RunDetail({ runId }: { runId: string }) {
   const [runDiff, setRunDiff] = useState<string | null>(null);
 
   const load = useCallback(async () => {
-    const [nextRun, nextAttempts] = await Promise.all([api.runGet(runId), api.runAttempts(runId)]);
+    // Whether it's in a change across projects is extra, and not finding out mustn't hide the run.
+    const [nextRun, nextAttempts, nextJoint] = await Promise.all([api.runGet(runId), api.runAttempts(runId), api.runJoint(runId).catch(() => null)]);
     setRun(nextRun);
     setAttempts(nextAttempts);
+    setJoint(nextJoint ?? null);
   }, [runId]);
 
   useEffect(() => {
@@ -1495,6 +1486,13 @@ export function RunDetail({ runId }: { runId: string }) {
             <p className="mt-0.5 flex flex-wrap gap-x-3 text-[12px] text-subtle">
               {run?.prUrl && run.prState && <PrStatus state={run.prState} at={run.prStateAt} />}
               {isReadOnlyTask(run) && <span className="rounded border border-border px-1 text-[11px] text-muted">{t("run.readOnly")}</span>}
+              {joint && (
+                <button type="button" className="inline-flex items-center gap-1 text-accent hover:underline" onClick={() => setJointOpen(true)}>
+                  <Layers size={11} />
+                  {t("board.joint.agreeing")}
+                  {joint.part && <span>· {partText(t, joint.part)}</span>}
+                </button>
+              )}
               {run?.startedBy && <span>{t("run.startedBy", { client: run.startedBy })}</span>}
               {run?.sourceIssue && <span>{t("run.fromIssue", { number: run.sourceIssue.number })}</span>}
               {accounts.claude && <span>{t("run.accountClaude", { account: accounts.claude })}</span>}
@@ -1517,7 +1515,7 @@ export function RunDetail({ runId }: { runId: string }) {
           </p>
         )}
         {latest.state === "waitingApproval" ? (
-          <ApprovalCard key={latest.id} attempt={latest} run={run} attempts={attempts} files={files} commands={allCommands} rawCheck={rawCheck} sizeDecision={sizeDecision} onShowChanges={showChanges} onError={setError} />
+          <ApprovalCard key={latest.id} attempt={latest} run={run} attempts={attempts} files={files} commands={allCommands} rawCheck={rawCheck} sizeDecision={sizeDecision} joint={joint} onShowChanges={showChanges} onError={setError} />
         ) : latest.state === "waitingAnswers" ? (
           <QuestionsCard key={latest.id} attempt={latest} attempts={attempts} onError={setError} />
         ) : (
@@ -1582,6 +1580,7 @@ export function RunDetail({ runId }: { runId: string }) {
         </Card>
         {going && outcome}
       </main>
+      {jointOpen && joint && <JointChangeDialog changeId={joint.changeId} backTo={view} onClose={() => setJointOpen(false)} />}
     </>
   );
 }

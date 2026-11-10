@@ -18,7 +18,7 @@ use serde_json::json;
 use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
 use crate::specs::{self, Verdict};
-use crate::{Error, Inner, Result, Resume, brain, locked, prompts, verification, workflows};
+use crate::{Error, Inner, Result, Resume, brain, joint, locked, prompts, verification, workflows};
 
 /// Tool output kept in the database. The raw file always has all of it.
 const EVENT_TEXT_LIMIT: usize = 64 * 1024;
@@ -358,6 +358,22 @@ impl Inner {
         let (_git, sha_before) = self.prepare_workspace(attempt, project_id)?;
         let workspace = PathBuf::from(&attempt.workspace);
         let dir = self.run_dir(&attempt.run_id);
+        // The other projects of a change across several, which it reads and can't change. Only
+        // what its settings already close to changes, since `--add-dir` opens a folder to writes.
+        let (copies, joint) = if joint::reads_others(&spec.role) {
+            let wanted: Vec<_> = self
+                .read_copies(&attempt.run_id)?
+                .into_iter()
+                .filter(|copy| {
+                    settings::is_read_only(&attempt.settings, &copy.path.to_string_lossy())
+                })
+                .collect();
+            let copies = self.prepare_read_copies(attempt, &wanted)?;
+            let joint = self.joint_text(&attempt.run_id, &copies)?;
+            (copies, joint)
+        } else {
+            (Vec::new(), String::new())
+        };
 
         let stem = format!("{}-{}", attempt.step_id, attempt.number);
         let settings_file = dir.join(format!("{stem}.settings.json"));
@@ -369,7 +385,7 @@ impl Inner {
             self.brain_block(project_id)?
         };
         let (system_prompt, sources) =
-            prompts::system_prompt(&workspace, &attempt.language, spec.tools, &brain);
+            prompts::system_prompt(&workspace, &attempt.language, spec.tools, &brain, &joint);
         let system_prompt_file = dir.join(format!("{stem}.system.md"));
         std::fs::write(&system_prompt_file, &system_prompt)?;
         let prompt_file = dir.join(format!("{stem}.prompt.txt"));
@@ -390,6 +406,7 @@ impl Inner {
             } else {
                 workflows::schema_for(&spec.role).map(str::to_owned)
             },
+            add_dirs: copies.iter().map(|ready| ready.copy.path.clone()).collect(),
         };
         let args = command.args(spec);
         let version = auth::read_version(&claude, &tools.path_env);

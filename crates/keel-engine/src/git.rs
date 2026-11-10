@@ -34,7 +34,8 @@ impl GitError {
 
 /// The branch prefix Keel owns. A push to anything else is refused here, whatever the caller says.
 pub const BRANCH_PREFIX: &str = "keel/";
-const BASE_REF: &str = "keel-base";
+/// What a run of the project starts from, and counts its own commits from.
+pub const BASE_REF: &str = "keel-base";
 /// Where a run's tools keep their caches. Inside the private copy, since the real ones live in the
 /// home folder, which sandboxed commands can't reach.
 pub const RUN_CACHE: &str = ".keel-cache";
@@ -258,6 +259,115 @@ impl Git {
         let refspec = format!("+refs/heads/{branch}:refs/heads/{BASE_REF}");
         self.run_remote(mirror, auth, &["fetch", "-q", "--no-tags", url, &refspec])?;
         Ok(())
+    }
+
+    /// Brings a branch from GitHub into the mirror as `into`, for a run in another project to read.
+    /// Never into `keel-base`: a run of this project counts its own commits from there.
+    pub fn fetch_for_reading(
+        &self,
+        mirror: &Path,
+        url: &str,
+        branch: &str,
+        into: &str,
+        auth: &RemoteAuth,
+    ) -> Result<(), GitError> {
+        self.ensure_mirror(mirror)?;
+        let refspec = format!("+refs/heads/{branch}:refs/heads/{into}");
+        // Another run of this project can be fetching into the same mirror. Each moves its own
+        // branch, and neither needs `FETCH_HEAD`.
+        self.run_remote(
+            mirror,
+            auth,
+            &[
+                "fetch",
+                "-q",
+                "--no-tags",
+                "--no-write-fetch-head",
+                url,
+                &refspec,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// The same from the project's folder, for a project with no GitHub account: what it has
+    /// checked out, as a run of that project would start from.
+    pub fn fetch_local_for_reading(
+        &self,
+        source: &Path,
+        mirror: &Path,
+        into: &str,
+    ) -> Result<(), GitError> {
+        self.ensure_mirror(mirror)?;
+        let refspec = format!("+HEAD:refs/heads/{into}");
+        self.run(
+            mirror,
+            &[
+                "fetch",
+                "-q",
+                "--no-tags",
+                "--no-write-fetch-head",
+                &source.to_string_lossy(),
+                &refspec,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Whether the mirror has this branch.
+    pub fn mirror_has(&self, mirror: &Path, branch: &str) -> bool {
+        mirror.join("HEAD").exists()
+            && self
+                .run(
+                    mirror,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "-q",
+                        &format!("refs/heads/{branch}^{{commit}}"),
+                    ],
+                )
+                .is_ok()
+    }
+
+    /// A copy of one of the mirror's branches, for a run in another project to read. It has no
+    /// remote. It's made to one side and moved into place, so a copy that's there is whole.
+    pub fn create_read_copy(
+        &self,
+        mirror: &Path,
+        branch: &str,
+        copy: &Path,
+    ) -> Result<String, GitError> {
+        let parent = copy.parent().unwrap_or(copy);
+        std::fs::create_dir_all(parent)?;
+        let name = copy.file_name().map_or_else(
+            || "copy".to_owned(),
+            |name| name.to_string_lossy().into_owned(),
+        );
+        let partial = parent.join(format!(".{name}.partial"));
+        if partial.exists() {
+            std::fs::remove_dir_all(&partial)?;
+        }
+        self.run(
+            parent,
+            &[
+                "clone",
+                "-q",
+                "--no-hardlinks",
+                "--single-branch",
+                "--no-tags",
+                "--branch",
+                branch,
+                &mirror.to_string_lossy(),
+                &partial.to_string_lossy(),
+            ],
+        )?;
+        self.run(&partial, &["remote", "remove", "origin"])?;
+        // As in a workspace: git would look for these in the home folder, which the sandbox hides.
+        self.run(&partial, &["config", "core.excludesFile", "/dev/null"])?;
+        self.run(&partial, &["config", "core.attributesFile", "/dev/null"])?;
+        std::fs::rename(&partial, copy)?;
+        self.head(copy)
     }
 
     /// A private clone for one run. It has no remote, so `git push` has nowhere to go.

@@ -12,7 +12,7 @@ import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
 import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
-import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunRow, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
+import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, JointChange, JointCheck, PartOf, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunJoint, RunRow, SpecOutput, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
 import { useApp } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -530,7 +530,7 @@ const setupAccounts = (account: string | null | undefined) => {
 
 const PR = "https://github.com/acme/app/pull/12";
 const issueOf = (number: number, title: string) => ({ number, title, author: "someone", url: `https://github.com/acme/app/issues/${number}` });
-const boardCard = (id: string, title: string, column: BoardColumn, extra: Partial<BoardCard> = {}): BoardCard => ({ id, projectId: "p1", title, body: "", issue: null, column, position: 0, runId: null, runState: null, reason: null, prUrl: null, prState: null, prStateAt: null, rejection: null, startBlocked: null, createdAt: at(100), ...extra });
+const boardCard = (id: string, title: string, column: BoardColumn, extra: Partial<BoardCard> = {}): BoardCard => ({ id, projectId: "p1", title, body: "", issue: null, column, position: 0, runId: null, runState: null, reason: null, prUrl: null, prState: null, prStateAt: null, rejection: null, startBlocked: null, createdAt: at(100), jointChangeId: null, alsoTouches: [], part: null, ...extra });
 const inRun = (runState: AttemptState, reason: Reason | null = null) => ({ runId: "r1", runState, reason });
 let boardCards: BoardCard[] =
   params.get("cards") === "none"
@@ -563,7 +563,54 @@ let boardCards: BoardCard[] =
         boardCard("c26", "A pull request Keel hasn't looked at yet", "done", { ...inRun("succeeded"), prUrl: PR }),
         boardCard("c21", "Write the map of the project", "done", inRun("succeeded")),
         boardCard("c22", "Rotate the payments key", "done", { ...inRun("succeeded"), projectId: "p2", prUrl: PR }),
+        // A change across projects: c44 hasn't been agreed yet, c40 was, and its parts are c42 and c41.
+        // c45 is the second part of another, still waiting for its first.
+        boardCard("c44", "Charge in two currencies", "backlog", { jointChangeId: "c44", alsoTouches: ["p2"] }),
+        boardCard("c45", "Refund from the payments page", "todo", { jointChangeId: "c46", part: partOf("c46", 2, { waitsFor: { cardId: "c47", position: 1, project: "payments" } }) }),
+        boardCard("c41", "Pay invoices through payments", "humanReview", { ...inRun("waitingApproval"), jointChangeId: "c40", part: partOf("c40", 2, { warnings: params.get("jointWarn") === "none" ? [] : [{ kind: "changed", position: 1, project: "payments" }] }) }),
+        boardCard("c40", "Pay invoices through payments", "done", { ...inRun("succeeded"), jointChangeId: "c40", alsoTouches: ["p2"] }),
+        boardCard("c42", "Pay invoices through payments", "done", { ...inRun("succeeded"), projectId: "p2", prUrl: PR, prState: "draft", prStateAt: at(300), jointChangeId: "c40", part: partOf("c40", 1) }),
       ];
+let jointChecks: JointCheck[] = [{ seq: 1, text: "Pay an invoice in demo and see it settled in payments", confirmedAt: null }];
+const jointAgreed: SpecOutput = {
+  summary: "Invoices are paid through the payments service instead of in demo.",
+  criteria: [{ id: "C1", when: "someone pays an invoice", then: "payments settles it and demo marks it paid" }],
+  changes: [],
+  limits: ["The /invoices route keeps its name"],
+  decided: [],
+  questions: [],
+  parts: [
+    { project: "payments", text: "Add an endpoint that settles one invoice" },
+    { project: "demo", text: "Call it when an invoice is paid" },
+  ],
+  together: jointChecks.map((check) => check.text),
+};
+function partOf(changeId: string, position: number, extra: Partial<PartOf> = {}): PartOf {
+  return { changeId, position, total: 2, waitsFor: null, warnings: [], ...extra };
+}
+function jointChange(changeId: string): JointChange {
+  const name = (projectId: string) => listedProjects.find((p) => p.id === projectId)?.name ?? projectId;
+  const view = (card: BoardCard) => ({ cardId: card.id, projectId: card.projectId, project: name(card.projectId), title: card.title, column: card.column, runId: card.runId, runState: card.runState, prUrl: card.prUrl, prState: card.prState, part: card.part });
+  const agreeing = boardCards.find((card) => card.id === changeId);
+  const parts = boardCards.filter((card) => card.jointChangeId === changeId && card.part).sort((a, b) => (a.part?.position ?? 0) - (b.part?.position ?? 0));
+  const agreed = parts.length > 0;
+  return {
+    id: changeId,
+    agreedIn: agreeing ? view(agreeing) : null,
+    projects: [agreeing?.projectId ?? "p1", ...(agreeing?.alsoTouches ?? ["p2"])].map((id) => ({ id, name: name(id) })),
+    agreed: agreed ? jointAgreed : null,
+    parts: parts.map(view),
+    readOnly: [],
+    checks: agreed ? jointChecks : [],
+  };
+}
+// ?joint=agree or ?joint=part shows a run in a change across projects.
+const runJoint = (): RunJoint | null => {
+  const joint = params.get("joint");
+  if (joint === "agree") return { changeId: "c40", agrees: true, part: null };
+  if (joint === "part") return { changeId: "c40", agrees: false, part: partOf("c40", 2, { warnings: [{ kind: "changed", position: 1, project: "payments" }] }) };
+  return null;
+};
 // ?paused=rateLimited, or any other reason's code. ?paused=rateLimited&resets=none has no known time.
 // ?paused=none with ?session=out is a session that was bad at startup and isn't any more.
 const boardPaused = (): Reason | null => {
@@ -744,6 +791,25 @@ mockIPC((command, args) => {
     case "card_delete":
       boardCards = boardCards.filter((c) => c.id !== (args as { cardId: string }).cardId);
       return null;
+    case "card_set_projects": {
+      const { cardId, projects: chosen } = args as { cardId: string; projects: string[] };
+      boardCards = boardCards.map((c) => (c.id === cardId ? { ...c, alsoTouches: chosen, jointChangeId: chosen.length > 0 ? c.id : null } : c));
+      return null;
+    }
+    case "card_stop_waiting": {
+      const { cardId } = args as { cardId: string };
+      boardCards = boardCards.map((c) => (c.id === cardId && c.part ? { ...c, part: { ...c.part, waitsFor: null } } : c));
+      return null;
+    }
+    case "joint_change_get":
+      return jointChange((args as { changeId: string }).changeId);
+    case "joint_check_set": {
+      const { seq, works } = args as { seq: number; works: boolean };
+      jointChecks = jointChecks.map((check) => (check.seq === seq ? { ...check, confirmedAt: works ? at(0) : null } : check));
+      return null;
+    }
+    case "run_joint":
+      return runJoint();
     case "max_agents_get":
       return maxAgents;
     case "max_agents_set":
