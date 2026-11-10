@@ -22,8 +22,8 @@ use serde_json::{Value as Json, json};
 use crate::{McpServer, ToolError};
 
 /// Runs a client may have open at once until the person sets its own number in Keel's settings. A
-/// run waiting for the person counts, so an assistant can't spend a person's usage faster than
-/// they're looking at it.
+/// run waiting for the person counts until they decide it or the client closes it, so an assistant
+/// can't pile up work faster than they're looking at it.
 pub const MAX_OPEN_RUNS: i64 = keel_store::DEFAULT_MAX_OPEN_RUNS;
 /// Runs one wait_for_run can watch at once.
 const MAX_WAITED_RUNS: usize = 10;
@@ -50,7 +50,8 @@ const WAIT_MAX_SECS: u64 = 50;
 const WAIT_TICK: Duration = Duration::from_millis(300);
 
 /// What a run waits on someone for. Answering and approving are only ever the person's. Of the
-/// rest, a client the person lets give feedback can send back, retry or close its own runs.
+/// rest, a client that may start runs can close its own, and one the person also lets give feedback
+/// can send them back or retry them.
 const NEEDS_PERSON: [&str; 7] = [
     "waitingApproval",
     "waitingAnswers",
@@ -928,7 +929,9 @@ impl McpServer {
         args: CloseRunArgs,
     ) -> Result<Json, ToolError> {
         self.call(client, "close_run", args, |server, client, args| {
-            let (run, attempts) = server.steerable(client, &args.run)?;
+            // Withdrawing its own request: it delivers nothing and decides nothing for the person,
+            // so starting runs is enough. It's how a client lets go of a run it won't take further.
+            let (run, attempts) = server.own_run(client, &args.run)?;
             let target = close_target(&run, &attempts)?;
             server
                 .0
@@ -1053,7 +1056,7 @@ impl McpServer {
             .map_err(store_error)?;
         if open >= client.max_open_runs.clamp(1, MAX_OPEN_RUNS_CEILING) {
             return Err(ToolError::new(format!(
-                "This client has as many runs open as the person allows it ({open}). They finish when the person decides in Keel, and the person can raise the limit in Keel's settings."
+                "This client has as many runs open as the person allows it ({open}). A run that waits for the person stays open until they decide in Keel, or until you close it with close_run if you won't take it further. list_runs with `mine` finds them. The person can also raise the limit in Keel's settings."
             )));
         }
         Ok(())
@@ -1066,6 +1069,14 @@ impl McpServer {
         run_id: &str,
     ) -> Result<(Run, Vec<Attempt>), ToolError> {
         may_steer(client)?;
+        self.own_run(client, run_id)
+    }
+
+    /// A run this client started and may act on, with its attempts, or why it may not.
+    fn own_run(&self, client: &McpClient, run_id: &str) -> Result<(Run, Vec<Attempt>), ToolError> {
+        if !client.can_run {
+            return Err(may_only_read());
+        }
         let attempts = self.attempts(run_id)?;
         let store = &self.0.store;
         if !store
@@ -1116,9 +1127,9 @@ impl McpServer {
             {
                 tools.push("retry_step");
             }
-            if close_target(run, attempts).is_ok() {
-                tools.push("close_run");
-            }
+        }
+        if client.can_run && mine && close_target(run, attempts).is_ok() {
+            tools.push("close_run");
         }
         if client.can_run && attempts.iter().any(working) {
             tools.push("stop_run");
@@ -1291,8 +1302,8 @@ fn who_decides(state: &str) -> &'static str {
     }
 }
 
-/// Whether the person lets this client give feedback at all. Every feedback tool asks this first,
-/// in this order, so the refusal says what's missing. The run also has to be the client's own.
+/// Whether the person lets this client give feedback at all: send back or retry. Both ask this
+/// first, in this order, so the refusal says what's missing. The run also has to be the client's own.
 fn may_steer(client: &McpClient) -> Result<(), ToolError> {
     if !client.can_run {
         return Err(may_only_read());
