@@ -13,7 +13,7 @@ import App from "../src/App";
 import i18next from "../src/i18n";
 import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
 import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, JointChange, JointCheck, PartOf, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunJoint, RunRow, SpecOutput, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
-import { useApp } from "../src/lib/store";
+import { useApp, type View } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
 const view = params.get("view") ?? "home";
@@ -480,7 +480,10 @@ const projects = view === "board" || palette || params.get("drafts") === "1" ? [
 // removing, addError=1 refuses the folder, picker=cancel closes the picker, and history=1 with empty=1
 // keeps the runs of projects that are all gone.
 const freshProject: Project = { ...otherProject, id: "p3", name: "shop", path: "/Users/you/www/shop", githubAccount: null, githubRepo: params.get("repo") === "none" ? null : "acme/shop", setupCommand: null, checkCommand: null, allowedDomains: ["pypi.org"], allowedRead: [], services: [{ type: "bridge", name: "db", port: 5432, socket: null }], env: [{ name: "DB_HOST", value: "{{socketDir:db}}" }] };
-let listedProjects: Project[] = params.get("empty") === "1" ? [] : [...projects, ...(params.get("projects") === "mixed" || params.get("dialog") === "setup" ? [freshProject] : [])];
+// projects=many has that one too, and enough others for the Projects page to filter them.
+const manyProjects = params.get("projects") === "many";
+const moreProjects: Project[] = manyProjects ? ["mobile", "billing-api", "docs", "infra", "website", "analytics"].map((name, i) => ({ ...otherProject, id: `p${i + 4}`, name, path: `/Users/you/www/${name}`, githubRepo: `acme/${name}` })) : [];
+let listedProjects: Project[] = params.get("empty") === "1" ? [] : [...projects, ...(params.get("projects") === "mixed" || manyProjects || params.get("dialog") === "setup" ? [freshProject] : []), ...moreProjects];
 const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[]; setupOptions: string[]; checkOptions: string[] }> = {
   pnpm: { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run check:i18n", "pnpm run lint", "pnpm test", "pnpm run typecheck"] },
   npm: { check: "npm test", setup: "npm ci", from: ["package.json", "package-lock.json"], setupOptions: [], checkOptions: [] },
@@ -848,11 +851,20 @@ void useApp.getState().refreshMcp();
 useApp.setState({ preflight: params.get("session") === "checking" ? null : preflight });
 // from=board or from=brain shows a run opened on that page: it stays the current one in the top bar.
 const from = params.get("from");
-if (view === "run") useApp.setState({ view: { name: "run", runId: "r1", backTo: from === "board" ? { name: "board", projectId: "p1" } : from === "brain" ? { name: "brain" } : undefined } });
-if (view === "settings") useApp.setState({ view: { name: "settings" } });
-if (view === "workflows") useApp.setState({ view: { name: "workflows" } });
-if (view === "brain") useApp.setState({ view: { name: "brain" } });
-if (view === "board") useApp.setState({ view: { name: "board" } });
+// What view= opens. It has one entry for each page the app has, so a new page doesn't compile until
+// the preview can show it.
+const PAGES: { [Name in View["name"]]: Extract<View, { name: Name }> } = {
+  home: { name: "home" },
+  run: { name: "run", runId: "r1", backTo: from === "board" ? { name: "board", projectId: "p1" } : from === "brain" ? { name: "brain" } : undefined },
+  settings: { name: "settings" },
+  workflows: { name: "workflows" },
+  brain: { name: "brain" },
+  board: { name: "board" },
+  // project=p3 opens with that one chosen, which is the one that needs setup with projects=mixed|many
+  // (and has no GitHub with repo=none).
+  projects: { name: "projects", projectId: params.get("project") ?? undefined },
+};
+if (Object.hasOwn(PAGES, view)) useApp.setState({ view: PAGES[view as View["name"]] });
 if (params.get("dialog") === "newRun") useApp.setState({ newRunOpen: true });
 if (params.get("dialog") === "quit") useApp.setState({ quitOpen: true });
 if (params.get("dialog") === "setup") useApp.setState({ projectSetup: { projectId: freshProject.id, added: params.get("added") ? (addedAnswer() as ProjectAdded) : null, returnToNewRun: false } });
