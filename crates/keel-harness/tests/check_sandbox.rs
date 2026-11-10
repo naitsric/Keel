@@ -1,5 +1,6 @@
 //! The sandbox for `check` steps, for real. Tests and Makefiles can be edited by an agent, so
-//! what runs here gets no more trust than the agent.
+//! what runs here gets no more trust than the agent. Each test starts a sandbox, which macOS
+//! refuses inside another one, as when Keel checks a change to itself. There they say so and stop.
 #![cfg(target_os = "macos")]
 
 use std::net::TcpListener;
@@ -62,6 +63,7 @@ fn quoted(path: &Path) -> String {
 
 #[test]
 fn exit_codes_come_through() {
+    keel_harness::needs!(sandbox);
     let s = sandbox();
     assert_eq!(s.run("exit 0").status.code(), Some(0));
     assert_eq!(s.run("exit 7").status.code(), Some(7));
@@ -73,6 +75,7 @@ fn exit_codes_come_through() {
 
 #[test]
 fn the_workspace_is_readable_and_writable() {
+    keel_harness::needs!(sandbox);
     let s = sandbox();
     assert!(s.allowed("cat ok.txt"));
     assert!(s.allowed("echo x > new.txt && cat new.txt && mkdir -p a/b && rm new.txt"));
@@ -80,6 +83,7 @@ fn the_workspace_is_readable_and_writable() {
 
 #[test]
 fn the_home_folder_is_not() {
+    keel_harness::needs!(sandbox);
     let s = sandbox();
     assert!(!s.allowed(&format!("cat {}", quoted(&s.canary))));
     assert!(!s.allowed(&format!("cat {}", quoted(&s.home.join(".ssh/known_hosts")))));
@@ -97,6 +101,7 @@ fn the_home_folder_is_not() {
 
 #[test]
 fn a_check_cannot_change_what_git_will_run() {
+    keel_harness::needs!(sandbox);
     let s = sandbox();
     let git = |script: &str| {
         Command::new("/bin/sh")
@@ -136,6 +141,7 @@ fn a_check_cannot_change_what_git_will_run() {
 
 #[test]
 fn git_works_when_the_home_folder_has_a_git_config() {
+    keel_harness::needs!(sandbox);
     // Most Macs have one. The sandbox hides it, and git gives up when it can't read it.
     let s = sandbox();
     std::fs::write(
@@ -208,6 +214,7 @@ fn deep_run() -> DeepRun {
 
 #[test]
 fn a_command_can_find_its_way_to_a_workspace_deep_in_the_home_folder() {
+    keel_harness::needs!(sandbox);
     let d = deep_run();
     let other = d.runs.with_file_name("other");
     std::fs::create_dir(&other).unwrap();
@@ -247,6 +254,7 @@ fn a_command_can_find_its_way_to_a_workspace_deep_in_the_home_folder() {
 
 #[test]
 fn a_command_can_ask_about_its_own_output_files() {
+    keel_harness::needs!(sandbox);
     let d = deep_run();
     let log = d.runs.join("step.log");
     let asks = |profile: &str| {
@@ -276,6 +284,7 @@ fn a_command_can_ask_about_its_own_output_files() {
 
 #[test]
 fn toolchains_can_be_read_and_cargo_credentials_cannot() {
+    keel_harness::needs!(sandbox);
     let home = PathBuf::from(std::env::var("HOME").unwrap());
     let s = sandbox();
     // `~/.cargo/bin` opens up, and the file right next to it doesn't.
@@ -295,12 +304,14 @@ fn toolchains_can_be_read_and_cargo_credentials_cannot() {
 
 #[test]
 fn temp_folders_work_because_test_suites_need_them() {
+    keel_harness::needs!(sandbox);
     let s = sandbox();
     assert!(s.allowed("f=$(mktemp) && echo x > \"$f\" && rm \"$f\""));
 }
 
 #[test]
 fn the_keychain_is_out_of_reach() {
+    keel_harness::needs!(sandbox);
     let s = sandbox();
     assert!(!s.allowed("security find-generic-password -s gh:github.com -w >/dev/null 2>&1"));
     assert!(
@@ -312,6 +323,7 @@ fn the_keychain_is_out_of_reach() {
 
 #[test]
 fn there_is_no_network() {
+    keel_harness::needs!(sandbox);
     let s = sandbox();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -321,8 +333,34 @@ fn there_is_no_network() {
     assert!(!s.allowed("curl -fsS -m 4 -o /dev/null https://example.com"));
 }
 
+/// Keel's own tests run inside a check when it works on itself, and those that need what it takes
+/// away stop there and say why. These are the refusals `keel_harness::testing` goes by, so one
+/// can't pass for a real failure.
+#[test]
+fn inside_a_check_what_tests_may_need_is_refused_in_a_way_they_can_tell() {
+    keel_harness::needs!(sandbox);
+    let s = sandbox();
+    for (script, says) in [
+        (
+            "/usr/bin/sandbox-exec -p '(version 1)(allow default)(deny network*)' /usr/bin/true",
+            keel_harness::testing::REFUSAL,
+        ),
+        (
+            "python3 -c \"import socket; socket.socket().bind(('127.0.0.1', 0))\"",
+            "Operation not permitted",
+        ),
+        ("/bin/ps -o pid= -p $$", "Operation not permitted"),
+    ] {
+        let output = s.run(script);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{script}");
+        assert!(stderr.contains(says), "{script}: {stderr}");
+    }
+}
+
 #[test]
 fn listed_paths_can_be_read() {
+    keel_harness::needs!(sandbox);
     let s = sandbox();
     let allowed = s.canary_dir.path().to_string_lossy().into_owned();
     let profile = check_profile(s.workspace.path(), &s.home, &[allowed], &[]);
@@ -336,6 +374,7 @@ fn listed_paths_can_be_read() {
 
 #[test]
 fn local_unix_sockets_are_out_of_reach_too() {
+    keel_harness::needs!(sandbox);
     // The Docker socket is one of these, and reaching it would undo the whole sandbox.
     let s = sandbox();
     let path = s.canary_dir.path().join("s.sock");
@@ -349,6 +388,7 @@ fn local_unix_sockets_are_out_of_reach_too() {
 
 #[test]
 fn a_listed_socket_works_and_no_other_does() {
+    keel_harness::needs!(sandbox);
     let s = sandbox();
     let root = tempfile::tempdir_in("/tmp").unwrap();
     let root_path = root.path().canonicalize().unwrap();
@@ -403,6 +443,7 @@ fn run_setup(s: &Sandbox, cache: &Path, script: &str) -> bool {
 
 #[test]
 fn setup_can_reach_the_internet_and_its_cache() {
+    keel_harness::needs!(sandbox);
     let s = sandbox();
     let cache = tempfile::Builder::new()
         .prefix(".keel-sandbox-cache")
@@ -436,6 +477,7 @@ fn setup_can_reach_the_internet_and_its_cache() {
 
 #[test]
 fn setup_still_cannot_reach_anything_on_this_machine() {
+    keel_harness::needs!(sandbox);
     let s = sandbox();
     let cache = tempfile::Builder::new()
         .prefix(".keel-sandbox-cache")
@@ -490,6 +532,7 @@ fn setup_still_cannot_reach_anything_on_this_machine() {
 /// other projects next door. uv stopped dead there, and a cache right in the home folder hid it.
 #[test]
 fn setup_can_find_its_way_to_its_cache_and_learns_nothing_else_on_the_way() {
+    keel_harness::needs!(sandbox);
     let d = deep_run();
     let projects = d.root.path().join("Application Support/projects");
     let project = projects.join("p1");
@@ -580,6 +623,7 @@ fn setup_can_find_its_way_to_its_cache_and_learns_nothing_else_on_the_way() {
 
 #[test]
 fn the_cache_is_only_writable_during_setup() {
+    keel_harness::needs!(sandbox);
     let s = sandbox();
     let cache = tempfile::Builder::new()
         .prefix(".keel-sandbox-cache")

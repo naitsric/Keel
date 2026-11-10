@@ -422,6 +422,7 @@ fn blocked_with(result: Result<(), Error>) -> Reason {
 
 #[test]
 fn with_nothing_to_ask_it_goes_straight_on() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[good()]);
     let run = w.start(no_approver());
@@ -440,6 +441,7 @@ fn with_nothing_to_ask_it_goes_straight_on() {
 
 #[test]
 fn questions_wait_and_hold_no_agent_slot() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|config| config.max_agents = 1);
     w.answers(&[asking("Q1", "If `whole` is 0, what should happen?")]);
     let run = w.start(no_approver());
@@ -467,6 +469,7 @@ fn questions_wait_and_hold_no_agent_slot() {
 
 #[test]
 fn using_the_recommended_options_runs_no_agent_and_keeps_what_it_wrote() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[asking("Q1", "If `whole` is 0, what should happen?")]);
     let run = w.start(no_approver());
@@ -515,6 +518,7 @@ fn using_the_recommended_options_runs_no_agent_and_keeps_what_it_wrote() {
 
 #[test]
 fn an_answer_that_could_not_go_ahead_leaves_nothing_behind_and_can_be_given_again() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[asking("Q1", "If it's 0, what then?"), good()]);
     let run = w.start(no_approver());
@@ -543,6 +547,7 @@ fn an_answer_that_could_not_go_ahead_leaves_nothing_behind_and_can_be_given_agai
 
 #[test]
 fn a_different_answer_resumes_the_same_session_and_the_builder_sees_it() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let mut reflected = good();
     reflected["criteria"][0]["then"] = json!("it returns 0");
@@ -592,6 +597,7 @@ fn a_different_answer_resumes_the_same_session_and_the_builder_sees_it() {
 
 #[test]
 fn what_a_person_typed_reaches_the_agent_as_text_and_expands_nothing() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[asking("Q1", "What then?")]);
     let run = w.start(no_approver());
@@ -617,6 +623,7 @@ fn what_a_person_typed_reaches_the_agent_as_text_and_expands_nothing() {
 
 #[test]
 fn a_third_round_of_questions_takes_the_recommended_options_and_says_so() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[
         asking("Q1", "First?"),
@@ -657,6 +664,7 @@ fn a_third_round_of_questions_takes_the_recommended_options_and_says_so() {
 
 #[test]
 fn what_only_a_person_can_answer_is_asked_once_more_and_then_the_step_stops() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[
         asking("Q1", "First?"),
@@ -704,6 +712,7 @@ fn what_only_a_person_can_answer_is_asked_once_more_and_then_the_step_stops() {
 
 #[test]
 fn a_question_with_none_recommended_always_runs_the_agent_with_the_answer() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[only_they_know("Q1", "How much?"), good()]);
     let run = w.start(no_approver());
@@ -719,6 +728,7 @@ fn a_question_with_none_recommended_always_runs_the_agent_with_the_answer() {
 
 #[test]
 fn going_over_the_limits_once_gets_corrected_and_twice_ends_blocked() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[too_long(), good()]);
     let run = w.start(no_approver());
@@ -759,6 +769,7 @@ fn going_over_the_limits_once_gets_corrected_and_twice_ends_blocked() {
 
 #[test]
 fn fixing_a_limit_does_not_use_up_the_rounds_of_questions() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let mut broken_with_a_question = asking("Q1", "First?");
     broken_with_a_question["summary"] = json!("x".repeat(201));
@@ -787,6 +798,7 @@ fn fixing_a_limit_does_not_use_up_the_rounds_of_questions() {
 
 #[test]
 fn a_result_that_came_from_answers_gets_its_own_chance_to_fix_a_limit() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[too_long(), asking("Q1", "First?"), too_long(), good()]);
     let run = w.start(no_approver());
@@ -801,6 +813,7 @@ fn a_result_that_came_from_answers_gets_its_own_chance_to_fix_a_limit() {
 
 #[test]
 fn resuming_by_hand_says_again_what_to_fix() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[too_long(), too_long(), good(), good()]);
     let run = w.start(no_approver());
@@ -820,6 +833,7 @@ fn resuming_by_hand_says_again_what_to_fix() {
 
 #[test]
 fn answers_that_do_not_belong_are_refused_and_change_nothing() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let mut output = asking("Q1", "First?");
     output["questions"].as_array_mut().unwrap().push(json!({
@@ -873,6 +887,7 @@ fn answers_that_do_not_belong_are_refused_and_change_nothing() {
 
 #[test]
 fn only_the_first_of_two_answers_counts_however_close_together() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[asking("Q1", "First?"), good()]);
     let run = w.start(no_approver());
@@ -913,6 +928,7 @@ fn only_the_first_of_two_answers_counts_however_close_together() {
 
 #[test]
 fn answering_and_sending_back_refuse_what_is_not_waiting_for_them() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[asking("Q1", "First?")]);
     let run = w.start(no_approver());
@@ -981,6 +997,7 @@ fn answering_and_sending_back_refuse_what_is_not_waiting_for_them() {
 
 #[test]
 fn cancelling_sends_the_card_to_the_backlog_and_writes_no_decision() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[asking("Q1", "First?")]);
     let workflow = w
@@ -1030,6 +1047,7 @@ fn cancelling_sends_the_card_to_the_backlog_and_writes_no_decision() {
 
 #[test]
 fn the_wait_survives_a_restart_and_can_be_answered_after_it() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[asking("Q1", "First?")]);
     let run = w.start(no_approver());
@@ -1063,6 +1081,7 @@ fn the_wait_survives_a_restart_and_can_be_answered_after_it() {
 
 #[test]
 fn remembering_an_answer_makes_it_a_decision_and_not_remembering_makes_none() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let mut output = asking("Q1", "First?");
     output["questions"].as_array_mut().unwrap().push(json!({
@@ -1112,6 +1131,7 @@ fn remembering_an_answer_makes_it_a_decision_and_not_remembering_makes_none() {
 
 #[test]
 fn an_answer_a_person_typed_stays_on_one_line_when_it_is_remembered() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[asking("Q1", "First?"), good()]);
     let run = w.start(no_approver());
@@ -1131,6 +1151,7 @@ fn an_answer_a_person_typed_stays_on_one_line_when_it_is_remembered() {
 
 #[test]
 fn sending_back_with_an_approver_runs_it_all_again_and_does_not_read_as_approved() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[good()]);
     let run = w.start(with_approver(2));
@@ -1181,6 +1202,7 @@ fn sending_back_with_an_approver_runs_it_all_again_and_does_not_read_as_approved
 
 #[test]
 fn sending_back_with_no_approver_starts_again_at_the_last_worker_that_builds() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[good()]);
     let run = w.start(no_approver());
@@ -1199,6 +1221,7 @@ fn sending_back_with_no_approver_starts_again_at_the_last_worker_that_builds() {
 
 #[test]
 fn a_round_a_person_asked_for_does_not_count_against_the_approver() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[good()]);
     let run = w.start(with_approver(1));
@@ -1225,6 +1248,7 @@ fn a_round_a_person_asked_for_does_not_count_against_the_approver() {
 
 #[test]
 fn a_saved_prompt_that_leaves_out_the_rework_still_gets_what_a_person_asked() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[good()]);
     let run = w.start(vec![
@@ -1245,6 +1269,7 @@ fn a_saved_prompt_that_leaves_out_the_rework_still_gets_what_a_person_asked() {
 
 #[test]
 fn sending_back_needs_instructions_and_something_to_go_back_to() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(vec![
         agent("reader", ToolProfile::ReadOnly, StepRole::Worker, "READ"),
@@ -1278,6 +1303,7 @@ fn sending_back_needs_instructions_and_something_to_go_back_to() {
 
 #[test]
 fn a_client_that_sends_work_back_or_closes_the_run_is_named_and_a_person_is_not() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[good()]);
     let run = w.start(no_approver());
@@ -1322,6 +1348,7 @@ fn a_client_that_sends_work_back_or_closes_the_run_is_named_and_a_person_is_not(
 
 #[test]
 fn a_client_that_retries_a_step_is_named_on_it_before_the_new_try_starts() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[json!("fail"), json!("fail"), json!("fail")]);
     let run = w.start(no_approver());
@@ -1366,6 +1393,7 @@ fn invalid_state<T: std::fmt::Debug>(result: Result<T, Error>) -> bool {
 
 #[test]
 fn a_step_already_tried_again_never_starts_twice() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[json!("fail"), json!("fail")]);
     let run = w.start(no_approver());
@@ -1403,6 +1431,7 @@ fn a_step_already_tried_again_never_starts_twice() {
 
 #[test]
 fn a_client_retries_only_what_went_wrong_and_never_reopens_a_run() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[json!("fail")]);
     let run = w.start(no_approver());
@@ -1437,6 +1466,7 @@ fn a_client_retries_only_what_went_wrong_and_never_reopens_a_run() {
 
 #[test]
 fn a_client_s_retry_and_close_at_once_never_leave_a_step_working_in_a_run_that_ended() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&vec![json!("fail"); 12]);
     for trial in 0..4 {
@@ -1466,6 +1496,7 @@ fn a_client_s_retry_and_close_at_once_never_leave_a_step_working_in_a_run_that_e
 
 #[test]
 fn a_saved_workflow_with_a_plain_worker_spec_behaves_exactly_as_before() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let plain = || {
         agent(
@@ -1509,6 +1540,7 @@ fn a_saved_workflow_with_a_plain_worker_spec_behaves_exactly_as_before() {
 
 #[test]
 fn a_fresh_try_after_answers_still_knows_them_and_a_resumed_one_gets_them_again() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[asking("Q1", "First?"), json!("fail"), json!("fail"), good()]);
     let run = w.start(no_approver());
@@ -1535,6 +1567,7 @@ fn a_fresh_try_after_answers_still_knows_them_and_a_resumed_one_gets_them_again(
 
 #[test]
 fn each_resumed_attempt_only_counts_what_it_added_to_the_session() {
+    keel_harness::needs!(sandbox);
     let w = world();
     // The fake reports 0.1, 0.2, 0.3 as what the session has cost by then.
     w.answers(&[too_long(), asking("Q1", "First?"), good()]);
@@ -1554,6 +1587,7 @@ fn each_resumed_attempt_only_counts_what_it_added_to_the_session() {
 
 #[test]
 fn the_results_count_who_stopped_to_ask_what_matched_and_what_was_sent_back() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let workflow = w
         .engine

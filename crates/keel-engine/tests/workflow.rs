@@ -280,6 +280,7 @@ fn all_files(dir: &Path, found: &mut Vec<PathBuf>) {
 
 #[test]
 fn a_request_goes_all_the_way_to_a_draft_pull_request() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(Some("test -f fixed.txt"));
 
@@ -363,6 +364,7 @@ fn a_request_goes_all_the_way_to_a_draft_pull_request() {
 
 #[test]
 fn agents_get_the_original_and_a_pull_request_the_masked_copy() {
+    keel_harness::needs!(sandbox);
     let w = world();
     // Put together here, so no secret scanner trips on this file.
     let secret = format!("{}{}", "ghp_", "x".repeat(36));
@@ -412,6 +414,7 @@ fn agents_get_the_original_and_a_pull_request_the_masked_copy() {
 
 #[test]
 fn the_token_is_never_stored_and_the_active_account_never_changes() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(Some("true"));
     let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
@@ -439,6 +442,7 @@ fn the_token_is_never_stored_and_the_active_account_never_changes() {
 
 #[test]
 fn a_failed_check_stops_the_run_and_can_be_retried_alone() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(Some("test -f approved-by-test || exit 3"));
     let check = w.wait(&run, "check", AttemptState::Failed);
@@ -471,6 +475,7 @@ fn a_failed_check_stops_the_run_and_can_be_retried_alone() {
 
 #[test]
 fn checks_run_with_no_credentials_in_the_environment() {
+    keel_harness::needs!(sandbox);
     // SAFETY: only this test sets this variable, and nothing reads it concurrently.
     unsafe { std::env::set_var("GH_TOKEN", "must-not-leak") };
     let w = world();
@@ -483,6 +488,7 @@ fn checks_run_with_no_credentials_in_the_environment() {
 
 #[test]
 fn rejecting_ends_the_run_and_the_reason_reaches_the_next_one() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(None);
     let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
@@ -523,6 +529,7 @@ fn rejecting_ends_the_run_and_the_reason_reaches_the_next_one() {
 
 #[test]
 fn a_retired_decision_stops_reaching_agents() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(None);
     let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
@@ -538,6 +545,7 @@ fn a_retired_decision_stops_reaching_agents() {
 
 #[test]
 fn an_approval_waits_through_a_restart() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(None);
     let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
@@ -557,6 +565,7 @@ fn an_approval_waits_through_a_restart() {
 
 #[test]
 fn a_run_cut_between_two_steps_continues_on_reopening() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(None);
     let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
@@ -571,6 +580,7 @@ fn a_run_cut_between_two_steps_continues_on_reopening() {
 
 #[test]
 fn answering_twice_is_refused() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(None);
     let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
@@ -586,6 +596,7 @@ fn answering_twice_is_refused() {
 
 #[test]
 fn rejecting_a_change_takes_a_reason_and_approving_does_not() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(None);
     let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
@@ -606,6 +617,7 @@ fn rejecting_a_change_takes_a_reason_and_approving_does_not() {
 
 #[test]
 fn a_run_that_changed_nothing_closes_without_a_reason() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.flag("no-change");
     let run = w.start(None);
@@ -619,6 +631,7 @@ fn a_run_that_changed_nothing_closes_without_a_reason() {
 
 #[test]
 fn a_failed_delivery_says_why_and_retries_without_repeating_the_agents() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.flag("pr-sso");
     let run = w.start(None);
@@ -642,6 +655,7 @@ fn a_failed_delivery_says_why_and_retries_without_repeating_the_agents() {
 
 #[test]
 fn a_pull_request_that_already_exists_counts_as_delivered() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.flag("pr-exists");
     let run = w.start(None);
@@ -652,6 +666,7 @@ fn a_pull_request_that_already_exists_counts_as_delivered() {
 
 #[test]
 fn nothing_to_deliver_is_said_plainly() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.flag("no-change");
     let run = w.start(None);
@@ -707,6 +722,7 @@ fn github_status_shows_accounts_permission_and_excess_scopes_without_switching()
 
 #[test]
 fn choosing_an_account_compares_the_map_with_what_is_on_github() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let account = |login: Option<&str>| keel_store::ProjectSettings {
         github_account: login.map(str::to_owned),
@@ -815,6 +831,7 @@ fn github_status_never_asks_for_the_token_of_an_account_gh_does_not_have() {
 
 #[test]
 fn an_issue_is_imported_as_data_and_linked_from_the_pull_request() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let issues = w.engine.issues(&w.project_id).unwrap();
     assert_eq!(
@@ -852,6 +869,7 @@ fn an_issue_is_imported_as_data_and_linked_from_the_pull_request() {
 
 #[test]
 fn step_kinds_appear_in_order_with_a_shared_workspace() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(Some("true"));
     let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);

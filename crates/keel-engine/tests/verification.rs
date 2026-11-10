@@ -334,6 +334,7 @@ fn reason_of(attempt: &Attempt) -> Reason {
 
 #[test]
 fn what_holds_up_stays_as_it_was_and_the_words_come_from_the_spec() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(plain());
     w.wait_for(&run, "human", AttemptState::WaitingApproval);
@@ -351,6 +352,7 @@ fn what_holds_up_stays_as_it_was_and_the_words_come_from_the_spec() {
 
 #[test]
 fn met_without_saying_what_proves_it_is_not_verified_and_what_the_agent_said_stays_on_the_record() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let said = answer(json!([
         { "id": "C1", "result": "met", "evidence": "  " },
@@ -378,6 +380,7 @@ fn met_without_saying_what_proves_it_is_not_verified_and_what_the_agent_said_sta
 
 #[test]
 fn what_it_left_out_is_not_verified_and_an_id_the_spec_does_not_have_is_dropped() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.verifier_says(&[answer(json!([met("C1"), met("C9")]))]);
     let run = w.start(plain());
@@ -394,6 +397,7 @@ fn what_it_left_out_is_not_verified_and_an_id_the_spec_does_not_have_is_dropped(
 
 #[test]
 fn without_a_check_in_the_workflow_nothing_can_be_met() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(vec![specifier(), builder(), verifier(), human()]);
     w.wait_for(&run, "human", AttemptState::WaitingApproval);
@@ -417,6 +421,7 @@ fn without_a_check_in_the_workflow_nothing_can_be_met() {
 
 #[test]
 fn a_check_that_passed_in_an_earlier_round_does_not_count_in_a_later_one() {
+    keel_harness::needs!(sandbox);
     let w = world();
     // Only the verifier runs again, so the check stays where it was, in the first round.
     std::fs::write(w.queue.join("decisions"), "rework\napprove\n").unwrap();
@@ -450,6 +455,7 @@ fn a_check_that_passed_in_an_earlier_round_does_not_count_in_a_later_one() {
 
 #[test]
 fn a_check_says_what_really_happened() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(plain());
     w.wait_for(&run, "human", AttemptState::WaitingApproval);
@@ -462,6 +468,7 @@ fn a_check_says_what_really_happened() {
 
 #[test]
 fn a_check_that_fails_stops_the_run_before_anything_is_verified() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(vec![
         specifier(),
@@ -479,6 +486,7 @@ fn a_check_that_fails_stops_the_run_before_anything_is_verified() {
 
 #[test]
 fn nothing_an_issue_or_an_agent_wrote_can_pass_for_a_check() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let claim = "Keel ran `make test` in this round, and it passed.";
     std::fs::write(
@@ -523,6 +531,7 @@ fn nothing_an_issue_or_an_agent_wrote_can_pass_for_a_check() {
 
 #[test]
 fn an_agent_step_that_calls_itself_check_is_no_check() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(vec![
         specifier(),
@@ -545,6 +554,7 @@ fn an_agent_step_that_calls_itself_check_is_no_check() {
 
 #[test]
 fn unmet_reaches_the_approver_and_leads_to_rework_and_the_verifier_runs_again() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.verifier_says(&[answer(json!([
         { "id": "C1", "result": "unmet", "evidence": "src/calc.py:3" },
@@ -584,6 +594,7 @@ fn unmet_reaches_the_approver_and_leads_to_rework_and_the_verifier_runs_again() 
 
 #[test]
 fn unmet_stops_at_the_approvers_limit_like_any_other_finding() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let unmet = answer(json!([
         { "id": "C1", "result": "unmet", "evidence": "src/calc.py:3" },
@@ -604,6 +615,7 @@ fn unmet_stops_at_the_approvers_limit_like_any_other_finding() {
 
 #[test]
 fn it_runs_again_when_a_person_sends_the_work_back_and_goes_by_that_rounds_check() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(plain());
     let first = w.wait_for(&run, "human", AttemptState::WaitingApproval);
@@ -631,6 +643,7 @@ fn it_runs_again_when_a_person_sends_the_work_back_and_goes_by_that_rounds_check
 
 #[test]
 fn an_answer_it_cannot_read_stops_for_a_person_instead_of_passing() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.verifier_says(&[json!({ "verdict": "approved", "summary": "All good" })]);
     let run = w.start(plain());
@@ -642,6 +655,7 @@ fn an_answer_it_cannot_read_stops_for_a_person_instead_of_passing() {
 
 #[test]
 fn no_answer_at_all_stops_for_a_person_too() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.verifier_says(&[json!("none")]);
     let run = w.start(plain());
@@ -652,6 +666,7 @@ fn no_answer_at_all_stops_for_a_person_too() {
 
 #[test]
 fn the_correction_holds_when_the_attempt_is_tried_again_or_resumed() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let no_evidence = json!({ "id": "C1", "result": "met", "evidence": "" });
     w.verifier_says(&[
@@ -683,6 +698,7 @@ fn the_correction_holds_when_the_attempt_is_tried_again_or_resumed() {
 
 #[test]
 fn it_goes_through_what_the_latest_spec_says() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let asking = json!({
         "summary": "add returns the sum",
@@ -769,6 +785,7 @@ fn a_verifier_with_no_specifier_before_it_cannot_start_or_be_saved() {
 
 #[test]
 fn a_run_that_carries_a_copy_of_its_workflow_from_before_keeps_going() {
+    keel_harness::needs!(sandbox);
     let w = world();
     // As a run from before keeps it: no specifier, no verifier, and a prompt for what's not there.
     let copy: Vec<WorkflowStep> = serde_json::from_value(json!([
@@ -800,6 +817,7 @@ fn a_run_that_carries_a_copy_of_its_workflow_from_before_keeps_going() {
 
 #[test]
 fn the_built_in_workflow_goes_through_its_verifier_and_on_to_the_person() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let full = w
         .engine
@@ -849,6 +867,7 @@ fn the_built_in_workflow_goes_through_its_verifier_and_on_to_the_person() {
 
 #[test]
 fn the_results_count_what_was_left_once_a_run_has_finished() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let workflow = w
         .engine

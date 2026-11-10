@@ -543,6 +543,7 @@ mod tests {
 
     #[test]
     fn a_bridge_forwards_to_its_port_and_stops_cleanly() {
+        keel_harness::needs!(sockets);
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         let server = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = server.local_addr().unwrap().port();
@@ -580,6 +581,7 @@ mod tests {
 
     #[test]
     fn a_bridge_to_nothing_says_so() {
+        keel_harness::needs!(sockets);
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         let closed = TcpListener::bind("127.0.0.1:0")
             .unwrap()
@@ -613,6 +615,7 @@ mod tests {
 
     #[test]
     fn a_command_service_is_started_waited_for_and_stopped() {
+        keel_harness::needs!(sockets);
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         let script = dir.path().join("server.py");
         std::fs::write(&script, SERVER).unwrap();
@@ -668,6 +671,7 @@ mod tests {
 
     #[test]
     fn a_server_left_by_a_crash_is_stopped_before_starting_again() {
+        keel_harness::needs!(sockets);
         let dir = tempfile::tempdir_in("/tmp").unwrap();
         let script = dir.path().join("server.py");
         std::fs::write(&script, SERVER).unwrap();

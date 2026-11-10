@@ -154,6 +154,7 @@ fn reason(attempt: &keel_store::Attempt) -> Reason {
 
 #[test]
 fn a_step_runs_and_everything_it_did_is_recorded() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         r#"cat > /dev/null
 {}
@@ -222,6 +223,7 @@ echo changed > fixed.txt
 
 #[test]
 fn the_users_repo_is_never_touched_and_the_clone_has_no_remote() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\necho x > new.txt\ngit add -A\ngit commit -qm work\n{OK_RESULT}",
         init(BUILD_TOOLS, "none")
@@ -253,6 +255,7 @@ fn the_users_repo_is_never_touched_and_the_clone_has_no_remote() {
 
 #[test]
 fn credentials_in_the_environment_do_not_reach_the_agent() {
+    keel_harness::needs!(sandbox);
     // SAFETY: only this test touches these variables, and they aren't read concurrently elsewhere.
     unsafe {
         std::env::set_var("GH_TOKEN", "must-not-leak");
@@ -282,6 +285,7 @@ fn credentials_in_the_environment_do_not_reach_the_agent() {
 
 #[test]
 fn an_unexpected_login_blocks_the_step() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\ntrap 'exit 0' INT\nsleep 30 & wait",
         init(BUILD_TOOLS, "ANTHROPIC_API_KEY")
@@ -299,6 +303,7 @@ fn an_unexpected_login_blocks_the_step() {
 
 #[test]
 fn tools_other_than_requested_block_the_step() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\ntrap 'exit 0' INT\nsleep 30 & wait",
         init(r#"["Read","Bash","Agent"]"#, "none")
@@ -311,6 +316,7 @@ fn tools_other_than_requested_block_the_step() {
 
 #[test]
 fn a_rejected_session_is_blocked_even_with_subtype_success() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\necho '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":true,\"result\":\"Invalid API key\"}}'\nexit 1",
         init(BUILD_TOOLS, "none")
@@ -324,6 +330,7 @@ fn a_rejected_session_is_blocked_even_with_subtype_success() {
 
 #[test]
 fn a_usage_limit_blocks_with_its_reset_time() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\necho '{{\"type\":\"rate_limit_event\",\"rate_limit_info\":{{\"status\":\"rejected\",\"resetsAt\":1800000000}}}}'\nexit 1",
         init(BUILD_TOOLS, "none")
@@ -341,6 +348,7 @@ fn a_usage_limit_blocks_with_its_reset_time() {
 
 #[test]
 fn stopping_sends_sigint_and_keeps_the_result() {
+    keel_harness::needs!(sandbox);
     let interrupted = r#"echo '{"type":"result","subtype":"error_during_execution","is_error":true,"num_turns":1,"total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'"#;
     let body = format!(
         "cat > /dev/null\non_int() {{ {interrupted}; exit 0; }}\ntrap on_int INT\n{}\nsleep 60 & wait",
@@ -359,6 +367,7 @@ fn stopping_sends_sigint_and_keeps_the_result() {
 
 #[test]
 fn a_step_that_ignores_sigint_is_escalated() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\ntrap '' INT\n{}\nwhile true; do sleep 0.1; done",
         init(BUILD_TOOLS, "none")
@@ -400,6 +409,7 @@ impl Harness {
 
 #[test]
 fn a_quiet_idle_step_is_reported_as_stalled_and_never_killed_on_its_own() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\nsleep 2345\n{OK_RESULT}",
         init(BUILD_TOOLS, "none")
@@ -440,6 +450,7 @@ fn heartbeat_only(command: &str) -> String {
 
 #[test]
 fn a_hung_command_is_stalled_even_while_heartbeats_keep_coming() {
+    keel_harness::needs!(sandbox);
     let h = harness_with(&heartbeat_only("sleep 2345"), LOGGED_IN, "2.1.318", |c| {
         c.stall_after = Duration::from_millis(300)
     });
@@ -469,6 +480,7 @@ fn a_hung_command_is_stalled_even_while_heartbeats_keep_coming() {
 
 #[test]
 fn a_command_using_cpu_is_not_stalled_by_heartbeats_alone() {
+    keel_harness::needs!(sandbox);
     let h = harness_with(
         &heartbeat_only("while :; do :; done"),
         LOGGED_IN,
@@ -487,6 +499,7 @@ fn a_command_using_cpu_is_not_stalled_by_heartbeats_alone() {
 
 #[test]
 fn waiting_silences_the_stall_warning() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\ntrap 'exit 0' INT\nsleep 3456 & wait",
         init(BUILD_TOOLS, "none")
@@ -506,6 +519,7 @@ fn waiting_silences_the_stall_warning() {
 
 #[test]
 fn a_project_runs_one_command_step_at_a_time_and_reviews_are_not_held_back() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\nread_only=0; case \"$*\" in *Read,Grep,Glob\\ *) read_only=1;; esac\n\
          if [ \"$read_only\" = 1 ]; then {}; {OK_RESULT}; exit 0; fi\n{}\nsleep 1\n{OK_RESULT}",
@@ -540,6 +554,7 @@ fn a_project_runs_one_command_step_at_a_time_and_reviews_are_not_held_back() {
 
 #[test]
 fn the_agent_limit_applies_across_projects() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\nsleep 1\n{OK_RESULT}",
         init(r#"["Read","Grep","Glob"]"#, "none")
@@ -559,6 +574,7 @@ fn the_agent_limit_applies_across_projects() {
 
 #[test]
 fn stopping_a_queued_step_means_it_never_starts() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\ntrap 'exit 0' INT\nsleep 30 & wait",
         init(BUILD_TOOLS, "none")
@@ -578,6 +594,7 @@ fn stopping_a_queued_step_means_it_never_starts() {
 
 #[test]
 fn exiting_without_a_result_is_a_failure_with_the_exit_code() {
+    keel_harness::needs!(sandbox);
     let body = format!("cat > /dev/null\n{}\nexit 7", init(BUILD_TOOLS, "none"));
     let h = harness(&body);
     let run = h.start(ToolProfile::Build);
@@ -590,6 +607,7 @@ fn exiting_without_a_result_is_a_failure_with_the_exit_code() {
 
 #[test]
 fn showing_a_step_hides_its_secrets_and_leaves_the_record_as_it_was() {
+    keel_harness::needs!(sandbox);
     // Put together here, so no secret scanner trips on this file.
     let secret = format!("{}{}", "ghp_", "x".repeat(36));
     let body = format!(
@@ -634,6 +652,7 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"Found {se
 
 #[test]
 fn a_tampered_raw_file_is_detected() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\n{OK_RESULT}",
         init(BUILD_TOOLS, "none")
@@ -721,6 +740,7 @@ fn restart(h: &Harness) -> Engine {
 
 #[test]
 fn reopening_the_app_reconnects_to_a_step_still_running() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\nsleep 2\n{OK_RESULT}",
         init(BUILD_TOOLS, "none")
@@ -740,6 +760,7 @@ fn reopening_the_app_reconnects_to_a_step_still_running() {
 
 #[test]
 fn reopening_after_the_agent_died_marks_it_interrupted_and_keeps_the_audit() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\n{OK_RESULT}",
         init(BUILD_TOOLS, "none")
@@ -800,6 +821,7 @@ fn reopening_after_the_agent_died_marks_it_interrupted_and_keeps_the_audit() {
 
 #[test]
 fn retry_starts_fresh_in_the_same_workspace_and_resume_continues_the_session() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\nif [ -f first-done ]; then {OK_RESULT}; exit 0; fi\ntouch first-done\nexit 1",
         init(BUILD_TOOLS, "none")
@@ -829,6 +851,7 @@ fn retry_starts_fresh_in_the_same_workspace_and_resume_continues_the_session() {
 
 #[test]
 fn abandon_closes_an_interrupted_run() {
+    keel_harness::needs!(sandbox);
     let body = format!("cat > /dev/null\n{}\nexit 1", init(BUILD_TOOLS, "none"));
     let h = harness(&body);
     let run = h.start(ToolProfile::Build);
@@ -840,6 +863,7 @@ fn abandon_closes_an_interrupted_run() {
 
 #[test]
 fn a_new_run_works_in_runs_dir_not_in_the_data_folder() {
+    keel_harness::needs!(sandbox);
     let h = harness_with("echo hi > new.txt\n", LOGGED_IN, "2.1.318", |c| {
         c.runs_dir = std::env::temp_dir().join(format!("keel-runs-{}", std::process::id()));
     });

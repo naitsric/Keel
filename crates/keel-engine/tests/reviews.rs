@@ -260,6 +260,7 @@ impl World {
 
 #[test]
 fn reviews_run_at_once_and_the_approver_gets_their_answers() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(workflow(2));
     w.wait(&run, "human", AttemptState::WaitingApproval);
@@ -291,6 +292,7 @@ fn reviews_run_at_once_and_the_approver_gets_their_answers() {
 
 #[test]
 fn a_reviewer_gets_the_diff_with_any_secret_still_in_it() {
+    keel_harness::needs!(sandbox);
     let w = world();
     // Put together here, so no secret scanner trips on this file.
     let secret = format!("{}{}", "ghp_", "x".repeat(36));
@@ -323,6 +325,7 @@ fn a_reviewer_gets_the_diff_with_any_secret_still_in_it() {
 
 #[test]
 fn a_reviewer_with_nothing_to_look_at_is_skipped_on_the_record() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(workflow(2));
     w.wait(&run, "human", AttemptState::WaitingApproval);
@@ -354,6 +357,7 @@ fn a_reviewer_with_nothing_to_look_at_is_skipped_on_the_record() {
 
 #[test]
 fn sending_work_back_fixes_it_and_reviews_everything_again() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&["rework"]);
     let run = w.start(workflow(2));
@@ -410,6 +414,7 @@ fn sending_work_back_fixes_it_and_reviews_everything_again() {
 
 #[test]
 fn a_step_before_the_rework_point_does_not_run_again() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&["rework"]);
     let mut steps = workflow(2);
@@ -431,6 +436,7 @@ fn a_step_before_the_rework_point_does_not_run_again() {
 
 #[test]
 fn at_the_limit_a_person_decides() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&["rework", "rework", "rework", "approve"]);
     let run = w.start(workflow(1));
@@ -478,6 +484,7 @@ fn at_the_limit_a_person_decides() {
 
 #[test]
 fn only_that_situation_can_be_resolved_that_way() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(workflow(2));
     let approver = w.wait(&run, "approver", AttemptState::Succeeded);
@@ -489,6 +496,7 @@ fn only_that_situation_can_be_resolved_that_way() {
 
 #[test]
 fn a_reviewer_without_its_answer_stops_the_run() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let steps = vec![
         WorkflowStep::Agent(spec(
@@ -542,6 +550,7 @@ fn an_invalid_workflow_is_refused_before_anything_runs() {
 
 #[test]
 fn the_run_diff_covers_every_round() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&["rework"]);
     let run = w.start(workflow(2));
@@ -582,6 +591,7 @@ fn a_project_keeps_its_own_workflows_beside_the_built_in_ones() {
 
 #[test]
 fn retrying_one_failed_review_leaves_the_others() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let steps = vec![
         WorkflowStep::Agent(spec(
@@ -625,6 +635,7 @@ fn retrying_one_failed_review_leaves_the_others() {
 
 #[test]
 fn a_client_closes_a_run_only_where_it_stands_and_once_nothing_in_it_works() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let hold = w.dir.path().join("bin/hold");
     std::fs::write(&hold, "").unwrap();
@@ -686,6 +697,7 @@ fn a_client_closes_a_run_only_where_it_stands_and_once_nothing_in_it_works() {
 
 #[test]
 fn a_group_can_open_a_workflow_without_stepping_on_itself() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let steps = vec![WorkflowStep::Parallel {
         id: "reviews".into(),
@@ -710,6 +722,7 @@ fn a_group_can_open_a_workflow_without_stepping_on_itself() {
 
 #[test]
 fn a_step_whose_changes_cannot_be_read_does_not_count_as_a_success() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let steps = vec![
         WorkflowStep::Agent(spec(
@@ -737,6 +750,7 @@ fn a_step_whose_changes_cannot_be_read_does_not_count_as_a_success() {
 
 #[test]
 fn a_file_added_and_then_removed_is_not_part_of_what_changed() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let steps = vec![
         WorkflowStep::Agent(spec(
@@ -788,6 +802,7 @@ fn a_file_added_and_then_removed_is_not_part_of_what_changed() {
 
 #[test]
 fn a_step_named_setup_does_not_clash_with_the_projects_own() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let settings = keel_store::ProjectSettings {
         setup_command: Some("true".into()),
@@ -867,6 +882,7 @@ fn file_parts(diff: &str) -> Vec<String> {
 
 #[test]
 fn a_change_too_big_for_the_prompt_is_all_there_for_a_reviewer_to_read() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(one_review("BUILD-BIG", "REVIEW-READ\nDIFF:{{diff}}"));
     let review = w.wait(&run, "security", AttemptState::Succeeded);
@@ -929,6 +945,7 @@ fn a_change_too_big_for_the_prompt_is_all_there_for_a_reviewer_to_read() {
 
 #[test]
 fn a_change_that_fits_is_in_the_prompt_whole_as_before() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(one_review("BUILD", "REVIEW security\nDIFF:{{diff}}"));
     let review = w.wait(&run, "security", AttemptState::Succeeded);
@@ -941,6 +958,7 @@ fn a_change_that_fits_is_in_the_prompt_whole_as_before() {
 
 #[test]
 fn a_review_that_could_not_read_all_of_the_change_is_not_an_approval() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let mut steps = one_review("BUILD", "REVIEW-UNREAD");
     steps.insert(

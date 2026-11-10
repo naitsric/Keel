@@ -539,6 +539,7 @@ fn reason_of(attempt: &Attempt) -> Reason {
 
 #[test]
 fn an_approved_agreement_opens_a_part_for_each_project_in_order() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[both()]);
     let (card, run) = w.agreeing();
@@ -613,6 +614,7 @@ fn an_approved_agreement_opens_a_part_for_each_project_in_order() {
 
 #[test]
 fn an_answer_remembered_while_agreeing_reaches_every_project_with_a_part() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let mut asks = both();
     asks["questions"] = json!([{
@@ -660,6 +662,7 @@ fn an_answer_remembered_while_agreeing_reaches_every_project_with_a_part() {
 
 #[test]
 fn a_rejected_agreement_opens_nothing_and_can_be_agreed_again() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[both(), both()]);
     let (card, run) = w.agreeing();
@@ -686,6 +689,7 @@ fn a_rejected_agreement_opens_nothing_and_can_be_agreed_again() {
 
 #[test]
 fn a_part_in_a_project_it_was_not_given_is_sent_back_to_fix() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[
         agreed(&[
@@ -712,6 +716,7 @@ fn a_part_in_a_project_it_was_not_given_is_sent_back_to_fix() {
 
 #[test]
 fn parts_that_cannot_open_hold_the_approval_until_tried_again_and_open_once() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[both()]);
     let (card, run) = w.agreeing();
@@ -794,6 +799,7 @@ fn an_assistant_cannot_start_the_issue_of_a_change_across_projects() {
 
 #[test]
 fn agreeing_reads_a_copy_of_each_other_project_and_can_change_none() {
+    keel_harness::needs!(sandbox);
     let w = world();
     // A run of Valora's own started from its first commit, and Valora has moved on since.
     w.answers(&[json!({}), both()]);
@@ -863,6 +869,7 @@ fn agreeing_reads_a_copy_of_each_other_project_and_can_change_none() {
 
 #[test]
 fn each_part_reads_what_was_agreed_and_the_branch_of_the_part_before() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.short_workflows();
     let mut asks = both();
@@ -1031,6 +1038,7 @@ fn each_part_reads_what_was_agreed_and_the_branch_of_the_part_before() {
 
 #[test]
 fn a_project_that_cannot_be_read_holds_only_that_step_until_it_can() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[both(), both()]);
     let away = w.valora_path.with_file_name("valora-away");
@@ -1075,6 +1083,7 @@ fn a_project_that_cannot_be_read_holds_only_that_step_until_it_can() {
 
 #[test]
 fn each_part_opens_its_own_pull_request_saying_which_part_it_is() {
+    keel_harness::needs!(sandbox);
     let w = world_on_github();
     w.delivering_workflows();
     w.answers(&[
@@ -1224,6 +1233,7 @@ fn each_part_opens_its_own_pull_request_saying_which_part_it_is() {
 
 #[test]
 fn a_person_sees_the_whole_change_and_only_they_say_what_works_together() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[both()]);
     let (card, run) = w.agreeing();
@@ -1312,6 +1322,7 @@ fn proposal(w: &World, issue: Option<Issue>) -> StartRun {
 
 #[test]
 fn a_change_proposed_from_outside_the_board_is_agreed_like_one_started_from_a_card() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.answers(&[both()]);
     // The project's own and repeats are left out, as on the board.

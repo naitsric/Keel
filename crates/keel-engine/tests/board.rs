@@ -560,6 +560,7 @@ fn workflow_of(run: &keel_store::Run) -> Vec<WorkflowStep> {
 
 #[test]
 fn moving_to_todo_starts_the_card_with_the_full_workflow_when_none_was_chosen() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.engine.start_board();
     let id = w
@@ -599,6 +600,7 @@ fn moving_to_todo_starts_the_card_with_the_full_workflow_when_none_was_chosen() 
 
 #[test]
 fn the_project_can_choose_the_workflow_and_the_card_brings_its_language() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.set_default("builtin:simple");
     w.engine.start_board();
@@ -631,6 +633,7 @@ fn the_project_can_choose_the_workflow_and_the_card_brings_its_language() {
 
 #[test]
 fn an_issue_is_imported_once_and_starts_as_the_new_run_dialog_would_start_it() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.set_default("builtin:simple");
     let issue = w.engine.issues(&w.project_id).unwrap().remove(0);
@@ -677,6 +680,7 @@ fn an_issue_is_imported_once_and_starts_as_the_new_run_dialog_would_start_it() {
 
 #[test]
 fn a_claude_that_stops_answering_pauses_the_board_and_says_why() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|config| config.session_check_limit = Duration::from_millis(300));
     w.use_one_step();
     w.flag("hung-auth");
@@ -723,6 +727,7 @@ fn steps_of(w: &World, id: &str) -> Vec<WorkflowStep> {
 
 #[test]
 fn a_run_from_outside_gets_a_card_that_follows_the_columns_and_starts_once() {
+    keel_harness::needs!(sandbox);
     let mut w = world();
     let workflow = answer_step(&w.engine, &w.project_id);
     w.engine.start_board();
@@ -784,6 +789,7 @@ fn a_run_from_outside_holds_a_place_so_todo_waits_for_it() {
 
 #[test]
 fn an_issue_keeps_its_one_card_when_a_run_starts_from_outside() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let workflow = answer_step(&w.engine, &w.project_id);
     let issue = w.engine.issues(&w.project_id).unwrap().remove(0);
@@ -840,6 +846,7 @@ fn a_run_that_could_never_start_leaves_no_card_behind() {
 
 #[test]
 fn a_read_only_task_from_outside_ends_in_done_with_nothing_delivered() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let WorkflowStep::Agent(mut step) = agent("task", ToolProfile::ReadOnly) else {
         unreachable!()
@@ -862,6 +869,7 @@ fn a_read_only_task_from_outside_ends_in_done_with_nothing_delivered() {
 
 #[test]
 fn a_run_from_outside_that_its_client_closes_keeps_what_its_card_says() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let workflow = answer_step(&w.engine, &w.project_id);
     let run = w
@@ -888,6 +896,7 @@ fn a_run_from_outside_that_its_client_closes_keeps_what_its_card_says() {
 
 #[test]
 fn five_in_todo_only_the_limit_works_and_the_next_enters_top_first() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     w.flag("hold");
@@ -948,6 +957,7 @@ fn five_in_todo_only_the_limit_works_and_the_next_enters_top_first() {
 
 #[test]
 fn across_projects_the_top_card_that_has_waited_longest_goes_first() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     w.use_one_step();
     w.flag("hold");
@@ -985,6 +995,7 @@ fn across_projects_the_top_card_that_has_waited_longest_goes_first() {
 
 #[test]
 fn a_person_can_rearrange_todo_while_cards_wait_for_room() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     w.use_one_step();
     w.flag("hold");
@@ -1010,6 +1021,7 @@ fn a_person_can_rearrange_todo_while_cards_wait_for_room() {
 
 #[test]
 fn a_run_by_hand_counts_as_working_and_is_never_held_back() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     let one = one_step(&w.engine, &w.project_id);
     w.set_default(&one);
@@ -1040,6 +1052,7 @@ fn a_run_by_hand_counts_as_working_and_is_never_held_back() {
 
 #[test]
 fn a_card_waiting_for_approval_frees_its_place_and_nothing_reaches_github() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     w.set_default("builtin:simple");
     let first = w.queued("card-1");
@@ -1068,6 +1081,7 @@ fn a_card_waiting_for_approval_frees_its_place_and_nothing_reaches_github() {
 
 #[test]
 fn approving_opens_the_draft_and_the_card_ends_in_done_with_its_link() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.set_default("builtin:simple");
     w.engine.start_board();
@@ -1100,6 +1114,7 @@ fn approving_opens_the_draft_and_the_card_ends_in_done_with_its_link() {
 
 #[test]
 fn a_proposal_step_that_fails_after_delivering_still_ends_in_done() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.set_default("builtin:simple");
     w.flag("fail-learner");
@@ -1126,6 +1141,7 @@ fn a_proposal_step_that_fails_after_delivering_still_ends_in_done() {
 
 #[test]
 fn rejecting_sends_the_card_to_the_backlog_with_what_the_person_wrote() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.set_default("builtin:simple");
     w.engine.start_board();
@@ -1168,6 +1184,7 @@ fn rejecting_sends_the_card_to_the_backlog_with_what_the_person_wrote() {
 
 #[test]
 fn a_change_cannot_be_rejected_without_a_reason_and_the_card_stays_for_the_answer() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.set_default("builtin:simple");
     w.engine.start_board();
@@ -1184,6 +1201,7 @@ fn a_change_cannot_be_rejected_without_a_reason_and_the_card_stays_for_the_answe
 
 #[test]
 fn closing_a_run_with_nothing_to_deliver_shows_as_a_rejection_with_no_text() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.set_default("builtin:simple");
     w.flag("no-change");
@@ -1202,6 +1220,7 @@ fn closing_a_run_with_nothing_to_deliver_shows_as_a_rejection_with_no_text() {
 
 #[test]
 fn a_failed_run_goes_to_human_review_with_the_reason_and_frees_its_place() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     w.use_one_step();
     w.flag("fail-card-1");
@@ -1225,6 +1244,7 @@ fn a_failed_run_goes_to_human_review_with_the_reason_and_frees_its_place() {
 
 #[test]
 fn a_blocked_run_goes_to_human_review_with_the_reason() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     w.flag("limit-card-1");
@@ -1238,6 +1258,7 @@ fn a_blocked_run_goes_to_human_review_with_the_reason() {
 
 #[test]
 fn a_delivery_that_is_blocked_goes_to_human_review_and_can_be_abandoned_to_the_backlog() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.set_default("builtin:simple");
     w.flag("no-change");
@@ -1269,6 +1290,7 @@ fn a_delivery_that_is_blocked_goes_to_human_review_and_can_be_abandoned_to_the_b
 
 #[test]
 fn a_review_that_fails_goes_to_human_review_even_when_a_later_one_went_fine() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.flag("fail-security");
     w.engine.start_board();
@@ -1303,6 +1325,7 @@ fn a_review_that_fails_goes_to_human_review_even_when_a_later_one_went_fine() {
 
 #[test]
 fn a_stalled_card_needs_a_person_and_comes_back_when_they_say_wait() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| {
         c.stall_after = Duration::from_millis(100);
         c.stall_hard_limit = Duration::from_millis(100);
@@ -1326,6 +1349,7 @@ fn a_stalled_card_needs_a_person_and_comes_back_when_they_say_wait() {
 
 #[test]
 fn a_stopped_card_goes_to_human_review() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     w.flag("hold");
@@ -1344,6 +1368,7 @@ fn a_stopped_card_goes_to_human_review() {
 
 #[test]
 fn reopening_keeps_columns_and_queue_and_todo_still_starts() {
+    keel_harness::needs!(sandbox);
     let mut w = world();
     let ask = answer_step(&w.engine, &w.project_id);
     let one = one_step(&w.engine, &w.project_id);
@@ -1428,6 +1453,7 @@ fn reopening_keeps_columns_and_queue_and_todo_still_starts() {
 
 #[test]
 fn every_step_left_unfinished_comes_back_interrupted_and_in_human_review() {
+    keel_harness::needs!(sandbox);
     // `recover` treats a queued attempt like any other that lost its process. Nothing tested that,
     // and Human Review after a restart depends on it.
     let check = || WorkflowStep::Check {
@@ -1484,6 +1510,7 @@ fn every_step_left_unfinished_comes_back_interrupted_and_in_human_review() {
 
 #[test]
 fn a_card_taken_by_an_app_that_died_before_its_run_began_goes_back_to_its_place_in_todo() {
+    keel_harness::needs!(sandbox);
     let mut w = world();
     w.use_one_step();
     let taken = w.queued("card-1");
@@ -1509,6 +1536,7 @@ fn a_card_taken_by_an_app_that_died_before_its_run_began_goes_back_to_its_place_
 
 #[test]
 fn without_the_account_the_move_is_refused_and_the_card_stays_where_it_was() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.engine.start_board();
     let other = w.new_card("card-1");
@@ -1549,6 +1577,7 @@ fn without_the_account_the_move_is_refused_and_the_card_stays_where_it_was() {
 
 #[test]
 fn a_project_with_no_github_remote_is_refused_unless_its_workflow_never_delivers() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let repo = new_repo(w.dir.path(), "local");
     let local = w.engine.add_project(&repo).unwrap();
@@ -1632,6 +1661,7 @@ fn an_invalid_workflow_is_refused_at_the_move_as_it_would_be_at_the_start() {
 
 #[test]
 fn a_start_that_fails_after_the_move_goes_to_the_backlog_says_why_and_does_not_loop() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let id = w.queued("card-1");
     assert_eq!(w.card(&id).column, BoardColumn::Todo);
@@ -1691,6 +1721,7 @@ fn a_default_workflow_deleted_while_the_card_waited_sends_it_to_the_backlog() {
 
 #[test]
 fn a_rejected_card_that_can_no_longer_start_stays_rejected() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.set_default("builtin:simple");
     w.engine.start_board();
@@ -1724,6 +1755,7 @@ fn commands(log: &str) -> BTreeSet<String> {
 
 #[test]
 fn a_full_board_flow_asks_github_for_nothing_delivery_does_not_already_do() {
+    keel_harness::needs!(sandbox);
     // A run with no board at all, for comparison.
     let plain = world();
     let workflow = plain
@@ -1858,6 +1890,7 @@ fn the_limit_only_takes_one_to_ten_and_survives_reopening() {
 
 #[test]
 fn raising_the_limit_lets_a_waiting_agent_go_without_restarting() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     w.flag("hold");
     w.by_hand("card-1");
@@ -1891,6 +1924,7 @@ fn raising_the_limit_lets_a_waiting_agent_go_without_restarting() {
 
 #[test]
 fn raising_the_limit_starts_the_next_todo_card_and_lowering_it_stops_nothing() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 2);
     w.use_one_step();
     w.flag("hold");
@@ -1938,6 +1972,7 @@ fn raising_the_limit_starts_the_next_todo_card_and_lowering_it_stops_nothing() {
 
 #[test]
 fn a_session_that_cannot_work_starts_nothing_and_cards_wait_in_todo() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     let with_claude = tools_in(&[&w.dir.path().join("bin")]);
@@ -1966,6 +2001,7 @@ fn a_session_that_cannot_work_starts_nothing_and_cards_wait_in_todo() {
 
 #[test]
 fn being_signed_out_leaves_cards_in_todo_until_signing_in() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     w.flag("logged-out");
@@ -1989,6 +2025,7 @@ fn being_signed_out_leaves_cards_in_todo_until_signing_in() {
 
 #[test]
 fn starting_a_run_by_hand_does_not_lock_up_with_the_scheduler() {
+    keel_harness::needs!(sandbox);
     // On its own thread, so that locking up fails the test instead of hanging it. `start_run`
     // reports its first step from inside `advance`, with `advancing` held, and every move reports
     // a change too. If that wake-up did the scheduler's work on the same thread, none of this
@@ -2068,6 +2105,7 @@ fn a_change_reaches_the_app_after_every_write_and_a_quiet_board_stays_quiet() {
 
 #[test]
 fn a_card_keel_is_working_on_cannot_be_moved_changed_or_deleted() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     w.flag("hold");
@@ -2103,6 +2141,7 @@ fn a_card_keel_is_working_on_cannot_be_moved_changed_or_deleted() {
 
 #[test]
 fn a_card_in_human_review_cannot_be_deleted_but_one_in_done_can_and_the_run_stays() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let ask = answer_step(&w.engine, &w.project_id);
     w.set_default(&ask);
@@ -2147,6 +2186,7 @@ fn a_card_needs_a_title() {
 
 #[test]
 fn the_board_has_the_shape_the_contract_says() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.set_default("builtin:simple");
     let issue = w.engine.issues(&w.project_id).unwrap().remove(0);
@@ -2252,6 +2292,7 @@ const QUIT_PATIENCE: Duration = Duration::from_secs(12);
 
 #[test]
 fn stopping_and_quitting_starts_nothing_new_and_the_queue_is_there_on_reopening() {
+    keel_harness::needs!(sandbox);
     let mut w = world();
     w.use_one_step();
     w.flag("hold");
@@ -2280,6 +2321,7 @@ fn stopping_and_quitting_starts_nothing_new_and_the_queue_is_there_on_reopening(
 
 #[test]
 fn stopping_and_quitting_holds_when_agents_take_different_times_to_end() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.stop_grace = Duration::from_secs(10));
     w.use_one_step();
     w.flag("hold");
@@ -2303,6 +2345,7 @@ fn stopping_and_quitting_holds_when_agents_take_different_times_to_end() {
 
 #[test]
 fn quitting_waits_for_a_card_being_started_and_stops_its_agent_too() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     w.flag("hold");
@@ -2339,6 +2382,7 @@ fn quitting_waits_for_a_card_being_started_and_stops_its_agent_too() {
 
 #[test]
 fn stopping_and_quitting_also_stops_a_run_that_starts_while_it_waits() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.stop_grace = Duration::from_secs(10));
     w.use_one_step();
     w.flag("hold");
@@ -2366,6 +2410,7 @@ fn stopping_and_quitting_also_stops_a_run_that_starts_while_it_waits() {
 
 #[test]
 fn leaving_agents_running_on_quit_stops_only_the_board() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     w.use_one_step();
     w.flag("hold");
@@ -2386,6 +2431,7 @@ fn leaving_agents_running_on_quit_stops_only_the_board() {
 
 #[test]
 fn staying_in_the_dialog_leaves_the_board_running() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     w.use_one_step();
     w.flag("hold");
@@ -2407,6 +2453,7 @@ fn staying_in_the_dialog_leaves_the_board_running() {
 
 #[test]
 fn closing_with_nothing_running_starts_nothing_on_the_way_out() {
+    keel_harness::needs!(sandbox);
     let mut w = world();
     w.use_one_step();
     let id = w.queued("card-1");
@@ -2462,6 +2509,7 @@ fn blocked_on(w: &World, title: &str, reason: &Reason) -> String {
 
 #[test]
 fn a_usage_limit_does_not_spend_the_queue_and_lifts_when_the_person_acts() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     let cards: Vec<String> = (1..=5)
@@ -2506,6 +2554,7 @@ fn a_usage_limit_does_not_spend_the_queue_and_lifts_when_the_person_acts() {
 
 #[test]
 fn retrying_the_only_blocked_run_lifts_the_pause() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     w.use_one_step();
     w.flag("limit-card-1");
@@ -2525,6 +2574,7 @@ fn retrying_the_only_blocked_run_lifts_the_pause() {
 
 #[test]
 fn a_usage_limit_with_a_known_reset_lifts_once_that_time_has_passed() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     let now = now_in_seconds();
@@ -2572,6 +2622,7 @@ fn now_in_seconds() -> i64 {
 
 #[test]
 fn a_rejected_session_pauses_the_queue() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     w.flag("session-card-1");
@@ -2593,6 +2644,7 @@ fn a_rejected_session_pauses_the_queue() {
 
 #[test]
 fn losing_the_github_session_at_preparation_pauses_the_queue_and_retrying_lifts_it() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     w.use_one_step();
     w.flag("gh-signed-out");
@@ -2620,6 +2672,7 @@ fn losing_the_github_session_at_preparation_pauses_the_queue_and_retrying_lifts_
 
 #[test]
 fn a_run_started_by_hand_that_is_blocked_pauses_the_queue_too() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     w.flag("limit-card-9");
@@ -2642,6 +2695,7 @@ fn a_run_started_by_hand_that_is_blocked_pauses_the_queue_too() {
 
 #[test]
 fn a_pause_is_still_there_after_reopening() {
+    keel_harness::needs!(sandbox);
     let mut w = world();
     w.use_one_step();
     let limit = Reason::RateLimited { resets_at: None };
@@ -2698,6 +2752,7 @@ fn a_failure_that_belongs_to_one_run_pauses_nothing() {
 
 #[test]
 fn a_failed_check_pauses_nothing_end_to_end() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     w.set_default(&saved(
         &w.engine,
@@ -2731,6 +2786,7 @@ fn a_failed_check_pauses_nothing_end_to_end() {
 
 #[test]
 fn a_login_that_expires_after_launch_shows_as_paused_and_reading_it_launches_nothing() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     w.engine.start_board();
@@ -2817,6 +2873,7 @@ fn a_tick_with_nothing_to_start_reads_no_session_and_a_stale_pause_goes_away() {
 
 #[test]
 fn with_no_room_a_card_waits_for_room_not_for_the_session() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     w.use_one_step();
     w.flag("hold");
@@ -2837,6 +2894,7 @@ fn with_no_room_a_card_waits_for_room_not_for_the_session() {
 
 #[test]
 fn dying_with_the_run_linked_and_not_yet_begun_runs_the_card_once() {
+    keel_harness::needs!(sandbox);
     let mut w = world();
     let workflow = one_step(&w.engine, &w.project_id);
     w.set_default(&workflow);
@@ -2913,6 +2971,7 @@ fn a_start_that_fails_on_disk_leaves_no_run_behind_to_hold_a_place_or_start_late
 
 #[test]
 fn an_edit_saved_while_the_session_is_being_read_reaches_the_run() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     let id = w.queued("card-1");
@@ -2932,6 +2991,7 @@ fn an_edit_saved_while_the_session_is_being_read_reaches_the_run() {
 
 #[test]
 fn moving_a_card_to_the_top_while_the_session_is_being_read_starts_it_first() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     w.use_one_step();
     let first = w.queued("card-1");
@@ -2951,6 +3011,7 @@ fn moving_a_card_to_the_top_while_the_session_is_being_read_starts_it_first() {
 
 #[test]
 fn a_stalled_agent_keeps_its_place_so_the_next_card_waits_in_todo() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| {
         c.max_agents = 1;
         c.stall_after = Duration::from_millis(100);
@@ -2984,6 +3045,7 @@ fn a_stalled_agent_keeps_its_place_so_the_next_card_waits_in_todo() {
 
 #[test]
 fn a_failed_review_with_another_still_running_keeps_its_place() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     w.flag("fail-security");
     w.flag("hold-code");
@@ -3009,6 +3071,7 @@ fn a_failed_review_with_another_still_running_keeps_its_place() {
 
 #[test]
 fn a_run_between_two_steps_keeps_its_place() {
+    keel_harness::needs!(sandbox);
     // The scheduler is woken the moment a step ends, before the next one is recorded. If that gap
     // looked like room, a card would slip in at every step of every run.
     let w = world_with(|c| c.max_agents = 1);
@@ -3040,6 +3103,7 @@ fn a_run_between_two_steps_keeps_its_place() {
 
 #[test]
 fn done_has_the_latest_on_top_and_what_is_going_on_has_the_oldest_on_top() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 3);
     w.use_one_step();
     w.flag("hold");
@@ -3064,6 +3128,7 @@ fn done_has_the_latest_on_top_and_what_is_going_on_has_the_oldest_on_top() {
 
 #[test]
 fn human_review_has_the_card_that_has_waited_longest_on_top() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);
     let ask = answer_step(&w.engine, &w.project_id);
     w.set_default(&ask);
