@@ -1012,7 +1012,11 @@ async fn a_run_it_starts_shows_who_started_it_and_waits_for_the_person() {
     let attempt = view["steps"][0]["attemptId"].as_str().unwrap();
     let step = ok(&call(&client, "get_step", json!({ "attempt": attempt })).await);
     assert_eq!(step["result"], "Fixed it.");
-    assert_eq!(step["filesChanged"], json!(["fixed.txt"]), "{step}");
+    assert_eq!(
+        step["filesChanged"],
+        json!([{ "path": "fixed.txt", "added": 1, "removed": 0 }]),
+        "{step}"
+    );
     assert!(step["prompt"].as_str().unwrap().contains("Fix the bug"));
     assert!(
         step["diff"].as_str().unwrap().contains("fixed.txt"),
@@ -2103,7 +2107,333 @@ async fn a_run_that_went_round_again_reads_in_one_go_and_says_each_thing_once() 
     let built = ok(&call(&client, "get_step", latest("builder")).await);
     assert_eq!(built["result"], report["answer"], "{built}");
     assert!(built.get("output").is_none(), "{built}");
-    assert_eq!(built["filesChanged"].as_array().unwrap().len(), 150);
+    // The first 100 files, and how many more there are.
+    assert_eq!(built["filesChanged"].as_array().unwrap().len(), 100);
+    assert_eq!(
+        built["filesChanged"][0],
+        json!({ "path": "src/part_0/file_0.rs" })
+    );
+    assert_eq!(built["moreFilesChanged"], 50);
+    client.cancel().await.unwrap();
+}
+
+/// A diff as git writes it: a file moved, one removed, a binary one, one with a space in its name,
+/// one too long for a piece with what JSON escapes and characters of several bytes, then `small`
+/// short new files. Returns it, and each file's path and diff in order.
+fn big_diff(small: usize) -> (String, Vec<(String, String)>) {
+    let new_file = |path: &str, lines: Vec<String>| {
+        // Git puts a tab after a name with a space.
+        let tab = if path.contains(' ') { "\t" } else { "" };
+        let mut text = format!(
+            "diff --git a/{path} b/{path}\nnew file mode 100644\nindex 0000000..1111111\n\
+             --- /dev/null\n+++ b/{path}{tab}\n@@ -0,0 +1,{} @@\n",
+            lines.len()
+        );
+        for line in lines {
+            text.push_str(&format!("+{line}\n"));
+        }
+        text
+    };
+    let mut files = vec![
+        (
+            "src/b.rs".to_owned(),
+            "diff --git a/src/a.rs b/src/b.rs\nsimilarity index 100%\nrename from src/a.rs\n\
+             rename to src/b.rs\n"
+                .to_owned(),
+        ),
+        (
+            "old.txt".to_owned(),
+            "diff --git a/old.txt b/old.txt\ndeleted file mode 100644\nindex 1111111..0000000\n\
+             --- a/old.txt\n+++ /dev/null\n@@ -1,3 +0,0 @@\n-one\n-two\n-three\n"
+                .to_owned(),
+        ),
+        (
+            "logo.png".to_owned(),
+            "diff --git a/logo.png b/logo.png\nnew file mode 100644\nindex 0000000..1111111\n\
+             Binary files /dev/null and b/logo.png differ\n"
+                .to_owned(),
+        ),
+    ];
+    let lines = vec!["# Read me".to_owned(), "Ñandú 🦀".to_owned()];
+    files.push(("docs/read me.md".into(), new_file("docs/read me.md", lines)));
+    let lines = (0..1500)
+        .map(|n| format!("\tlet s{n} = \"ñandú \\\\ 🦀 {n}\";"))
+        .collect();
+    files.push(("src/big.rs".into(), new_file("src/big.rs", lines)));
+    for n in 0..small {
+        let path = format!("src/part_{n}/file_{n}.rs");
+        let lines = (0..10)
+            .map(|l| format!("pub fn f{l}() -> u32 {{ {l} }}"))
+            .collect();
+        files.push((path.clone(), new_file(&path, lines)));
+    }
+    let diff = files.iter().map(|(_, text)| text.as_str()).collect();
+    (diff, files)
+}
+
+/// Reads one part of an attempt piece by piece, from the start, as a client would, following each
+/// piece's `next`. Each piece reads in one go and says how much is left. Returns the part and how
+/// many pieces it came in.
+async fn read_whole(client: &Client, args: Json) -> (String, usize) {
+    let mut args = args;
+    let mut text = String::new();
+    let mut pieces = 0;
+    loop {
+        let piece = ok(&call(client, "get_step", args).await);
+        pieces += 1;
+        let size = piece.to_string().len();
+        assert!(size < 20 * 1024, "{size} bytes");
+        assert_eq!(piece["from"], json!(text.len()), "{piece}");
+        text.push_str(piece["text"].as_str().unwrap());
+        let bytes = piece["bytes"].as_u64().unwrap() as usize;
+        assert_eq!(piece["left"], json!(bytes - text.len()), "{piece}");
+        match piece.get("next") {
+            Some(next) => args = next.clone(),
+            None => {
+                assert_eq!(text.len(), bytes);
+                return (text, pieces);
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_big_change_comes_in_short_and_every_part_of_it_reads_whole_in_pieces() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+
+    // A small attempt comes whole in one call, as before.
+    let run = w.person_run("Fix the bug");
+    let view = settled(&client, &run).await;
+    let small = view["steps"][0]["attemptId"].as_str().unwrap().to_owned();
+    let step = ok(&call(&client, "get_step", json!({ "attempt": small })).await);
+    assert_eq!(
+        step["prompt"],
+        json!(w.store.attempt(&small).unwrap().prompt)
+    );
+    assert_eq!(
+        step["diff"],
+        json!(w.engine.diff(&small).unwrap()),
+        "{step}"
+    );
+    assert_eq!(step["result"], "Fixed it.");
+    assert_eq!(
+        step["filesChanged"],
+        json!([{ "path": "fixed.txt", "added": 1, "removed": 0 }])
+    );
+    assert!(step.get("leftOut").is_none(), "{step}");
+    assert!(step.get("toRead").is_none(), "{step}");
+
+    // A builder that got a long prompt, changed 124 files in about 100 KB, and answered at length.
+    // Put together here, so no secret scanner trips on this file.
+    let secret = format!("{}{}", "ghp_", "x".repeat(36));
+    let request = format!(
+        "{}\nUse API_KEY={secret} to test.\n{}",
+        at_length("Fix the parser so \"quoted\" names and ñ work.", 30 * 1024),
+        at_length("Then say what changed.", 10 * 1024)
+    );
+    let run = w.person_run(&request);
+    let view = settled(&client, &run).await;
+    let builder = view["steps"][0]["attemptId"].as_str().unwrap().to_owned();
+    let (diff, files) = big_diff(119);
+    assert!(diff.len() > 64 * 1024, "{}", diff.len());
+    let diff_path = w._dir.path().join("big.diff");
+    std::fs::write(&diff_path, &diff).unwrap();
+    let paths: Vec<&str> = files.iter().map(|(path, _)| path.as_str()).collect();
+    let answer = at_length("It's done and tested, ñandú.", 20 * 1024);
+    let fields = [
+        (
+            "diff_path",
+            Value::Text(diff_path.to_string_lossy().into_owned()),
+        ),
+        ("files_changed", Value::Text(json!(paths).to_string())),
+        ("result_text", Value::Text(answer.clone())),
+    ];
+    w.store.patch_attempt(&builder, &fields).unwrap();
+    let prompt = keel_core::mask_secrets(&w.store.attempt(&builder).unwrap().prompt);
+    assert!(prompt.len() > 40 * 1024, "{}", prompt.len());
+    // Every file it changed, as `git diff --numstat` lists them.
+    let numstat: String = paths
+        .iter()
+        .map(|path| {
+            let (added, removed) = match *path {
+                "src/b.rs" | "logo.png" => (0, 0),
+                "old.txt" => (0, 3),
+                "docs/read me.md" => (2, 0),
+                "src/big.rs" => (1500, 0),
+                _ => (10, 0),
+            };
+            format!("{added}\t{removed}\t{path}\n")
+        })
+        .collect();
+
+    // It comes in short, and says what it left out and how to read it.
+    let step = ok(&call(&client, "get_step", json!({ "attempt": builder })).await);
+    let size = step.to_string().len();
+    assert!(size < 20 * 1024, "{size} bytes: {step}");
+    assert_eq!(
+        step["leftOut"],
+        json!({
+            "diff": diff.len(),
+            "files": numstat.len(),
+            "prompt": prompt.len(),
+            "answer": answer.len(),
+        })
+    );
+    let to_read = step["toRead"].as_str().unwrap();
+    assert!(
+        to_read.contains("`part`") && to_read.contains("`next`"),
+        "{to_read}"
+    );
+    assert!(step.get("diff").is_none(), "{step}");
+    assert!(step.get("prompt").is_none(), "{step}");
+    assert!(!step.to_string().contains(&secret), "{step}");
+    // What it answered, from the start, saying where it's cut.
+    let result = step["result"].as_str().unwrap();
+    let (shown, cut) = result.rsplit_once("\n… [").unwrap();
+    assert!(
+        shown.len() > 4 * 1024 && answer.starts_with(shown),
+        "{result}"
+    );
+    assert!(cut.contains("part answer"), "{cut}");
+    // The files it changed, with what each adds and removes, and how many more there are.
+    let listed = step["filesChanged"].as_array().unwrap();
+    let more = step["moreFilesChanged"].as_u64().unwrap() as usize;
+    assert_eq!(listed.len() + more, files.len(), "{step}");
+    assert_eq!(listed.len(), 100, "{step}");
+    assert_eq!(
+        listed[..5],
+        [
+            json!({ "path": "src/b.rs", "added": 0, "removed": 0 }),
+            json!({ "path": "old.txt", "added": 0, "removed": 3 }),
+            json!({ "path": "logo.png", "added": 0, "removed": 0 }),
+            json!({ "path": "docs/read me.md", "added": 2, "removed": 0 }),
+            json!({ "path": "src/big.rs", "added": 1500, "removed": 0 }),
+        ]
+    );
+    assert_eq!(
+        listed[99],
+        json!({ "path": "src/part_94/file_94.rs", "added": 10, "removed": 0 })
+    );
+
+    // The diff, piece by piece, is all of it, byte for byte.
+    let (read, pieces) = read_whole(&client, json!({ "attempt": builder, "part": "diff" })).await;
+    assert!(read == diff, "the pieces differ from the diff");
+    assert!(pieces > diff.len() / (20 * 1024), "{pieces}");
+    // And so is one file's, which also takes more than one piece.
+    let (path, big) = &files[4];
+    let (read, pieces) = read_whole(&client, json!({ "attempt": builder, "file": path })).await;
+    assert!(read == *big, "the pieces differ from {path}");
+    assert!(pieces > 1, "{pieces}");
+    let (path, spaced) = &files[3];
+    let args = json!({ "attempt": builder, "part": "diff", "file": path });
+    assert_eq!(read_whole(&client, args).await, (spaced.clone(), 1));
+    let (path, removed) = &files[1];
+    let args = json!({ "attempt": builder, "file": path });
+    assert_eq!(read_whole(&client, args).await, (removed.clone(), 1));
+    // A piece can start anywhere.
+    let args = json!({ "attempt": builder, "part": "diff", "from": 100 });
+    let piece = ok(&call(&client, "get_step", args).await);
+    assert_eq!(piece["from"], 100);
+    assert!(diff[100..].starts_with(piece["text"].as_str().unwrap()));
+
+    // Every file it changed, past the 100 listed.
+    let (read, _) = read_whole(&client, json!({ "attempt": builder, "part": "files" })).await;
+    assert_eq!(read, numstat);
+
+    // The prompt, masked as it always is, and the answer.
+    let (read, _) = read_whole(&client, json!({ "attempt": builder, "part": "prompt" })).await;
+    assert!(read == prompt, "the pieces differ from the prompt");
+    assert!(read.contains(&format!("API_KEY={MASK} to test")));
+    assert!(!read.contains(&secret));
+    let (read, _) = read_whole(&client, json!({ "attempt": builder, "part": "answer" })).await;
+    assert!(read == answer, "the pieces differ from the answer");
+
+    // What it can't do says why.
+    for (args, says) in [
+        (
+            json!({ "part": "diff", "from": diff.len() + 1 }),
+            "`from` goes up to",
+        ),
+        (json!({ "file": "nope.rs" }), "no file \"nope.rs\""),
+        (
+            json!({ "part": "prompt", "file": "src/big.rs" }),
+            "only goes with part diff",
+        ),
+        (json!({ "from": 10 }), "goes with `part`"),
+        (json!({ "part": "stdout" }), "setup or check"),
+    ] {
+        let mut args = args;
+        args["attempt"] = json!(builder);
+        let refusal = refused(&call(&client, "get_step", args).await);
+        assert!(refusal.contains(says), "{refusal}");
+    }
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_check_that_printed_a_lot_shows_how_it_ended_and_reads_whole_in_pieces() {
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let loud = w.saved(
+        "Loud",
+        vec![
+            WorkflowStep::Agent(agent("builder", ToolProfile::Build, StepRole::Worker)),
+            WorkflowStep::Check {
+                id: "tests".into(),
+                run: "i=0; while [ $i -lt 4000 ]; do echo \"test $i of the suite: ok\"; \
+                      i=$((i+1)); done; echo 'error: 3 failed' >&2; exit 1"
+                    .into(),
+            },
+            WorkflowStep::Approval { id: "human".into() },
+        ],
+    );
+    let run = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.args_for(&loud, "Fix it"),
+    )
+    .await));
+    let check = waiting_attempt(&settled(&client, &run).await);
+    let recorded = w
+        .store
+        .events(&check, 0)
+        .unwrap()
+        .into_iter()
+        .find(|event| event.kind == "checkResult")
+        .unwrap()
+        .data["stdout"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(recorded.len() > 32 * 1024, "{}", recorded.len());
+
+    // The end of what it printed, from a whole line, which is where it says what went wrong.
+    let step = ok(&call(&client, "get_step", json!({ "attempt": check })).await);
+    let size = step.to_string().len();
+    assert!(size < 20 * 1024, "{size} bytes: {step}");
+    let output = &step["commandOutput"];
+    assert_eq!(output["exitCode"], 1, "{step}");
+    assert_eq!(output["stderr"], "error: 3 failed\n");
+    let stdout = output["stdout"].as_str().unwrap();
+    let (cut, tail) = stdout.split_once('\n').unwrap();
+    assert!(cut.contains("part stdout"), "{cut}");
+    assert!(
+        tail.starts_with("test ") && recorded.ends_with(tail),
+        "{tail}"
+    );
+    assert!(tail.ends_with("test 3999 of the suite: ok\n"), "{tail}");
+    assert_eq!(step["leftOut"], json!({ "stdout": recorded.len() }));
+
+    // All of it, in pieces.
+    let (read, pieces) = read_whole(&client, json!({ "attempt": check, "part": "stdout" })).await;
+    assert!(read == recorded, "the pieces differ from what it printed");
+    assert!(pieces > 1, "{pieces}");
+    let args = json!({ "attempt": check, "part": "stderr" });
+    assert_eq!(
+        read_whole(&client, args).await,
+        ("error: 3 failed\n".to_owned(), 1)
+    );
     client.cancel().await.unwrap();
 }
 

@@ -48,7 +48,8 @@ workflows and projects. Each run appears in the app at once, as a card on the pr
 start_run to change code, with its own pull request.\n\
 - Wait on several at once with wait_for_run and `runs`, rather than calling get_run in a loop, and read the \
 `report` of each one that's ready. get_run has any that came back brief. A run lists its steps without what they \
-wrote, which get_step has.\n\
+wrote, which get_step has. A long diff, prompt or output comes in pieces: get_step says what it left out and how to \
+read it.\n\
 - `waitingFor.youCan` says what this client may do on a run right now. If something concrete is missing when a run \
 reaches the approval, send_back with clear instructions.\n\
 - When a run waits for answers or an approval, bring the person exactly what waitingFor says and tell them to decide \
