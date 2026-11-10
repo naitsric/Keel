@@ -5,6 +5,7 @@ mod board;
 mod brain;
 mod deliver;
 mod detect;
+mod diffs;
 mod git;
 mod joint;
 mod project_proposals;
@@ -1628,6 +1629,32 @@ impl Inner {
         self.run_dir(run_id).join("workspace")
     }
 
+    /// Where a change too big for a prompt is saved, one file per changed file, for an agent to
+    /// read. It's outside the workspace, so nothing in it can end up in a commit, and no step that
+    /// changes the workspace can change it.
+    fn change_dir(&self, run_id: &str) -> PathBuf {
+        self.run_dir(run_id).join("change")
+    }
+
+    /// What an agent can read outside its workspace and change nothing in: the other projects of a
+    /// change across several, whose copies are made when the step starts, and the change itself if
+    /// it was too big for a prompt.
+    fn read_only_dirs(&self, run_id: &str, role: &StepRole) -> Result<Vec<String>> {
+        let mut dirs: Vec<String> = if joint::reads_others(role) {
+            self.read_copies(run_id)?
+                .iter()
+                .map(|copy| copy.path.to_string_lossy().into_owned())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let change = self.change_dir(run_id);
+        if change.is_dir() {
+            dirs.push(change.to_string_lossy().into_owned());
+        }
+        Ok(dirs)
+    }
+
     fn project_proposals_dir(&self) -> PathBuf {
         self.config.data_dir.join("project-proposals")
     }
@@ -1712,16 +1739,7 @@ impl Inner {
                                 Vec::new()
                             },
                         ),
-                        // The other projects of a change across several. Their copies are made when
-                        // the step starts, and only what's here can be read.
-                        &if joint::reads_others(&spec.role) {
-                            self.read_copies(run_id)?
-                                .iter()
-                                .map(|copy| copy.path.to_string_lossy().into_owned())
-                                .collect()
-                        } else {
-                            Vec::new()
-                        },
+                        &self.read_only_dirs(run_id, &spec.role)?,
                     )
                     .to_string(),
                     format!("{stem}.jsonl"),
@@ -1809,7 +1827,11 @@ impl Inner {
     /// An agent's prompt. What a person sent back has to reach whoever does the work, whatever a
     /// saved workflow's prompt leaves out.
     fn agent_prompt(&self, spec: &StepSpec, run: &keel_store::Run) -> Result<String> {
-        let mut text = self.render_prompt(&spec.prompt, run)?;
+        let judging = matches!(
+            spec.role,
+            StepRole::Reviewer | StepRole::Verifier | StepRole::Approver { .. }
+        );
+        let mut text = self.render_prompt(&spec.prompt, run, judging)?;
         if spec.role == StepRole::Worker && spec.tools == keel_core::ToolProfile::Build {
             let attempts = self.store.attempts_of_run(&run.id)?;
             if workflows::returned_before(&attempts, run.round) {
@@ -1823,7 +1845,13 @@ impl Inner {
     }
 
     /// What a step's prompt becomes right now. The answers come from this run's latest round.
-    fn render_prompt(&self, template: &str, run: &keel_store::Run) -> Result<String> {
+    /// `judging` is for an agent that decides on the change, which has to read all of it.
+    fn render_prompt(
+        &self,
+        template: &str,
+        run: &keel_store::Run,
+        judging: bool,
+    ) -> Result<String> {
         let attempts = self.store.attempts_of_run(&run.id)?;
         let steps: Vec<WorkflowStep> =
             serde_json::from_value(run.workflow.clone()).unwrap_or_default();
@@ -1833,13 +1861,18 @@ impl Inner {
         Ok(prompts::render(template, |name| match name {
             "request" => Some(run.request.clone()),
             "diff" => {
-                let diff = match (&git, &base) {
-                    (Some(git), Some(base)) if workspace.join(".git").exists() => {
-                        git.diff_since(&workspace, base).unwrap_or_default()
-                    }
-                    _ => String::new(),
+                let (diff, head) = match (&git, &base) {
+                    (Some(git), Some(base)) if workspace.join(".git").exists() => (
+                        git.diff_since(&workspace, base).unwrap_or_default(),
+                        git.head(&workspace).unwrap_or_default(),
+                    ),
+                    _ => (String::new(), String::new()),
                 };
-                Some(workflows::cap_diff(diff))
+                // Named after the commit it goes up to, so each round has its own.
+                let folder = self
+                    .change_dir(&run.id)
+                    .join(head.get(..12).unwrap_or(&head));
+                Some(diffs::for_prompt(diff, &folder, &run.language, judging))
             }
             "rework" => Some(workflows::rework_text(&attempts, run.round, &run.language)),
             "answers" => Some(workflows::answers_text(&attempts, &run.language)),

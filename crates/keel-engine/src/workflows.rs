@@ -15,12 +15,30 @@ use serde_json::Value;
 
 use crate::{brain, prompts, sizing, specs, verification};
 
-/// How much of a diff goes into a prompt. A reviewer can still read any file it wants.
-const DIFF_LIMIT: usize = 200 * 1024;
 const MAX_ROUNDS: u32 = 5;
 
-pub const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"verdict":{"type":"string","enum":["approved","changes"]},"findings":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"}},"required":["verdict","findings","summary"],"additionalProperties":false}"#;
+pub const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"verdict":{"type":"string","enum":["approved","changes"]},"findings":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"},"unread":{"type":"array","items":{"type":"string"},"description":"Each file of the change you could not read, if any. A review that left one out is not an approval."}},"required":["verdict","findings","summary","unread"],"additionalProperties":false}"#;
 pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"}},"required":["decision","risk","reasons","instructions"],"additionalProperties":false}"#;
+
+/// What a reviewer answered, as Keel keeps it. One that says it couldn't read part of the change
+/// didn't review all of it, so it's never an approval, whatever it says. `None` if it stands.
+pub fn review_as_kept(output: &Value) -> Option<(Value, Vec<String>)> {
+    let unread: Vec<String> = output
+        .get("unread")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::trim)
+        .filter(|file| !file.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if unread.is_empty() || output.get("verdict")? != "approved" {
+        return None;
+    }
+    let mut kept = output.clone();
+    kept["verdict"] = Value::from("changes");
+    Some((kept, unread))
+}
 
 pub fn schema_for(role: &StepRole) -> Option<&'static str> {
     match role {
@@ -467,20 +485,6 @@ pub fn answers_text(attempts: &[Attempt], language: &str) -> String {
     format!("{intro}\n{}", specs::answer_lines(&given))
 }
 
-pub fn cap_diff(diff: String) -> String {
-    if diff.len() <= DIFF_LIMIT {
-        return diff;
-    }
-    let mut end = DIFF_LIMIT;
-    while !diff.is_char_boundary(end) {
-        end -= 1;
-    }
-    format!(
-        "{}\n\n[The diff was cut here. Read the files for the rest.]",
-        &diff[..end]
-    )
-}
-
 fn agent(
     id: &str,
     model: &str,
@@ -549,11 +553,11 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
             "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{{{{rework}}}}\n\n{}\n{{{{diff}}}}",
             if es {
                 format!(
-                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Si no hay, el veredicto es approved. Responde en español."
+                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Si no hay, el veredicto es approved. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
                 )
             } else {
                 format!(
-                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Report only real problems in this change, each with its file and line. If there are none, the verdict is approved."
+                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Report only real problems in this change, each with its file and line. If there are none, the verdict is approved. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
                 )
             },
             text("Specification:", "Especificación:"),
@@ -568,8 +572,8 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
     let approver_prompt = format!(
         "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{VERIFY_STEP}: {{{{steps.{VERIFY_STEP}.output}}}}\n{security}: {{{{steps.{security}.output}}}}\nux: {{{{steps.ux.output}}}}\nui: {{{{steps.ui.output}}}}\n{code}: {{{{steps.{code}.output}}}}\n\n{{{{rework}}}}",
         text(
-            "You decide whether this change is ready for a person to review, using the reviews below and what `verify` found, and you edit nothing. Check each finding in the code before believing it, and discard false ones. Anything `unmet` in `verify` is a finding, unless what was sent back below changed it. `unverified` only means no test proves it, and isn't a finding by itself. decision = rework if a real finding remains, approve if not. risk = high if it touches authorization, personal data, money, contractual deadlines or the database schema; low if it's contained and easy to revert; medium otherwise. In instructions, say exactly what to fix.",
-            "Decides si este cambio está listo para que lo revise una persona, usando las revisiones de abajo y lo que encontró `verify`, y no editas nada. Comprueba cada hallazgo en el código antes de creerle y descarta los falsos. Todo lo que esté `unmet` en `verify` es un hallazgo, salvo que lo devuelto abajo lo haya cambiado. `unverified` solo significa que ninguna prueba lo demuestra, y por sí solo no es un hallazgo. decision = rework si queda un hallazgo real, approve si no. risk = high si toca autorización, datos personales, dinero, plazos contractuales o el esquema de base; low si es acotado y fácil de revertir; medium en otro caso. En instructions, di exactamente qué corregir. Responde en español.",
+            "You decide whether this change is ready for a person to review, using the reviews below and what `verify` found, and you edit nothing. Check each finding in the code before believing it, and discard false ones. A review with files in `unread` didn't check them: check them yourself before you approve. Anything `unmet` in `verify` is a finding, unless what was sent back below changed it. `unverified` only means no test proves it, and isn't a finding by itself. decision = rework if a real finding remains, approve if not. risk = high if it touches authorization, personal data, money, contractual deadlines or the database schema; low if it's contained and easy to revert; medium otherwise. In instructions, say exactly what to fix.",
+            "Decides si este cambio está listo para que lo revise una persona, usando las revisiones de abajo y lo que encontró `verify`, y no editas nada. Comprueba cada hallazgo en el código antes de creerle y descarta los falsos. Una revisión con archivos en `unread` no los revisó: revísalos tú antes de aprobar. Todo lo que esté `unmet` en `verify` es un hallazgo, salvo que lo devuelto abajo lo haya cambiado. `unverified` solo significa que ninguna prueba lo demuestra, y por sí solo no es un hallazgo. decision = rework si queda un hallazgo real, approve si no. risk = high si toca autorización, datos personales, dinero, plazos contractuales o el esquema de base; low si es acotado y fácil de revertir; medium en otro caso. En instructions, di exactamente qué corregir. Responde en español.",
         ),
         text("Specification:", "Especificación:"),
     );
@@ -1916,6 +1920,46 @@ mod tests {
     }
 
     #[test]
+    fn a_review_that_left_part_of_the_change_unread_is_never_an_approval() {
+        let review = |verdict: &str, unread: Value| serde_json::json!({ "verdict": verdict, "findings": [], "summary": "Fine", "unread": unread });
+        let (kept, unread) =
+            review_as_kept(&review("approved", serde_json::json!(["src/b.ts", " "]))).unwrap();
+        assert_eq!(kept["verdict"], "changes");
+        assert_eq!(kept["summary"], "Fine");
+        assert_eq!(unread, ["src/b.ts"]);
+        // Read it all, or already asking for changes, or from before Keel asked: it stands.
+        assert!(review_as_kept(&review("approved", serde_json::json!([]))).is_none());
+        assert!(review_as_kept(&review("approved", serde_json::json!(["  "]))).is_none());
+        assert!(review_as_kept(&review("changes", serde_json::json!(["src/b.ts"]))).is_none());
+        assert!(
+            review_as_kept(
+                &serde_json::json!({ "verdict": "approved", "findings": [], "summary": "" })
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn every_built_in_reviewer_and_approver_is_told_about_what_it_could_not_read() {
+        for language in ["en", "es"] {
+            let full = builtin(language, None).remove(0);
+            for step in &full.steps {
+                let specs: Vec<&StepSpec> = match step {
+                    WorkflowStep::Agent(spec) => vec![spec],
+                    WorkflowStep::Parallel { steps, .. } => steps.iter().collect(),
+                    _ => Vec::new(),
+                };
+                for spec in specs {
+                    if matches!(spec.role, StepRole::Reviewer | StepRole::Approver { .. }) {
+                        assert!(spec.prompt.contains("`unread`"), "{language} {}", spec.id);
+                    }
+                }
+            }
+        }
+        assert!(VERDICT_SCHEMA.contains(r#""required":["verdict","findings","summary","unread"]"#));
+    }
+
+    #[test]
     fn ids_cannot_escape_the_workflows_folder() {
         let dir = tempfile::tempdir().unwrap();
         for id in ["../x", "a/b", "..", "builtin:full", ""] {
@@ -1924,13 +1968,5 @@ mod tests {
         let mut workflow = builtin("en", None).remove(1);
         workflow.id = "../../evil".into();
         assert!(save(dir.path(), &workflow).is_err());
-    }
-
-    #[test]
-    fn long_diffs_are_cut_and_say_so() {
-        let cut = cap_diff("é".repeat(DIFF_LIMIT));
-        assert!(cut.len() < DIFF_LIMIT + 100);
-        assert!(cut.ends_with("Read the files for the rest.]"));
-        assert_eq!(cap_diff("short".to_owned()), "short");
     }
 }

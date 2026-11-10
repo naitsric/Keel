@@ -61,10 +61,20 @@ BROKEN-GIT*)
 REVERT*)
   git rm -q built.tsx && git commit -qm "revert"
   result='{{"type":"result","subtype":"success","is_error":false,"result":"Took it back.","num_turns":1}}';;
+BUILD-BIG*)
+  line=$(printf 'y%.0s' $(seq 1 100))
+  for i in $(seq 1 30); do for j in $(seq 1 100); do echo "$line $j"; done > "big$i.txt"; done
+  git add -A && git commit -qm "build: big"
+  result='{{"type":"result","subtype":"success","is_error":false,"result":"Built a lot.","num_turns":1}}';;
 BUILD*)
   echo "$role" >> built.tsx
   git add -A && git commit -qm "build: $role"
   result='{{"type":"result","subtype":"success","is_error":false,"result":"Built it.","num_turns":1,"total_cost_usd":0.01}}';;
+REVIEW-READ*)
+  printf '%s\n' "$prompt" | sed -n 's/.*, not below: //p' | while IFS= read -r file; do cat "$file" >> "{log}/read.log"; done
+  result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{{"verdict":"approved","findings":[],"summary":"Read it all","unread":[]}}}}';;
+REVIEW-UNREAD*)
+  result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{{"verdict":"approved","findings":[],"summary":"Fine as far as I got","unread":["built.tsx"]}}}}';;
 REVIEW-NOANSWER*)
   result='{{"type":"result","subtype":"success","is_error":false,"result":"I looked.","num_turns":1}}';;
 REVIEW*)
@@ -793,4 +803,185 @@ fn a_step_named_setup_does_not_clash_with_the_projects_own() {
     ))]);
     w.wait(&run, "project-setup", AttemptState::Succeeded);
     w.wait(&run, "setup", AttemptState::Succeeded);
+}
+
+/// A builder, then one reviewer with this prompt, then a person.
+fn one_review(build: &str, review: &str) -> Vec<WorkflowStep> {
+    vec![
+        WorkflowStep::Agent(spec(
+            "builder",
+            ToolProfile::Build,
+            StepRole::Worker,
+            &[],
+            build,
+        )),
+        WorkflowStep::Parallel {
+            id: "reviews".into(),
+            steps: vec![spec(
+                "security",
+                ToolProfile::ReadOnly,
+                StepRole::Reviewer,
+                &[],
+                review,
+            )],
+        },
+        WorkflowStep::Approval { id: "human".into() },
+    ]
+}
+
+impl World {
+    fn change_dir(&self, run: &str) -> PathBuf {
+        self.dir.path().join("data/runs").join(run).join("change")
+    }
+
+    /// The folders `--add-dir` opened for an attempt.
+    fn added_dirs(&self, attempt: &keel_store::Attempt) -> Vec<String> {
+        let events = self.store.events(&attempt.id, 0).unwrap();
+        let started = events.iter().find(|e| e.kind == "started").unwrap();
+        let args: Vec<String> = serde_json::from_value(started.data["args"].clone()).unwrap();
+        let Some(at) = args.iter().position(|a| a == "--add-dir") else {
+            return Vec::new();
+        };
+        args[at + 1..]
+            .iter()
+            .take_while(|a| !a.starts_with("--"))
+            .cloned()
+            .collect()
+    }
+}
+
+/// Each file's part of a diff, without the line break that ends it.
+fn file_parts(diff: &str) -> Vec<String> {
+    diff.split("\ndiff --git ")
+        .enumerate()
+        .map(|(i, part)| {
+            let part = part.trim_end_matches('\n');
+            if i == 0 {
+                part.to_owned()
+            } else {
+                format!("diff --git {part}")
+            }
+        })
+        .collect()
+}
+
+#[test]
+fn a_change_too_big_for_the_prompt_is_all_there_for_a_reviewer_to_read() {
+    let w = world();
+    let run = w.start(one_review("BUILD-BIG", "REVIEW-READ\nDIFF:{{diff}}"));
+    let review = w.wait(&run, "security", AttemptState::Succeeded);
+    let diff = w.engine.run_diff(&run).unwrap();
+    assert!(diff.len() > 250 * 1024, "{}", diff.len());
+
+    // It's told plainly, every file is listed, and it's asked to read what isn't in the prompt.
+    let prompt = &review.prompt;
+    assert!(
+        prompt.contains("This change is too big to fit here whole: 30 files"),
+        "{}",
+        &prompt[..prompt.len().min(2000)]
+    );
+    assert!(prompt.contains("Read them all before you judge the change"));
+    assert!(!prompt.contains("was cut here"));
+    for i in 1..=30 {
+        assert!(
+            prompt.contains(&format!("\n- big{i}.txt +100 -0")),
+            "big{i}.txt"
+        );
+    }
+    assert!(prompt.len() < 210 * 1024, "{}", prompt.len());
+
+    // Each file's diff is in the prompt whole, or was read whole from where the prompt said.
+    let read = std::fs::read_to_string(w.log.join("read.log")).unwrap_or_default();
+    assert!(!read.is_empty(), "some had to be read");
+    for part in file_parts(&diff) {
+        let first = part.lines().next().unwrap();
+        assert!(
+            prompt.contains(&part) || read.contains(&part),
+            "{first} is neither in the prompt nor where it said"
+        );
+    }
+
+    // The reviewer could reach it, and only to read: the folder is open to its file tools, and its
+    // settings keep it from changing anything there.
+    let change = w.change_dir(&run);
+    let opened = w.added_dirs(&review);
+    assert_eq!(opened, [change.to_string_lossy().into_owned()]);
+    assert!(keel_harness::settings::is_read_only(
+        &review.settings,
+        &change.to_string_lossy()
+    ));
+
+    // It's outside the workspace, so nothing of it reaches the branch that's delivered.
+    let workspace = PathBuf::from(&review.workspace);
+    assert!(!change.starts_with(&workspace));
+    let status = Command::new("git")
+        .current_dir(&workspace)
+        .args(["status", "--porcelain", "--ignored"])
+        .output()
+        .unwrap();
+    assert!(
+        status.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+    assert!(!diff.contains(".diff b/") && !diff.contains("files.txt"));
+}
+
+#[test]
+fn a_change_that_fits_is_in_the_prompt_whole_as_before() {
+    let w = world();
+    let run = w.start(one_review("BUILD", "REVIEW security\nDIFF:{{diff}}"));
+    let review = w.wait(&run, "security", AttemptState::Succeeded);
+    let diff = w.engine.run_diff(&run).unwrap();
+    assert!(diff.contains("+BUILD"));
+    assert_eq!(review.prompt, format!("REVIEW security\nDIFF:{diff}"));
+    assert!(!w.change_dir(&run).exists());
+    assert!(w.added_dirs(&review).is_empty());
+}
+
+#[test]
+fn a_review_that_could_not_read_all_of_the_change_is_not_an_approval() {
+    let w = world();
+    let mut steps = one_review("BUILD", "REVIEW-UNREAD");
+    steps.insert(
+        2,
+        WorkflowStep::Agent(spec(
+            "approver",
+            ToolProfile::ReadOnly,
+            StepRole::Approver {
+                rework_to: "builder".into(),
+                max_rounds: 2,
+            },
+            &[],
+            "APPROVE\nsecurity={{steps.security.output}}",
+        )),
+    );
+    let run = w.start(steps);
+    w.wait(&run, "human", AttemptState::WaitingApproval);
+
+    let review = w.all(&run, "security").pop().unwrap();
+    assert_eq!(review.state, "succeeded");
+    let output = review.output.clone().unwrap();
+    assert_eq!(output["verdict"], "changes");
+    assert_eq!(output["unread"], serde_json::json!(["built.tsx"]));
+    let events = w.store.events(&review.id, 0).unwrap();
+    let incomplete = events
+        .iter()
+        .find(|e| e.kind == "reviewIncomplete")
+        .unwrap();
+    assert_eq!(incomplete.data["unread"], serde_json::json!(["built.tsx"]));
+    // What it said is still on the record as it came.
+    let result = events.iter().find(|e| e.kind == "result").unwrap();
+    assert!(
+        result.data.to_string().contains(r#""verdict":"approved""#),
+        "{}",
+        result.data
+    );
+    // The approver doesn't see it as an approval either.
+    let approver = w.all(&run, "approver").pop().unwrap();
+    assert!(
+        approver.prompt.contains(r#""verdict":"changes""#),
+        "{}",
+        approver.prompt
+    );
 }

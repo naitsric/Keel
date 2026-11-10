@@ -351,6 +351,8 @@ export interface Verdict {
   verdict: "approved" | "changes";
   findings: string[];
   summary: string;
+  /** Files of the change it couldn't read. Keel never counts such a review as an approval. Older answers don't have it. */
+  unread?: string[];
 }
 
 /** The approver's answer. */
