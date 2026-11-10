@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseEnv } from "./SettingsView";
+import { parseEnv } from "./ProjectsView";
 
 describe("parseEnv", () => {
   it("reads NAME=value lines, keeping any = in the value", () => {

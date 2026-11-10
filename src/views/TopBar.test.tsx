@@ -30,6 +30,7 @@ describe("the top bar", () => {
     ["Board", "board"],
     ["Workflows", "workflows"],
     ["Brain", "brain"],
+    ["Projects", "projects"],
   ])("%s goes to its page", async (label, page) => {
     await showApp(RUNS, { name: "settings" });
     await click(headerButton(label));
@@ -47,6 +48,8 @@ describe("the top bar", () => {
     ["the board", { name: "board" }, "Board"],
     ["workflows", { name: "workflows" }, "Workflows"],
     ["brain", { name: "brain" }, "Brain"],
+    ["projects", { name: "projects" }, "Projects"],
+    ["projects with one chosen", { name: "projects", projectId: "p2" }, "Projects"],
     ["settings", { name: "settings" }, "Settings"],
     ["a run opened from home", { name: "run", runId: "r1" }, "Runs"],
     ["a run opened from the board", { name: "run", runId: "r1", backTo: { name: "board", projectId: "p2" } }, "Board"],
@@ -75,7 +78,7 @@ describe("the top bar", () => {
     await showApp(RUNS);
     await act(() => i18next.changeLanguage("es"));
     const labels = [...(nav() as Element).querySelectorAll("button")].map((b) => b.textContent);
-    expect(labels).toEqual(["Ejecuciones", "Tablero", "Workflows", "Brain"]);
+    expect(labels).toEqual(["Ejecuciones", "Tablero", "Workflows", "Brain", "Proyectos"]);
     await act(() => i18next.changeLanguage("en"));
   });
 

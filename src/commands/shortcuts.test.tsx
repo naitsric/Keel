@@ -21,6 +21,7 @@ describe("the keys", () => {
     ["2", "Digit2", "board"],
     ["3", "Digit3", "workflows"],
     ["4", "Digit4", "brain"],
+    ["5", "Digit5", "projects"],
   ])("⌘%s goes to its page", async (key, code, page) => {
     await showApp(RUNS, { name: "settings" });
     pressMod(key, code);
@@ -564,7 +565,7 @@ describe("the keys", () => {
     it("say the key", async () => {
       await showApp(RUNS);
       const titles = [...document.querySelectorAll("header button")].map((b) => b.getAttribute("title"));
-      expect(titles).toEqual(["Runs  ⌘1", "Board  ⌘2", "Workflows  ⌘3", "Brain  ⌘4", "Search  ⇧⇧", "New run  ⌘N", "Settings  ⌘,"]);
+      expect(titles).toEqual(["Runs  ⌘1", "Board  ⌘2", "Workflows  ⌘3", "Brain  ⌘4", "Projects  ⌘5", "Search  ⇧⇧", "New run  ⌘N", "Settings  ⌘,"]);
     });
 
     it("say the key for Back too", async () => {

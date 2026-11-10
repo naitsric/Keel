@@ -5,11 +5,20 @@ import { useApp } from "../lib/store";
 import { Button, Card } from "../ui/primitives";
 import { AddProjectButton, useAddProject } from "./AddProject";
 
+function ProjectLink({ name, onOpen }: { name: string; onOpen: () => void }) {
+  return (
+    <button type="button" className="rounded-sm hover:underline focus-visible:outline-2 focus-visible:outline-accent" onClick={onOpen}>
+      {name}
+    </button>
+  );
+}
+
 /** Home's list of projects: which are ready, which aren't, and the way to add another. */
 export function ProjectsRow() {
   const { t } = useTranslation();
   const projects = useApp((s) => s.overview.projects);
   const openSetup = useApp((s) => s.openProjectSetup);
+  const navigate = useApp((s) => s.navigate);
   const { add, error, busy } = useAddProject();
   return (
     <Card className="px-4 py-2.5">
@@ -19,7 +28,7 @@ export function ProjectsRow() {
           {projects.map((project) =>
             needsSetup(project) ? (
               <li key={project.id} className="flex items-center gap-1.5 text-[12.5px]">
-                {project.name}
+                <ProjectLink name={project.name} onOpen={() => navigate({ name: "projects", projectId: project.id })} />
                 <Button variant="ghost" className="h-6 px-1.5 text-warning" onClick={() => openSetup({ projectId: project.id, added: null, returnToNewRun: false })}>
                   {t("projects.finishSetup")}
                 </Button>
@@ -27,7 +36,7 @@ export function ProjectsRow() {
             ) : (
               <li key={project.id} className="flex h-6 items-center gap-1.5 text-[12.5px]">
                 <Check size={13} className="shrink-0 text-success" aria-label={t("projects.ready")} />
-                {project.name}
+                <ProjectLink name={project.name} onOpen={() => navigate({ name: "projects", projectId: project.id })} />
               </li>
             ),
           )}
