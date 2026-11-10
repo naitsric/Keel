@@ -22,7 +22,7 @@ use crate::{Error, Inner, Result, locked, new_id, prompts, specs, workflows};
 const AGREE_STEP: &str = "spec";
 
 /// Where a project's mirror keeps what Keel last read of its default branch for a run in another
-/// project. Apart from `keel-base`, which a run of this project counts its own commits from.
+/// project. Apart from `keel-base`, which a run of this project starts from.
 const READ_BRANCH: &str = "keel-read";
 
 /// Where it keeps what it last read of an earlier part's branch.
