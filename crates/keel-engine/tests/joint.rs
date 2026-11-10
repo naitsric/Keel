@@ -1328,7 +1328,7 @@ fn a_change_proposed_from_outside_the_board_is_agreed_like_one_started_from_a_ca
     assert_eq!(stored.joint_change_id.as_deref(), Some(card.as_str()));
     assert_eq!(
         w.store.joint_change(&card).unwrap().projects,
-        [w.valora.clone()]
+        std::slice::from_ref(&w.valora)
     );
     assert_eq!(
         w.store.run(&run).unwrap().started_by.as_deref(),
