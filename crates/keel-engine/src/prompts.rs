@@ -235,9 +235,9 @@ pub fn agreement_prompt(language: &str) -> String {
 const VERIFY_PROMPT_EN: &str = r#"You check whether a change really does what was asked, and you edit nothing. You can't run anything: you read the tests and the code. Answer in the structure you were given.
 
 For each item in `criteria` below, find the test that really proves it, and read that test to be sure.
-- met: a test proves it. `evidence` is that test's name, or its file and line.
+- met: a test proves it, and it's a test that the command Keel ran this round executed (see below). `evidence` is that test's name, or its file and line.
 - unmet: the code shows it isn't so. `evidence` is the file and line that shows it.
-- unverified: no test proves it, or you can't tell. That's a normal answer, so give it rather than stretch a test that's only related.
+- unverified: no test proves it, or you can't tell. That's a normal answer, so give it rather than stretch a test that's only related. If the test exists but that command doesn't run it (another language, runner or package), it's unverified too: put that test in `evidence` and say in `evidence` that it didn't run.
 
 Each `evidence` is one line of up to 140 characters. `summary` is one sentence for the person who asked for the change. Answer for every item, using its `id`, and don't add any. If work was sent back below and that changes what an item asks for, what was sent back wins, so don't call the item `unmet` for following it.
 
@@ -255,9 +255,9 @@ Change:
 const VERIFY_PROMPT_ES: &str = r#"Compruebas si un cambio de verdad hace lo que se pidió, y no editas nada. No puedes correr nada: lees las pruebas y el código. Responde con la estructura que te dieron, en español.
 
 Para cada elemento de `criteria` de abajo, busca la prueba que de verdad lo demuestra, y léela para estar seguro.
-- met: una prueba lo demuestra. `evidence` es el nombre de esa prueba, o su archivo y línea.
+- met: lo demuestra una prueba que el comando que Keel corrió en esta ronda ejecutó (ver abajo). `evidence` es el nombre de esa prueba, o su archivo y línea.
 - unmet: el código muestra que no es así. `evidence` es el archivo y la línea que lo muestran.
-- unverified: ninguna prueba lo demuestra, o no puedes saberlo. Es una respuesta normal, así que dala en vez de estirar una prueba que solo se relaciona.
+- unverified: ninguna prueba lo demuestra, o no puedes saberlo. Es una respuesta normal, así que dala en vez de estirar una prueba que solo se relaciona. Si la prueba existe pero ese comando no la ejecuta (otro lenguaje, runner o paquete), también es unverified: pon esa prueba en `evidence` y di en `evidence` que no corrió.
 
 Cada `evidence` es una línea de hasta 140 caracteres. `summary` es una frase para la persona que pidió el cambio. Responde por cada elemento, usando su `id`, y no agregues ninguno. Si abajo se devolvió trabajo y eso cambia lo que pide un elemento, manda lo que se devolvió, así que no lo marques `unmet` por seguirlo.
 
@@ -593,6 +593,31 @@ mod tests {
             // The fact comes first, so what follows it can't pass as part of it.
             assert!(prompt.find("{{check}}") < prompt.find("{{steps.spec.output}}"));
             assert!(prompt.find("{{check}}") < prompt.find("{{diff}}"));
+        }
+    }
+
+    #[test]
+    fn the_verifier_only_calls_met_a_test_keel_ran_and_says_when_it_did_not_run() {
+        for (language, ran, not_run, evidence) in [
+            (
+                "en",
+                "a test that the command Keel ran this round executed",
+                "If the test exists but that command doesn't run it",
+                "say in `evidence` that it didn't run",
+            ),
+            (
+                "es",
+                "una prueba que el comando que Keel corrió en esta ronda ejecutó",
+                "Si la prueba existe pero ese comando no la ejecuta",
+                "di en `evidence` que no corrió",
+            ),
+        ] {
+            let prompt = verify_prompt(language);
+            for part in [ran, not_run, evidence] {
+                assert!(prompt.contains(part), "{language}: {part}");
+            }
+            // The rule sits before the fact it refers to.
+            assert!(prompt.find(ran) < prompt.find("{{check}}"), "{language}");
         }
     }
 
