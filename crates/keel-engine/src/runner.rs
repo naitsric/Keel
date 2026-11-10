@@ -86,24 +86,83 @@ impl Monitor {
     }
 }
 
+/// Whether one of the project's allowed domains is `host` or a subdomain of it.
+fn allows_host(domains: &[String], host: &str) -> bool {
+    domains.iter().any(|domain| {
+        let domain = domain.trim().trim_start_matches("*.").to_ascii_lowercase();
+        domain == host || domain.ends_with(&format!(".{host}"))
+    })
+}
+
 /// Points the usual tools at a cache a sandboxed command can write to, since theirs live in the
-/// home folder. Copies rather than links, so a change in the workspace can't reach a cache.
-/// Cargo and Go read what they downloaded from there when they build, and a check has no network
-/// and can't see the cache setup filled, so theirs stays in the run's own copy.
-fn cache_env(cache: &std::path::Path, workspace: &std::path::Path) -> Vec<(String, String)> {
-    let run_cache = workspace.join(RUN_CACHE).to_string_lossy().into_owned();
+/// home folder. Cargo and Go keep what they download in `tool_homes`: for setup that's the
+/// project's own cache, which only setup writes, and for any other step it's the run's copy of it.
+/// `domains` are those the step may reach, or `None` when it has the whole network (setup). With no
+/// way to crates.io cargo is told to work offline, and Go has no proxy, so a missing dependency is
+/// an error at once and not minutes of retries. A project that does allow them is left as it was.
+fn cache_env(
+    cache: &std::path::Path,
+    tool_homes: &std::path::Path,
+    domains: Option<&[String]>,
+) -> Vec<(String, String)> {
+    let homes = tool_homes.to_string_lossy().into_owned();
     let cache = cache.to_string_lossy().into_owned();
-    vec![
+    let mut env = vec![
         ("XDG_CACHE_HOME".to_owned(), cache.clone()),
         ("UV_CACHE_DIR".to_owned(), format!("{cache}/uv")),
         ("UV_LINK_MODE".to_owned(), "copy".to_owned()),
         ("PIP_CACHE_DIR".to_owned(), format!("{cache}/pip")),
         ("npm_config_cache".to_owned(), format!("{cache}/npm")),
-        ("CARGO_HOME".to_owned(), format!("{run_cache}/cargo")),
-        ("GOPATH".to_owned(), format!("{run_cache}/go")),
+        ("CARGO_HOME".to_owned(), format!("{homes}/cargo")),
+        ("GOPATH".to_owned(), format!("{homes}/go")),
         ("GOCACHE".to_owned(), format!("{cache}/go-build")),
         ("GOTOOLCHAIN".to_owned(), "local".to_owned()),
-    ]
+    ];
+    if let Some(domains) = domains {
+        if !allows_host(domains, "crates.io") {
+            env.push(("CARGO_NET_OFFLINE".to_owned(), "true".to_owned()));
+        }
+        if !allows_host(domains, "golang.org") {
+            env.push(("GOPROXY".to_owned(), "off".to_owned()));
+        }
+    }
+    env
+}
+
+/// Gives a run its own copy of what setup downloaded for cargo and Go, once. It's a clone on APFS,
+/// which costs almost nothing, and a copy where that's not possible. It's never a link: whatever
+/// an agent changes stays in the run and can't reach the project's cache or the next run.
+fn copy_tool_caches(shared: &std::path::Path, run_cache: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(run_cache)?;
+    for tool in ["cargo", "go"] {
+        let (from, to) = (shared.join(tool), run_cache.join(tool));
+        if to.exists() {
+            continue;
+        }
+        if !from.is_dir() {
+            std::fs::create_dir_all(&to)?;
+            continue;
+        }
+        let copy = |flags: &str| {
+            std::process::Command::new("/bin/cp")
+                .arg(flags)
+                .arg(&from)
+                .arg(&to)
+                .status()
+                .is_ok_and(|status| status.success())
+        };
+        if !copy("-cR") {
+            let _ = std::fs::remove_dir_all(&to);
+            if !copy("-R") {
+                let _ = std::fs::remove_dir_all(&to);
+                return Err(Error::Io(std::io::Error::other(format!(
+                    "could not copy {}",
+                    from.display()
+                ))));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn runs_commands(kind: &str, tools: Option<ToolProfile>) -> bool {
@@ -261,6 +320,11 @@ impl Inner {
                 self.end_early(&attempt_id, &run_id, state, Some(reason));
             }
         }
+    }
+
+    /// What setup downloads for a project, shared by its runs. Only setup writes there.
+    fn shared_cache(&self, project_id: &str) -> PathBuf {
+        self.mirror(project_id).with_file_name("cache")
     }
 
     /// Makes sure the run has its private clone, and returns the commit the step starts from.
@@ -447,15 +511,22 @@ impl Inner {
         let raw_path = PathBuf::from(&attempt.raw_path);
         let stderr_path = dir.join(format!("{stem}.stderr.txt"));
         // Only steps that can run commands get services. A read-only step has no way to use them.
-        let (service_set, service_env) = if spec.tools == ToolProfile::Build {
+        let (service_set, service_env, project) = if spec.tools == ToolProfile::Build {
             let project = store.project(project_id)?;
-            self.start_services(attempt, &project, &tools.path_env)?
+            let (set, env) = self.start_services(attempt, &project, &tools.path_env)?;
+            (set, env, Some(project))
         } else {
-            (None, Vec::new())
+            (None, Vec::new(), None)
         };
         let mut process_command = command.command(spec);
-        if spec.tools == ToolProfile::Build {
-            process_command.envs(cache_env(&workspace.join(RUN_CACHE), &workspace));
+        if let Some(project) = project {
+            let run_cache = workspace.join(RUN_CACHE);
+            copy_tool_caches(&self.shared_cache(project_id), &run_cache)?;
+            process_command.envs(cache_env(
+                &run_cache,
+                &run_cache,
+                Some(&project.allowed_domains),
+            ));
         }
         process_command.envs(service_env);
         let child = process::spawn_step(process_command, &prompt_file, &raw_path, &stderr_path)?;
@@ -485,7 +556,7 @@ impl Inner {
         let sockets = services::socket_dirs(&services::root_for(project_id), &project.services);
         // Setup fills a cache shared by the project's runs. Everything after it gets one of its
         // own, inside the private copy, so nothing an agent wrote can reach the next run.
-        let shared_cache = self.mirror(project_id).with_file_name("cache");
+        let shared_cache = self.shared_cache(project_id);
         let (profile, cache) = if is_setup {
             std::fs::create_dir_all(&shared_cache)?;
             (
@@ -496,7 +567,7 @@ impl Inner {
                     &sockets,
                     &shared_cache,
                 ),
-                shared_cache,
+                shared_cache.clone(),
             )
         } else {
             (
@@ -530,9 +601,14 @@ impl Inner {
                     .filter(|(name, _)| !name.starts_with("CLAUDE_") && !name.starts_with("BASH_")),
             );
         let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
-        command
-            .envs(cache_env(&cache, &workspace))
-            .envs(service_env);
+        // Setup writes to the project's cache. Any other step works on the run's own copy of it.
+        let cache_vars = if is_setup {
+            cache_env(&cache, &cache, None)
+        } else {
+            copy_tool_caches(&shared_cache, &cache)?;
+            cache_env(&cache, &cache, Some(&project.allowed_domains))
+        };
+        command.envs(cache_vars).envs(service_env);
         let child = process::spawn_step(command, &prompt_file, &raw_path, &stderr_path)?;
         let mut monitor = self.track_process(attempt, child, project_id)?;
         monitor.services = service_set;
@@ -1366,5 +1442,70 @@ fn classify(
             AttemptState::Failed,
             Some(Reason::ExitedWithoutResult { exit_code }),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn var<'a>(env: &'a [(String, String)], name: &str) -> Option<&'a str> {
+        env.iter()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn without_crates_io_cargo_and_go_work_offline() {
+        let env = cache_env(Path::new("/c"), Path::new("/h"), Some(&[]));
+        assert_eq!(var(&env, "CARGO_HOME"), Some("/h/cargo"));
+        assert_eq!(var(&env, "GOPATH"), Some("/h/go"));
+        assert_eq!(var(&env, "CARGO_NET_OFFLINE"), Some("true"));
+        assert_eq!(var(&env, "GOPROXY"), Some("off"));
+    }
+
+    #[test]
+    fn a_project_that_allows_them_is_not_forced_offline() {
+        let domains = ["Index.crates.io".to_owned(), "proxy.golang.org".to_owned()];
+        let env = cache_env(Path::new("/c"), Path::new("/h"), Some(&domains));
+        assert_eq!(var(&env, "CARGO_NET_OFFLINE"), None);
+        assert_eq!(var(&env, "GOPROXY"), None);
+        // A domain that merely ends in the same letters isn't it.
+        let env = cache_env(
+            Path::new("/c"),
+            Path::new("/h"),
+            Some(&["notcrates.io".to_owned()]),
+        );
+        assert_eq!(var(&env, "CARGO_NET_OFFLINE"), Some("true"));
+    }
+
+    #[test]
+    fn setup_has_the_network_and_is_left_alone() {
+        let env = cache_env(Path::new("/c"), Path::new("/c"), None);
+        assert_eq!(var(&env, "CARGO_NET_OFFLINE"), None);
+        assert_eq!(var(&env, "GOPROXY"), None);
+    }
+
+    #[test]
+    fn a_run_copies_the_cache_once_and_never_writes_to_the_shared_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(shared.join("cargo/registry")).unwrap();
+        std::fs::write(shared.join("cargo/registry/dep"), "x").unwrap();
+        let run = dir.path().join("run");
+        copy_tool_caches(&shared, &run).unwrap();
+        assert!(run.join("cargo/registry/dep").exists());
+        assert!(run.join("go").is_dir(), "an empty one when setup left none");
+        std::fs::write(run.join("cargo/registry/mine"), "y").unwrap();
+        std::fs::write(run.join("cargo/registry/dep"), "changed").unwrap();
+        // Another step of the same run keeps what the run has.
+        copy_tool_caches(&shared, &run).unwrap();
+        assert!(run.join("cargo/registry/mine").exists());
+        assert!(!shared.join("cargo/registry/mine").exists());
+        assert_eq!(
+            std::fs::read_to_string(shared.join("cargo/registry/dep")).unwrap(),
+            "x"
+        );
     }
 }
