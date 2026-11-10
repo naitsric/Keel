@@ -2063,6 +2063,7 @@ version = "0.2.1"
 dependencies = [
  "keel-core",
  "libc",
+ "regex",
  "serde",
  "serde_json",
  "sha2",

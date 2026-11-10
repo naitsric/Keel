@@ -2,6 +2,7 @@
 //! looks like this: each rule here comes from something observed in the spike.
 
 pub mod auth;
+pub mod bash_edits;
 pub mod command;
 pub mod github;
 pub mod locate;

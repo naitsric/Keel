@@ -909,6 +909,8 @@ pub fn run() {
             if let Some(home) = std::env::var_os("HOME") {
                 config.runs_dir = std::path::PathBuf::from(home).join(".keel").join("runs");
             }
+            // This same program answers Claude Code's hook, see `main.rs`.
+            config.bash_hook = std::env::current_exe().ok();
             let engine = Engine::new(store.clone(), config, Tools::default(), move |run_id| {
                 let _ = handle.emit(CHANGED_EVENT, run_id);
             });
