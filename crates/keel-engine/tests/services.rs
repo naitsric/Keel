@@ -482,6 +482,87 @@ fn setup_runs_first_and_later_steps_use_their_own_cache() {
 }
 
 #[test]
+fn what_setup_downloads_stays_in_the_project_cache_and_each_run_gets_its_own_copy() {
+    let w = world();
+    w.engine
+        .update_project(
+            &w.project_id,
+            &ProjectSettings {
+                setup_command: Some(
+                    "echo $CARGO_HOME > setup-cargo.txt; mkdir -p \"$CARGO_HOME/registry\" \"$GOPATH/pkg\"; \
+                     test -f \"$CARGO_HOME/registry/dep\" || echo downloaded >> \"$CARGO_HOME/registry/count\"; \
+                     touch \"$CARGO_HOME/registry/dep\" \"$GOPATH/pkg/mod\""
+                        .into(),
+                ),
+                ..ProjectSettings::default()
+            },
+        )
+        .unwrap();
+    let probe = "echo $CARGO_HOME > check-cargo.txt; echo \"[$CARGO_NET_OFFLINE][$GOPROXY]\" > check-offline.txt; \
+                 test -f \"$CARGO_HOME/registry/dep\" && test -f \"$GOPATH/pkg/mod\" || exit 7; \
+                 touch \"$CARGO_HOME/registry/changed-by-check\"";
+    let first = w.run(vec![check("after", probe)]);
+    let after = w.wait_done(&first, "after");
+    assert_eq!(after.state, "succeeded", "{}", w.check_output(&after));
+    let workspace = Path::new(&after.workspace);
+    let shared = std::fs::read_to_string(workspace.join("setup-cargo.txt")).unwrap();
+    let shared = Path::new(shared.trim());
+    let own = std::fs::read_to_string(workspace.join("check-cargo.txt")).unwrap();
+    assert!(
+        shared.starts_with(w.dir.path()) && shared.ends_with("cache/cargo"),
+        "{shared:?}"
+    );
+    assert!(
+        own.trim().starts_with(&*workspace.to_string_lossy()),
+        "{own}"
+    );
+    // Without crates.io among the project's domains, cargo and Go fail at once.
+    let offline = std::fs::read_to_string(workspace.join("check-offline.txt")).unwrap();
+    assert_eq!(offline.trim(), "[true][off]");
+    // What the run changed in its copy never reached the project's cache.
+    assert!(shared.join("registry/dep").exists());
+    assert!(!shared.join("registry/changed-by-check").exists());
+
+    // A second run copies the same cache, without the first run's change, and downloads nothing.
+    let second = w.run(vec![check("after", probe)]);
+    let after = w.wait_done(&second, "after");
+    assert_eq!(after.state, "succeeded", "{}", w.check_output(&after));
+    let attempts = w.store.attempts_of_run(&second).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(shared.join("registry/count"))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "the second setup found it already there"
+    );
+    assert!(attempts.iter().any(|a| a.kind == "setup"));
+    assert!(!shared.join("registry/changed-by-check").exists());
+}
+
+#[test]
+fn a_project_that_allows_crates_io_is_not_forced_offline() {
+    let w = world();
+    w.engine
+        .update_project(
+            &w.project_id,
+            &ProjectSettings {
+                allowed_domains: vec!["index.crates.io".into(), "proxy.golang.org".into()],
+                ..ProjectSettings::default()
+            },
+        )
+        .unwrap();
+    let run = w.run(vec![check(
+        "after",
+        "echo \"[$CARGO_NET_OFFLINE][$GOPROXY]\" > offline.txt",
+    )]);
+    let after = w.wait_done(&run, "after");
+    assert_eq!(after.state, "succeeded", "{}", w.check_output(&after));
+    let text = std::fs::read_to_string(Path::new(&after.workspace).join("offline.txt")).unwrap();
+    assert_eq!(text.trim(), "[][]");
+}
+
+#[test]
 fn a_failed_setup_stops_the_run_before_any_agent_and_can_be_retried() {
     let w = world();
     let flag = w.dir.path().join("setup-may-pass");
