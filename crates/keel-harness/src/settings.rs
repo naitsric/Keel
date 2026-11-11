@@ -65,6 +65,26 @@ pub fn with_read_only(mut settings: Value, folders: &[String]) -> Value {
     settings
 }
 
+/// For a step that can edit: before each Bash command, Claude Code runs `program` (the Keel app)
+/// and gets a refusal for a command that changes the project's files, which is Edit's and Write's
+/// job. Hooks run outside the sandbox, so nothing here has to let the program in.
+pub fn with_bash_hook(mut settings: Value, program: &Path, workspace: &Path) -> Value {
+    settings["hooks"] = json!({
+        "PreToolUse": [{
+            "matcher": "Bash",
+            "hooks": [{
+                "type": "command",
+                // With `args` there's no shell in between, so no path needs quoting.
+                "command": program.to_string_lossy(),
+                "args": [crate::bash_edits::HOOK_ARG, workspace.to_string_lossy()],
+                // A hook that doesn't answer in time lets the command run.
+                "timeout": 10,
+            }],
+        }],
+    });
+    settings
+}
+
 /// Whether these settings let an agent read this folder and change nothing in it. Only then may
 /// `--add-dir` name it.
 pub fn is_read_only(settings: &Value, folder: &str) -> bool {
@@ -245,6 +265,28 @@ mod tests {
             ),
             "readable isn't enough"
         );
+    }
+
+    #[test]
+    fn the_bash_hook_runs_keel_on_each_bash_command_and_leaves_the_rest_alone() {
+        let plain = step_settings(Path::new("/w"), &[], &[], &[]);
+        assert!(plain.get("hooks").is_none());
+        let settings = with_bash_hook(
+            plain.clone(),
+            Path::new("/Applications/Keel.app/Contents/MacOS/keel"),
+            Path::new("/w"),
+        );
+        let group = &settings["hooks"]["PreToolUse"][0];
+        assert_eq!(group["matcher"], "Bash");
+        let hook = &group["hooks"][0];
+        assert_eq!(hook["type"], "command");
+        assert_eq!(
+            hook["command"],
+            "/Applications/Keel.app/Contents/MacOS/keel"
+        );
+        assert_eq!(hook["args"], json!([crate::bash_edits::HOOK_ARG, "/w"]));
+        assert_eq!(settings["sandbox"], plain["sandbox"]);
+        assert_eq!(settings["permissions"], plain["permissions"]);
     }
 
     #[test]

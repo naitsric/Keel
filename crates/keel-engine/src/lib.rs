@@ -112,6 +112,9 @@ pub struct Config {
     pub github_git_base: String,
     /// How long what Keel knows about a pull request is good for, in the background.
     pub pr_look_again: Duration,
+    /// What Claude Code runs before each Bash command of a step that can edit, to turn back the
+    /// ones that change project files. The app points it at itself. Without it, no hook.
+    pub bash_hook: Option<PathBuf>,
 }
 
 impl Config {
@@ -129,6 +132,7 @@ impl Config {
             session_check_limit: auth::CHECK_LIMIT,
             github_git_base: "https://github.com".to_owned(),
             pr_look_again: pull_requests::LOOK_AGAIN,
+            bash_hook: None,
         }
     }
 }
@@ -1895,6 +1899,26 @@ impl Inner {
                     Some(_) => RESUME_PROMPT.to_owned(),
                     None => self.agent_prompt(spec, &run)?,
                 };
+                let can_edit = spec.tools == keel_core::ToolProfile::Build;
+                let mut agent_settings = settings::with_read_only(
+                    settings::step_settings(
+                        &workspace,
+                        &project.allowed_domains,
+                        &project.allowed_read,
+                        // Only steps that run commands get anywhere near a service.
+                        &if can_edit {
+                            services::socket_dirs(&services::root_for(&project.id), &project.services)
+                        } else {
+                            Vec::new()
+                        },
+                    ),
+                    &self.read_only_dirs(run_id, &spec.role)?,
+                );
+                // Builders changed files from Bash even when told to use Edit and Write. Only a
+                // step that can edit has Bash.
+                if can_edit && let Some(program) = &self.config.bash_hook {
+                    agent_settings = settings::with_bash_hook(agent_settings, program, &workspace);
+                }
                 (
                     spec.model.clone(),
                     spec.effort.clone(),
@@ -1902,21 +1926,7 @@ impl Inner {
                     spec.max_turns,
                     spec.max_budget_usd,
                     text,
-                    settings::with_read_only(
-                        settings::step_settings(
-                            &workspace,
-                            &project.allowed_domains,
-                            &project.allowed_read,
-                            // Only steps that run commands get anywhere near a service.
-                            &if spec.tools == keel_core::ToolProfile::Build {
-                                services::socket_dirs(&services::root_for(&project.id), &project.services)
-                            } else {
-                                Vec::new()
-                            },
-                        ),
-                        &self.read_only_dirs(run_id, &spec.role)?,
-                    )
-                    .to_string(),
+                    agent_settings.to_string(),
                     format!("{stem}.jsonl"),
                 )
             }

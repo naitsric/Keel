@@ -248,6 +248,37 @@ echo changed > fixed.txt
 }
 
 #[test]
+fn only_a_step_that_can_edit_has_its_bash_commands_checked() {
+    let body = format!(
+        "cat > /dev/null\n{}\n{OK_RESULT}",
+        init(BUILD_TOOLS, "none")
+    );
+    let keel = "/Applications/Keel.app/Contents/MacOS/keel";
+    let h = harness_with(&body, LOGGED_IN, "2.1.318", |c| {
+        c.bash_hook = Some(PathBuf::from(keel));
+    });
+    let done = [
+        AttemptState::Succeeded,
+        AttemptState::Failed,
+        AttemptState::Blocked,
+    ];
+    let build = h.wait_for(&h.start(ToolProfile::Build), &done);
+    let group = &build.settings["hooks"]["PreToolUse"][0];
+    assert_eq!(group["matcher"], "Bash");
+    assert_eq!(group["hooks"][0]["command"], keel);
+    assert_eq!(group["hooks"][0]["args"][1], build.workspace.as_str());
+    // What the step was launched with, not only what was recorded.
+    let log = h.store.events(&build.id, 0).unwrap();
+    let args = log[0].data["args"].as_array().unwrap();
+    let at = args.iter().position(|a| a == "--settings").unwrap();
+    let file = std::fs::read_to_string(args[at + 1].as_str().unwrap()).unwrap();
+    assert!(file.contains("\"PreToolUse\""), "{file}");
+
+    let read = h.wait_for(&h.start(ToolProfile::ReadOnly), &done);
+    assert!(read.settings.get("hooks").is_none(), "{}", read.settings);
+}
+
+#[test]
 fn the_users_repo_is_never_touched_and_the_clone_has_no_remote() {
     keel_harness::needs!(sandbox);
     let body = format!(
