@@ -648,14 +648,37 @@ fn indent(line: &str) -> usize {
 }
 
 /// The fence a line opens or closes a code block with, if it's one: its character and length.
+/// However indented, since one under a list item is indented with it.
 fn fence(line: &str) -> Option<(char, usize)> {
-    if indent(line) > 3 {
-        return None;
-    }
     let line = line.trim_start();
     let mark = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
     let length = line.chars().take_while(|c| *c == mark).count();
     (length >= 3).then_some((mark, length))
+}
+
+/// A line of only `-`, `*` or `_`, three or more, which breaks one part of a text from the next.
+fn thematic_break(trimmed: &str) -> bool {
+    let mut marks = trimmed.chars().filter(|c| !c.is_whitespace());
+    let Some(first) = marks.next().filter(|c| matches!(c, '-' | '*' | '_')) else {
+        return false;
+    };
+    let rest: Vec<char> = marks.collect();
+    rest.len() >= 2 && rest.iter().all(|c| *c == first)
+}
+
+/// A text without its `<!-- -->` comments, which nobody reads as part of it.
+fn without_comments(text: &str) -> String {
+    let mut kept = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<!--") {
+        kept.push_str(&rest[..start]);
+        rest = match rest[start + 4..].find("-->") {
+            Some(end) => &rest[start + 4 + end + 3..],
+            None => "",
+        };
+    }
+    kept.push_str(rest);
+    kept
 }
 
 /// A list of what was decided, as it's read item by item.
@@ -673,8 +696,13 @@ struct DecidedList {
 impl DecidedList {
     fn end_item(&mut self) {
         if let Some((text, open_task)) = self.item.take() {
-            let text = one_line(&text);
-            let fits = !text.is_empty() && chars(&text) <= MAX_REQUEST_ITEM;
+            let text = one_line(&without_comments(&text));
+            // Markup with no words, such as `[x]` or `**`, says nothing, as an empty template doesn't.
+            let words = text
+                .strip_prefix("[x]")
+                .or_else(|| text.strip_prefix("[X]"));
+            let says_something = words.unwrap_or(&text).chars().any(char::is_alphanumeric);
+            let fits = says_something && chars(&text) <= MAX_REQUEST_ITEM;
             if !open_task && fits && !self.decided.contains(&text) {
                 self.decided.push(text);
             }
@@ -697,13 +725,16 @@ pub(crate) fn decided_in(text: &str) -> Vec<String> {
     let mut list = DecidedList::default();
     let mut code: Option<(char, usize)> = None;
     let mut comment = false;
+    // Whether this line starts a block, as after a blank line. A heading is one only there, or
+    // with `#`: anywhere else it's the end of a sentence.
+    let mut block_start = true;
     for line in text.lines() {
         // A fence ends only with one of the same kind, as long or longer.
         if let Some((mark, length)) = code {
             if fence(line).is_some_and(|(m, n)| m == mark && n >= length)
                 && line.trim().chars().all(|c| c == mark)
             {
-                code = None;
+                (code, block_start) = (None, true);
             }
             continue;
         }
@@ -713,13 +744,14 @@ pub(crate) fn decided_in(text: &str) -> Vec<String> {
         }
         let trimmed = line.trim();
         let depth = indent(line);
+        // Code, a comment or a quote is never part of an item. Code ends the list.
         if let Some(opened) = fence(line) {
             list.end();
             code = Some(opened);
             continue;
         }
-        if depth <= 3 && trimmed.starts_with("<!--") {
-            comment = !trimmed[4..].contains("-->");
+        if let Some(opened) = trimmed.strip_prefix("<!--") {
+            comment = !opened.contains("-->");
             continue;
         }
         if trimmed.is_empty() {
@@ -727,18 +759,23 @@ pub(crate) fn decided_in(text: &str) -> Vec<String> {
             if list.item.is_some() {
                 list.end();
             }
+            block_start = true;
             continue;
         }
+        // A quote, a tag on its own line such as one that closes an issue, or a break.
+        let tag = trimmed.starts_with('<') && trimmed.ends_with('>');
+        if trimmed.starts_with('>') || tag || thematic_break(trimmed) {
+            list.end();
+            block_start = thematic_break(trimmed);
+            continue;
+        }
+        let starts_block = std::mem::replace(&mut block_start, false);
         if let (Some((item, _)), Some(at)) = (&mut list.item, list.items_at)
             && depth > at
         {
             item.push(' ');
             item.push_str(trimmed);
-            continue;
-        }
-        // Code, a quote, or a tag on its own line, such as one that closes an issue.
-        let tag = trimmed.starts_with('<') && trimmed.ends_with('>');
-        if depth >= 4 || trimmed.starts_with('>') || tag {
+        } else if depth >= 4 {
             list.end();
         } else if let Some(said) = list_item(line) {
             if list.open {
@@ -746,11 +783,12 @@ pub(crate) fn decided_in(text: &str) -> Vec<String> {
                 list.items_at.get_or_insert(depth);
                 list.item = Some((said.to_owned(), said.starts_with("[ ]")));
             }
-        } else if is_decided_heading(line) {
+        } else if is_decided_heading(line) && (starts_block || trimmed.starts_with('#')) {
             list.end();
             list.open = true;
         } else if trimmed.starts_with('#') {
             list.end();
+            block_start = true;
         } else if let Some((item, _)) = &mut list.item {
             item.push(' ');
             item.push_str(trimmed);
@@ -764,7 +802,7 @@ pub(crate) fn decided_in(text: &str) -> Vec<String> {
 
 /// What the request decided, as lines of `decided` that say so and who wrote them. Where two
 /// pieces say the same, it's the first one's.
-fn from_request(written: &[Written]) -> Vec<Decided> {
+pub(crate) fn from_request(written: &[Written]) -> Vec<Decided> {
     let mut decided: Vec<Decided> = Vec::new();
     for piece in written {
         for text in decided_in(&piece.text) {
@@ -1024,6 +1062,31 @@ pub fn answer_lines(given: &[GivenAnswer]) -> String {
         .map(|a| format!("- {}", decided_line(&a.asked, &a.answer)))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+const ALREADY_DECIDED_EN: &str = "Keel already adds these decisions from the request, so don't repeat them in `decided`:\n{{decided}}\nAnything else the request treats as decided, copy into `decided` as usual.";
+const ALREADY_DECIDED_ES: &str = "Keel ya agrega estas decisiones del pedido; no las repitas en `decided`:\n{{decided}}\nCualquier otra cosa que el pedido dé por decidida, cópiala en `decided` como siempre.";
+
+/// What a specifier is told Keel adds from the request itself, word for word, so it repeats none
+/// of it and copies the rest as ever. Nothing when Keel adds nothing. What a person typed reaches
+/// the agent as text, and expands nothing.
+pub(crate) fn already_decided_prompt(decided: &[Decided], language: &str) -> Option<String> {
+    if decided.is_empty() {
+        return None;
+    }
+    let template = if language.starts_with("es") {
+        ALREADY_DECIDED_ES
+    } else {
+        ALREADY_DECIDED_EN
+    };
+    let lines = decided
+        .iter()
+        .map(|decided| format!("- {}", decided.text))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(prompts::render(template, |name| {
+        (name == "decided").then(|| lines.clone())
+    }))
 }
 
 const ANSWERED_EN: &str = "The person answered your questions:\n{{answers}}\n\nAnswer again in the same structure, with `criteria` reflecting what they said. You've already read the code, so read more only if an answer needs something new. Take what they answered out of `questions`, and ask something new only if their answer raises a decision that still meets the rules for asking.";
@@ -1684,6 +1747,67 @@ mod tests {
             decided_in("Decided:\n- [ ] Open thing\n  that goes on.\n- [x] Old threads stay."),
             ["[x] Old threads stay."]
         );
+    }
+
+    #[test]
+    fn a_heading_starts_a_block_and_is_never_the_end_of_a_sentence() {
+        assert!(
+            decided_in(
+                "Count the threads. The team has not\ndecided:\n- whether old threads count"
+            )
+            .is_empty()
+        );
+        // One with `#` starts a block wherever it is.
+        assert_eq!(
+            decided_in("Some context.\n## Decided\n- It stays."),
+            ["It stays."]
+        );
+    }
+
+    #[test]
+    fn markup_and_template_text_is_not_a_decision() {
+        assert_eq!(
+            decided_in(
+                "Decided:\n- [x]\n- -\n- **\n- <!-- list what is already decided -->\n- It stays. <!-- why: the export -->"
+            ),
+            ["It stays."]
+        );
+        // A line of only `*`, `-` or `_` is a break that ends the list.
+        assert_eq!(
+            decided_in("Decided:\n- It stays.\n* * *\n- Not this."),
+            ["It stays."]
+        );
+    }
+
+    #[test]
+    fn code_a_quote_or_a_comment_under_an_item_is_never_part_of_it() {
+        let fenced =
+            "Decided:\n- It stays.\n  ```\n  drop table threads;\n  ```\n- Not after code.";
+        assert_eq!(decided_in(fenced), ["It stays."]);
+        let quoted = "Decided:\n- It stays.\n  > a customer said to drop it\n- Not after a quote.";
+        assert_eq!(decided_in(quoted), ["It stays."]);
+        let commented = "Decided:\n- It stays.\n  <!-- drop it later -->\n- It counts.";
+        assert_eq!(decided_in(commented), ["It stays.", "It counts."]);
+    }
+
+    #[test]
+    fn the_specifier_is_told_exactly_what_keel_adds_and_nothing_when_it_adds_nothing() {
+        let decided = from_request(&typed(
+            "Decided:\n- Old threads stay.\n- {{request}} stays.",
+        ));
+        let en = already_decided_prompt(&decided, "en").unwrap();
+        assert_eq!(
+            en,
+            "Keel already adds these decisions from the request, so don't repeat them in `decided`:\n- Old threads stay.\n- {{request}} stays.\nAnything else the request treats as decided, copy into `decided` as usual."
+        );
+        let es = already_decided_prompt(&decided, "es").unwrap();
+        assert!(
+            es.starts_with("Keel ya agrega estas decisiones del pedido; no las repitas en `decided`:\n- Old threads stay.")
+        );
+        assert!(es.ends_with(
+            "Cualquier otra cosa que el pedido dé por decidida, cópiala en `decided` como siempre."
+        ));
+        assert_eq!(already_decided_prompt(&[], "en"), None);
     }
 
     #[test]

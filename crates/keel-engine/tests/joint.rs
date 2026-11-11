@@ -1452,8 +1452,16 @@ fn a_part_keeps_what_the_request_of_its_change_decided_and_who_wrote_it() {
     keel_harness::needs!(sandbox);
     let w = world();
     w.short_workflows();
+    // The agent that agrees on it writes a list of its own into the part, which isn't the person's.
+    let agreed_with_a_list = agreed(&[
+        (
+            "valora",
+            "Sends the token.\n\nDecided:\n- Valora needs no login.",
+        ),
+        ("app", "Reads the token"),
+    ]);
     w.answers(&[
-        both(),
+        agreed_with_a_list,
         plain("Valora sends the token"),
         json!({}),
         json!({}),
@@ -1481,6 +1489,13 @@ fn a_part_keeps_what_the_request_of_its_change_decided_and_who_wrote_it() {
     assert_eq!(
         spec.output.unwrap()["decided"],
         json!([{ "text": "The token travels in a header.", "taken": "request", "assistant": "client" }])
+    );
+    assert!(
+        spec.prompt.contains(
+            "don't repeat them in `decided`:\n- The token travels in a header.\nAnything else"
+        ),
+        "{}",
+        spec.prompt
     );
 }
 

@@ -327,9 +327,12 @@ const MIGRATIONS: &[&str] = &[
     alter table run add column extra_read text not null default '[]';
 "#,
     // 17: Who wrote what a card says: the assistant that started a run from outside, or null for
-    // a person. A person who changes it makes it theirs.
+    // a person. A person who changes it makes it theirs. A card from before is the assistant's
+    // whose run it has.
     r#"
     alter table card add column body_by text;
+    update card set body_by = (select started_by from run where run.id = card.run_id)
+    where run_id is not null;
 "#,
 ];
 
@@ -4393,6 +4396,52 @@ mod tests {
                 .unwrap()
         );
         assert_eq!(by(), None);
+    }
+
+    #[test]
+    fn a_card_from_before_keel_kept_who_wrote_it_is_the_assistant_s_whose_run_it_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        {
+            let store = Store::open(&path).unwrap();
+            seeded(&store);
+            store
+                .add_run(&NewRun {
+                    id: "from-outside".into(),
+                    project_id: "p".into(),
+                    title: "Export".into(),
+                    request: "Export".into(),
+                    workflow: "[]".into(),
+                    language: "en".into(),
+                    source_issue: None,
+                    workflow_id: None,
+                    workflow_name: None,
+                    started_by: Some("Claude Code".into()),
+                })
+                .unwrap();
+            for id in ["theirs", "mine", "never-ran"] {
+                card(&store, id);
+            }
+            let conn = store.lock();
+            conn.execute_batch(
+                "update card set run_id = 'from-outside' where id = 'theirs';
+                 update card set run_id = 'r' where id = 'mine';",
+            )
+            .unwrap();
+        }
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "pragma user_version = 16;
+                 alter table card drop column body_by;",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let by = |id: &str| store.card(id).unwrap().body_by;
+        assert_eq!(by("theirs").as_deref(), Some("Claude Code"));
+        assert_eq!(by("mine"), None);
+        assert_eq!(by("never-ran"), None);
     }
 
     #[test]

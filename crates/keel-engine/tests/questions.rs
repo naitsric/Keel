@@ -675,6 +675,16 @@ fn an_issue_counts_only_from_the_project_s_account_and_what_was_added_stays_apar
         ])
     );
     assert_eq!(w.decided(&from_theirs), json!([]), "someone else's issue");
+
+    // The specifier is told exactly what Keel adds, and nothing when it adds nothing, so it copies
+    // the rest as it always has.
+    let told = w.step(&from_mine, "spec").prompt;
+    assert!(
+        told.contains("Keel already adds these decisions from the request, so don't repeat them in `decided`:\n- Old threads stay as they are.\n- Critical ones count.\n"),
+        "{told}"
+    );
+    let told = w.step(&from_theirs, "spec").prompt;
+    assert!(!told.contains("Keel already adds"), "{told}");
 }
 
 #[test]

@@ -2123,6 +2123,14 @@ impl Inner {
             StepRole::Reviewer | StepRole::Verifier | StepRole::Approver { .. }
         );
         let mut text = self.render_prompt(&spec.prompt, run, judging)?;
+        // What Keel adds from the request itself, the specifier has to know of to leave it out,
+        // whatever a saved workflow's prompt says.
+        if spec.role == StepRole::Specifier {
+            let decided = specs::from_request(&self.written_in_request(&run.id));
+            if let Some(told) = specs::already_decided_prompt(&decided, &run.language) {
+                text.push_str(&format!("\n\n{told}"));
+            }
+        }
         if spec.role == StepRole::Worker && spec.tools == keel_core::ToolProfile::Build {
             let attempts = self.store.attempts_of_run(&run.id)?;
             if workflows::returned_before(&attempts, run.round) {
