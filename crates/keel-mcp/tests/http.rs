@@ -2,7 +2,6 @@
 //! port, with the real engine and a fake `claude`.
 
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -127,8 +126,7 @@ async fn world() -> World {
     let bin = dir.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
     let claude = bin.join("claude");
-    std::fs::write(&claude, fake_claude()).unwrap();
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    keel_harness::testing::write_script(&claude, &fake_claude()).unwrap();
 
     let repo = dir.path().join("app");
     std::fs::create_dir(&repo).unwrap();

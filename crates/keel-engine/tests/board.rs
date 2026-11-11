@@ -3,7 +3,6 @@
 //! then only do what a person can do, unless a test is about a single tick.
 
 use std::collections::BTreeSet;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -55,8 +54,7 @@ fn git(repo: &Path, args: &[&str]) -> String {
 }
 
 fn write_script(path: &Path, text: &str) {
-    std::fs::write(path, text).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    keel_harness::testing::write_script(path, text).unwrap();
 }
 
 /// A `card-N` in the prompt says which card this is, which is how a test holds one back or makes
@@ -771,10 +769,16 @@ fn a_run_from_outside_holds_a_place_so_todo_waits_for_it() {
     let w = world();
     w.use_one_step();
     w.engine.set_max_agents(1).unwrap();
+    // Its agent waits, so the run is still in progress when the board looks.
+    w.flag("hold");
     let workflow = answer_step(&w.engine, &w.project_id);
     let run = w
         .engine
-        .start_run_on_board(outside_run(&w, steps_of(&w, &workflow), "From outside"))
+        .start_run_on_board(outside_run(
+            &w,
+            steps_of(&w, &workflow),
+            "card-1 from outside",
+        ))
         .unwrap();
     let card = w.store.card_of_run(&run).unwrap().unwrap();
     assert_eq!(w.card(&card).column, BoardColumn::InProgress);
@@ -785,6 +789,7 @@ fn a_run_from_outside_holds_a_place_so_todo_waits_for_it() {
     std::thread::sleep(A_MOMENT);
     assert_eq!(w.card(&queued).column, BoardColumn::Todo);
     assert_eq!(w.store.runs(10).unwrap().len(), 1);
+    w.flag("go-card-1");
 }
 
 #[test]

@@ -2,11 +2,15 @@
 //! a step's sandbox, and there macOS refuses to start another sandbox, to open local sockets and
 //! to run setuid programs such as `ps`. Those tests say so and stop, instead of failing for a
 //! reason that has nothing to do with the change. Anywhere else they run in full.
+//!
+//! It also writes the scripts tests run in place of `claude` and other tools.
 
 use std::io::{ErrorKind, Write};
 use std::net::TcpListener;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
-use std::process::Command;
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 /// What `sandbox-exec` says when macOS won't start a sandbox inside another one.
@@ -85,6 +89,22 @@ pub fn skipped(why: &str) {
     let thread = std::thread::current();
     let test = thread.name().unwrap_or("a test");
     let _ = writeln!(std::io::stderr(), "skipped {test}: {why}");
+}
+
+/// Writes an executable script for a test, such as a fake `claude`. macOS checks a new executable
+/// the first time it runs, and on a busy Mac that has taken from under a second to minutes, while
+/// later runs of the same file take milliseconds, even after it's rewritten. So the file first runs
+/// once as an empty script, here, where nothing is timed, and only then gets `text`. A test's time
+/// limit then measures the script, not that check, and the script itself never runs early.
+pub fn write_script(path: &Path, text: &str) -> std::io::Result<()> {
+    std::fs::write(path, "#!/bin/sh\n")?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
+    Command::new(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    std::fs::write(path, text)
 }
 
 /// Ends the test right here, saying why, if the sandbox it runs in takes away what it needs:
