@@ -68,6 +68,139 @@ describe("a decision on the Brain page", () => {
   });
 });
 
+describe("the project the Brain page shows", () => {
+  let root: Root;
+  const brainOf = (projectId: string): BrainView => ({ ...brain, decisions: [{ seq: 1, at: "2026-11-04T10:00:00Z", answer: "reject", question: null, text: `Decided in ${projectId}`, included: true }] });
+  const answer = (_: string, args: unknown) => brainOf((args as { projectId: string }).projectId);
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    useApp.setState({
+      overview: { ...useApp.getState().overview, projects: [{ id: "p1", name: "demo" }, { id: "p2", name: "other" }] as never },
+      brainProjectId: "p1",
+    });
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.replaceChildren();
+    useApp.setState({ brainProjectId: null });
+  });
+
+  const open = () => act(async () => root.render(<BrainPage />));
+  const shown = () => document.querySelector("select")?.value;
+  const page = () => document.body.textContent ?? "";
+  // What "Open the Brain" in a project's setup does.
+  const sendTo = (projectId: string) =>
+    act(async () => {
+      useApp.setState({ brainProjectId: projectId });
+      useApp.getState().navigate({ name: "brain" });
+    });
+  const pick = (projectId: string) =>
+    act(async () => {
+      const select = document.querySelector("select") as HTMLSelectElement;
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set?.call(select, projectId);
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+  it("moves to another project sent to it while it's open", async () => {
+    mockIPC(answer);
+    await open();
+    expect(shown()).toBe("p1");
+    expect(page()).toContain("Decided in p1");
+    await sendTo("p2");
+    expect(shown()).toBe("p2");
+    expect(page()).toContain("Decided in p2");
+    expect(page()).not.toContain("Decided in p1");
+  });
+
+  it("moves back to a project sent to it before, after the person picked another", async () => {
+    mockIPC(answer);
+    await open();
+    await pick("p2");
+    expect(page()).toContain("Decided in p2");
+    await sendTo("p1");
+    expect(shown()).toBe("p1");
+    expect(page()).toContain("Decided in p1");
+  });
+
+  it("ignores a project's answer that arrives after another project is on screen", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    mockIPC(async (command, args) => {
+      if ((args as { projectId: string }).projectId === "p1") await held;
+      return answer(command, args);
+    });
+    await open();
+    await sendTo("p2");
+    expect(page()).toContain("Decided in p2");
+    await act(async () => release());
+    expect(shown()).toBe("p2");
+    expect(page()).toContain("Decided in p2");
+    expect(page()).not.toContain("Decided in p1");
+  });
+});
+
+describe("writing the map", () => {
+  let root: Root;
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    useApp.setState({ overview: { ...useApp.getState().overview, projects: [{ id: "p1", name: "demo" }] as never }, brainProjectId: "p1" });
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.replaceChildren();
+    useApp.setState({ brainProjectId: null });
+  });
+
+  const write = () => act(async () => [...document.querySelectorAll("button")].find((b) => b.textContent === "Write the map")?.click());
+
+  it("starts one run on a double click, and stays off until the page shows that run", async () => {
+    const overview = useApp.getState().overview;
+    let started = 0;
+    let mapRun: string | null = null;
+    let finish!: (run: string) => void;
+    let reloaded: Promise<void> | null = null;
+    let release!: () => void;
+    mockIPC(async (command) => {
+      if (command === "overview") return overview;
+      if (command === "brain_get") {
+        if (reloaded) await reloaded;
+        return { ...brain, mapRun };
+      }
+      if (command === "brain_generate_map") {
+        started += 1;
+        return new Promise<string>((resolve) => (finish = (run) => resolve((mapRun = run))));
+      }
+      return null;
+    });
+    await act(async () => root.render(<BrainPage />));
+
+    await write();
+    await write();
+    expect(started).toBe(1);
+
+    // The run exists, but the page hasn't loaded it yet.
+    reloaded = new Promise<void>((resolve) => (release = resolve));
+    await act(async () => finish("r9"));
+    await write();
+    expect(started).toBe(1);
+
+    await act(async () => release());
+    expect(document.body.textContent).toContain(i18next.t("brain.mapRunning"));
+    await write();
+    expect(started).toBe(1);
+  });
+});
+
 describe("the Brain page in a wide window", () => {
   let root: Root;
 

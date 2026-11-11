@@ -22,7 +22,7 @@ interface AppState {
   overviewLoaded: boolean;
   newRunOpen: boolean;
   projectSetup: ProjectSetupRequest | null;
-  /** The project the Brain page opens on, when something sent the person there for it. */
+  /** The project the Brain page shows. Whatever sends the person there for a project sets it, also while the page is open. */
   brainProjectId: string | null;
   quitOpen: boolean;
   /** Notes on approvals not answered yet, per attempt, so leaving the page doesn't drop them. */

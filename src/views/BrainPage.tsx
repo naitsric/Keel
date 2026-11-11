@@ -101,11 +101,13 @@ export function BrainPage() {
   const projects = useApp((s) => s.overview.projects);
   const revision = useApp((s) => s.revision);
   const refreshOverview = useApp((s) => s.refreshOverview);
-  const wanted = useApp((s) => s.brainProjectId);
-  const [projectId, setProjectId] = useState(wanted ?? "");
+  // In the store, not only read when the page opens, so "Open the Brain" moves it while it's open.
+  const projectId = useApp((s) => s.brainProjectId) ?? "";
+  const setProjectId = (id: string) => useApp.setState({ brainProjectId: id });
   const [brain, setBrain] = useState<BrainView | null>(null);
   const [model, setModel] = useState("sonnet");
   const [error, setError] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
 
   useEffect(() => {
     if (projects.length > 0 && !projects.some((p) => p.id === projectId)) setProjectId(projects[0].id);
@@ -113,7 +115,9 @@ export function BrainPage() {
 
   const load = useCallback(async () => {
     if (!projectId) return;
-    setBrain(await api.brainGet(projectId));
+    const loaded = await api.brainGet(projectId);
+    // Another project may be on screen by the time it arrives.
+    if (useApp.getState().brainProjectId === projectId) setBrain(loaded);
   }, [projectId]);
 
   useEffect(() => {
@@ -122,13 +126,15 @@ export function BrainPage() {
 
   const changed = () => {
     setError(null);
-    void load();
     void refreshOverview();
+    return load();
   };
-  const act = (action: () => Promise<unknown>) => {
-    action().then(changed, (e) => setError(errorText(t, e)));
+  const act = (action: () => Promise<unknown>) => action().then(changed).catch((e) => setError(errorText(t, e)));
+  // Off until the page shows the run it started, so a second click can't start another.
+  const generate = () => {
+    setGenerating(true);
+    void act(() => api.brainGenerateMap(projectId, model, i18n.language)).finally(() => setGenerating(false));
   };
-  const generate = () => act(() => api.brainGenerateMap(projectId, model, i18n.language));
 
   const staleCount = brain?.map.filter((n) => n.stale).length ?? 0;
   const over = brain ? brain.used > brain.limit || brain.mapUsed > brain.mapLimit : false;
@@ -207,7 +213,7 @@ export function BrainPage() {
                     <div className="w-44">
                       <ModelField label={t("newRun.model")} value={model} onChange={setModel} />
                     </div>
-                    <Button disabled={!model || brain.mapRun !== null} onClick={generate}>
+                    <Button disabled={!model || generating || brain.mapRun !== null} onClick={generate}>
                       <RefreshCw size={13} />
                       {brain.map.length === 0 ? t("brain.mapGenerate") : t("brain.mapRegenerate")}
                     </Button>
