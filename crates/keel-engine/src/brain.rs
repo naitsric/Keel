@@ -478,6 +478,14 @@ impl Engine {
     /// Has an agent read the project and write its map. A run like any other, so every part of it
     /// can be audited. Asking twice gets the one already underway.
     pub fn generate_map(&self, project_id: &str, model: &str, language: &str) -> Result<String> {
+        // Held from looking for one until the new one is recorded, or two requests at once could
+        // each start a map. One per project, since `start_run` first reads the session, which can
+        // take seconds, and other projects needn't wait for that.
+        let lock = locked(&self.inner.starting_map)
+            .entry(project_id.to_owned())
+            .or_default()
+            .clone();
+        let _starting = locked(&lock);
         if let Some(run) = self.inner.open_map_run(project_id)? {
             return Ok(run);
         }

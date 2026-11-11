@@ -358,6 +358,8 @@ struct Inner {
     /// One lock for each project being fetched to read and each run making its copies. See
     /// `joint::prepare_read_copies`.
     read_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One lock for each project starting its map. See `Engine::generate_map`.
+    starting_map: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 #[derive(Clone)]
@@ -425,6 +427,7 @@ impl Engine {
                 advancing: Mutex::new(()),
                 creating_workspace: Mutex::new(()),
                 read_locks: Mutex::default(),
+                starting_map: Mutex::default(),
             }),
         }
     }
