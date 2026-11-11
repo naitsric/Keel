@@ -364,6 +364,15 @@ export interface Verdict {
   unchecked?: string[];
 }
 
+/** A line of what the specification decided on its own that a review questions, and why. */
+export interface Questioned {
+  /** The line, quoted, maybe in other words. */
+  decided: string;
+  /** Its place in the list, from 1. Older answers don't have it, and an agent can get it wrong. */
+  number?: number;
+  why: string;
+}
+
 /** The approver's answer. */
 export interface Decision_ {
   decision: "approve" | "rework";
@@ -371,7 +380,7 @@ export interface Decision_ {
   reasons: string;
   instructions: string;
   /** What the specification decided on its own that a review questions, for the person to settle. Older answers don't have it. */
-  questioned?: { decided: string; why: string }[];
+  questioned?: Questioned[];
   overriddenByPerson?: boolean;
 }
 

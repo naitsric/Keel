@@ -98,8 +98,14 @@ const fittingSteps: WorkflowStep[] = [
   { type: "approval", id: "approval" },
   { type: "deliver", id: "pull-request" },
 ];
+// unchecked=1 has the code review say what it couldn't check by reading the code, which the approval
+// and the run once delivered show as not proven: view=run&unchecked=1, and with flow=delivered after
+// it. questioned=1 has the approver question what the specifier decided alone, so what was asked
+// comes from a specifier, as with specifier=1. Without flow=, either one opens the approval.
+const uncheckedShown = params.get("unchecked") === "1";
+const questionedShown = params.get("questioned") === "1";
 const workflow: WorkflowStep[] = [
-  { ...agentStep("spec", "opus", "readOnly"), ...(params.get("specifier") === "1" || params.get("flow") === "questions" || params.get("flow") === "corrected" ? { role: { kind: "specifier" as const } } : {}) },
+  { ...agentStep("spec", "opus", "readOnly"), ...(params.get("specifier") === "1" || questionedShown || params.get("flow") === "questions" || params.get("flow") === "corrected" ? { role: { kind: "specifier" as const } } : {}) },
   agentStep("builder", "sonnet", "build"),
   { type: "check", id: "check", run: "make test" },
   ...(verifyShown ? [verifyStep] : []),
@@ -109,7 +115,7 @@ const workflow: WorkflowStep[] = [
   { type: "deliver", id: "pull-request" },
 ];
 const delivered = params.get("flow") === "delivered";
-const waiting = params.get("flow") === "approval" || params.get("flow") === "limit" || delivered;
+const waiting = params.get("flow") === "approval" || params.get("flow") === "limit" || delivered || (!params.has("flow") && (uncheckedShown || questionedShown));
 // Variants of an approval: check=none, reviews=none, changes=none (the run changed nothing), long=1
 // (text that would push the buttons away, what was asked included), gate=build (asks before building,
 // where what was asked is already what the card shows), gate=end (never delivers). asked=none has no
@@ -183,10 +189,21 @@ const previewSpec = {
     { text: say("Keeps the rounding as it is today, because nothing asked to change it.", "Deja el redondeo como está hoy, porque nada pidió cambiarlo.") },
     { text: say("If `whole` is 0, what should happen? Show an error, as today", "Si `whole` es 0, ¿qué debe pasar? Mostrar error, como hoy"), taken: "person" },
     ...(params.get("taken") === "1" ? [{ text: say("Should the total round up? Leave it as it is", "¿El total debe redondear hacia arriba? Dejarlo como está"), taken: "roundsLimit" }] : []),
+    ...(questionedShown ? [{ text: say("Sorts the invoices by date, as the list does today.", "Ordena las facturas por fecha, como la lista de hoy.") }] : []),
   ],
   questions: [],
 };
-const useSpecifier = params.get("specifier") === "1";
+// What questioned=1 has the approver question. The first names its line by its number and quotes it in
+// other words. The second quotes its line as it is, with no number, like an answer from before there
+// were numbers. The third quotes no line, and its number is past the end, so it goes after the list.
+const previewQuestioned = [
+  { decided: say("Rounding stays the same", "El redondeo sigue igual"), number: 1, why: say("Totals on invoices with a discount now drift by a cent.", "Los totales de las facturas con descuento ahora se corren un centavo.") },
+  { decided: say("“sorts the invoices by date, as the list does today”", "“ordena las facturas por fecha, como la lista de hoy”"), why: say("The export sorts them by number, so the two no longer agree.", "La exportación las ordena por número, así que ya no coinciden.") },
+  { decided: say("Sends the receipt by email", "Manda el recibo por correo"), number: previewSpec.decided.length + 1, why: say("Nothing in the request asks for an email.", "Nada en el pedido pide un correo.") },
+];
+// unchecked=1: what the code review couldn't check by reading the code.
+const previewUnchecked = uncheckedShown ? [say("How the invoices page shows the new totals", "Cómo se ven los totales nuevos en la página de facturas"), say("That the export still opens in the accounting app", "Que la exportación siga abriendo en el programa de contabilidad")] : [];
+const useSpecifier = params.get("specifier") === "1" || questionedShown;
 const specAttempt: Attempt = { ...attempt, id: "a0", stepId: "spec", role: useSpecifier ? "specifier" : "worker", tools: "readOnly", state: "succeeded", reason: null, modelActual: "claude-opus-5-5", filesChanged: null, output: useSpecifier ? (previewSpec as unknown as Attempt["output"]) : null, resultText: useSpecifier ? "" : long ? askedLong : "1. add returns the sum.\n2. The tests pass.", finishedAt: at(2) };
 const previewQuestions = [
   {
@@ -235,9 +252,9 @@ const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "ch
 const approvalAttempt: Attempt = { ...attempt, id: "a3", stepId: "approval", kind: "approval", tools: "none", round, state: delivered ? "succeeded" : "waitingApproval", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, rawSha256: null, finishedAt: delivered ? at(0) : null };
 const prAttempt: Attempt = { ...attempt, id: "a4", stepId: "pull-request", kind: "deliver", tools: "none", state: "succeeded", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: "https://github.com/acme/app/pull/12", rawSha256: null, finishedAt: at(0) };
 const reworkAttempt: Attempt = { ...builtAttempt, id: "a1b", number: 2, round: 1, resultText: "I added the role check the security review asked for, in app/api.py.\n\nTests: `make test` passes." };
-const reviewer = (id: string, verdict: "approved" | "changes", summary: string, findings: string[]): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "succeeded", reason: null, tools: "readOnly", filesChanged: null, resultText: null, finishedAt: at(1), output: { verdict, findings, summary } as Attempt["output"] });
+const reviewer = (id: string, verdict: "approved" | "changes", summary: string, findings: string[], unchecked: string[] = []): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "succeeded", reason: null, tools: "readOnly", filesChanged: null, resultText: null, finishedAt: at(1), output: { verdict, findings, summary, unchecked } as Attempt["output"] });
 const skippedReviewer = (id: string): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "skipped", reason: { code: "noMatchingPaths", paths: ["**/*.tsx"] }, tools: "readOnly", filesChanged: null, resultText: null, modelActual: null, finishedAt: at(1), output: null });
-const approverAttempt = (decision: "approve" | "rework"): Attempt => ({ ...attempt, id: "r-approver", stepId: "approver", role: "approver", round, state: params.get("flow") === "limit" ? "blocked" : "succeeded", reason: params.get("flow") === "limit" ? { code: "reworkLimit", rounds: 2 } : null, tools: "readOnly", modelActual: "claude-opus-5-5", filesChanged: null, resultText: null, finishedAt: at(1), output: { decision, risk: params.get("risk") ?? "medium", reasons: long ? "The security finding is real: the new endpoint skips the role check, and the same pattern repeats in every handler. ".repeat(6) : "The security finding is real: the new endpoint skips the role check.", instructions: "Add the role check.", overriddenByPerson: params.get("override") === "1" } as Attempt["output"] });
+const approverAttempt = (decision: "approve" | "rework"): Attempt => ({ ...attempt, id: "r-approver", stepId: "approver", role: "approver", round, state: params.get("flow") === "limit" ? "blocked" : "succeeded", reason: params.get("flow") === "limit" ? { code: "reworkLimit", rounds: 2 } : null, tools: "readOnly", modelActual: "claude-opus-5-5", filesChanged: null, resultText: null, finishedAt: at(1), output: { decision, risk: params.get("risk") ?? "medium", reasons: long ? "The security finding is real: the new endpoint skips the role check, and the same pattern repeats in every handler. ".repeat(6) : "The security finding is real: the new endpoint skips the role check.", instructions: "Add the role check.", overriddenByPerson: params.get("override") === "1", ...(questionedShown ? { questioned: previewQuestioned } : {}) } as Attempt["output"] });
 const verifiedItems = () => {
   const longWords = (text: string, limit: number) => atLimit(text, limit);
   const item = (id: string, when: string, then: string, result: "met" | "unmet" | "unverified", evidence: string, corrected?: string) => ({ id, when: longWords(when, 100), then: longWords(then, 100), result, evidence: long ? `${evidence} ${"x".repeat(140)}`.slice(0, 140) : evidence, ...(corrected ? { corrected } : {}) });
@@ -263,7 +280,7 @@ const reviews: Attempt[] = [
   reviewer("security", params.get("findings") === "1" ? "changes" : "approved", params.get("findings") === "1" ? "The new endpoint skips the role check." : "No problems in authorization, logs or input handling.", params.get("findings") === "1" ? ["app/api.py:42 doesn't call require_role"] : []),
   skippedReviewer("ux"),
   skippedReviewer("ui"),
-  reviewer("code", "approved", "It meets each criterion, and the tests prove it.", []),
+  reviewer("code", "approved", "It meets each criterion, and the tests prove it.", [], previewUnchecked),
   approverAttempt(params.get("findings") === "1" ? "rework" : "approve"),
 ];
 const built = [builtAttempt, ...(round > 0 ? [reworkAttempt] : [])];

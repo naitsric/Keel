@@ -18,7 +18,7 @@ use crate::{brain, prompts, sizing, specs, verification};
 const MAX_ROUNDS: u32 = 5;
 
 pub const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"verdict":{"type":"string","enum":["approved","changes"]},"findings":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"},"unread":{"type":"array","items":{"type":"string"},"description":"Each file of the change you could not read, if any. A review that left one out is not an approval."},"unchecked":{"type":"array","items":{"type":"string"},"description":"Each thing in this change you could not check by reading the code, such as how it looks on screen, in one line, if any. Keel shows them to the person as not proven."}},"required":["verdict","findings","summary","unread","unchecked"],"additionalProperties":false}"#;
-pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"},"questioned":{"type":"array","items":{"type":"object","properties":{"decided":{"type":"string"},"why":{"type":"string"}},"required":["decided","why"],"additionalProperties":false},"description":"Each thing the specification decided on its own that a finding questions, quoted as `decided` says it, and why it does not hold. A person decides these at the approval, so none is a reason for rework."}},"required":["decision","risk","reasons","instructions","questioned"],"additionalProperties":false}"#;
+pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"},"questioned":{"type":"array","items":{"type":"object","properties":{"decided":{"type":"string"},"number":{"type":"integer","description":"The `number` that decision has in `decided`."},"why":{"type":"string"}},"required":["decided","number","why"],"additionalProperties":false},"description":"Each thing the specification decided on its own that a finding questions, quoted as `decided` says it, with the `number` it has there, and why it does not hold. A person decides these at the approval, so none is a reason for rework."}},"required":["decision","risk","reasons","instructions","questioned"],"additionalProperties":false}"#;
 
 /// What a reviewer answered, as Keel keeps it. One that says it couldn't read part of the change
 /// didn't review all of it, so it's never an approval, whatever it says. `None` if it stands.
@@ -337,9 +337,25 @@ pub fn output_of(attempts: &[Attempt], step_id: &str) -> String {
         return "(skipped: nothing it covers changed)".to_owned();
     }
     match &attempt.output {
+        Some(output) if attempt.role == "specifier" => numbered_decided(output).to_string(),
         Some(output) => output.to_string(),
         None => attempt.result_text.clone().unwrap_or_default(),
     }
+}
+
+/// A specification with each line of what it decided alone numbered from 1, in the order the person
+/// sees them. An approver names the one it questions by that number, so Keel can show it on its line
+/// however it worded the quote, and nobody has to count.
+fn numbered_decided(output: &Value) -> Value {
+    let mut output = output.clone();
+    if let Some(lines) = output.get_mut("decided").and_then(Value::as_array_mut) {
+        for (index, line) in lines.iter_mut().enumerate() {
+            if let Some(line) = line.as_object_mut() {
+                line.insert("number".into(), Value::from(index + 1));
+            }
+        }
+    }
+    output
 }
 
 /// The attempt that says what was asked: the latest that worked of a step with the specifier's role,
@@ -578,8 +594,8 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
         text("Specification:", "Especificación:"),
         // What the specification decided on its own is the person's to settle, not the builder's.
         text(
-            "A finding that questions what the specification decided on its own, in `decided`, is not a reason for rework, even if it's right: a person decides that, and can change it at the approval. Put each one in `questioned`, quoting the decision as `decided` says it and saying why it doesn't hold, mention them in reasons, and leave them out of instructions.",
-            "Un hallazgo que cuestiona lo que la especificación decidió por su cuenta, en `decided`, no es motivo de rework, aunque tenga razón: eso lo decide una persona, que puede cambiarlo en la aprobación. Pon cada uno en `questioned`, citando la decisión como la dice `decided` y diciendo por qué no se sostiene, menciónalos en reasons y déjalos fuera de instructions.",
+            "A finding that questions what the specification decided on its own, in `decided`, is not a reason for rework, even if it's right: a person decides that, and can change it at the approval. Put each one in `questioned`, quoting the decision as `decided` says it, with the `number` it has there, and saying why it doesn't hold, mention them in reasons, and leave them out of instructions.",
+            "Un hallazgo que cuestiona lo que la especificación decidió por su cuenta, en `decided`, no es motivo de rework, aunque tenga razón: eso lo decide una persona, que puede cambiarlo en la aprobación. Pon cada uno en `questioned`, citando la decisión como la dice `decided`, con el `number` que tiene ahí, y diciendo por qué no se sostiene, menciónalos en reasons y déjalos fuera de instructions.",
         ),
     );
 
@@ -1091,7 +1107,7 @@ mod tests {
         let questioned = &schema["properties"]["questioned"];
         assert_eq!(
             questioned["items"]["required"],
-            serde_json::json!(["decided", "why"])
+            serde_json::json!(["decided", "number", "why"])
         );
         assert!(
             questioned["description"]
@@ -1099,6 +1115,73 @@ mod tests {
                 .unwrap()
                 .contains("A person decides these at the approval")
         );
+    }
+
+    #[test]
+    fn the_approver_names_each_decision_it_questions_by_its_number() {
+        // Every approver is asked for it, also one of a workflow saved before this.
+        let schema: Value = serde_json::from_str(DECISION_SCHEMA).unwrap();
+        let item = &schema["properties"]["questioned"]["items"];
+        assert_eq!(item["properties"]["number"]["type"], "integer");
+        assert_eq!(
+            item["required"],
+            serde_json::json!(["decided", "number", "why"])
+        );
+        for (language, told) in [
+            (
+                "en",
+                "quoting the decision as `decided` says it, with the `number` it has there,",
+            ),
+            (
+                "es",
+                "citando la decisión como la dice `decided`, con el `number` que tiene ahí,",
+            ),
+        ] {
+            let approvers: Vec<String> = builtin(language, None)
+                .iter()
+                .flat_map(|workflow| workflow.steps.iter())
+                .filter_map(|step| match step {
+                    WorkflowStep::Agent(spec) if matches!(spec.role, StepRole::Approver { .. }) => {
+                        Some(spec.prompt.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(approvers.len(), 2, "{language}");
+            for prompt in approvers {
+                assert!(prompt.contains(told), "{language}: {prompt}");
+            }
+        }
+    }
+
+    #[test]
+    fn what_was_decided_alone_reaches_the_agents_numbered_from_one() {
+        let mut attempts = recorded(&[
+            ("spec", "agent", "specifier", Succeeded, ""),
+            ("code", "agent", "reviewer", Succeeded, ""),
+        ]);
+        attempts[0].output = Some(serde_json::json!({
+            "summary": "s", "criteria": [], "changes": [], "limits": [], "questions": [],
+            "decided": [{ "text": "Keeps the rounding" }, { "text": "If 0? Show an error", "taken": "person" }],
+        }));
+        let verdict =
+            serde_json::json!({ "verdict": "approved", "findings": [], "summary": "Fine." });
+        attempts[1].output = Some(verdict.clone());
+        let read: Value = serde_json::from_str(&output_of(&attempts, "spec")).unwrap();
+        assert_eq!(
+            read["decided"],
+            serde_json::json!([
+                { "number": 1, "text": "Keeps the rounding" },
+                { "number": 2, "text": "If 0? Show an error", "taken": "person" },
+            ])
+        );
+        assert_eq!(read["summary"], "s");
+        // What Keel keeps is what the specifier wrote, and the rest reaches them as it is.
+        assert_eq!(
+            attempts[0].output.as_ref().unwrap()["decided"][0].get("number"),
+            None
+        );
+        assert_eq!(output_of(&attempts, "code"), verdict.to_string());
     }
 
     #[test]
