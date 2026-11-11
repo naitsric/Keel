@@ -441,6 +441,13 @@ describe("the approval card", () => {
       expect(proves("Qué lo demuestra").startsWith("Sin probar")).toBe(true);
       expect(proves("Qué lo demuestra")).toContain("Cómo se ve en tema oscuro");
     });
+
+    it("is with what each review said, too", () => {
+      show([builder(["calc.py"]), check, verifier([met]), looked("ux", ["How the Save bar looks in dark mode", "  "]), looked("code", []), human], ["calc.py"]);
+      press("See the reviews");
+      expect(page()).toContain("Couldn't check by reading the code, so not proven: How the Save bar looks in dark mode");
+      expect(page().match(/Couldn't check by reading the code/g)).toHaveLength(1);
+    });
   });
 
   describe("when the workflow fits the change", () => {
@@ -1214,6 +1221,28 @@ describe("the run summary", () => {
     expect(page()).toContain("La corrida hasta ahora");
     expect(page()).toContain("builder sigue trabajando.");
     expect(page()).toContain("1 de 2 comandos de la corrida salieron bien.");
+  });
+
+  describe("once a person approved it", () => {
+    const approved = attempt({ id: "human", stepId: "human", kind: "approval", tools: "none", state: "succeeded" });
+    const met = said("C1", "met", "test_calc.py:1");
+    const looked = (unchecked: string[]) => attempt({ id: "ux", stepId: "ux", role: "reviewer", output: { verdict: "approved", findings: [], summary: "Fine.", unread: [], unchecked } as unknown as Attempt["output"] });
+    const greenCheck = () => document.querySelector("details summary svg.text-success");
+
+    it("still says what the reviews couldn't check, without the check that says it's all proven", () => {
+      show([builder(["calc.py"]), check, verifier([met]), looked(["How the Save bar looks in dark mode"]), approved], [], "2026-01-01T00:00:00Z");
+      expect(page()).toContain("Not proven: the reviews couldn't check this by reading the code.");
+      expect(page()).toContain("How the Save bar looks in dark mode");
+      expect(page().indexOf("How the Save bar")).toBeLessThan(page().indexOf("1 of 1 met"));
+      expect(document.querySelector("details summary")?.textContent).toBe("1 of 1 met");
+      expect(greenCheck()).toBeNull();
+    });
+
+    it("keeps the check when the reviews could check all of it", () => {
+      show([builder(["calc.py"]), check, verifier([met]), looked([]), approved], [], "2026-01-01T00:00:00Z");
+      expect(page()).not.toContain("Not proven");
+      expect(greenCheck()).not.toBeNull();
+    });
   });
 });
 

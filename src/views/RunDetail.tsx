@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Reason, type Run, type RunJoint, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -103,6 +103,8 @@ export function Summary({ run, attempts, current, commands, rawCheck, closedBy, 
   // Of the steps working, the one that started last is the one to name.
   const working = attempts.filter((a) => isActive(a.state)).at(-1);
   const verification = verificationInRound(attempts, run?.round ?? 0);
+  // Still not proven once the run is approved: a person approving it didn't make it so.
+  const unchecked = uncheckedInRound(attempts, run?.round ?? 0);
   const skipped = skippedSteps(attempts);
   // A step that's done says nothing about the run while others are still to come.
   const between = !run?.finishedAt && (current.state === "succeeded" || current.state === "skipped");
@@ -147,7 +149,8 @@ export function Summary({ run, attempts, current, commands, rawCheck, closedBy, 
           {latestChecks.length > 0 && (
             <p className={cx(checksPassed === latestChecks.length ? "text-muted" : "font-medium text-danger")}>{t("run.checksPassed", { passed: checksPassed, total: latestChecks.length })}</p>
           )}
-          {verification && <VerificationProof verification={verification} />}
+          <NotProvenByReviews unchecked={unchecked} />
+          {verification && <VerificationProof verification={verification} allProven={unchecked.length === 0} />}
           {skipped.length > 0 && <p className="text-muted">{t("fits.summary", { names: skipped.map((step) => step.stepId).join(", ") })}</p>}
           <p className="text-muted">{commands.length === 0 ? t("run.noRunCommands") : t("run.runCommandsPassed", { passed, total: commands.length })}</p>
           <p className={cx("mt-0.5", rawCheck === "changed" || rawCheck === "missing" ? "font-medium text-danger" : "text-muted")}>
@@ -210,7 +213,7 @@ function VerificationItems({ verification }: { verification: VerificationOutput 
  * unproven: anything else says what it is, and not being able to verify something is a normal thing to
  * find, not an alarm.
  */
-function VerificationProof({ verification, allProven = true }: { verification: VerificationOutput; allProven?: boolean }) {
+function VerificationProof({ verification, allProven }: { verification: VerificationOutput; allProven: boolean }) {
   const { t } = useTranslation();
   const { met, unmet, total } = verificationCounts(verification);
   return (
@@ -238,6 +241,25 @@ function VerificationView({ verification }: { verification: VerificationOutput }
   );
 }
 
+/** What the reviews said they couldn't check by reading the code, with the review that said it. Nothing if there's none. */
+function NotProvenByReviews({ unchecked }: { unchecked: { step: string; text: string }[] }) {
+  const { t } = useTranslation();
+  if (unchecked.length === 0) return null;
+  return (
+    <div className="mb-1.5">
+      <p className="font-medium">{t("run.notProvenByReviews")}</p>
+      <ul className="selectable list-disc space-y-0.5 pl-4 break-words">
+        {unchecked.map((item, index) => (
+          // Lines of a fixed text: their position is their identity.
+          <li key={index}>
+            {item.text} <span className="font-mono text-[11.5px] text-muted">{item.step}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { attempts: Attempt[]; round: number; commands: CommandRun[]; rawCheck: RawCheck; reviewed: boolean }) {
   const { t } = useTranslation();
   const checks = latestOfEachStep(attempts.filter((a) => a.kind === "check"));
@@ -247,19 +269,7 @@ function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { atte
   const unchecked = uncheckedInRound(attempts, round);
   return (
     <>
-      {unchecked.length > 0 && (
-        <div className="mb-1.5">
-          <p className="font-medium">{t("run.notProvenByReviews")}</p>
-          <ul className="selectable list-disc space-y-0.5 pl-4 break-words">
-            {unchecked.map((item, index) => (
-              // Lines of a fixed text: their position is their identity.
-              <li key={index}>
-                {item.text} <span className="font-mono text-[11.5px] text-muted">{item.step}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      <NotProvenByReviews unchecked={unchecked} />
       {checks.map((check) =>
         check.state === "succeeded" ? (
           <p key={check.id} className="selectable flex gap-1.5">
@@ -1286,6 +1296,7 @@ function ReviewsList({ attempts, round }: { attempts: Attempt[]; round: number }
             {review.state === "skipped" && review.reason && <p className="selectable mt-0.5 text-muted">{reasonText(t, review.reason)}</p>}
             {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
             {(review.output?.unread ?? []).length > 0 && <p className="selectable mt-0.5 text-warning">{t("run.unreadFiles", { files: review.output?.unread?.join(", ") })}</p>}
+            {uncheckedOf(review.output).length > 0 && <p className="selectable mt-0.5 text-muted">{t("run.reviewUnchecked", { items: uncheckedOf(review.output).join("; ") })}</p>}
             {(review.output?.findings ?? []).length > 0 && (
               <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 text-muted">
                 {review.output?.findings.map((finding, index) => (

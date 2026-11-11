@@ -336,6 +336,7 @@
     "verdictChanges": "Pide cambios",
     "verdictUnread": "No lo leyó todo",
     "unreadFiles": "No leyó: {{files}}",
+    "reviewUnchecked": "No pudo comprobarlo leyendo el código, así que está sin probar: {{items}}",
     "approverTitle": "Aprobador",
     "decisionApprove": "Listo para ti",
     "decisionRework": "Lo devolvió",

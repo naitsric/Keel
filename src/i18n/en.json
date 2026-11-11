@@ -336,6 +336,7 @@
     "verdictChanges": "Asks for changes",
     "verdictUnread": "Didn't read all of it",
     "unreadFiles": "Didn't read: {{files}}",
+    "reviewUnchecked": "Couldn't check by reading the code, so not proven: {{items}}",
     "approverTitle": "Approver",
     "decisionApprove": "Ready for you",
     "decisionRework": "Sent it back",

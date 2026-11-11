@@ -336,9 +336,14 @@ describe("what the reviews couldn't check by reading the code", () => {
   });
 
   it("only takes each review's latest answer, in the round it's asked about", () => {
-    const attempts = [review("ux", ["Before it was tried again"]), review("ux", ["After"]), review("ui", ["About code that has changed since"], 0), review("ui", [], 1)];
-    expect(uncheckedInRound(attempts.slice(0, 2), 0)).toEqual([{ step: "ux", text: "After" }]);
-    expect(uncheckedInRound(attempts.slice(2), 1)).toEqual([]);
+    expect(uncheckedInRound([review("ux", ["Before it was tried again"]), review("ux", ["After"])], 0)).toEqual([{ step: "ux", text: "After" }]);
+    // ui only answered in the first round, and ux's answer in the new one is the latest of all.
+    const rounds = [review("ui", ["About code that has changed since"], 0), review("ux", ["In the first round"], 0), review("code", [], 1), review("ux", ["In the new round"], 1)];
+    expect(uncheckedInRound(rounds, 1)).toEqual([{ step: "ux", text: "In the new round" }]);
+    expect(uncheckedInRound(rounds, 0)).toEqual([
+      { step: "ui", text: "About code that has changed since" },
+      { step: "ux", text: "In the first round" },
+    ]);
   });
 
   it("is nothing for an answer from before Keel asked, one it can't read, or anything but a review", () => {
