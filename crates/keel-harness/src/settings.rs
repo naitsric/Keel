@@ -65,22 +65,43 @@ pub fn with_read_only(mut settings: Value, folders: &[String]) -> Value {
     settings
 }
 
-/// For a step that can edit: before each Bash command, Claude Code runs `program` (the Keel app)
-/// and gets a refusal for a command that changes the project's files, which is Edit's and Write's
-/// job. Hooks run outside the sandbox, so nothing here has to let the program in.
-pub fn with_bash_hook(mut settings: Value, program: &Path, workspace: &Path) -> Value {
-    settings["hooks"] = json!({
-        "PreToolUse": [{
-            "matcher": "Bash",
-            "hooks": [{
-                "type": "command",
-                // With `args` there's no shell in between, so no path needs quoting.
-                "command": program.to_string_lossy(),
-                "args": [crate::bash_edits::HOOK_ARG, workspace.to_string_lossy()],
-                // A hook that doesn't answer in time lets the command run.
-                "timeout": 10,
-            }],
+/// The paths the Bash hook is given: the program (see `hook`), Keel's git, the project, a folder
+/// of the run's outside the project for what it notes before each command, and the sandbox
+/// profile its git runs in.
+pub struct BashHook<'a> {
+    pub program: &'a Path,
+    pub git: &'a Path,
+    pub workspace: &'a Path,
+    pub state: &'a Path,
+    pub profile: &'a Path,
+}
+
+/// For a step that can edit: Claude Code runs the hook around each Bash command. Before it, the
+/// hook only notes what git lists and answers nothing, so permissions go as they would have.
+/// After it, whether it worked or not, the agent may get a note about the files that changed, or
+/// that a command that looks like an edit changed none. It never stops a command. Hooks run
+/// outside the sandbox, so nothing here has to let the program in.
+pub fn with_bash_hook(mut settings: Value, hook: &BashHook) -> Value {
+    let group = json!([{
+        "matcher": "Bash",
+        "hooks": [{
+            "type": "command",
+            // With `args` there's no shell in between, so no path needs quoting.
+            "command": hook.program.to_string_lossy(),
+            "args": [
+                hook.git.to_string_lossy(),
+                hook.workspace.to_string_lossy(),
+                hook.state.to_string_lossy(),
+                hook.profile.to_string_lossy(),
+            ],
+            // It answers in milliseconds. Past this the command goes on, without a note.
+            "timeout": 5,
         }],
+    }]);
+    settings["hooks"] = json!({
+        "PreToolUse": group,
+        "PostToolUse": group,
+        "PostToolUseFailure": group,
     });
     settings
 }
@@ -268,23 +289,38 @@ mod tests {
     }
 
     #[test]
-    fn the_bash_hook_runs_keel_on_each_bash_command_and_leaves_the_rest_alone() {
-        let plain = step_settings(Path::new("/w"), &[], &[], &[]);
+    fn the_bash_hook_watches_before_each_bash_command_and_notes_after_it() {
+        let plain = step_settings(Path::new("/r/workspace"), &[], &[], &[]);
         assert!(plain.get("hooks").is_none());
         let settings = with_bash_hook(
             plain.clone(),
-            Path::new("/Applications/Keel.app/Contents/MacOS/keel"),
-            Path::new("/w"),
+            &BashHook {
+                program: Path::new("/h/.keel/bin/keel-hook-0123456789abcdef"),
+                git: Path::new("/usr/bin/git"),
+                workspace: Path::new("/r/workspace"),
+                state: Path::new("/r/hook"),
+                profile: Path::new("/r/hook/git.sb"),
+            },
         );
-        let group = &settings["hooks"]["PreToolUse"][0];
-        assert_eq!(group["matcher"], "Bash");
-        let hook = &group["hooks"][0];
-        assert_eq!(hook["type"], "command");
-        assert_eq!(
-            hook["command"],
-            "/Applications/Keel.app/Contents/MacOS/keel"
-        );
-        assert_eq!(hook["args"], json!([crate::bash_edits::HOOK_ARG, "/w"]));
+        // Before, to note what git lists; after, whether the command worked or not, since one
+        // that failed may have changed files first.
+        let events: Vec<&String> = settings["hooks"].as_object().unwrap().keys().collect();
+        assert_eq!(events, ["PostToolUse", "PostToolUseFailure", "PreToolUse"]);
+        for event in events {
+            let group = &settings["hooks"][event][0];
+            assert_eq!(group["matcher"], "Bash", "{event}");
+            // Nothing that could block or decide: no `if`, no `onFailure`.
+            assert_eq!(
+                group["hooks"][0],
+                json!({
+                    "type": "command",
+                    "command": "/h/.keel/bin/keel-hook-0123456789abcdef",
+                    "args": ["/usr/bin/git", "/r/workspace", "/r/hook", "/r/hook/git.sb"],
+                    "timeout": 5,
+                }),
+                "{event}"
+            );
+        }
         assert_eq!(settings["sandbox"], plain["sandbox"]);
         assert_eq!(settings["permissions"], plain["permissions"]);
     }

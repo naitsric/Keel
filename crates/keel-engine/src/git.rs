@@ -132,14 +132,25 @@ impl Git {
             .collect()
     }
 
-    /// Git on a run's workspace, in the same sandbox as a `check` step. Whatever the workspace
-    /// makes git run gets no more than that step did.
-    fn run_in_workspace(&self, workspace: &Path, args: &[&str]) -> Result<String, GitError> {
+    /// The sandbox git gets on a run's workspace: the same as a `check` step's, plus git's own
+    /// files. The Bash hook runs its git in it too.
+    pub(crate) fn workspace_profile(&self, workspace: &Path) -> Result<String, GitError> {
         let home = std::env::var_os("HOME")
             .filter(|home| !home.is_empty())
             .map(PathBuf::from)
             .ok_or_else(|| GitError::Failed("HOME is not set".to_owned()))?;
-        let profile = check_profile(workspace, &home, &self.install_dirs(&home), &[]);
+        Ok(check_profile(
+            workspace,
+            &home,
+            &self.install_dirs(&home),
+            &[],
+        ))
+    }
+
+    /// Git on a run's workspace, in the same sandbox as a `check` step. Whatever the workspace
+    /// makes git run gets no more than that step did.
+    fn run_in_workspace(&self, workspace: &Path, args: &[&str]) -> Result<String, GitError> {
+        let profile = self.workspace_profile(workspace)?;
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command.args(["-p", &profile]).arg(&self.bin);
         Self::harden(&mut command, workspace);
@@ -724,6 +735,41 @@ fn require_own_branch(branch: &str) -> Result<(), GitError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bash_hook_hardens_git_at_least_as_much_as_keel_does() {
+        // The hook can't use this crate, so it keeps its own copy. This keeps the two in step.
+        let hook = include_str!("../../keel-hook/src/git.rs");
+        let mut command = Command::new("git");
+        Git::harden(&mut command, Path::new("/w"));
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let settings: Vec<&String> = args
+            .iter()
+            .zip(args.iter().skip(1))
+            .filter(|(flag, _)| *flag == "-c")
+            .map(|(_, setting)| setting)
+            .collect();
+        assert!(!settings.is_empty());
+        for setting in settings {
+            assert!(
+                hook.contains(&format!("\"{setting}\"")),
+                "the hook lacks -c {setting}"
+            );
+        }
+        for (name, value) in command.get_envs() {
+            let name = name.to_string_lossy();
+            if name.starts_with("GIT_") || name == "PATH" {
+                let value = value.unwrap_or_default().to_string_lossy();
+                assert!(
+                    hook.contains(&format!(".env(\"{name}\", \"{value}\")")),
+                    "the hook lacks {name}={value}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn a_count_of_what_changed_reads_lines_paths_and_what_it_will_not_count() {
