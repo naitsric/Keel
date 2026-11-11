@@ -368,6 +368,41 @@ fn a_project_is_mapped_once_on_its_own_and_again_only_when_asked() {
     assert!(w.engine.brain(&w.project_id).unwrap().map.is_empty());
 }
 
+#[test]
+fn two_requests_at_once_get_the_same_map() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // With no answer the map stops at its step and stays open, so the second request can't find it
+    // ended. The barrier lets both go at once: each then reads the session, which takes two
+    // processes, before it could record a run.
+    let both = std::sync::Barrier::new(2);
+    let ask = || {
+        both.wait();
+        w.engine.generate_map(&w.project_id, "fake", "en").unwrap()
+    };
+    let (first, second) = std::thread::scope(|scope| {
+        let first = scope.spawn(ask);
+        let second = scope.spawn(ask);
+        (first.join().unwrap(), second.join().unwrap())
+    });
+    assert_eq!(first, second);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !w.store.active_attempts().unwrap().is_empty() {
+        assert!(Instant::now() < deadline, "the map never stopped");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let open: Vec<String> = w
+        .store
+        .open_runs()
+        .unwrap()
+        .into_iter()
+        .map(|run| run.id)
+        .collect();
+    assert_eq!(open, std::slice::from_ref(&first));
+    assert_eq!(w.engine.brain(&w.project_id).unwrap().map_run, Some(first));
+}
+
 const THREE: &str = r#"{"text":"One","evidence":"e1","paths":["src/a.py"]},{"text":"Two","evidence":"e2","paths":[]},{"text":"Three","evidence":"e3","paths":["src/nope.py"]}"#;
 
 #[test]
