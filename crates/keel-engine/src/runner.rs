@@ -134,6 +134,11 @@ fn run_home(workspace: &std::path::Path) -> PathBuf {
     workspace.join(RUN_CACHE).join(home::FOLDER)
 }
 
+/// The home folder Keel itself runs with, where toolchains are.
+fn real_home() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+}
+
 fn runs_commands(kind: &str, tools: Option<ToolProfile>) -> bool {
     kind == "check" || kind == "setup" || tools == Some(ToolProfile::Build)
 }
@@ -451,6 +456,9 @@ impl Inner {
         std::fs::write(&system_prompt_file, &system_prompt)?;
         let prompt_file = dir.join(format!("{stem}.prompt.txt"));
         std::fs::write(&prompt_file, &attempt.prompt)?;
+        // Only steps that can run commands get services, a folder for screenshots, and the run's
+        // home. A read-only step has no way to use them.
+        let can_write = spec.tools == ToolProfile::Build;
 
         let command = StepCommand {
             claude: claude.clone(),
@@ -475,6 +483,8 @@ impl Inner {
                         && settings::is_read_only(&attempt.settings, &dir.to_string_lossy())
                 }))
                 .collect(),
+            // Beside the workspace, where the agent can't change it.
+            env_file: can_write.then(|| dir.join(format!("{stem}.env"))),
         };
         let args = command.args(spec);
         let version = auth::read_version(&claude, &tools.path_env);
@@ -499,6 +509,7 @@ impl Inner {
                 "systemPrompt": system_prompt,
                 "systemPromptSources": sources,
                 "resumedFrom": attempt.resumed_from,
+                "home": can_write.then(|| run_home(&workspace)),
             }),
         )?;
         if self.stop_requested(&attempt.id) {
@@ -507,9 +518,6 @@ impl Inner {
 
         let raw_path = PathBuf::from(&attempt.raw_path);
         let stderr_path = dir.join(format!("{stem}.stderr.txt"));
-        // Only steps that can run commands get services, or a folder for screenshots. A read-only
-        // step has no way to use them.
-        let can_write = spec.tools == ToolProfile::Build;
         let (service_set, service_env, project) = if can_write {
             screenshots::empty(&workspace, &dir)?;
             let project = store.project(project_id)?;
@@ -520,13 +528,14 @@ impl Inner {
         };
         let mut process_command = command.command(spec);
         if let Some(project) = project {
-            // `claude` itself needs the real home folder, so only its tools are pointed at the
-            // run's home, where they find what setup left.
+            // Its Bash commands work in the run's home, as the check does, and find what setup
+            // left. `claude` itself keeps the real home folder, where its login and sessions are.
             let run_home = run_home(&workspace);
             home::copy(&self.project_home(project_id), &run_home)?;
-            process_command
-                .envs(home::tool_env(&run_home))
-                .envs(tool_settings(Some(&project.allowed_domains)));
+            if let Some(file) = &command.env_file {
+                std::fs::write(file, home::script(&run_home, &real_home()))?;
+            }
+            process_command.envs(tool_settings(Some(&project.allowed_domains)));
         }
         process_command.envs(service_env);
         // After the project's own variables, as for a check, so the folder is always Keel's.
@@ -556,7 +565,7 @@ impl Inner {
         let tools = locked(&self.tools).clone();
         let workspace = PathBuf::from(&attempt.workspace);
         let dir = self.run_dir(&attempt.run_id);
-        let real_home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        let real_home = real_home();
         let sockets = services::socket_dirs(&services::root_for(project_id), &project.services);
         // Setup fills a home shared by the project's runs, in its cache. Everything after it works
         // in the run's own copy, inside the private copy, so nothing an agent wrote can reach the
@@ -1552,20 +1561,5 @@ mod tests {
         assert_eq!(var(&env, "HOME"), Some("/p/cache/home"));
         assert_eq!(var(&env, "CARGO_NET_OFFLINE"), None);
         assert_eq!(var(&env, "GOPROXY"), None);
-    }
-
-    #[test]
-    fn the_builder_keeps_its_home_and_its_tools_use_the_runs() {
-        let workspace = Path::new("/r/workspace");
-        assert_eq!(
-            run_home(workspace),
-            Path::new("/r/workspace/.keel-cache/home")
-        );
-        let env = home::tool_env(&run_home(workspace));
-        assert_eq!(
-            var(&env, "CARGO_HOME"),
-            Some("/r/workspace/.keel-cache/home/.cargo")
-        );
-        assert_eq!(var(&env, "HOME"), None);
     }
 }
