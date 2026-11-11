@@ -432,6 +432,101 @@ fn run_of_client(run: &str, client: &str) -> String {
     )
 }
 
+/// Whether the client may act on the card: it's on a run the client started, it's a part of a
+/// change the client proposed, or the client put it back in Todo. A client only acts on what it
+/// started.
+fn card_of_client(conn: &Connection, card_id: &str, client_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        &format!(
+            "select exists (select 1 from card k where k.id = ?1 and (
+                 k.queued_by_client = ?2
+                 or (k.run_id is not null and {})
+                 or (k.joint_position is not null and exists (
+                     select 1 from card agreeing
+                     join mcp_call c on c.run_id = agreeing.run_id
+                     where agreeing.id = k.joint_change_id and c.client_id = ?2
+                       and c.tool = 'propose_change' and c.ok = 1))))",
+            run_of_client("k.run_id", "?2")
+        ),
+        [card_id, client_id],
+        |r| r.get(0),
+    )
+}
+
+/// Whether the client closed the run itself, and nothing the person did ended it: its close_run
+/// on it went through, every close names a client rather than the person, the person asked
+/// nothing in it to stop, and nothing ran in it once the client first closed it, as it would
+/// after the person tried it again. Only such a run is the client's to run again.
+fn run_closed_by_client(
+    conn: &Connection,
+    run_id: &str,
+    client_id: &str,
+) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "with first_close as (
+             select min(e.seq) as seq, min(e.at) as at from event e
+             join attempt a on a.id = e.attempt_id
+             where a.run_id = ?1 and e.kind = 'abandoned' and json_extract(e.data, '$.by') is not null)
+         select exists (select 1 from run where id = ?1 and finished_at is not null)
+            and exists (select 1 from mcp_call c where c.run_id = ?1 and c.client_id = ?2
+                                                   and c.tool = 'close_run' and c.ok = 1)
+            and (select seq from first_close) is not null
+            and not exists (select 1 from event e join attempt a on a.id = e.attempt_id
+                            where a.run_id = ?1 and e.kind in ('abandoned', 'stopRequested')
+                              and json_extract(e.data, '$.by') is null)
+            and not exists (select 1 from attempt a
+                            where a.run_id = ?1 and a.started_at > (select at from first_close))
+            and not exists (select 1 from event e join attempt a on a.id = e.attempt_id
+                            where a.run_id = ?1 and e.seq > (select seq from first_close)
+                              and e.kind <> 'abandoned')",
+        [run_id, client_id],
+        |r| r.get(0),
+    )
+}
+
+/// Whether the client may put the card back in Todo: it waits in the Backlog because the client
+/// closed its last run itself, and it isn't where a change across projects is agreed, which only
+/// propose_change starts.
+fn may_queue(conn: &Connection, card: &Card, client_id: &str) -> rusqlite::Result<bool> {
+    let Some(run) = card.run_id.as_deref() else {
+        return Ok(false);
+    };
+    Ok(card.column() == BoardColumn::Backlog
+        && card.joint_change_id.as_deref() != Some(card.id.as_str())
+        && card.rejection.is_none()
+        && card_of_client(conn, &card.id, client_id)?
+        && run_closed_by_client(conn, run, client_id)?)
+}
+
+/// Whether the client may add a note to the card: one it put in Todo, a part waiting there as its
+/// change opened it, or one it may put back in Todo. Never one the person put in Todo or ended.
+fn may_note(conn: &Connection, card: &Card, client_id: &str) -> rusqlite::Result<bool> {
+    match card.column() {
+        BoardColumn::Todo => Ok((card.queued_by_client.as_deref() == Some(client_id)
+            || card.waits_as_opened())
+            && card_of_client(conn, &card.id, client_id)?),
+        BoardColumn::Backlog => may_queue(conn, card, client_id),
+        _ => Ok(false),
+    }
+}
+
+/// Whether the card a query calls `card` can start as far as the client that put it in Todo
+/// goes: that client has fewer runs going than the person allows it, counting cards of its own
+/// already taken from Todo. A card the person put there always can.
+fn room_for(card: &str) -> String {
+    format!(
+        "({card}.queued_by_client is null
+          or (select count(distinct r.id) from run r join mcp_call c on c.run_id = r.id
+              where c.client_id = {card}.queued_by_client and c.tool in {MCP_STARTS_A_RUN}
+                and c.ok = 1 and r.finished_at is null)
+           + (select count(*) from card k left join run r on r.id = k.run_id
+              where k.queued_by_client = {card}.queued_by_client and k.lane = 'started'
+                and r.finished_at is null)
+           < (select max(1, min(m.max_open_runs, {MAX_OPEN_RUNS_CEILING})) from mcp_client m
+              where m.id = {card}.queued_by_client))"
+    )
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Project {
@@ -871,6 +966,15 @@ impl Card {
     /// Whether a person can still move or change it. Once Keel has it, it's out of their hands.
     fn is_waiting(&self) -> bool {
         matches!(self.column(), BoardColumn::Backlog | BoardColumn::Todo)
+    }
+
+    /// Whether it's a part waiting in Todo just as its change opened it, which nobody has moved
+    /// since: taking it out of Todo and back gives it a new time there.
+    pub fn waits_as_opened(&self) -> bool {
+        self.joint_position.is_some()
+            && self.lane == CardLane::Todo
+            && self.run_id.is_none()
+            && self.todo_at.as_deref() == Some(self.created_at.as_str())
     }
 }
 
@@ -1380,45 +1484,15 @@ impl Store {
         )?)
     }
 
-    /// Whether this client closed that run itself, and nothing the person did ended it: its
-    /// close_run on it went through, the latest close names a client rather than the person, and
-    /// the person asked nothing in it to stop. Only such a run is the client's to run again.
+    /// Whether this client closed that run itself, and nothing the person did ended it. See
+    /// `run_closed_by_client`.
     pub fn run_closed_by_mcp_client(&self, run_id: &str, client_id: &str) -> Result<bool> {
-        Ok(self.lock().query_row(
-            "select exists (select 1 from run where id = ?1 and finished_at is not null)
-                and exists (select 1 from mcp_call c where c.run_id = ?1 and c.client_id = ?2
-                                                       and c.tool = 'close_run' and c.ok = 1)
-                and coalesce((select json_extract(e.data, '$.by') is not null
-                              from event e join attempt a on a.id = e.attempt_id
-                              where a.run_id = ?1 and e.kind = 'abandoned'
-                              order by e.seq desc limit 1), 0)
-                and not exists (select 1 from event e join attempt a on a.id = e.attempt_id
-                                where a.run_id = ?1 and e.kind = 'stopRequested'
-                                  and json_extract(e.data, '$.by') is null)",
-            [run_id, client_id],
-            |r| r.get(0),
-        )?)
+        Ok(run_closed_by_client(&self.lock(), run_id, client_id)?)
     }
 
-    /// Whether this client may act on that card: it's on a run the client started, it's a part of
-    /// a change the client proposed, or the client put it back in Todo. A client only acts on what
-    /// it started.
+    /// Whether this client may act on that card. See `card_of_client`.
     pub fn card_of_mcp_client(&self, card_id: &str, client_id: &str) -> Result<bool> {
-        Ok(self.lock().query_row(
-            &format!(
-                "select exists (select 1 from card k where k.id = ?1 and (
-                     k.queued_by_client = ?2
-                     or (k.run_id is not null and {})
-                     or (k.joint_position is not null and exists (
-                         select 1 from card agreeing
-                         join mcp_call c on c.run_id = agreeing.run_id
-                         where agreeing.id = k.joint_change_id and c.client_id = ?2
-                           and c.tool = 'propose_change' and c.ok = 1))))",
-                run_of_client("k.run_id", "?2")
-            ),
-            [card_id, client_id],
-            |r| r.get(0),
-        )?)
+        Ok(card_of_client(&self.lock(), card_id, client_id)?)
     }
 
     /// Whether this client started that run. A client only acts on its own runs.
@@ -2235,12 +2309,13 @@ impl Store {
         Ok(true)
     }
 
-    /// Adds `text` at the end of what a card says, after a blank line, if a person could still
-    /// change it. What's there stays as it is. `false` if not.
-    pub fn append_to_card(&self, id: &str, text: &str) -> Result<bool> {
+    /// Adds a client's `text` at the end of what a card says, after a blank line, if that client
+    /// may add to it: see `may_note`, looked at here as it's written. What's there stays as it
+    /// is. `false` if not.
+    pub fn append_to_card(&self, id: &str, text: &str, client_id: &str) -> Result<bool> {
         let conn = self.lock();
         let card = read_card(&conn, id)?;
-        if !card.is_waiting() {
+        if !may_note(&conn, &card, client_id)? {
             return Ok(false);
         }
         let body = if card.body.is_empty() {
@@ -2450,7 +2525,8 @@ impl Store {
 
     /// `move_card` by an MCP client, `by` its id, or by the person when None. Whoever brings a card
     /// into Todo is who the run it starts belongs to, and taking it out of Todo is the person's. A
-    /// client only brings a card in: `false`, with nothing changed, for one already in Todo.
+    /// client only brings in a card it may run again, looked at here as it moves: see
+    /// `may_queue`. `false`, with nothing changed, for any other.
     pub fn move_card_as(
         &self,
         id: &str,
@@ -2471,7 +2547,9 @@ impl Store {
             return Ok(false);
         }
         let from = card.column();
-        if by.is_some() && (from == to || to != BoardColumn::Todo) {
+        if let Some(client) = by
+            && (to != BoardColumn::Todo || !may_queue(&tx, &card, client)?)
+        {
             return Ok(false);
         }
         let others = read_cards(
@@ -2514,14 +2592,16 @@ impl Store {
         Ok(true)
     }
 
-    /// Cards that could start now. A removed project's wait where they are until it comes back, and
-    /// a part until the one before it has a pull request.
+    /// Cards that could start now. A removed project's wait where they are until it comes back, a
+    /// part until the one before it has a pull request, and a card a client put there until that
+    /// client has room.
     pub fn has_todo_cards(&self) -> Result<bool> {
         Ok(self.lock().query_row(
             &format!(
                 "select exists (select 1 from card c join project p on p.id = c.project_id
-                                where c.lane = 'todo' and p.removed_at is null and {})",
-                ready("c")
+                                where c.lane = 'todo' and p.removed_at is null and {} and {})",
+                ready("c"),
+                room_for("c")
             ),
             [],
             |r| r.get(0),
@@ -2531,20 +2611,23 @@ impl Store {
     /// Takes the card to start next out of Todo, and returns it as it is at that moment: the top
     /// one of each project's Todo, and of those, whichever has waited longest. After this nobody
     /// can drag it away or edit it, and it can't start twice. Never a removed project's, nor a part
-    /// still waiting for the one before it, which doesn't hold up the cards below it either.
+    /// still waiting for the one before it, nor one a client put there while that client has as
+    /// many runs going as the person allows it. None of those holds up the cards below it.
     pub fn claim_next_todo_card(&self) -> Result<Option<Card>> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let tops = read_cards(
             &tx,
             &format!(
-                "c.lane = 'todo' and {}
+                "c.lane = 'todo' and {} and {}
                  and c.project_id in (select id from project where removed_at is null)
                  and not exists (
-                    select 1 from card o where o.project_id = c.project_id and o.lane = 'todo' and {}
+                    select 1 from card o where o.project_id = c.project_id and o.lane = 'todo' and {} and {}
                       and (o.position, o.created_at, o.id) < (c.position, c.created_at, c.id))",
                 ready("c"),
-                ready("o")
+                room_for("c"),
+                ready("o"),
+                room_for("o")
             ),
             [],
         )?;
@@ -4967,24 +5050,80 @@ mod tests {
         assert_eq!(ids("c1"), ["task", "r"], "finished ones stay theirs");
     }
 
+    /// The clients `c1`, Claude Code, and `c2`, Other.
+    fn two_clients(store: &Store) {
+        store
+            .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        store
+            .add_mcp_client("c2", "Other", &[8u8; 32], "keel_def", true)
+            .unwrap();
+    }
+
+    /// Gives a card a run `c1` started and then closed itself, as start_run and close_run leave
+    /// it. The card waits in the Backlog.
+    fn closed_by_c1(store: &Store, card: &str, run: &str) {
+        let client = store.mcp_client("c1").unwrap();
+        ran(store, card, run, None);
+        let attempt = format!("{run}-human");
+        store
+            .add_attempt(&new_attempt(
+                &attempt,
+                run,
+                "human",
+                AttemptState::Abandoned,
+            ))
+            .unwrap();
+        store
+            .append_event(
+                &attempt,
+                "abandoned",
+                &serde_json::json!({ "by": "Claude Code" }),
+            )
+            .unwrap();
+        for tool in ["start_run", "close_run"] {
+            store
+                .add_mcp_call(&NewMcpCall {
+                    client: &client,
+                    tool,
+                    args: "{}",
+                    error: None,
+                    run_id: Some(run),
+                    duration_ms: 1,
+                })
+                .unwrap();
+        }
+    }
+
     #[test]
-    fn a_note_goes_at_the_end_of_a_card_that_waits_and_never_on_one_keel_has() {
+    fn a_note_goes_at_the_end_of_a_card_the_client_may_add_to_and_never_on_one_keel_has() {
         let (_dir, store) = store();
         seeded(&store);
+        two_clients(&store);
         card(&store, "c");
-        assert!(store.append_to_card("c", "Add the field").unwrap());
+        assert!(
+            !store.append_to_card("c", "Add the field", "c1").unwrap(),
+            "the person's"
+        );
+        closed_by_c1(&store, "c", "r1");
+        assert!(store.append_to_card("c", "Add the field", "c1").unwrap());
+        assert!(!store.append_to_card("c", "Mine", "c2").unwrap());
         assert_eq!(store.card("c").unwrap().body, "Add the field");
         assert!(store.update_card("c", "c", "Fix it").unwrap());
-        assert!(store.append_to_card("c", "And its test").unwrap());
+        assert!(store.append_to_card("c", "And its test", "c1").unwrap());
         assert_eq!(store.card("c").unwrap().body, "Fix it\n\nAnd its test");
-        assert!(store.move_card("c", CardLane::Todo, 0, "en").unwrap());
-        assert!(store.append_to_card("c", "Last").unwrap());
+        assert!(
+            store
+                .move_card_as("c", CardLane::Todo, 0, "en", Some("c1"))
+                .unwrap()
+        );
+        assert!(store.append_to_card("c", "Last", "c1").unwrap());
         let noted = "Fix it\n\nAnd its test\n\nLast";
         assert_eq!(store.card("c").unwrap().body, noted);
 
         // Once Keel has taken it, nothing changes.
         assert_eq!(claim(&store).as_deref(), Some("c"));
-        assert!(!store.append_to_card("c", "Too late").unwrap());
+        assert!(!store.append_to_card("c", "Too late", "c1").unwrap());
         assert_eq!(store.card("c").unwrap().body, noted);
     }
 
@@ -4992,42 +5131,33 @@ mod tests {
     fn a_card_a_client_puts_in_todo_is_its_own_and_so_is_the_run_it_starts() {
         let (_dir, store) = store();
         seeded(&store);
-        store
-            .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
-            .unwrap();
-        store
-            .add_mcp_client("c2", "Other", &[8u8; 32], "keel_def", true)
-            .unwrap();
+        two_clients(&store);
         card(&store, "c");
         assert!(
             !store.card_of_mcp_client("c", "c1").unwrap(),
             "the person's"
         );
-
-        // Waiting in Todo, it counts as a run the client has open.
-        assert!(
+        let queue = |client: &str| {
             store
-                .move_card_as("c", CardLane::Todo, usize::MAX, "en", Some("c1"))
+                .move_card_as("c", CardLane::Todo, usize::MAX, "en", Some(client))
                 .unwrap()
-        );
-        assert_eq!(
-            store.card("c").unwrap().queued_by_client.as_deref(),
-            Some("c1")
-        );
+        };
+        assert!(!queue("c1"), "it never ran for the client");
+        closed_by_c1(&store, "c", "r1");
+        assert!(store.card_of_mcp_client("c", "c1").unwrap());
+        assert!(!queue("c2"), "not the other client's");
+
+        // Waiting in Todo, it counts as a run the client has open, and remembers which it runs again.
+        assert!(queue("c1"));
+        let queued = store.card("c").unwrap();
+        assert_eq!(queued.queued_by_client.as_deref(), Some("c1"));
+        assert_eq!(queued.rerun_of.as_deref(), Some("r1"));
+        assert_eq!(queued.run_id, None);
         assert!(store.card_of_mcp_client("c", "c1").unwrap());
         assert!(!store.card_of_mcp_client("c", "c2").unwrap());
         assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
         assert_eq!(store.open_runs_of_mcp_client("c2").unwrap(), 0);
-        // A client only brings a card into Todo. It doesn't reorder it there.
-        assert!(
-            !store
-                .move_card_as("c", CardLane::Todo, 0, "en", Some("c2"))
-                .unwrap()
-        );
-        assert_eq!(
-            store.card("c").unwrap().queued_by_client.as_deref(),
-            Some("c1")
-        );
+        assert!(!queue("c1"), "it doesn't reorder Todo");
 
         // The run it starts is the client's, and still counts once.
         assert_eq!(claim(&store).as_deref(), Some("c"));
@@ -5039,43 +5169,38 @@ mod tests {
         assert!(store.run_started_by_mcp_client("r", "c1").unwrap());
         assert!(!store.run_started_by_mcp_client("r", "c2").unwrap());
         assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
-        let mine: Vec<String> = store
+        let mut mine: Vec<String> = store
             .runs_started_by_mcp_client("c1", 10)
             .unwrap()
             .into_iter()
             .map(|run| run.id)
             .collect();
-        assert_eq!(mine, ["r"]);
+        mine.sort();
+        assert_eq!(mine, ["r", "r1"]);
 
-        // Closed, it waits in the Backlog, still the client's and no longer open.
+        // The person closes it: it waits in the Backlog, still the client's to see, no longer
+        // open, and not the client's to run again.
         store.set_state("a", AttemptState::Abandoned, None).unwrap();
+        store
+            .append_event("a", "abandoned", &serde_json::json!({}))
+            .unwrap();
         store
             .patch_run("r", &[("finished_at", Value::Text(now()))])
             .unwrap();
         assert_eq!(store.card("c").unwrap().column(), BoardColumn::Backlog);
         assert!(store.card_of_mcp_client("c", "c1").unwrap());
         assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
+        assert!(!queue("c1"), "the person closed it");
 
-        // Back in Todo by the client, it remembers which run it runs again.
-        assert!(
-            store
-                .move_card_as("c", CardLane::Todo, 0, "en", Some("c1"))
-                .unwrap()
-        );
-        let again = store.card("c").unwrap();
-        assert_eq!(again.rerun_of.as_deref(), Some("r"));
-        assert_eq!(again.run_id, None);
-        assert!(store.move_card("c", CardLane::Backlog, 0, "en").unwrap());
-        assert_eq!(store.card("c").unwrap().rerun_of, None);
-
-        // The person putting it in Todo makes it theirs again.
+        // The person putting it in Todo makes it theirs.
         assert!(store.move_card("c", CardLane::Todo, 0, "en").unwrap());
-        assert_eq!(store.card("c").unwrap().queued_by_client, None);
-        assert_eq!(store.card("c").unwrap().rerun_of, None);
+        let theirs = store.card("c").unwrap();
+        assert_eq!((theirs.queued_by_client, theirs.rerun_of), (None, None));
         assert!(!store.card_of_mcp_client("c", "c1").unwrap());
         assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
-        // And so does sending one the client put there back to the Backlog.
+        // And so does taking one the client put there out of Todo.
         card(&store, "d");
+        closed_by_c1(&store, "d", "r2");
         assert!(
             store
                 .move_card_as("d", CardLane::Todo, 0, "en", Some("c1"))
@@ -5083,6 +5208,7 @@ mod tests {
         );
         assert!(store.move_card("d", CardLane::Backlog, 0, "en").unwrap());
         assert!(!store.card_of_mcp_client("d", "c1").unwrap());
+        assert_eq!(store.card("d").unwrap().rerun_of, None);
         assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
     }
 
@@ -5090,9 +5216,7 @@ mod tests {
     fn a_run_started_on_a_card_a_client_put_in_todo_belongs_to_whoever_started_it() {
         let (_dir, store) = store();
         seeded(&store);
-        store
-            .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
-            .unwrap();
+        two_clients(&store);
         let issue = r#"{"number":7,"title":"Log in","body":"","url":"https://github.com/acme/app/issues/7"}"#;
         let card = NewCard {
             id: "c".into(),
@@ -5103,6 +5227,7 @@ mod tests {
             issue_number: Some(7),
         };
         store.add_card(&card).unwrap();
+        closed_by_c1(&store, "c", "r1");
         assert!(
             store
                 .move_card_as("c", CardLane::Todo, 0, "en", Some("c1"))
@@ -5111,7 +5236,8 @@ mod tests {
         // A run started from outside the board takes the issue's card over.
         let started = store.add_started_card(&card, "en", &[]).unwrap();
         assert_eq!(started.as_deref(), Some("c"));
-        assert_eq!(store.card("c").unwrap().queued_by_client, None);
+        let taken = store.card("c").unwrap();
+        assert_eq!((taken.queued_by_client, taken.rerun_of), (None, None));
         assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
     }
 
@@ -5150,6 +5276,112 @@ mod tests {
         }
         // Parts waiting for their turn aren't runs it has open: only the agreement is.
         assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
+
+        // A part waiting in Todo as the change opened it takes the client's note. Once the
+        // person has put it back in Todo, it's theirs.
+        assert!(
+            store
+                .append_to_card("second", "Send the date.", "c1")
+                .unwrap()
+        );
+        assert!(!store.append_to_card("second", "Mine.", "c2").unwrap());
+        assert!(
+            store
+                .move_card("second", CardLane::Backlog, 0, "en")
+                .unwrap()
+        );
+        assert!(!store.append_to_card("second", "x", "c1").unwrap());
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(store.move_card("second", CardLane::Todo, 0, "en").unwrap());
+        assert!(!store.card("second").unwrap().waits_as_opened());
+        assert!(!store.append_to_card("second", "x", "c1").unwrap());
+        assert!(store.card("first").unwrap().waits_as_opened());
+    }
+
+    #[test]
+    fn cards_a_client_put_in_todo_start_only_while_it_has_room() {
+        let (_dir, store) = store();
+        seeded(&store);
+        two_clients(&store);
+        store.set_mcp_client_max_open_runs("c1", 1).unwrap();
+        for id in ["one", "two", "three", "theirs"] {
+            card(&store, id);
+            assert!(
+                store
+                    .move_card(id, CardLane::Todo, usize::MAX, "en")
+                    .unwrap()
+            );
+        }
+        for id in ["one", "two", "three"] {
+            store
+                .lock()
+                .execute(
+                    "update card set queued_by_client = 'c1' where id = ?1",
+                    [id],
+                )
+                .unwrap();
+        }
+        // One of the client's starts, and the person's card below the others doesn't wait for them.
+        assert_eq!(claim(&store).as_deref(), Some("one"));
+        assert!(store.has_todo_cards().unwrap());
+        assert_eq!(claim(&store).as_deref(), Some("theirs"));
+        assert!(
+            !store.has_todo_cards().unwrap(),
+            "two and three wait for room"
+        );
+        assert_eq!(claim(&store), None);
+
+        // Once its run is over, the next one starts.
+        store
+            .lock()
+            .execute("update card set run_id = 'r' where id = 'one'", [])
+            .unwrap();
+        assert_eq!(claim(&store), None, "its run is still going");
+        store
+            .patch_run("r", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        assert_eq!(claim(&store).as_deref(), Some("two"));
+        assert_eq!(claim(&store), None);
+    }
+
+    #[test]
+    fn a_run_the_person_opened_again_after_the_client_closed_it_is_theirs_for_good() {
+        let (_dir, store) = store();
+        seeded(&store);
+        two_clients(&store);
+        card(&store, "c");
+        closed_by_c1(&store, "c", "r1");
+        assert!(store.run_closed_by_mcp_client("r1", "c1").unwrap());
+        // The person tries it again, and the client closes it once more.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store
+            .patch_run("r1", &[("finished_at", Value::Null)])
+            .unwrap();
+        store
+            .add_attempt(&NewAttempt {
+                number: 2,
+                ..new_attempt("r1-human-2", "r1", "human", AttemptState::WaitingApproval)
+            })
+            .unwrap();
+        store
+            .set_state("r1-human-2", AttemptState::Abandoned, None)
+            .unwrap();
+        store
+            .append_event(
+                "r1-human-2",
+                "abandoned",
+                &serde_json::json!({ "by": "Claude Code" }),
+            )
+            .unwrap();
+        store
+            .patch_run("r1", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        assert!(!store.run_closed_by_mcp_client("r1", "c1").unwrap());
+        assert!(
+            !store
+                .move_card_as("c", CardLane::Todo, 0, "en", Some("c1"))
+                .unwrap()
+        );
     }
 
     #[test]
@@ -5208,6 +5440,13 @@ mod tests {
         call("close_run");
         assert!(!closed("c1"));
 
+        // A stop the client asked for is its own, and so are a stop for Keel quitting and the
+        // close that follows.
+        for by in ["Claude Code", "Keel"] {
+            store
+                .append_event("a", "stopRequested", &serde_json::json!({ "by": by }))
+                .unwrap();
+        }
         store.set_state("a", AttemptState::Abandoned, None).unwrap();
         store
             .append_event(
@@ -5222,19 +5461,45 @@ mod tests {
         assert!(closed("c1"));
         assert!(!closed("c2"), "it wasn't the other client's call");
 
-        // A stop the client asked for is its own. One the person asked for is theirs.
+        // One the person asked to stop is theirs, though the client closed it after.
+        card(&store, "c");
+        closed_by_c1(&store, "c", "r2");
+        assert!(store.run_closed_by_mcp_client("r2", "c1").unwrap());
+        card(&store, "d");
+        ran(&store, "d", "r3", None);
         store
-            .append_event(
-                "a",
-                "stopRequested",
-                &serde_json::json!({ "by": "Claude Code" }),
-            )
+            .add_attempt(&new_attempt(
+                "r3-a",
+                "r3",
+                "builder",
+                AttemptState::Abandoned,
+            ))
             .unwrap();
-        assert!(closed("c1"));
+        for data in [
+            serde_json::json!({}),
+            serde_json::json!({ "by": "Claude Code" }),
+        ] {
+            let kind = if data.get("by").is_some() {
+                "abandoned"
+            } else {
+                "stopRequested"
+            };
+            store.append_event("r3-a", kind, &data).unwrap();
+        }
         store
-            .append_event("a", "stopRequested", &serde_json::json!({}))
+            .add_mcp_call(&NewMcpCall {
+                client: &mine,
+                tool: "close_run",
+                args: "{}",
+                error: None,
+                run_id: Some("r3"),
+                duration_ms: 1,
+            })
             .unwrap();
-        assert!(!closed("c1"), "the person stopped it");
+        assert!(
+            !store.run_closed_by_mcp_client("r3", "c1").unwrap(),
+            "the person stopped it"
+        );
     }
 
     #[test]

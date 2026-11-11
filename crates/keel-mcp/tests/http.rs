@@ -3738,6 +3738,15 @@ async fn a_part_waiting_its_turn_takes_a_note_and_one_closed_goes_back_to_todo()
         let refusal = refused(&call(&client, tool, args).await);
         assert!(refusal.contains("the person"), "{tool}: {refusal}");
     }
+    // Nor does putting it back in Todo give it back: the person put it there.
+    w.engine
+        .card_move(&second, CardLane::Todo, 0, "en")
+        .unwrap();
+    let refusal = refused(&call(&client, "append_to_card", note_args(&second, "x")).await);
+    assert!(
+        refusal.contains("The person put this card in Todo"),
+        "{refusal}"
+    );
     let part = ok(&call(&client, "get_run", json!({ "run": part_run })).await);
     assert_eq!(part["jointChange"]["parts"][1]["youCan"], json!([]));
     assert_eq!(
@@ -3816,11 +3825,24 @@ async fn a_client_cannot_add_to_or_run_again_what_the_person_ended() {
     w.card_in(&rejected, BoardColumn::Backlog).await;
     refuses(&rejected, "rejected").await;
 
-    // The person closed it.
+    // The client closed it, then the person tried it again and closed it themselves.
     let (closed, approval) = started("Closed").await;
+    ok(&call(&client, "close_run", json!({ "run": closed })).await);
+    w.engine.retry(&approval, false).unwrap();
+    let approval = waiting_attempt(&settled(&client, &closed).await);
     w.engine.abandon(&approval).unwrap();
     w.card_in(&closed, BoardColumn::Backlog).await;
     refuses(&closed, "The person ended").await;
+
+    // The person tried it again after the client closed it, and the client closed it once more:
+    // trying it again was the person's say, so it stays theirs.
+    let (reopened, approval) = started("Reopened").await;
+    ok(&call(&client, "close_run", json!({ "run": reopened })).await);
+    w.engine.retry(&approval, false).unwrap();
+    settled(&client, &reopened).await;
+    ok(&call(&client, "close_run", json!({ "run": reopened })).await);
+    w.card_in(&reopened, BoardColumn::Backlog).await;
+    refuses(&reopened, "tried it again").await;
 
     // The person stopped it, though it was the client that closed it after.
     let hold = w.hold();

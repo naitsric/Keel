@@ -1153,7 +1153,7 @@ impl McpServer {
             server
                 .0
                 .engine
-                .card_append_by(&card.id, text, &client.name, &language)
+                .card_append_by(&card.id, text, &client.id, &client.name, &language)
                 .map_err(card_changed_meanwhile)?;
             Ok((server.card_view(client, &card.id)?, None))
         })
@@ -1427,13 +1427,21 @@ impl McpServer {
         Ok(tools)
     }
 
-    /// Whether a client could add a note to a card of its own: one waiting in Todo, like a part
-    /// waiting for its turn, or one in the Backlog whose last run it closed itself. Its run gets
-    /// the note when it starts. A card the person ended or held back is theirs, and a note on it
-    /// would only ride along when they start it.
+    /// Whether a client could add a note to a card of its own: one it put in Todo, a part waiting
+    /// there as its change opened it, or one in the Backlog whose last run it closed itself. Its
+    /// run gets the note when it starts. A card the person put in Todo, ended or held back is
+    /// theirs, and a note on it would ride along in their run. The store looks again as it writes.
     fn note_target(&self, client: &McpClient, card: &Card) -> Result<(), ToolError> {
         match card.column() {
-            BoardColumn::Todo => Ok(()),
+            BoardColumn::Todo
+                if card.queued_by_client.as_deref() == Some(client.id.as_str())
+                    || card.waits_as_opened() =>
+            {
+                Ok(())
+            }
+            BoardColumn::Todo => Err(ToolError::new(
+                "The person put this card in Todo, so what its run is asked is theirs, in Keel.",
+            )),
             BoardColumn::Backlog => self.closed_by_client(client, card),
             BoardColumn::Done => Err(ToolError::new(
                 "This card's run has finished, so a note would reach nothing.",
@@ -1445,17 +1453,29 @@ impl McpServer {
     }
 
     /// Whether a client could put a card back in Todo: only one in the Backlog whose last run it
-    /// closed itself. It runs that run's workflow again.
+    /// closed itself, and that can start again as start_run or start_task would start it today.
+    /// The store looks again as the card moves.
     fn queue_target(&self, client: &McpClient, card: &Card) -> Result<(), ToolError> {
         match card.column() {
             BoardColumn::Backlog => {
                 self.closed_by_client(client, card)?;
-                let run = card.run_id.as_deref().unwrap_or_default();
-                let run = self.0.store.run(run).map_err(store_error)?;
-                if steps_of(&run).is_empty() {
-                    return Err(ToolError::new(
-                        "Keel doesn't know which workflow this card's last run used, so only the person can start it again, in Keel.",
-                    ));
+                let run_id = card.run_id.as_deref().unwrap_or_default();
+                let language = self.language(None)?;
+                if !self
+                    .0
+                    .engine
+                    .can_run_again(run_id, &language)
+                    .map_err(engine_error)?
+                {
+                    let run = self.0.store.run(run_id).map_err(store_error)?;
+                    return Err(ToolError::new(match run.workflow_id {
+                        Some(_) => {
+                            "The workflow this card's last run used isn't in Keel anymore, so only the person can start it again, in Keel."
+                        }
+                        None => {
+                            "This card's last run was neither a saved workflow nor a task that only reads, so only the person can start it again, in Keel."
+                        }
+                    }));
                 }
                 Ok(())
             }
@@ -1494,7 +1514,7 @@ impl McpServer {
             .map_err(store_error)?
         {
             return Err(ToolError::new(
-                "The person ended this card's last run, closing or stopping it, so whether it runs again is theirs to decide, in Keel.",
+                "The person ended this card's last run, closing or stopping it, or tried it again after this client closed it, so whether it runs again is theirs to decide, in Keel.",
             ));
         }
         Ok(())

@@ -899,18 +899,21 @@ fn a_run_from_outside_that_its_client_closes_keeps_what_its_card_says() {
     assert!(w.github_writes().is_empty(), "{:?}", w.github_writes());
 }
 
-/// What a client's own close_run leaves on record, besides the run's event naming it.
+/// What a client that started a run and closed it leaves on record, besides the run's event
+/// naming it.
 fn closed_by_client(w: &World, client: &McpClient, run: &str) {
-    w.store
-        .add_mcp_call(&NewMcpCall {
-            client,
-            tool: "close_run",
-            args: "{}",
-            error: None,
-            run_id: Some(run),
-            duration_ms: 1,
-        })
-        .unwrap();
+    for tool in ["start_run", "close_run"] {
+        w.store
+            .add_mcp_call(&NewMcpCall {
+                client,
+                tool,
+                args: "{}",
+                error: None,
+                run_id: Some(run),
+                duration_ms: 1,
+            })
+            .unwrap();
+    }
 }
 
 fn client(w: &World) -> McpClient {
@@ -947,7 +950,7 @@ fn a_client_adds_a_note_to_a_card_it_closed_and_runs_its_workflow_again_as_its_o
     // While its run is open, the card is Keel's.
     let note = w
         .engine
-        .card_append_by(&card, "And a double one.", "Claude Code", "en");
+        .card_append_by(&card, "And a double one.", &client.id, "Claude Code", "en");
     assert!(matches!(note, Err(Error::InvalidState)), "{note:?}");
     let moved = w.engine.card_queue_by(&card, "en", &client.id);
     assert!(matches!(moved, Err(Error::InvalidState)), "{moved:?}");
@@ -956,7 +959,13 @@ fn a_client_adds_a_note_to_a_card_it_closed_and_runs_its_workflow_again_as_its_o
     closed_by_client(&w, &client, &run);
     w.wait_column(&card, BoardColumn::Backlog);
     w.engine
-        .card_append_by(&card, "  And a double one.\n", "Claude Code", "en")
+        .card_append_by(
+            &card,
+            "  And a double one.\n",
+            &client.id,
+            "Claude Code",
+            "en",
+        )
         .unwrap();
     let (person, notes) = split_assistant_notes(&w.card(&card).body);
     assert_eq!(person, "Add a triple function\n\nWith its test.");
@@ -1070,7 +1079,13 @@ fn a_task_a_client_closed_runs_again_as_the_same_task_that_only_reads() {
 
     std::fs::remove_file(w.flags.join("fail-card-5")).unwrap();
     w.engine
-        .card_append_by(&card, "Look at the session too.", "Claude Code", "en")
+        .card_append_by(
+            &card,
+            "Look at the session too.",
+            &client.id,
+            "Claude Code",
+            "en",
+        )
         .unwrap();
     w.engine.card_queue_by(&card, "en", &client.id).unwrap();
     let done = w.wait_column(&card, BoardColumn::Done);
@@ -1090,6 +1105,81 @@ fn a_task_a_client_closed_runs_again_as_the_same_task_that_only_reads() {
     );
     assert_eq!(w.attempt(&card).tools, "readOnly");
     assert!(w.github_writes().is_empty(), "{:?}", w.github_writes());
+}
+
+#[test]
+fn a_card_runs_again_with_its_workflow_and_the_project_s_commands_as_they_are_now() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let with_setup = |setup: &str| ProjectSettings {
+        setup_command: Some(setup.into()),
+        ..settings(Some("alice"), None)
+    };
+    w.engine
+        .update_project(&w.project_id, &with_setup("echo setup-v1"))
+        .unwrap();
+    let workflow = saved(
+        &w.engine,
+        &w.project_id,
+        "Builds",
+        vec![
+            agent("work", ToolProfile::Build),
+            WorkflowStep::Approval { id: "ask".into() },
+        ],
+    );
+    w.engine.start_board();
+    let client = client(&w);
+    let mut asked = outside_run(&w, steps_of(&w, &workflow), "Add a triple function");
+    asked.saved_workflow = Some(
+        w.engine
+            .workflow(&w.project_id, &workflow, "en")
+            .unwrap()
+            .unwrap()
+            .reference(),
+    );
+    let run = w.engine.start_run_on_board(asked).unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    let setup_of = |run: &str| {
+        workflow_of(&w.store.run(run).unwrap())
+            .into_iter()
+            .find_map(|step| match step {
+                WorkflowStep::Setup { run, .. } => Some(run),
+                _ => None,
+            })
+    };
+    assert_eq!(setup_of(&run).as_deref(), Some("echo setup-v1"));
+    w.engine
+        .abandon_by(&w.wait_approval(&run), "Claude Code")
+        .unwrap();
+    closed_by_client(&w, &client, &run);
+    w.wait_column(&card, BoardColumn::Backlog);
+
+    // The person changes the setup meanwhile: the run again prepares as the project does now.
+    w.engine
+        .update_project(&w.project_id, &with_setup("echo setup-v2"))
+        .unwrap();
+    assert!(w.engine.can_run_again(&run, "en").unwrap());
+    w.engine.card_queue_by(&card, "en", &client.id).unwrap();
+    let again = w.wait_column(&card, BoardColumn::HumanReview);
+    let again = again.run_id.unwrap();
+    assert_ne!(again, run);
+    assert_eq!(setup_of(&again).as_deref(), Some("echo setup-v2"));
+    assert_eq!(
+        w.store.run(&again).unwrap().workflow_id.as_deref(),
+        Some(workflow.as_str())
+    );
+
+    // Closed again, and the person deletes the workflow: there's nothing left to run again.
+    w.engine
+        .abandon_by(&w.wait_approval(&again), "Claude Code")
+        .unwrap();
+    closed_by_client(&w, &client, &again);
+    w.wait_column(&card, BoardColumn::Backlog);
+    w.engine.delete_workflow(&w.project_id, &workflow).unwrap();
+    assert!(!w.engine.can_run_again(&again, "en").unwrap());
+    let moved = w.engine.card_queue_by(&card, "en", &client.id);
+    assert!(matches!(moved, Err(Error::InvalidState)), "{moved:?}");
+    assert_eq!(w.card(&card).column, BoardColumn::Backlog);
 }
 
 // Criterion 3: only as many as the limit work at once, and the rest enter in order.
@@ -2508,6 +2598,19 @@ fn stopping_and_quitting_starts_nothing_new_and_the_queue_is_there_on_reopening(
     assert_eq!(w.started().len(), 2, "{:?}", w.started());
     assert_eq!(w.engine.active_count().unwrap(), 0);
     assert_eq!(w.titles_in(BoardColumn::Todo), ["card-3", "card-4"]);
+    // Keel asked them to stop as it quit, not the person, who never asked about these runs.
+    let stops: Vec<serde_json::Value> = w
+        .store
+        .runs(10)
+        .unwrap()
+        .iter()
+        .flat_map(|run| w.store.attempts_of_run(&run.id).unwrap())
+        .flat_map(|attempt| w.store.events(&attempt.id, 0).unwrap())
+        .filter(|event| event.kind == "stopRequested")
+        .map(|event| event.data)
+        .collect();
+    assert_eq!(stops.len(), 2, "{stops:?}");
+    assert!(stops.iter().all(|data| data["by"] == "Keel"), "{stops:?}");
 
     // Being stopped belongs to that session, not to the data.
     w.reopen(|_| {});

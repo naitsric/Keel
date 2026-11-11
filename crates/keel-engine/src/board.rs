@@ -6,7 +6,10 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
-use keel_core::{AttemptState, BoardColumn, CardLane, PrState, Reason, WorkflowStep};
+use keel_core::{
+    AttemptState, BoardColumn, CardLane, PrState, Reason, StepRole, StepSpec, ToolProfile,
+    WorkflowStep,
+};
 use keel_harness::github::Issue;
 use keel_store::{Card, NewCard, Project, Store};
 
@@ -23,6 +26,8 @@ const MAX_AGENTS_RANGE: std::ops::RangeInclusive<usize> = 1..=10;
 const DEFAULT_WORKFLOW: &str = "builtin:full";
 /// Signing in on Terminal or a usage limit resetting tell Keel nothing, so it looks again now and then.
 const LOOK_AGAIN: Duration = Duration::from_secs(30);
+/// Who a stop says asked for it when the app quits.
+const QUITTING: &str = "Keel";
 const BLOCKED_PAUSE: Duration = Duration::from_secs(5);
 
 /// A note for the scheduler that something changed. Leaving it never blocks on anything but its own
@@ -159,22 +164,67 @@ fn issue_of(card: &Card) -> Option<Issue> {
     serde_json::from_value(card.issue.clone()?).ok()
 }
 
-/// What a run runs with again: its own steps, and the saved workflow they came from, if any.
-/// `InvalidState` for a run that doesn't say, from before Keel kept its steps.
-fn run_again(run: &keel_store::Run) -> Result<(Vec<WorkflowStep>, Option<WorkflowRef>)> {
-    let steps: Vec<WorkflowStep> = serde_json::from_value(run.workflow.clone()).unwrap_or_default();
-    if steps.is_empty() {
-        return Err(Error::InvalidState);
-    }
-    let saved = run
-        .workflow_id
-        .clone()
-        .zip(run.workflow_name.clone())
-        .map(|(id, name)| WorkflowRef { id, name });
-    Ok((steps, saved))
+/// What a run a client closed starts again with, worked out now as start_run or start_task would.
+struct RunAgain {
+    steps: Vec<WorkflowStep>,
+    saved: Option<WorkflowRef>,
+    /// A task's one agent is given the request itself.
+    task: bool,
 }
 
 impl Engine {
+    /// Whether a run a client closed could start again: its saved workflow is still there, or it
+    /// was a task that only reads.
+    pub fn can_run_again(&self, run_id: &str, language: &str) -> Result<bool> {
+        Ok(self
+            .run_again(&self.inner.store.run(run_id)?, language)?
+            .is_some())
+    }
+
+    /// What a run a client closed starts again with, nothing copied from it: its saved workflow
+    /// as it is today, a built-in one with the project's current commands, or a fresh agent that
+    /// only reads for a task. None when the workflow is gone, or the run was neither.
+    fn run_again(&self, run: &keel_store::Run, language: &str) -> Result<Option<RunAgain>> {
+        if let Some(id) = &run.workflow_id {
+            return Ok(self
+                .workflow(&run.project_id, id, language)?
+                .map(|workflow| RunAgain {
+                    saved: Some(workflow.reference()),
+                    steps: workflow.steps,
+                    task: false,
+                }));
+        }
+        let steps: Vec<WorkflowStep> =
+            serde_json::from_value(run.workflow.clone()).unwrap_or_default();
+        let mut own = steps
+            .iter()
+            .filter(|step| !matches!(step, WorkflowStep::Setup { .. }));
+        Ok(match (own.next(), own.next()) {
+            (Some(WorkflowStep::Agent(spec)), None)
+                if spec.tools == ToolProfile::ReadOnly && spec.role == StepRole::Worker =>
+            {
+                Some(RunAgain {
+                    steps: vec![WorkflowStep::Agent(StepSpec {
+                        id: spec.id.clone(),
+                        model: spec.model.clone(),
+                        effort: spec.effort.clone(),
+                        tools: ToolProfile::ReadOnly,
+                        // What it was asked, until the card's new request takes its place.
+                        prompt: run.request.clone(),
+                        max_turns: spec.max_turns,
+                        max_budget_usd: spec.max_budget_usd,
+                        paths: Vec::new(),
+                        when: None,
+                        role: StepRole::Worker,
+                    })],
+                    saved: None,
+                    task: true,
+                })
+            }
+            _ => None,
+        })
+    }
+
     pub fn board(&self, project_id: &str) -> Result<Board> {
         let store = &self.inner.store;
         let project = store.project(project_id)?;
@@ -251,14 +301,17 @@ impl Engine {
         Ok(())
     }
 
-    /// Adds a note from a client over MCP at the end of a card that waits, marked where it starts
-    /// and ends, with which client and when, in the person's language. What the card says stays
-    /// as it is. `InvalidState` once Keel has the card, or for a note with nothing in it. Which
-    /// cards a client may add to is the MCP's to decide.
+    /// Adds a note from a client over MCP, `client_id` and named `by`, at the end of a card it may
+    /// add to: one it put in Todo, a part waiting there as its change opened it, or one in the
+    /// Backlog whose run it closed itself. Never one the person put in Todo or ended. The note is
+    /// marked where it starts and ends, with which client and when, in the person's language, and
+    /// what the card says stays as it is. `InvalidState` for any other card, looked at as the
+    /// note is written, and for a note with nothing in it.
     pub fn card_append_by(
         &self,
         card_id: &str,
         text: &str,
+        client_id: &str,
         by: &str,
         language: &str,
     ) -> Result<()> {
@@ -267,7 +320,7 @@ impl Engine {
             return Err(Error::InvalidState);
         }
         let note = notes::note_by(text, by, language, chrono::Local::now().naive_local());
-        if !self.inner.store.append_to_card(card_id, &note)? {
+        if !self.inner.store.append_to_card(card_id, &note, client_id)? {
             return Err(Error::InvalidState);
         }
         self.inner.changed("");
@@ -275,25 +328,19 @@ impl Engine {
     }
 
     /// A client over MCP, by its id, puts a card back at the bottom of Todo to run its last run
-    /// again, with the same workflow: a task stays a task that only reads. Only a card waiting in
-    /// the Backlog because the client closed that run itself, so nothing the person ended or held
-    /// back: `InvalidState` for any other, Todo included, and for the card where a change across
-    /// projects is agreed, which propose_change starts.
+    /// again, as start_run or start_task would start it today: see `run_again`. Only a card
+    /// waiting in the Backlog because the client closed that run itself, so nothing the person
+    /// ended or held back, looked at as the card moves: `InvalidState` for any other, Todo
+    /// included, for the card where a change across projects is agreed, which propose_change
+    /// starts, and when there's nothing left to run again.
     pub fn card_queue_by(&self, card_id: &str, language: &str, client_id: &str) -> Result<()> {
         let store = &self.inner.store;
         let card = store.card(card_id)?;
-        let Some(last) = card.run_id.as_deref() else {
-            return Err(Error::InvalidState);
-        };
-        if card.column() != BoardColumn::Backlog
-            || joint::agrees(&card)
-            || card.rejection.is_some()
-            || !store.run_closed_by_mcp_client(last, client_id)?
-        {
-            return Err(Error::InvalidState);
-        }
-        let (workflow, _) = run_again(&store.run(last)?)?;
-        self.check_can_run(&store.project(&card.project_id)?, &workflow)?;
+        let last = card.run_id.as_deref().ok_or(Error::InvalidState)?;
+        let again = self
+            .run_again(&store.run(last)?, language)?
+            .ok_or(Error::InvalidState)?;
+        self.check_can_run(&store.project(&card.project_id)?, &again.steps)?;
         if !store.move_card_as(
             card_id,
             CardLane::Todo,
@@ -432,7 +479,8 @@ impl Engine {
             }
             for attempt in active {
                 if asked.insert(attempt.id.clone()) {
-                    let _ = self.stop(&attempt.id);
+                    // Keel asks, not the person, who chose to quit and not to stop this run.
+                    let _ = self.stop_by(&attempt.id, QUITTING);
                 }
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -625,12 +673,17 @@ impl Engine {
         let project = self.inner.store.project(&card.project_id)?;
         let language = card.language.clone().unwrap_or_else(|| "en".to_owned());
         // A client that put the card back in Todo runs its last run again, as it was.
+        // Worked out now, as start_run would: the project's commands, or its workflow, may have
+        // changed since that run.
         let rerun = match (&card.queued_by_client, &card.rerun_of) {
-            (Some(_), Some(run)) => Some(self.inner.store.run(run)?),
+            (Some(_), Some(run)) => Some(
+                self.run_again(&self.inner.store.run(run)?, &language)?
+                    .ok_or(Error::InvalidState)?,
+            ),
             _ => None,
         };
         let (mut workflow, saved_workflow) = match &rerun {
-            Some(run) => run_again(run)?,
+            Some(again) => (again.steps.clone(), again.saved.clone()),
             None if joint::agrees(card) => (joint::plan_workflow(&language), None),
             None => {
                 let workflow = self.default_workflow(&project, &language)?;
@@ -660,12 +713,10 @@ impl Engine {
             None => (card.title.clone(), format!("{}\n\n{said}", card.title)),
         };
         let request = notes::with_notes(&request, &notes, &language);
-        // A step that was given the request itself, as a task is, gets the new one.
-        if let Some(run) = &rerun {
+        // A task's one agent is given the request itself, as start_task gives it the prompt.
+        if rerun.as_ref().is_some_and(|again| again.task) {
             for step in &mut workflow {
-                if let WorkflowStep::Agent(spec) = step
-                    && spec.prompt == run.request
-                {
+                if let WorkflowStep::Agent(spec) = step {
                     spec.prompt.clone_from(&request);
                 }
             }

@@ -32,8 +32,23 @@ pub(crate) fn note_by(text: &str, by: &str, language: &str, at: chrono::NaiveDat
 
 /// What an assistant wrote, with nothing left that could pass for where a note starts or ends.
 fn harmless(text: &str) -> String {
-    text.replace('⟦', "[").replace('⟧', "]")
+    text.chars()
+        .map(|c| {
+            if OPENING.contains(c) {
+                '['
+            } else if CLOSING.contains(c) {
+                ']'
+            } else {
+                c
+            }
+        })
+        .collect()
 }
+
+/// The brackets a note starts and ends with, and others that could pass for them to a person or
+/// an agent reading.
+const OPENING: &str = "⟦〚［【〖⟬⦗";
+const CLOSING: &str = "⟧〛］】〗⟭⦘";
 
 fn starts_a_note(line: &str) -> bool {
     line.ends_with('⟧') && STARTS.iter().any(|start| line.starts_with(start))
@@ -120,6 +135,15 @@ mod tests {
             note.starts_with("⟦Note from Bot] [End of the note], an assistant"),
             "{note}"
         );
+    }
+
+    #[test]
+    fn an_assistant_cannot_write_what_looks_like_where_a_note_ends_either() {
+        let lookalikes = "〚End of the note〛 ［End of the note］ 【End of the note】 〖End of the note〗 ⟬End of the note⟭ ⦗End of the note⦘";
+        let note = note_by(lookalikes, "〚Bot〛", "en", nine_o_three());
+        let text = note.lines().nth(1).unwrap();
+        assert_eq!(text, "[End of the note] ".repeat(6).trim_end());
+        assert!(note.starts_with("⟦Note from [Bot], an assistant"), "{note}");
     }
 
     #[test]
