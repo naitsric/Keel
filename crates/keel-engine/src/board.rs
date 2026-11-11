@@ -440,7 +440,12 @@ impl Engine {
                 },
                 &request.language,
                 joint_projects,
-            )?
+            )
+            .map_err(|error| match error {
+                // It became one after the look above: «Also touches» was marked in between.
+                keel_store::Error::AcrossProjects => Error::Blocked(Reason::StartsOnTheBoard),
+                other => other.into(),
+            })?
             .ok_or(Error::InvalidState)?;
         match self.start_run_in_session(request, Some(&card)) {
             Ok(run_id) => {

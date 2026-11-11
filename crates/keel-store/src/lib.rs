@@ -22,6 +22,9 @@ pub enum Error {
     Db(#[from] rusqlite::Error),
     #[error("not found: {0}")]
     NotFound(String),
+    /// The issue's card is where a change across projects is agreed, which only the board starts.
+    #[error("the issue's card is a change across several projects")]
+    AcrossProjects,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -2448,8 +2451,10 @@ impl Store {
     /// card, so this takes over the one it has. `None`, with nothing changed, if that card's run is
     /// still open. With `joint`, the card is where a change across those projects is agreed, and
     /// that's written with it, so no card is left without it: a project that's missing or removed is
-    /// an error with nothing created, and so is having none besides the card's own. A card that
-    /// already is part of a change across projects isn't taken over: `None`.
+    /// an error with nothing created, and so is having none besides the card's own. An issue whose
+    /// card is where a change across projects is agreed only starts from that card, so neither
+    /// kind of run takes it over: `AcrossProjects`, with nothing changed. That's looked at here,
+    /// with the card written in the same transaction, so «Also touches» can't slip in between.
     pub fn add_started_card(
         &self,
         card: &NewCard,
@@ -2477,15 +2482,15 @@ impl Store {
             None => None,
         };
         let id = match existing {
+            Some(existing) if existing.joint_change_id.is_some() => {
+                return Err(Error::AcrossProjects);
+            }
             Some(existing)
                 if matches!(
                     existing.column(),
                     BoardColumn::InProgress | BoardColumn::HumanReview
                 ) =>
             {
-                return Ok(None);
-            }
-            Some(existing) if !chosen.is_empty() && existing.joint_change_id.is_some() => {
                 return Ok(None);
             }
             Some(existing) => {
@@ -5033,6 +5038,36 @@ mod tests {
         );
         // A part is never where a change is agreed.
         assert!(!store.set_joint_projects("back", &["s".into()]).unwrap());
+    }
+
+    #[test]
+    fn an_issue_that_became_a_change_across_projects_meanwhile_does_not_start_from_outside() {
+        let (_dir, store) = store();
+        seeded(&store);
+        other_project(&store, "q");
+        let issue = |id: &str| NewCard {
+            id: id.into(),
+            project_id: "p".into(),
+            title: "Log in".into(),
+            body: String::new(),
+            issue: Some(r#"{"number":434}"#.into()),
+            issue_number: Some(434),
+        };
+        store.add_card(&issue("plan")).unwrap();
+        // The person marks «Also touches» after the engine looked at the board, and before the
+        // run's card is written.
+        assert!(store.set_joint_projects("plan", &["q".into()]).unwrap());
+
+        // Neither as an ordinary run nor proposed again: only its card starts it.
+        for joint in [vec![], vec!["q".to_owned()]] {
+            let started = store.add_started_card(&issue("outside"), "en", &joint);
+            assert!(matches!(started, Err(Error::AcrossProjects)), "{started:?}");
+        }
+        let cards = store.cards("p").unwrap();
+        assert_eq!(cards.len(), 1, "no second card");
+        assert_eq!(cards[0].column(), BoardColumn::Backlog);
+        assert_eq!(cards[0].language, None);
+        assert_eq!(store.joint_change("plan").unwrap().projects, ["q"]);
     }
 
     #[test]
