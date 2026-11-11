@@ -2485,11 +2485,12 @@ fn propose_change_error(error: Error, issue: Option<i64>) -> ToolError {
     }
 }
 
-/// The same answer from start_run and propose_change, since both refuse it. The person or another
-/// client may have started it, so `mine` wouldn't find it.
+/// The same answer from start_run and propose_change, since both refuse it. Only its card on the
+/// board starts it, so a client waiting for a run would wait for nothing until the person does. The
+/// person or another client may have started it, so `mine` wouldn't find it.
 fn already_across_projects(number: i64) -> ToolError {
     ToolError::new(format!(
-        "Issue #{number} already is a change across several projects on the board, so nothing new was created. The person follows it in Keel and approves its agreement there. list_runs with this `project` shows its run once it has one, even if this client didn't start it."
+        "Issue #{number} already is a change across several projects on the board, so nothing new was created. It's started and its agreement approved from its card on Keel's board, by the person: no run starts until they do, so tell them rather than wait. list_runs with this `project` shows its run once it has one, even if this client didn't start it."
     ))
 }
 
@@ -2549,6 +2550,12 @@ mod tests {
         assert!(!refusal.contains("propose_change"), "{refusal}");
         assert!(refusal.contains("#47"), "{refusal}");
         assert!(refusal.contains("nothing new was created"), "{refusal}");
+        // Only its card starts it, so a client mustn't sit waiting for a run that won't come.
+        assert!(
+            refusal.contains("from its card on Keel's board"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("no run starts until they do"), "{refusal}");
         // The person, or another client, may have started it, so `mine` wouldn't find it.
         assert!(
             refusal.contains("list_runs with this `project`"),
