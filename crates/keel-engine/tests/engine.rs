@@ -580,6 +580,7 @@ fn a_project_runs_one_command_step_at_a_time_and_reviews_are_not_held_back() {
 
 #[test]
 fn a_step_waiting_for_its_turn_names_the_one_that_has_it_as_the_turn_passes() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\nsleep 1\n{OK_RESULT}",
         init(BUILD_TOOLS, "none")
@@ -942,6 +943,7 @@ fn until(what: &str, done: impl Fn() -> bool) {
 
 #[test]
 fn closing_a_run_frees_what_its_tools_rebuild_and_keeps_its_record() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\n{BUILDS}\nexit 1",
         init(BUILD_TOOLS, "none")
@@ -978,6 +980,7 @@ fn closing_a_run_frees_what_its_tools_rebuild_and_keeps_its_record() {
 
 #[test]
 fn a_run_that_ends_frees_them_too_but_not_what_the_project_keeps_in_git() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\nmkdir -p target/debug\necho bin > target/debug/app\n{OK_RESULT}",
         init(BUILD_TOOLS, "none")
@@ -1008,6 +1011,7 @@ fn trash_of(workspace: &Path) -> PathBuf {
 
 #[test]
 fn a_folder_the_project_keeps_stays_whatever_its_capitals() {
+    keel_harness::needs!(sandbox);
     // The Mac's disk doesn't tell `Target` from `target`. Git does, and still keeps `Target`.
     let body = format!(
         "cat > /dev/null\n{}\nmv Target t && mv t target\n{OK_RESULT}",
@@ -1037,6 +1041,7 @@ fn a_folder_the_project_keeps_stays_whatever_its_capitals() {
 
 #[test]
 fn reopening_the_app_frees_what_ended_runs_still_hold() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\n{BUILDS}\nexit 1",
         init(BUILD_TOOLS, "none")

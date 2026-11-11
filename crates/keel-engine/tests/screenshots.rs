@@ -165,6 +165,7 @@ fn shot(name: &str, step: &str, before_last_change: bool) -> (String, String, bo
 
 #[test]
 fn what_a_step_saves_reaches_the_approval_with_its_step_and_not_the_branch() {
+    keel_harness::needs!(sandbox);
     let dir = tempfile::tempdir().unwrap();
     let (store, engine, project_id) = engine(dir.path());
     let run = start(
@@ -217,6 +218,7 @@ fn what_a_step_saves_reaches_the_approval_with_its_step_and_not_the_branch() {
 
 #[test]
 fn a_new_round_shows_its_own_pictures_and_not_the_last_ones() {
+    keel_harness::needs!(sandbox);
     let dir = tempfile::tempdir().unwrap();
     let (store, engine, project_id) = engine(dir.path());
     let run = start(
@@ -248,6 +250,7 @@ fn a_new_round_shows_its_own_pictures_and_not_the_last_ones() {
 
 #[test]
 fn the_folder_is_keels_whatever_the_projects_variables_say() {
+    keel_harness::needs!(sandbox);
     let dir = tempfile::tempdir().unwrap();
     let (store, engine, project_id) = engine(dir.path());
     let elsewhere = dir.path().join("elsewhere");
@@ -286,6 +289,7 @@ fn the_folder_is_keels_whatever_the_projects_variables_say() {
 
 #[test]
 fn what_a_step_leaves_running_ends_with_it() {
+    keel_harness::needs!(sandbox);
     let dir = tempfile::tempdir().unwrap();
     let (store, engine, project_id) = engine(dir.path());
     let run = start(
@@ -313,6 +317,7 @@ fn what_a_step_leaves_running_ends_with_it() {
 
 #[test]
 fn a_run_without_pictures_has_none_to_show() {
+    keel_harness::needs!(sandbox);
     let dir = tempfile::tempdir().unwrap();
     let (store, engine, project_id) = engine(dir.path());
     let run = start(

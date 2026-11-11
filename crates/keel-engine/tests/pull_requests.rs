@@ -549,6 +549,7 @@ fn what_a_verifier_points_at_is_masked_like_the_rest_of_the_pull_request() {
 
 #[test]
 fn delivering_frees_what_the_build_left_in_the_run_copy() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let (repo, remote) = (
         w._dir.path().join("app"),
