@@ -150,7 +150,9 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
   const role = spec.role ?? { kind: "worker" };
   const setRole = (kind: StepRole["kind"]) => {
     if (kind === "approver") onChange({ ...spec, tools: "readOnly", role: { kind, reworkTo: earlier[earlier.length - 1] ?? "", maxRounds: 2 } });
-    else if (kind === "reviewer" || kind === "learner" || kind === "mapper" || kind === "specifier" || kind === "verifier") onChange({ ...spec, tools: "readOnly", role: { kind } });
+    // It works out the risks, so it can't go by them: what the form no longer shows goes too.
+    else if (kind === "specifier") onChange(withModelWhenRisky(withRisks({ ...spec, tools: "readOnly", role: { kind } }, []), ""));
+    else if (kind === "reviewer" || kind === "learner" || kind === "mapper" || kind === "verifier") onChange({ ...spec, tools: "readOnly", role: { kind } });
     else onChange({ ...spec, role: { kind } });
   };
   const judges = role.kind !== "worker";

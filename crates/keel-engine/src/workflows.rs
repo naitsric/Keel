@@ -355,10 +355,22 @@ pub fn risks_match(risks: &[String], named: &[String]) -> bool {
 const RISKY: [&str; 4] = ["security", "money", "personalData", "irreversibleData"];
 const RISKY_LINES: usize = 1500;
 
-/// `lines` is `None` when the change couldn't be read, which says nothing either way.
-pub fn is_risky(named: &[String], lines: Option<usize>) -> bool {
+/// `lines` reads the change only if the risks didn't decide it, and gives `None` when it can't be
+/// read. Like the size, a change nobody could read is never taken as a harmless one.
+pub fn is_risky(named: &[String], lines: impl FnOnce() -> Option<usize>) -> bool {
     named.iter().any(|risk| RISKY.contains(&risk.as_str()))
-        || lines.is_some_and(|lines| lines > RISKY_LINES)
+        || lines().is_none_or(|lines| lines > RISKY_LINES)
+}
+
+/// The model a step changes to for this change, if it does. A specifier works out the risks, so it
+/// has none to go by.
+pub fn model_for_the_change<'a>(
+    spec: &'a StepSpec,
+    named: &[String],
+    lines: impl FnOnce() -> Option<usize>,
+) -> Option<&'a str> {
+    let model = spec.model_when_risky.as_deref()?;
+    (spec.role != StepRole::Specifier && is_risky(named, lines)).then_some(model)
 }
 
 /// What a step produced, for the next one's prompt. From its latest attempt.
@@ -2093,12 +2105,31 @@ mod tests {
     fn a_change_is_risky_for_these_risks_or_over_1500_lines() {
         let named = |risks: &[&str]| risks.iter().map(|r| (*r).to_owned()).collect::<Vec<_>>();
         for risk in ["security", "money", "personalData", "irreversibleData"] {
-            assert!(is_risky(&named(&[risk]), Some(1)), "{risk}");
+            // The risks decide it without reading the change.
+            assert!(is_risky(&named(&[risk]), || unreachable!()), "{risk}");
         }
-        assert!(!is_risky(&named(&["concurrency", "environment"]), Some(1)));
-        assert!(!is_risky(&[], Some(1500)));
-        assert!(is_risky(&[], Some(1501)));
-        assert!(!is_risky(&[], None), "nothing to go on");
+        let small = || Some(1);
+        assert!(!is_risky(&named(&["concurrency", "environment"]), small));
+        assert!(!is_risky(&[], || Some(1500)));
+        assert!(is_risky(&[], || Some(1501)));
+        // Like the size: a change that can't be read is never taken as a harmless one.
+        assert!(is_risky(&[], || None));
+    }
+
+    #[test]
+    fn a_specifier_never_changes_model_for_the_risks_it_works_out() {
+        let named = vec!["security".to_owned()];
+        let mut step = worker("code", ToolProfile::ReadOnly);
+        step.role = StepRole::Reviewer;
+        assert_eq!(model_for_the_change(&step, &named, || Some(1)), None);
+        step.model_when_risky = Some("opus".into());
+        assert_eq!(
+            model_for_the_change(&step, &named, || Some(1)),
+            Some("opus")
+        );
+        assert_eq!(model_for_the_change(&step, &[], || Some(1)), None);
+        step.role = StepRole::Specifier;
+        assert_eq!(model_for_the_change(&step, &named, || None), None);
     }
 
     #[test]

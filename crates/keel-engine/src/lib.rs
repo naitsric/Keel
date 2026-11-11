@@ -1888,31 +1888,43 @@ impl Inner {
         })
     }
 
-    /// The step with its model for a risky change, if it has one and the change is. Decided each
-    /// time it starts, since the specification and the change only exist once a run gets there.
-    fn with_model_for_the_change(&self, run_id: &str, step: &WorkflowStep) -> Result<WorkflowStep> {
+    /// The step with the model it runs with this time. A fresh start decides it, since the
+    /// specification and the change only exist once a run gets there: a step's model for a risky
+    /// change, if it has one and the change is. Going on with a session keeps the model it began with.
+    fn with_its_model(
+        &self,
+        run_id: &str,
+        step: &WorkflowStep,
+        resume: Option<&Resume>,
+    ) -> Result<WorkflowStep> {
         let WorkflowStep::Agent(spec) = step else {
             return Ok(step.clone());
         };
-        let Some(model) = &spec.model_when_risky else {
-            return Ok(step.clone());
+        let model = match resume {
+            Some(resume) => Some(self.store.attempt(&resume.from)?.model_requested)
+                .filter(|model| !model.is_empty()),
+            None if spec.model_when_risky.is_some() => {
+                let attempts = self.store.attempts_of_run(run_id)?;
+                // Before any step has run there's no change yet, which isn't one that can't be read.
+                let lines = || {
+                    if attempts.is_empty() {
+                        return Some(0);
+                    }
+                    self.change_of_run(run_id, &attempts)
+                        .map(|change| change.lines)
+                };
+                workflows::model_for_the_change(spec, &workflows::named_risks(&attempts), lines)
+                    .map(str::to_owned)
+            }
+            None => None,
         };
-        let attempts = self.store.attempts_of_run(run_id)?;
-        let named = workflows::named_risks(&attempts);
-        // Reading the change takes git, so only when the risks didn't already decide it.
-        let risky = workflows::is_risky(&named, None)
-            || workflows::is_risky(
-                &[],
-                self.change_of_run(run_id, &attempts)
-                    .map(|change| change.lines),
-            );
-        if !risky {
-            return Ok(step.clone());
-        }
-        Ok(WorkflowStep::Agent(StepSpec {
-            model: model.clone(),
-            ..spec.clone()
-        }))
+        Ok(match model {
+            Some(model) => WorkflowStep::Agent(StepSpec {
+                model,
+                ..spec.clone()
+            }),
+            None => step.clone(),
+        })
     }
 
     /// Records a step and sets it going. Every caller holds `advancing`, so this never takes it:
@@ -1929,7 +1941,7 @@ impl Inner {
         let workspace = self.workspace(run_id);
         let dir = self.run_dir(run_id);
         std::fs::create_dir_all(&dir)?;
-        let step = &self.with_model_for_the_change(run_id, step)?;
+        let step = &self.with_its_model(run_id, step, resume.as_ref())?;
 
         let stem = format!("{}-{number}", step.id());
         let id = new_id();

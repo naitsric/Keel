@@ -1670,3 +1670,47 @@ fn a_persons_own_step_can_go_by_risks_too_also_alone() {
     assert_eq!(w.step(&run, "races").state, "succeeded");
     assert_eq!(w.step(&run, "stronger").model_requested, "fake");
 }
+
+#[test]
+fn going_on_with_a_step_keeps_its_model_and_only_a_fresh_start_decides_again() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.spec_says(answered_small(json!({ "size": "normal", "risks": [] })));
+    // It leaves a big change behind and stops with no answer. Each one says what it was run with.
+    w.builder_does(
+        1,
+        "seq 1 1600 > big.txt\ngit add -A && git commit -qm big\nexit 1\n",
+    );
+    w.builder_does(2, "echo \"$model\" > model-2.txt\nexit 1\n");
+    w.builder_does(3, "echo \"$model\" > model-3.txt\n");
+    let mut builder = spec_of("builder", ToolProfile::Build, StepRole::Worker, None);
+    builder.model_when_risky = Some("bigger".into());
+    let run = w.start(vec![specifier(), WorkflowStep::Agent(builder), human()]);
+    let tries = |count: usize, state: &'static str| {
+        w.wait_until(&run, &format!("try {count} of the builder"), || {
+            let all = w.all(&run, "builder");
+            all.len() == count && all[count - 1].state == state
+        });
+        w.step(&run, "builder")
+    };
+    let ran_with = |attempt: &Attempt, file: &str| {
+        std::fs::read_to_string(Path::new(&attempt.workspace).join(file)).unwrap()
+    };
+
+    let first = tries(1, "failed");
+    assert_eq!(first.model_requested, "fake", "nothing had changed yet");
+
+    w.engine.retry(&first.id, true).unwrap();
+    let resumed = tries(2, "failed");
+    assert_eq!(resumed.resumed_from.as_deref(), Some(first.id.as_str()));
+    assert_eq!(resumed.model_requested, "fake", "it goes on as it began");
+    assert_eq!(ran_with(&resumed, "model-2.txt"), "fake\n");
+
+    w.engine.retry(&resumed.id, false).unwrap();
+    let fresh = tries(3, "succeeded");
+    assert_eq!(
+        fresh.model_requested, "bigger",
+        "the change is over 1,500 lines now"
+    );
+    assert_eq!(ran_with(&fresh, "model-3.txt"), "bigger\n");
+}

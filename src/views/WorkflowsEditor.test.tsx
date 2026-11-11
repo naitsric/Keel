@@ -1176,6 +1176,20 @@ describe("the workflow editor", () => {
       await saveNow();
       expect(page()).toContain("“state” goes by the risks of what was asked, so a step that works out the change has to come before it.");
     });
+
+    it("go when the step becomes the one that works out the change, which hides them", async () => {
+      const look: WorkflowStep = { type: "agent", ...spec("look", { role: { kind: "reviewer" }, risks: ["money"], modelWhenRisky: "opus" }) };
+      await openRisky({ ...RISKY, steps: [...RISKY.steps, look] });
+      await click(node("look"));
+      expect(box("money").checked).toBe(true);
+      await click(text("Works out the change"));
+      expect(page()).not.toContain("Only if what was asked could affect");
+      await saveNow();
+      const saved = lastSaved().steps[3];
+      expect("risks" in saved).toBe(false);
+      expect("modelWhenRisky" in saved).toBe(false);
+      expect(saved).toMatchObject({ role: { kind: "specifier" } });
+    });
   });
   describe("the results", () => {
     const of = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0, shortRoute: 0, movedUp: 0, movedUpBecause: [], ...fields });
