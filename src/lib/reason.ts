@@ -36,6 +36,9 @@ export function reasonText(t: TFunction, reason: Reason): string {
       return t("reasons.checkFailed", { exitCode: data.exitCode ?? "?" });
     case "exitedWithoutResult":
       return t("reasons.exitedWithoutResult", { exitCode: data.exitCode ?? "?" });
+    case "waitingForProject":
+      // A reason saved before Keel said who has the turn has no title.
+      return data.title ? t("reasons.waitingForProjectStep", { step: data.step, title: data.title }) : t("reasons.waitingForProject");
     case "projectHasOpenRuns":
       return data.count > 1 ? t("reasons.projectHasOpenRunsMany", { title: data.title, others: data.count - 1 }) : t("reasons.projectHasOpenRuns", { title: data.title });
     default:
