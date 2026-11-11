@@ -2775,16 +2775,14 @@ fn a_failed_check_pauses_nothing_end_to_end() {
     let first = w.queued("card-1");
     let second = w.queued("card-2");
     w.engine.start_board();
+    let failed = Some(Reason::CheckFailed {
+        exit_code: Some(3),
+        localhost_refused: false,
+    });
     let card = w.wait_column(&first, BoardColumn::HumanReview);
-    assert_eq!(
-        card.reason,
-        Some(Reason::CheckFailed { exit_code: Some(3) })
-    );
+    assert_eq!(card.reason, failed);
     let next = w.wait_column(&second, BoardColumn::HumanReview);
-    assert_eq!(
-        next.reason,
-        Some(Reason::CheckFailed { exit_code: Some(3) })
-    );
+    assert_eq!(next.reason, failed);
     assert_eq!(w.paused(), None);
 }
 

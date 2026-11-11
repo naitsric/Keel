@@ -326,6 +326,11 @@ const MIGRATIONS: &[&str] = &[
                       where value = '~/.rustup');
     alter table run add column extra_read text not null default '[]';
 "#,
+    // 17: Whether a project's tests may start servers on localhost and reach them, and so anything
+    // else listening there. Closed until a person opens it, a project from before included.
+    r#"
+    alter table project add column allow_localhost integer not null default 0;
+"#,
 ];
 
 /// Whether the card a query calls `card` can start as far as other cards go: it waits for none,
@@ -463,6 +468,9 @@ pub struct Project {
     pub default_workflow: Option<String>,
     /// Patterns for files too sensitive for a change to count as small, on top of what always is.
     pub sensitive_paths: Vec<String>,
+    /// Its tests start servers on localhost, so its check and its builder's commands may reach
+    /// anything there. Setup never may.
+    pub allow_localhost: bool,
 }
 
 /// What a person can change about a project.
@@ -477,9 +485,10 @@ pub struct ProjectSettings {
     pub env: Vec<EnvVar>,
     pub default_workflow: Option<String>,
     pub sensitive_paths: Vec<String>,
+    pub allow_localhost: bool,
 }
 
-const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths";
+const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths, allow_localhost";
 
 fn project_from(r: &Row) -> rusqlite::Result<Project> {
     let list = |text: String| serde_json::from_str(&text).unwrap_or_default();
@@ -498,6 +507,7 @@ fn project_from(r: &Row) -> rusqlite::Result<Project> {
         setup_command: r.get(11)?,
         default_workflow: r.get(12)?,
         sensitive_paths: list(r.get(13)?),
+        allow_localhost: r.get(14)?,
     })
 }
 
@@ -1404,8 +1414,8 @@ impl Store {
 
     pub fn add_project(&self, project: &Project) -> Result<()> {
         self.lock().execute(
-            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths, allow_localhost)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 project.id,
                 project.name,
@@ -1421,6 +1431,7 @@ impl Store {
                 project.setup_command,
                 project.default_workflow,
                 serde_json::to_string(&project.sensitive_paths).unwrap_or_default(),
+                project.allow_localhost,
             ],
         )?;
         Ok(())
@@ -1428,7 +1439,7 @@ impl Store {
 
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<()> {
         self.lock().execute(
-            "update project set github_account = ?2, check_command = ?3, allowed_domains = ?4, allowed_read = ?5, services = ?6, env = ?7, setup_command = ?8, default_workflow = ?9, sensitive_paths = ?10 where id = ?1",
+            "update project set github_account = ?2, check_command = ?3, allowed_domains = ?4, allowed_read = ?5, services = ?6, env = ?7, setup_command = ?8, default_workflow = ?9, sensitive_paths = ?10, allow_localhost = ?11 where id = ?1",
             params![
                 id,
                 settings.github_account,
@@ -1440,6 +1451,7 @@ impl Store {
                 settings.setup_command,
                 settings.default_workflow,
                 serde_json::to_string(&settings.sensitive_paths).unwrap_or_default(),
+                settings.allow_localhost,
             ],
         )?;
         Ok(())
@@ -2703,6 +2715,7 @@ mod tests {
                 env: vec![],
                 default_workflow: None,
                 sensitive_paths: vec![],
+                allow_localhost: false,
             })
             .unwrap();
         store
@@ -2862,6 +2875,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 alter table project drop column allow_localhost;
                  alter table run drop column extra_read;
                  alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;
@@ -3128,10 +3142,12 @@ mod tests {
                     }],
                     default_workflow: Some("builtin:simple".into()),
                     sensitive_paths: vec!["billing/".into()],
+                    allow_localhost: true,
                 },
             )
             .unwrap();
         let project = store.project("p").unwrap();
+        assert!(project.allow_localhost);
         assert_eq!(project.sensitive_paths, ["billing/"]);
         assert_eq!(project.default_workflow.as_deref(), Some("builtin:simple"));
         assert_eq!(project.github_account.as_deref(), Some("octo"));
@@ -3160,6 +3176,7 @@ mod tests {
                 env: vec![],
                 default_workflow: None,
                 sensitive_paths: vec![],
+                allow_localhost: false,
             })
             .unwrap();
     }
@@ -3183,6 +3200,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 15;
+                 alter table project drop column allow_localhost;
                  alter table run drop column extra_read;
                  update project set allowed_read = 'not a list' where id = 'bad';",
             )
@@ -3212,6 +3230,42 @@ mod tests {
         let store = Store::open(&path).unwrap();
         assert_eq!(store.project("p").unwrap().allowed_read, every);
         assert!(store.project("new").unwrap().allowed_read.is_empty());
+    }
+
+    /// #123: localhost is closed to every project until a person opens it, a project from before
+    /// included, and a person can close it again.
+    #[test]
+    fn localhost_is_closed_unless_a_person_opens_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        {
+            let store = Store::open(&path).unwrap();
+            seeded(&store);
+        }
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "pragma user_version = 16;
+                 alter table project drop column allow_localhost;",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(!store.project("p").unwrap().allow_localhost);
+        project_reading(&store, "new", &[]);
+        assert!(!store.project("new").unwrap().allow_localhost);
+
+        let open = ProjectSettings {
+            allow_localhost: true,
+            ..ProjectSettings::default()
+        };
+        store.update_project("new", &open).unwrap();
+        assert!(store.project("new").unwrap().allow_localhost);
+        assert!(!store.project("p").unwrap().allow_localhost);
+        store
+            .update_project("new", &ProjectSettings::default())
+            .unwrap();
+        assert!(!store.project("new").unwrap().allow_localhost);
     }
 
     /// Trying commands before saving them, a person can let them read more than the project does.
@@ -3978,6 +4032,7 @@ mod tests {
                 env: vec![],
                 default_workflow: None,
                 sensitive_paths: vec![],
+                allow_localhost: false,
             })
             .unwrap();
         assert_eq!(
@@ -4556,6 +4611,7 @@ mod tests {
                 env: vec![],
                 default_workflow: None,
                 sensitive_paths: vec![],
+                allow_localhost: false,
             })
             .unwrap();
         let pause = || std::thread::sleep(std::time::Duration::from_millis(5));
@@ -4713,6 +4769,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table project drop column allow_localhost;
                  alter table run drop column extra_read;
                  alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;

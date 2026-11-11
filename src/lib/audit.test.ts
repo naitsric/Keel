@@ -1,9 +1,26 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { Attempt, AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, localhostOpenIn, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
+
+describe("whether a run had localhost open", () => {
+  // What each step was given, as the engine writes it down when the step starts.
+  const builder = (allowLocalBinding?: boolean) => ({ settings: { sandbox: { enabled: true, network: { allowedDomains: [], ...(allowLocalBinding === undefined ? {} : { allowLocalBinding }) } } } });
+  const check = (localhost?: boolean) => ({ settings: { network: "none", read: [], sockets: [], ...(localhost === undefined ? {} : { localhost }) } });
+
+  it("says so when its check or its builder's commands had it, from what each step ran with", () => {
+    expect(localhostOpenIn([builder(), check(true)])).toBe(true);
+    expect(localhostOpenIn([builder(true), check(false)])).toBe(true);
+  });
+
+  it("doesn't when none of them had it, a run from before the setting included", () => {
+    expect(localhostOpenIn([builder(), check()])).toBe(false);
+    expect(localhostOpenIn([builder(false), check(false), { settings: {} }, { settings: null }])).toBe(false);
+    expect(localhostOpenIn([])).toBe(false);
+  });
+});
 
 describe("what an attempt's state reads as", () => {
   const didNotFit = { code: "specNotUsable", problems: [{ code: "decidedTooLong", position: 1, chars: 141, limit: 140 }] };

@@ -61,6 +61,9 @@ most about 4 KB, so when it's full, adding something means retiring something.
   hooks, and everything Keel runs with git on a run's copy goes in the same sandbox.
 - Services a project needs, like a test database, run outside the sandbox while a step uses
   them, and commands reach them only through a Unix socket.
+- Localhost is closed as well. A project whose tests start their own servers can open it to its
+  check and its builder's commands, and then they can reach any service on your Mac. Setup stays
+  closed, and the approval says when a run had it open.
 - A setup command installs dependencies once per run, before any agent. It's the one step with
   internet access, and it still can't reach your home folder or anything else on your Mac.
 - Setup, the check and the agents' commands run in a home folder of the project's own. Setup fills
@@ -117,7 +120,8 @@ of its own, open a local socket or run `ps`. The tests that need one of these pr
 tests. Run `cargo test --workspace` outside Keel to run them all.
 
 `KEEL_SAMPLE_REPOS=all cargo test -p keel-engine --test samples -- --nocapture` has Keel guess the
-commands of small sample repos (pnpm, pip, uv, Rust) and run their setup and check in the sandbox.
+commands of small sample repos (npm, pnpm, pip, uv, Rust, and an npm suite that starts its own
+server) and run their setup and check in the sandbox.
 They download dependencies, so they only run when asked. `KEEL_SAMPLE_REPOS=keel` does the same
 with this repo, built from scratch.
 

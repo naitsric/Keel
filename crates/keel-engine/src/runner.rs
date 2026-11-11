@@ -19,8 +19,8 @@ use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
 use crate::specs::{self, Verdict};
 use crate::{
-    Error, Inner, Result, Resume, Turn, brain, joint, locked, prompts, screenshots, skipped_tests,
-    verification, workflows,
+    Error, Inner, Result, Resume, Turn, brain, joint, localhost, locked, prompts, screenshots,
+    skipped_tests, verification, workflows,
 };
 
 /// Tool output kept in the database. The raw file always has all of it.
@@ -57,6 +57,8 @@ pub(crate) struct Monitor {
     result: Option<ResultEvent>,
     /// Stops the step's services when dropped.
     services: Option<ServiceSet>,
+    /// A check that ran with localhost open.
+    localhost_open: bool,
 }
 
 impl Monitor {
@@ -85,6 +87,7 @@ impl Monitor {
             block: None,
             result: None,
             services: None,
+            localhost_open: opens_localhost(attempt),
         }
     }
 }
@@ -163,6 +166,11 @@ pub(crate) fn readable(project: &keel_store::Project, run: &keel_store::Run) -> 
         }
     }
     read
+}
+
+/// Whether a check runs with localhost open, as was written down when it was set going.
+fn opens_localhost(attempt: &Attempt) -> bool {
+    attempt.kind == "check" && attempt.settings["localhost"] == json!(true)
 }
 
 fn runs_commands(kind: &str, tools: Option<ToolProfile>) -> bool {
@@ -606,10 +614,13 @@ impl Inner {
                 self.project_home(project_id),
             )
         } else {
-            (
-                settings::check_profile(&workspace, &real_home, &read, &sockets),
-                run_home(&workspace),
-            )
+            let profile = settings::check_profile(&workspace, &real_home, &read, &sockets);
+            let profile = if opens_localhost(attempt) {
+                settings::with_localhost(profile)
+            } else {
+                profile
+            };
+            (profile, run_home(&workspace))
         };
         let stem = format!("{}-{}", attempt.step_id, attempt.number);
         let prompt_file = dir.join(format!("{stem}.stdin"));
@@ -1121,6 +1132,8 @@ impl Inner {
             }
         }
 
+        // A check that failed because its tests were refused localhost, which the project can open.
+        let mut localhost_refused = false;
         if m.kind == "check" || m.kind == "setup" {
             let stderr_path = m.raw_path.with_file_name(format!(
                 "{}.stderr.txt",
@@ -1139,6 +1152,12 @@ impl Inner {
                     "skipped_tests",
                     skipped.map_or(Value::Null, |count| Value::Integer(i64::from(count))),
                 ));
+                // With it open, what was refused was something else, and the setting can't help.
+                localhost_refused = exit_code != Some(0)
+                    && !m.localhost_open
+                    && [&output, &stderr]
+                        .iter()
+                        .any(|bytes| localhost::refused(&String::from_utf8_lossy(bytes)));
             }
             let tail = |bytes: &[u8]| {
                 String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(EVENT_TEXT_LIMIT)..])
@@ -1194,6 +1213,13 @@ impl Inner {
         let _ = store.patch_attempt(&m.attempt_id, &fields);
 
         let (mut state, mut reason) = classify(&m, exit_code, stop_requested, process_lost);
+        if let Some(Reason::CheckFailed {
+            localhost_refused: refused,
+            ..
+        }) = &mut reason
+        {
+            *refused = localhost_refused;
+        }
         // If Keel can't tell what the step changed, it can't say the step went well.
         if snapshot_failed && state == AttemptState::Succeeded {
             state = AttemptState::Failed;
@@ -1476,7 +1502,10 @@ fn classify(
             if m.kind == "setup" {
                 Reason::SetupFailed { exit_code }
             } else {
-                Reason::CheckFailed { exit_code }
+                Reason::CheckFailed {
+                    exit_code,
+                    localhost_refused: false,
+                }
             }
         };
         return match exit_code {

@@ -2,7 +2,9 @@
 //! commands, finds where their programs are in the home folder, and then tries them as the setup
 //! dialog does, setup with the network and the check without it, in the real sandbox, with Keel's
 //! own variables and only the folders it found. The repos are in `tests/samples`. Then a check of
-//! its own tries something setup didn't download, which has to fail in seconds (#121).
+//! its own tries something setup didn't download, which has to fail in seconds (#121). A sample
+//! whose tests start a server on localhost passes with its project's setting for that on, and with
+//! it off fails saying so (#123).
 //!
 //! They download dependencies and take minutes, so they only run when asked:
 //! `KEEL_SAMPLE_REPOS=all cargo test -p keel-engine --test samples -- --nocapture`, or a list such
@@ -15,7 +17,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use keel_core::EnvVar;
+use keel_core::{EnvVar, Reason};
 use keel_engine::{Config, Engine};
 use keel_harness::Tools;
 use keel_harness::testing::skipped;
@@ -23,7 +25,7 @@ use keel_store::{Attempt, ProjectSettings, Store};
 
 const VARIABLE: &str = "KEEL_SAMPLE_REPOS";
 /// What `all` runs.
-const STACKS: [&str; 5] = ["npm", "pnpm", "pip", "uv", "rust"];
+const STACKS: [&str; 6] = ["npm", "npm-server", "pnpm", "pip", "uv", "rust"];
 
 fn wanted(name: &str) -> bool {
     std::env::var(VARIABLE).is_ok_and(|list| {
@@ -76,11 +78,13 @@ struct Sample {
     /// Whether Keel has to guess exactly these, or is given them.
     guessed: bool,
     /// Where its tool keeps what it downloads, in the home folder, unless Keel told it otherwise.
-    /// Setup has to have left it in the project's home.
-    downloads: &'static str,
+    /// Setup has to have left it in the project's home. `None` for a sample with nothing to download.
+    downloads: Option<&'static str>,
     /// A command that needs something setup didn't download, and what its tool says as it fails.
     /// In a check, with no network, that has to happen in seconds and not after minutes of retries.
     needs_download: Option<(&'static str, &'static str)>,
+    /// Its tests start a server on localhost, so its project opens localhost to them (#123).
+    starts_servers: bool,
 }
 
 /// What took a check from when Keel started its command to when it ended.
@@ -156,21 +160,23 @@ fn try_sample(sample: Sample) {
         assert_eq!(guess.setup.as_deref(), Some(setup), "{guess:?}");
         assert_eq!(guess.check.as_deref(), Some(check), "{guess:?}");
     }
-    // As many jobs as this test was given, if it was told, as a project would set it.
-    if let Ok(jobs) = std::env::var("CARGO_BUILD_JOBS") {
-        engine
-            .update_project(
-                &id,
-                &ProjectSettings {
-                    env: vec![EnvVar {
-                        name: "CARGO_BUILD_JOBS".into(),
-                        value: jobs,
-                    }],
-                    ..ProjectSettings::default()
-                },
-            )
-            .unwrap();
-    }
+    // As many jobs as this test was given, if it was told, as a project would set it, and localhost
+    // open to tests that start servers there.
+    let settings = |allow_localhost: bool| ProjectSettings {
+        env: std::env::var("CARGO_BUILD_JOBS")
+            .map(|jobs| {
+                vec![EnvVar {
+                    name: "CARGO_BUILD_JOBS".into(),
+                    value: jobs,
+                }]
+            })
+            .unwrap_or_default(),
+        allow_localhost,
+        ..ProjectSettings::default()
+    };
+    engine
+        .update_project(&id, &settings(sample.starts_servers))
+        .unwrap();
 
     // As the setup dialog does: Keel finds where in the home folder the programs are, and lets the
     // commands read that, with nothing else from the home folder.
@@ -255,6 +261,11 @@ fn try_sample(sample: Sample) {
         .unwrap()
         .to_owned();
     assert!(profile.contains("(deny network*)"), "{profile}");
+    assert_eq!(
+        profile.contains("(local ip \"localhost:*\")"),
+        sample.starts_servers,
+        "{profile}"
+    );
     // What setup downloaded is in the project's home, where the tool keeps it by itself.
     let project_home = dir
         .path()
@@ -262,11 +273,12 @@ fn try_sample(sample: Sample) {
         .join(&id)
         .join("cache/home");
     let left = listing(&project_home, 3);
-    assert!(
-        project_home.join(sample.downloads).is_dir(),
-        "no {} in the project's home: {left:?}",
-        sample.downloads
-    );
+    if let Some(downloads) = sample.downloads {
+        assert!(
+            project_home.join(downloads).is_dir(),
+            "no {downloads} in the project's home: {left:?}",
+        );
+    }
     eprintln!(
         "sample {}: Keel found {found:?}\n\
          setup `{setup}` took {:.1}s, check `{check}` took {:.1}s\n\
@@ -276,6 +288,36 @@ fn try_sample(sample: Sample) {
         (total - setup_took).as_secs_f64(),
         output(&attempts[1])
     );
+
+    // With localhost closed, as every project has it until a person opens it, the same check fails,
+    // and says it was localhost.
+    if sample.starts_servers {
+        engine.update_project(&id, &settings(false)).unwrap();
+        let run = engine
+            .try_check_reading(&id, setup, check, &read, "en")
+            .unwrap();
+        wait_for(&store, &run, Duration::from_secs(600));
+        let attempts = store.attempts_of_run(&run).unwrap();
+        let kinds: Vec<&str> = attempts.iter().map(|a| a.kind.as_str()).collect();
+        assert_eq!(kinds, ["setup", "check"]);
+        assert_eq!(attempts[0].state, "succeeded", "{}", output(&attempts[0]));
+        let closed = &attempts[1];
+        let said = output(closed);
+        eprintln!("sample {}: with localhost closed:\n{said}", sample.name);
+        assert_eq!(closed.state, "failed", "{said}");
+        let reason: Reason = serde_json::from_value(closed.reason.clone().unwrap()).unwrap();
+        assert!(
+            matches!(
+                reason,
+                Reason::CheckFailed {
+                    localhost_refused: true,
+                    ..
+                }
+            ),
+            "{reason:?}: {said}"
+        );
+        assert!(said.contains("EPERM"), "{said}");
+    }
 
     // A run of its own, whose setup finds everything already downloaded. Some of it, such as pip's
     // `.venv`, is in the run's copy of the repo.
@@ -341,8 +383,27 @@ fn npm() {
             check: "npm test",
         },
         guessed: true,
-        downloads: ".npm/_cacache",
+        downloads: Some(".npm/_cacache"),
         needs_download: Some(("npm install left-pad", "ENOTCACHED")),
+        starts_servers: false,
+    });
+}
+
+/// #123: a suite that starts its own server on localhost and talks to it, with nothing to download.
+#[test]
+fn npm_server() {
+    try_sample(Sample {
+        name: "npm-server",
+        programs: &["npm", "node"],
+        finds: &[],
+        commands: Commands {
+            setup: "npm ci",
+            check: "npm test",
+        },
+        guessed: true,
+        downloads: None,
+        needs_download: None,
+        starts_servers: true,
     });
 }
 
@@ -357,8 +418,9 @@ fn pnpm() {
             check: "pnpm test",
         },
         guessed: true,
-        downloads: ".local/share/pnpm/store",
+        downloads: Some(".local/share/pnpm/store"),
         needs_download: Some(("pnpm add left-pad", "ERR_PNPM_")),
+        starts_servers: false,
     });
 }
 
@@ -373,11 +435,12 @@ fn pip() {
             check: ".venv/bin/python -m pytest",
         },
         guessed: true,
-        downloads: "Library/Caches/pip",
+        downloads: Some("Library/Caches/pip"),
         needs_download: Some((
             ".venv/bin/pip install six",
             "No matching distribution found for six",
         )),
+        starts_servers: false,
     });
 }
 
@@ -392,8 +455,9 @@ fn uv() {
             check: "uv run --frozen pytest",
         },
         guessed: true,
-        downloads: ".cache/uv",
+        downloads: Some(".cache/uv"),
         needs_download: Some(("uv add six", "network was disabled")),
+        starts_servers: false,
     });
 }
 
@@ -408,8 +472,9 @@ fn rust() {
             check: "cargo test --workspace",
         },
         guessed: true,
-        downloads: ".cargo/registry",
+        downloads: Some(".cargo/registry"),
         needs_download: Some(("cargo add memchr", "could not be found in registry index")),
+        starts_servers: false,
     });
 }
 
@@ -430,7 +495,8 @@ fn keel() {
             check: "test ! -e target && pnpm build && cargo test --workspace",
         },
         guessed: false,
-        downloads: ".cargo/registry",
+        downloads: Some(".cargo/registry"),
         needs_download: None,
+        starts_servers: false,
     });
 }

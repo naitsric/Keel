@@ -6,7 +6,7 @@ import type { Project } from "../lib/api";
 import { useApp } from "../lib/store";
 
 const RUNS = [row("r1", "running")];
-const project = (id: string, fields: Partial<Project> = {}): Project => ({ id, name: id, path: `/Users/you/${id}`, githubAccount: "you", githubRepo: `acme/${id}`, setupCommand: null, checkCommand: "make test", allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, sensitivePaths: [], ...fields });
+const project = (id: string, fields: Partial<Project> = {}): Project => ({ id, name: id, path: `/Users/you/${id}`, githubAccount: "you", githubRepo: `acme/${id}`, setupCommand: null, checkCommand: "make test", allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, sensitivePaths: [], allowLocalhost: false, ...fields });
 const THREE = [project("alpha"), project("beta", { checkCommand: null }), project("gamma", { githubRepo: "other/thing" })];
 
 const header = () => document.querySelector("header") as HTMLElement;
@@ -143,6 +143,40 @@ describe("the Projects page", () => {
     expect(main().textContent).toContain(i18next.t("settings.saved"));
   });
 
+  describe("localhost for a project's tests", () => {
+    const box = () => [...main().querySelectorAll("label")].find((l) => l.textContent?.includes(i18next.t("settings.localhost")))?.querySelector<HTMLInputElement>('input[type="checkbox"]') as HTMLInputElement;
+    const saved = () => (callsTo("project_update").at(-1)?.args as { settings: Project }).settings;
+
+    it("is closed unless the project opened it, says what opening it risks, and saves what's chosen", async () => {
+      await showApp(RUNS, { name: "projects" }, [project("alpha")]);
+      expect(box().checked).toBe(false);
+      expect(main().textContent).toContain(i18next.t("settings.localhostHint"));
+      await click(box());
+      expect(box().checked).toBe(true);
+      expect(callsTo("project_update")).toEqual([]);
+      await click(button(i18next.t("settings.save")));
+      expect(saved().allowLocalhost).toBe(true);
+      expect(saved().allowedRead).toEqual([]);
+    });
+
+    it("closes again", async () => {
+      await showApp(RUNS, { name: "projects" }, [project("alpha", { allowLocalhost: true })]);
+      expect(box().checked).toBe(true);
+      await click(box());
+      await click(button(i18next.t("settings.save")));
+      expect(saved().allowLocalhost).toBe(false);
+    });
+
+    it("tells the risk in plain words, in both languages", () => {
+      for (const lng of ["en", "es"]) {
+        const hint = i18next.t("settings.localhostHint", { lng });
+        expect(hint).toMatch(lng === "en" ? /any service running on this Mac/ : /cualquier servicio que corra en este Mac/);
+        expect(hint).toMatch(lng === "en" ? /local network/ : /red local/);
+        expect(hint).not.toMatch(/Seatbelt|sandbox-exec|allowLocalBinding|0\.0\.0\.0|interface/i);
+      }
+    });
+  });
+
   describe("the hint under a service's socket file", () => {
     const postgres = () => i18next.t("settings.serviceSocketHintPostgres");
     const general = () => i18next.t("settings.serviceSocketHint");
@@ -276,6 +310,26 @@ describe("what sends a person to fix a project", () => {
     mockIPC((command, args) => (command === "run_get" ? { ...(handler(command, args) as object), projectId: "beta" } : handler(command, args)), { shouldMockEvents: true });
     act(() => useApp.getState().navigate({ name: "run", runId: "r2" }));
     await settle();
+    await click(button(open("newRun.openProject")));
+    expect(view()).toEqual({ name: "projects", projectId: "beta" });
+  });
+
+  it("a check whose tests were refused localhost says so and opens the run's project", async () => {
+    const { mockIPC } = await import("@tauri-apps/api/mocks");
+    const refused = { code: "checkFailed", exitCode: 1, localhostRefused: true };
+    const runs = [row("r2", "failed", { projectId: "beta" })];
+    await showApp(runs, { name: "home" }, THREE);
+    mockIPC(
+      (command, args) => {
+        if (command === "run_get") return { ...(handler(command, args) as object), projectId: "beta", workflow: [{ type: "check", id: "check", run: "npm test" }] };
+        if (command === "run_attempts") return [{ id: "a1", runId: "r2", stepId: "check", kind: "check", role: "worker", tools: "check", prompt: "npm test", state: "failed", round: 0, number: 1, output: null, reason: refused, exitCode: 1, resultText: null, filesChanged: null, runFiles: null, startedAt: "2026-11-05T10:00:00Z" }];
+        return handler(command, args);
+      },
+      { shouldMockEvents: true },
+    );
+    act(() => useApp.getState().navigate({ name: "run", runId: "r2" }));
+    await settle();
+    expect(main().textContent).toContain(i18next.t("settings.localhost"));
     await click(button(open("newRun.openProject")));
     expect(view()).toEqual({ name: "projects", projectId: "beta" });
   });

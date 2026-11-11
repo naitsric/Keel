@@ -23,6 +23,7 @@ const PROJECT: Project = {
   env: [{ name: "DB_HOST", value: "{{socketDir:db}}" }],
   defaultWorkflow: "mine",
   sensitivePaths: ["billing/"],
+  allowLocalhost: true,
 };
 const NO_GUESS: Guess = { check: null, setup: null, from: [], setupOptions: [], checkOptions: [], fromCi: false };
 const PNPM: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false };

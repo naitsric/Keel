@@ -33,7 +33,7 @@ export function reasonText(t: TFunction, reason: Reason): string {
     case "setupFailed":
       return t("reasons.setupFailed", { exitCode: data.exitCode ?? "?" });
     case "checkFailed":
-      return t("reasons.checkFailed", { exitCode: data.exitCode ?? "?" });
+      return data.localhostRefused === true ? t("reasons.checkFailedLocalhost", { exitCode: data.exitCode ?? "?", setting: t("settings.localhost") }) : t("reasons.checkFailed", { exitCode: data.exitCode ?? "?" });
     case "exitedWithoutResult":
       return t("reasons.exitedWithoutResult", { exitCode: data.exitCode ?? "?" });
     case "waitingForProject":
@@ -63,9 +63,9 @@ export function errorText(t: TFunction, error: unknown): string {
 const FIXED_IN_SETTINGS = ["githubAccountMissing", "noGithubRemote", "defaultWorkflowMissing"];
 const DELIVERY_FIXED_IN_SETTINGS = ["notSignedIn", "noPermission"];
 
-/** A reason the user fixes in the project's settings. */
+/** A reason the user fixes in the project's settings. A check refused localhost is one, since a project can open it. */
 export const needsProjectSettings = (reason: Reason | null | undefined) =>
-  reason != null && (FIXED_IN_SETTINGS.includes(reason.code) || (reason.code === "deliveryFailed" && DELIVERY_FIXED_IN_SETTINGS.includes(reason.kind as string)));
+  reason != null && (FIXED_IN_SETTINGS.includes(reason.code) || (reason.code === "deliveryFailed" && DELIVERY_FIXED_IN_SETTINGS.includes(reason.kind as string)) || (reason.code === "checkFailed" && reason.localhostRefused === true));
 
 /** A reason the user fixes by signing in. */
 export const needsSignIn = (reason: Reason | null | undefined) =>

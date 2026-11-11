@@ -360,9 +360,12 @@ pub enum Reason {
         detail: String,
     },
     AgentLost,
-    /// A check command ended with this code.
+    /// A check command ended with this code. `localhost_refused` when what it printed says the
+    /// sandbox refused its tests a server on localhost, which the project's settings can open.
     CheckFailed {
         exit_code: Option<i32>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        localhost_refused: bool,
     },
     SetupFailed {
         exit_code: Option<i32>,
@@ -945,7 +948,13 @@ mod tests {
             (Reason::ExitedWithoutResult { exit_code: None }, false),
             (Reason::PrepareFailed { detail: text() }, false),
             (Reason::AgentLost, false),
-            (Reason::CheckFailed { exit_code: None }, false),
+            (
+                Reason::CheckFailed {
+                    exit_code: None,
+                    localhost_refused: true,
+                },
+                false,
+            ),
             (Reason::SetupFailed { exit_code: None }, false),
             (Reason::BrainFull { used: 1, limit: 1 }, false),
             (Reason::SnapshotFailed, false),
@@ -1113,6 +1122,38 @@ mod tests {
                 "runId": "r44",
                 "title": "Fix the calendar",
             })
+        );
+    }
+
+    /// #123: a check whose tests were refused localhost says so, for the app to point at the setting
+    /// that opens it. Any other failed check reads as it always did, one saved before included.
+    #[test]
+    fn a_check_refused_localhost_says_so_and_any_other_reads_as_before() {
+        let refused = Reason::CheckFailed {
+            exit_code: Some(1),
+            localhost_refused: true,
+        };
+        let value = serde_json::to_value(&refused).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "code": "checkFailed", "exitCode": 1, "localhostRefused": true })
+        );
+        assert_eq!(serde_json::from_value::<Reason>(value).unwrap(), refused);
+        let plain = Reason::CheckFailed {
+            exit_code: Some(1),
+            localhost_refused: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::json!({ "code": "checkFailed", "exitCode": 1 })
+        );
+        let saved: Reason = serde_json::from_str(r#"{"code":"checkFailed","exitCode":3}"#).unwrap();
+        assert_eq!(
+            saved,
+            Reason::CheckFailed {
+                exit_code: Some(3),
+                localhost_refused: false,
+            }
         );
     }
 

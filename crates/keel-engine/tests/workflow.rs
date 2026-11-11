@@ -168,6 +168,7 @@ fn world() -> World {
                 env: vec![],
                 default_workflow: None,
                 sensitive_paths: vec![],
+                allow_localhost: false,
             },
         )
         .unwrap();
@@ -446,7 +447,13 @@ fn a_failed_check_stops_the_run_and_can_be_retried_alone() {
     let w = world();
     let run = w.start(Some("test -f approved-by-test || exit 3"));
     let check = w.wait(&run, "check", AttemptState::Failed);
-    assert_eq!(reason(&check), Reason::CheckFailed { exit_code: Some(3) });
+    assert_eq!(
+        reason(&check),
+        Reason::CheckFailed {
+            exit_code: Some(3),
+            localhost_refused: false
+        }
+    );
     assert_eq!(check.exit_code, Some(3));
     assert!(
         w.step(&run, "approval").is_none(),

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Attempt, AttemptState, Guess, Project } from "./api";
 import { accountToSelect, checkOptionsLeft, commandNotFound, foldersToOffer, isListed, needsSetup, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withFolders, withSetup, withSetupOption } from "./projects";
 
-const project = (fields: Partial<Project>) => ({ id: "p", name: "demo", path: "/w", githubAccount: null, githubRepo: null, setupCommand: null, checkCommand: null, allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, sensitivePaths: [], ...fields }) as Project;
+const project = (fields: Partial<Project>) => ({ id: "p", name: "demo", path: "/w", githubAccount: null, githubRepo: null, setupCommand: null, checkCommand: null, allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, sensitivePaths: [], allowLocalhost: false, ...fields }) as Project;
 
 describe("whether a project still has setup to finish", () => {
   it("is done with a check and, on GitHub, an account", () => {

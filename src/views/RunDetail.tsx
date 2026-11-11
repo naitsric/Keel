@@ -16,6 +16,7 @@ import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } fro
 import { ProposalRow } from "./BrainPage";
 import { FlowDiagram } from "./FlowDiagram";
 import { JointChangeDialog } from "./JointChangeDialog";
+import { LocalhostNote } from "./LocalhostNote";
 import { SpecView } from "./SpecView";
 
 type Tab = "understood" | "found" | "activity" | "commands" | "changes" | "prompt" | "details" | "output";
@@ -794,6 +795,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
           {t(delivers ? "run.secretWarning" : "run.secretWarningLocal")}
         </p>
       )}
+      <LocalhostNote attempts={attempts} />
       {/* Right above the note and the buttons: the focus starts there, so this is in view with them. */}
       {notProven > 0 && (
         <div className="mt-2 flex items-center gap-2 rounded-md border border-border-strong bg-inset py-1 pr-1 pl-2 text-[12.5px]">

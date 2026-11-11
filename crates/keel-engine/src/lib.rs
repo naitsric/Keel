@@ -8,6 +8,7 @@ mod detect;
 mod diffs;
 mod git;
 mod joint;
+mod localhost;
 mod project_proposals;
 mod prompts;
 mod pull_requests;
@@ -568,6 +569,7 @@ impl Engine {
             env: Vec::new(),
             default_workflow: None,
             sensitive_paths: Vec::new(),
+            allow_localhost: false,
         };
         self.inner.store.add_project(&project)?;
         Ok((project, AddOutcome::New))
@@ -1980,6 +1982,11 @@ impl Inner {
                     ),
                     &self.read_only_dirs(run_id, &spec.role)?,
                 );
+                // Its Bash runs the project's tests, so it gets localhost when they do. A step
+                // without Bash has nothing to open it for.
+                if can_edit && project.allow_localhost {
+                    agent_settings = settings::with_local_binding(agent_settings);
+                }
                 // Builders changed files from Bash even when told to use Edit and Write, and an
                 // edit there that matches nothing says nothing. Only a step that can edit has Bash.
                 let git = locked(&self.tools).git.clone();
@@ -2033,6 +2040,8 @@ impl Inner {
                 json!({ "network": "internet, nothing local", "read": read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string(),
                 format!("{stem}.log"),
             ),
+            // Whether localhost is open is decided here, and the check runs with what's written
+            // down, so its record and its approval say what it really had.
             WorkflowStep::Check { run: command, .. } => (
                 String::new(),
                 None,
@@ -2040,7 +2049,13 @@ impl Inner {
                 None,
                 None,
                 command.clone(),
-                json!({ "network": "none", "read": read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string(),
+                json!({
+                    "network": if project.allow_localhost { "localhost only" } else { "none" },
+                    "localhost": project.allow_localhost,
+                    "read": read,
+                    "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services),
+                })
+                .to_string(),
                 format!("{stem}.log"),
             ),
             WorkflowStep::Parallel { .. } | WorkflowStep::Approval { .. } | WorkflowStep::Deliver { .. } => (

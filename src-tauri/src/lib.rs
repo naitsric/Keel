@@ -291,6 +291,7 @@ struct ProjectSettingsInput {
     env: Vec<EnvVar>,
     default_workflow: Option<String>,
     sensitive_paths: Vec<String>,
+    allow_localhost: bool,
 }
 
 #[tauri::command(async)]
@@ -313,6 +314,7 @@ fn project_update(
             env: settings.env,
             default_workflow: clean(settings.default_workflow),
             sensitive_paths: settings.sensitive_paths,
+            allow_localhost: settings.allow_localhost,
         },
     )?)
 }
@@ -1142,6 +1144,7 @@ mod tests {
             }],
             default_workflow: Some("mine".into()),
             sensitive_paths: vec!["billing/".into()],
+            allow_localhost: true,
         })
         .unwrap();
         sent["checkCommand"] = json!("pnpm test");
@@ -1153,6 +1156,7 @@ mod tests {
         assert_eq!(settings.env[0].value, SECRET);
         assert_eq!(settings.default_workflow.as_deref(), Some("mine"));
         assert_eq!(settings.sensitive_paths, ["billing/"]);
+        assert!(settings.allow_localhost);
     }
 
     #[test]
@@ -1258,6 +1262,7 @@ mod tests {
                 }],
                 default_workflow: None,
                 sensitive_paths: vec![],
+                allow_localhost: false,
             }],
             pending_proposals: 0,
             workflow_drafts: 0,

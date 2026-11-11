@@ -81,6 +81,8 @@ export interface Project {
   defaultWorkflow: string | null;
   /** Too sensitive for a change to count as small, on top of what always is. */
   sensitivePaths: string[];
+  /** Its tests start servers on localhost, so its check and its builder's commands may reach anything there. */
+  allowLocalhost: boolean;
 }
 
 export interface ProjectSettings {
@@ -93,6 +95,7 @@ export interface ProjectSettings {
   env: EnvVar[];
   defaultWorkflow: string | null;
   sensitivePaths: string[];
+  allowLocalhost: boolean;
 }
 
 /** A folder in the home folder where programs a project's commands use are installed. */
