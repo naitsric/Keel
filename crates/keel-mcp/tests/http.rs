@@ -2765,6 +2765,39 @@ async fn a_client_retries_with_the_project_s_current_commands_only_when_it_asks(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_client_takes_new_commands_only_for_a_setup_or_a_check() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let hold = w.hold();
+    let run = id_of(&ok(
+        &call(&client, "start_run", w.start_args("Fix that")).await
+    ));
+    for _ in 0..100 {
+        if view_of(&client, &run).await["steps"][0]["state"] == "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    ok(&call(&client, "stop_run", json!({ "run": run })).await);
+    let stopped = settled(&client, &run).await;
+    assert_eq!(stopped["waitingFor"]["step"], "builder", "{stopped}");
+    std::fs::remove_file(&hold).unwrap();
+
+    let args = json!({ "run": run, "useCurrentCommands": true, "resume": true });
+    let refusal = refused(&call(&client, "retry_step", args).await);
+    assert!(refusal.contains("setup or a check"), "{refusal}");
+    assert_eq!(
+        settled(&client, &run).await["waitingFor"]["state"],
+        "stopped"
+    );
+    ok(&call(&client, "retry_step", json!({ "run": run, "resume": true })).await);
+    let view = settled(&client, &run).await;
+    assert_eq!(view["waitingFor"]["state"], "waitingApproval", "{view}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_client_closes_its_waiting_run_with_nothing_delivered_and_never_one_that_works() {
     keel_harness::needs!(sandbox, sockets);
     let w = world().await;

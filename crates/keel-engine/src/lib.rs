@@ -1253,6 +1253,11 @@ impl Engine {
         {
             return Err(Error::InvalidState);
         }
+        // Only a step that runs one of them has a command to take. Anything else retries as it is,
+        // and a delivery never runs the setup again.
+        if current_commands && !matches!(attempt.kind.as_str(), "setup" | "check") {
+            return Err(Error::Blocked(Reason::NewCommandsNeedSetupOrCheck));
+        }
         let run = store.run(&attempt.run_id)?;
         if by.is_some() && run.finished_at.is_some() {
             return Err(Error::InvalidState);
@@ -1303,36 +1308,29 @@ impl Engine {
         if run.finished_at.is_some() {
             store.patch_run(&attempt.run_id, &[("finished_at", Value::Null)])?;
         }
-        let started = match &setup_first {
+        // Recorded with the attempt it starts, so a run that couldn't retry stays as it was, and
+        // nobody sees one without the other. Every later step and round reads the run's copy, so
+        // they run the same commands, and each attempt keeps the one it ran.
+        let workflow = workflow.to_string();
+        let event = json!({ "changes": changes });
+        let retry = (!changes.is_empty()).then(|| keel_store::RetryCommands {
+            run_id: &attempt.run_id,
+            workflow: &workflow,
+            retried: attempt_id,
+            put_off_from: setup_first.is_some().then_some(state),
+            event: &event,
+        });
+        match &setup_first {
             Some(setup) => {
                 let number = workflows::next_number(&attempts, setup.id());
                 self.inner
-                    .start_step(&attempt.run_id, setup, number, None)?
+                    .start_step_with(&attempt.run_id, setup, number, None, retry.as_ref())
             }
-            None => self
-                .inner
-                .start_step(&attempt.run_id, &step, number, resume)?,
-        };
-        // Only once something is on its way, so a run that couldn't retry stays as it was. Nothing
-        // reads the run's steps meanwhile: `advance` waits for the lock held here. Every later step
-        // and round reads the run's copy, so they run the same commands, and each attempt keeps
-        // the one it ran.
-        if !changes.is_empty() {
-            store.patch_run(
-                &attempt.run_id,
-                &[("workflow", Value::Text(workflow.to_string()))],
-            )?;
-            if setup_first.is_some() {
-                store.change_state(attempt_id, state, AttemptState::Postponed)?;
+            None => {
+                self.inner
+                    .start_step_with(&attempt.run_id, &step, number, resume, retry.as_ref())
             }
-            store.append_event(
-                attempt_id,
-                "commandsUpdated",
-                &json!({ "changes": changes }),
-            )?;
-            self.inner.changed(&attempt.run_id);
         }
-        Ok(started)
     }
 
     pub fn abandon(&self, attempt_id: &str) -> Result<()> {
@@ -1988,6 +1986,19 @@ impl Inner {
         number: i64,
         resume: Option<Resume>,
     ) -> Result<String> {
+        self.start_step_with(run_id, step, number, resume, None)
+    }
+
+    /// `start_step`, recording what a retry with the project's current commands changes along with
+    /// the attempt, in one go.
+    fn start_step_with(
+        self: &Arc<Self>,
+        run_id: &str,
+        step: &WorkflowStep,
+        number: i64,
+        resume: Option<Resume>,
+        retry: Option<&keel_store::RetryCommands>,
+    ) -> Result<String> {
         let run = self.store.run(run_id)?;
         let project = self.store.project(&run.project_id)?;
         let workspace = self.workspace(run_id);
@@ -2093,7 +2104,7 @@ impl Inner {
             ),
         };
         let session_id = resume.as_ref().map_or_else(new_id, |r| r.session.clone());
-        self.store.add_attempt(&NewAttempt {
+        let attempt = NewAttempt {
             id: id.clone(),
             run_id: run_id.to_owned(),
             step_id: step.id().to_owned(),
@@ -2123,7 +2134,11 @@ impl Inner {
             workspace: workspace.to_string_lossy().into_owned(),
             raw_path: dir.join(raw_name).to_string_lossy().into_owned(),
             started_at: now(),
-        })?;
+        };
+        match retry {
+            Some(retry) => self.store.add_retry_attempt(&attempt, retry)?,
+            None => self.store.add_attempt(&attempt)?,
+        }
         self.changed(run_id);
         if matches!(step, WorkflowStep::Approval { .. }) {
             self.store.append_event(&id, "waiting", &json!({}))?;

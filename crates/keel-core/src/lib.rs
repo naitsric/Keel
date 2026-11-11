@@ -466,6 +466,9 @@ pub enum Reason {
         project: String,
         detail: String,
     },
+    /// Only a setup or a check takes the project's commands as they are now. Any other step, a
+    /// delivery included, retries as it is.
+    NewCommandsNeedSetupOrCheck,
 }
 
 /// Why a run doesn't count as small. Each is a fact the engine checked for itself, and any one is
@@ -698,6 +701,7 @@ impl Reason {
             | Self::StartsOnTheBoard => false,
             // One project that's only read. Its account being signed out must not hold up the rest.
             Self::ReadCopyFailed { .. } => false,
+            Self::NewCommandsNeedSetupOrCheck => false,
         }
     }
 }
@@ -1019,6 +1023,7 @@ mod tests {
                 },
                 false,
             ),
+            (Reason::NewCommandsNeedSetupOrCheck, false),
         ]
     }
 
@@ -1072,6 +1077,7 @@ mod tests {
             Reason::PartsNotOpened { .. } => 44,
             Reason::StartsOnTheBoard => 45,
             Reason::ReadCopyFailed { .. } => 46,
+            Reason::NewCommandsNeedSetupOrCheck => 47,
         }
     }
 
@@ -1085,7 +1091,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=46).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=47).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]

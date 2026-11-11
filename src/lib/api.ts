@@ -19,8 +19,11 @@ export type AttemptState =
   | "skipped"
   | "abandoned";
 
-/** What the app calls a state. `corrected` is a failed answer that Keel had fixed at once: see `shownState`. */
-export type ShownState = AttemptState | "corrected";
+/**
+ * What the app calls a state. `corrected` is a failed answer that Keel had fixed at once, and
+ * `afterSetup` a step put off for a new setup to run first: see `shownState`.
+ */
+export type ShownState = AttemptState | "corrected" | "afterSetup";
 
 export type ToolProfile = "readOnly" | "build";
 

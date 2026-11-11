@@ -24,6 +24,12 @@ describe("what an attempt's state reads as", () => {
     expect(shownState(first({ state: "blocked" }), [first(), fix])).toBe("blocked");
     expect(shownState(fix, [first(), fix])).toBe("succeeded");
   });
+
+  it("says a step put off for a new setup runs again after it, and leaves a put-off approval as the person's asking", () => {
+    const putOff = (kind: Attempt["kind"]) => ({ id: "c1", kind, state: "postponed", reason: null, resumedFrom: null }) as Attempt;
+    expect(shownState(putOff("check"), [putOff("check")])).toBe("afterSetup");
+    expect(shownState(putOff("approval"), [putOff("approval")])).toBe("postponed");
+  });
 });
 
 describe("what a verifier found", () => {

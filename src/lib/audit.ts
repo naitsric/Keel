@@ -317,7 +317,11 @@ export function focusAttempt<T extends { stepId: string; state: string; role?: s
  * failed, but Keel went straight on with the same session to have it fixed: for the person that's
  * not a failure. Until that next attempt exists, nothing is fixing it, and it did fail.
  */
-export function shownState(attempt: Pick<Attempt, "id" | "state" | "reason">, attempts: Pick<Attempt, "resumedFrom">[]): ShownState {
+export function shownState(attempt: Pick<Attempt, "id" | "state" | "reason"> & { kind?: Attempt["kind"] }, attempts: Pick<Attempt, "resumedFrom">[]): ShownState {
   const fixed = attempt.state === "failed" && attempt.reason?.code === "specNotUsable" && attempts.some((a) => a.resumedFrom === attempt.id);
-  return fixed ? "corrected" : attempt.state;
+  if (fixed) return "corrected";
+  return putOffForSetup(attempt) ? "afterSetup" : attempt.state;
 }
+
+/** Only an approval is put off because the person asked for more. Any other step waits for a new setup to run first. */
+export const putOffForSetup = (attempt: { state: string; kind?: string }) => attempt.state === "postponed" && attempt.kind !== undefined && attempt.kind !== "approval";

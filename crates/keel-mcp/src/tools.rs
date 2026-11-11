@@ -259,9 +259,9 @@ pub struct RetryStepArgs {
     /// isn't an agent always starts over. False by default.
     #[serde(default)]
     pub resume: Option<bool>,
-    /// Run the project's setup and check as they are now, not as they were when the run started.
-    /// get_run's `commandsChanged` says which differ. A new setup runs before the step. False by
-    /// default.
+    /// For a setup or check: run the project's setup and check as they are now, not as they were
+    /// when the run started. get_run's `commandsChanged` says which differ. A new setup runs before
+    /// the step. Refused for any other step. False by default.
     #[serde(default)]
     pub use_current_commands: Option<bool>,
 }
@@ -1078,6 +1078,13 @@ impl McpServer {
         self.call(client, "retry_step", args, |server, client, args| {
             let (run, attempts) = server.steerable(client, &args.run)?;
             let step = retry_target(&run, &attempts)?;
+            let current_commands = args.use_current_commands.unwrap_or(false);
+            if current_commands && !matches!(step.kind.as_str(), "setup" | "check") {
+                return Err(ToolError::new(format!(
+                    "Step {:?} doesn't run one of the project's commands: only a setup or a check takes them as they are now. Retry it without `useCurrentCommands`.",
+                    step.step_id
+                )));
+            }
             if !server.feedback_left(client, &run.id, "retry_step")? {
                 return Err(ToolError::new(format!(
                     "This client has retried this run {MAX_FEEDBACK_PER_RUN} times already, which is as many as it may. Bring it to the person, who decides in Keel."
@@ -1086,7 +1093,7 @@ impl McpServer {
             // As the app's Retry button: the step starts over unless asked to go on.
             let resume = args.resume.unwrap_or(false);
             let engine = &server.0.engine;
-            if args.use_current_commands.unwrap_or(false) {
+            if current_commands {
                 engine.retry_with_current_commands_by(&step.id, resume, &client.name)
             } else {
                 engine.retry_by(&step.id, resume, &client.name)

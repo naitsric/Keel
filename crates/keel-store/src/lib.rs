@@ -657,6 +657,19 @@ pub struct NewAttempt {
     pub started_at: String,
 }
 
+/// What a retry with the project's current commands changes besides the attempt it starts.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryCommands<'a> {
+    pub run_id: &'a str,
+    /// The run's steps with the new commands.
+    pub workflow: &'a str,
+    /// The attempt that was retried, which the event goes on.
+    pub retried: &'a str,
+    /// The state it's in, when it waits for a new setup to run first.
+    pub put_off_from: Option<AttemptState>,
+    pub event: &'a serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Attempt {
@@ -1852,7 +1865,43 @@ impl Store {
     }
 
     pub fn add_attempt(&self, a: &NewAttempt) -> Result<()> {
-        self.lock().execute(
+        Self::insert_attempt(&self.lock(), a)
+    }
+
+    /// The attempt a retry with the project's current commands starts, and what that retry
+    /// changes, all at once: a reader never sees one without the rest, and a crash leaves neither.
+    /// Nothing is written if the retried attempt isn't where the caller found it.
+    pub fn add_retry_attempt(&self, a: &NewAttempt, retry: &RetryCommands) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        Self::insert_attempt(&tx, a)?;
+        tx.execute(
+            "update run set workflow = ?2 where id = ?1",
+            params![retry.run_id, retry.workflow],
+        )?;
+        if let Some(from) = retry.put_off_from {
+            let changed = tx.execute(
+                "update attempt set state = 'postponed', reason = null where id = ?1 and state = ?2",
+                params![retry.retried, from.as_str()],
+            )?;
+            if changed == 0 {
+                return Err(Error::NotFound(format!(
+                    "attempt {} as {}",
+                    retry.retried,
+                    from.as_str()
+                )));
+            }
+        }
+        tx.execute(
+            "insert into event (attempt_id, at, kind, data) values (?1, ?2, 'commandsUpdated', ?3)",
+            params![retry.retried, now(), retry.event.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn insert_attempt(conn: &Connection, a: &NewAttempt) -> Result<()> {
+        conn.execute(
             "insert into attempt (id, run_id, step_id, number, state, model_requested, effort, tools, max_turns,
                 max_budget_usd, language, prompt, system_prompt_sources, settings, session_id, resumed_from,
                 workspace, raw_path, started_at, kind, role, round)
@@ -3679,6 +3728,54 @@ mod tests {
             .unwrap();
         assert!(!store.postpone_attempt("g", &steps).unwrap());
         assert_eq!(store.attempt("g").unwrap().state, "succeeded");
+    }
+
+    #[test]
+    fn a_retry_with_new_commands_is_recorded_with_its_attempt_or_not_at_all() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_attempt(&new_attempt("c", "r", "check", AttemptState::Failed))
+            .unwrap();
+        let before = store.run("r").unwrap().workflow;
+        let workflow = r#"[{"type":"setup","id":"setup","run":"uv sync --group test"}]"#;
+        let event = serde_json::json!({ "changes": [] });
+        let retry = |from| RetryCommands {
+            run_id: "r",
+            workflow,
+            retried: "c",
+            put_off_from: Some(from),
+            event: &event,
+        };
+        // The retried attempt isn't where the caller found it: nothing at all is written.
+        assert!(
+            store
+                .add_retry_attempt(
+                    &new_attempt("s2", "r", "setup", AttemptState::Queued),
+                    &retry(AttemptState::Stopped)
+                )
+                .is_err()
+        );
+        assert!(store.attempt("s2").is_err());
+        assert_eq!(store.run("r").unwrap().workflow, before);
+        assert_eq!(store.attempt("c").unwrap().state, "failed");
+        assert!(store.events("c", 0).unwrap().is_empty());
+
+        store
+            .add_retry_attempt(
+                &new_attempt("s2", "r", "setup", AttemptState::Queued),
+                &retry(AttemptState::Failed),
+            )
+            .unwrap();
+        assert_eq!(store.attempt("s2").unwrap().state, "queued");
+        assert_eq!(
+            store.run("r").unwrap().workflow,
+            serde_json::from_str::<serde_json::Value>(workflow).unwrap()
+        );
+        assert_eq!(store.attempt("c").unwrap().state, "postponed");
+        let events = store.events("c", 0).unwrap();
+        assert_eq!(events[0].kind, "commandsUpdated");
+        assert_eq!(events[0].data, event);
     }
 
     #[test]

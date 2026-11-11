@@ -659,6 +659,35 @@ fn a_saved_workflow_s_own_check_keeps_its_command() {
 }
 
 #[test]
+fn only_a_setup_or_a_check_starts_over_with_new_commands() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_commands("true", "true");
+    w.flag("pr-sso");
+    let run = w.start_builtin();
+    let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let failed = w.wait(&run, "pull-request", AttemptState::Blocked);
+
+    // A failed delivery retries only the delivery: the setup, with its network, doesn't run again.
+    w.set_commands("touch installed.txt", "true");
+    assert_eq!(
+        blocked_reason(w.engine.retry_with_current_commands(&failed.id, false)),
+        Reason::NewCommandsNeedSetupOrCheck
+    );
+    assert_eq!(w.ran(&run, "setup").len(), 1);
+    assert_eq!(w.step(&run, "pull-request").unwrap().state, "blocked");
+    assert_eq!(w.engine.command_changes(&run).unwrap().len(), 1);
+}
+
+fn blocked_reason<T: std::fmt::Debug>(result: Result<T, Error>) -> Reason {
+    match result {
+        Err(Error::Blocked(reason)) => reason,
+        other => panic!("expected it to be refused with a reason, got {other:?}"),
+    }
+}
+
+#[test]
 fn a_retry_that_cannot_start_leaves_the_run_s_commands_as_they_were() {
     keel_harness::needs!(sandbox);
     let w = world();

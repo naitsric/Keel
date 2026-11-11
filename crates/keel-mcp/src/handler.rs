@@ -139,8 +139,8 @@ const SEND_BACK: &str = "Send the work of a run this client started back from th
                          person lets this client give feedback, and on runs it didn't start.";
 const RETRY_STEP: &str = "Try again the step of a run this client started that failed, was interrupted or was \
                           stopped. With `resume`, the agent goes on from where it stopped. With \
-                          `useCurrentCommands`, the run takes the project's setup and check as they are now, \
-                          which get_run's `commandsChanged` lists, and a new setup runs first. A step that's blocked \
+                          `useCurrentCommands`, a setup or check retries with the project's setup and check as \
+                          they are now, which get_run's `commandsChanged` lists, and a new setup runs first. A step that's blocked \
                           or stalled is the person's to decide. A failed delivery retries only the delivery, \
                           which reaches GitHub. At most 3 times per run, then it's the person's. Refused unless \
                           the person lets this client give feedback, and on runs it didn't start.";

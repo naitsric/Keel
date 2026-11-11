@@ -118,7 +118,8 @@
     "returned": "Devuelto",
     "postponed": "Se pidió más",
     "skipped": "Omitido",
-    "corrected": "Keel pidió corregirlo"
+    "corrected": "Keel pidió corregirlo",
+    "afterSetup": "Vuelve a correr después de la preparación"
   },
   "reasons": {
     "claudeMissing": "Claude Code no está instalado, o Keel no lo encuentra.",
@@ -172,7 +173,8 @@
     "keptAsking": "Después de {{rounds}} rondas de preguntas, siguió preguntando algo que solo tú puedes decidir, así que Keel lo detuvo en vez de elegir por ti.",
     "partsNotOpened": "Lo aprobaste, pero Keel no pudo poner en el tablero la parte de cada proyecto: {{detail}}. Inténtalo de nuevo cuando eso esté resuelto.",
     "startsOnTheBoard": "Este issue es un cambio en varios proyectos, así que arranca desde su tarjeta en el tablero.",
-    "readCopyFailed": "Keel no pudo traer una copia de {{project}} para leerla: {{detail}}. Inténtalo de nuevo cuando se pueda alcanzar."
+    "readCopyFailed": "Keel no pudo traer una copia de {{project}} para leerla: {{detail}}. Inténtalo de nuevo cuando se pueda alcanzar.",
+    "newCommandsNeedSetupOrCheck": "Solo una preparación o una verificación puede empezar de nuevo con los comandos nuevos del proyecto."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",

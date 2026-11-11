@@ -103,6 +103,13 @@ describe("the flow diagram", () => {
       expect(node("human").getAttribute("aria-label")).toContain("Waiting for you");
     });
 
+    it("says a check put off for a new setup runs again after it, and not that anyone asked for more", () => {
+      show(flowOf(STEPS, [attempt("check", "postponed", { kind: "check" }), attempt("human", "postponed", { kind: "approval" })]));
+      expect(node("check").getAttribute("aria-label")).toBe("check, Check, Runs again after the setup");
+      expect(node("check").textContent).toContain("Runs again after the setup");
+      expect(node("human").getAttribute("aria-label")).toContain("Asked for more");
+    });
+
     it("says the round, and when a state is from an earlier one", () => {
       const flow = flowOf(STEPS, [attempt("builder", "succeeded"), attempt("check", "succeeded", { kind: "check" }), attempt("builder", "running", { round: 1, number: 2 })]);
       show(flow);
