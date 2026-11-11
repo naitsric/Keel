@@ -260,7 +260,8 @@ pub struct RetryStepArgs {
     #[serde(default)]
     pub resume: Option<bool>,
     /// Run the project's setup and check as they are now, not as they were when the run started.
-    /// get_run's `commandsChanged` says which differ. False by default.
+    /// get_run's `commandsChanged` says which differ. A new setup runs before the step. False by
+    /// default.
     #[serde(default)]
     pub use_current_commands: Option<bool>,
 }

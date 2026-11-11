@@ -226,11 +226,12 @@ pub fn skipped_as_small(attempt: &Attempt) -> bool {
         && attempt.reason.as_ref().and_then(|r| r.get("code")) == Some(&json!("treatedAsSmall"))
 }
 
-/// Whether a person asked for what was skipped to run, at any point in this run.
+/// Whether a person asked for what was skipped to run, at any point in this run. That puts off
+/// their approval. A step put off for a new setup to run first is something else.
 pub fn person_asked(attempts: &[Attempt]) -> bool {
-    attempts
-        .iter()
-        .any(|attempt| attempt.state == AttemptState::Postponed.as_str())
+    attempts.iter().any(|attempt| {
+        attempt.state == AttemptState::Postponed.as_str() && attempt.kind == "approval"
+    })
 }
 
 /// An approval a person put off comes round again, and what they asked for runs before it. Asking

@@ -271,6 +271,7 @@
     "commandBefore": "Before",
     "commandNow": "Now",
     "commandsChangedHint": "Start over runs the ones from before.",
+    "commandsSetupFirst": "The new setup runs first, then this step again.",
     "retryWithNewCommands": "Start over with the new commands",
     "signIn": "Sign in to Claude Code",
     "decideStalled": "Choose above what to do with it.",

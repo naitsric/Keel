@@ -271,6 +271,7 @@
     "commandBefore": "Antes",
     "commandNow": "Ahora",
     "commandsChangedHint": "Empezar de nuevo corre los de antes.",
+    "commandsSetupFirst": "La preparación nueva corre primero, y después este paso otra vez.",
     "retryWithNewCommands": "Empezar de nuevo con los comandos nuevos",
     "signIn": "Iniciar sesión en Claude Code",
     "decideStalled": "Elige arriba qué hacer con él.",

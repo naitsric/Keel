@@ -2687,22 +2687,24 @@ async fn a_client_retries_with_the_project_s_current_commands_only_when_it_asks(
     keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.steering_token("Claude Code")).await;
-    let set_check = |check: &str| {
+    let set_setup = |setup: &str| {
         let settings = keel_store::ProjectSettings {
-            check_command: Some(check.into()),
+            setup_command: Some(setup.into()),
+            check_command: Some("make test".into()),
             ..keel_store::ProjectSettings::default()
         };
         w.engine.update_project(&w.project_id, &settings).unwrap();
     };
-    set_check("exit 1");
-    // As in the built-in workflows: the check is called `check` and has the project's command.
+    set_setup("true");
+    // Keel puts the project's setup first. The check is the workflow's own, whatever the
+    // project's is.
     let checked = w.saved(
         "Checked",
         vec![
             WorkflowStep::Agent(agent("builder", ToolProfile::Build, StepRole::Worker)),
             WorkflowStep::Check {
                 id: "check".into(),
-                run: "exit 1".into(),
+                run: "test -f installed.txt".into(),
             },
             WorkflowStep::Approval { id: "human".into() },
         ],
@@ -2714,33 +2716,51 @@ async fn a_client_retries_with_the_project_s_current_commands_only_when_it_asks(
     )
     .await));
     let failed = settled(&client, &run).await;
+    assert_eq!(failed["waitingFor"]["step"], "check", "{failed}");
     assert_eq!(failed["waitingFor"]["state"], "failed", "{failed}");
     assert!(failed.get("commandsChanged").is_none(), "{failed}");
 
-    set_check("echo fixed");
+    set_setup("touch installed.txt");
     assert_eq!(
         view_of(&client, &run).await["commandsChanged"],
-        json!([{ "step": "check", "before": "exit 1", "now": "echo fixed" }])
+        json!([{ "step": "setup", "before": "true", "now": "touch installed.txt" }])
     );
     // Without asking, it runs what the run started with.
     ok(&call(&client, "retry_step", json!({ "run": run })).await);
     let again = settled(&client, &run).await;
     assert_eq!(again["waitingFor"]["state"], "failed", "{again}");
 
+    // Asking, the new setup runs, and then the check again.
     let args = json!({ "run": run, "useCurrentCommands": true });
     ok(&call(&client, "retry_step", args).await);
     let view = settled(&client, &run).await;
     assert_eq!(view["waitingFor"]["state"], "waitingApproval", "{view}");
     assert!(view.get("commandsChanged").is_none(), "{view}");
-    let check = w
-        .store
-        .attempts_of_run(&run)
-        .unwrap()
-        .into_iter()
-        .rev()
-        .find(|a| a.step_id == "check")
-        .unwrap();
-    assert_eq!((check.number, check.prompt.as_str()), (3, "echo fixed"));
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    let ran = |step: &str| -> Vec<(i64, String, String)> {
+        attempts
+            .iter()
+            .filter(|a| a.step_id == step)
+            .map(|a| (a.number, a.prompt.clone(), a.state.clone()))
+            .collect()
+    };
+    let at = |number: i64, command: &str, state: &str| (number, command.into(), state.into());
+    assert_eq!(
+        ran("setup"),
+        vec![
+            at(1, "true", "succeeded"),
+            at(2, "touch installed.txt", "succeeded")
+        ]
+    );
+    assert_eq!(
+        ran("check"),
+        vec![
+            at(1, "test -f installed.txt", "failed"),
+            at(2, "test -f installed.txt", "postponed"),
+            at(3, "test -f installed.txt", "succeeded"),
+        ]
+    );
+    assert_eq!(ran("builder").len(), 1, "the agent didn't run again");
     client.cancel().await.unwrap();
 }
 

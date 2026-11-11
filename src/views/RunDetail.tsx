@@ -999,26 +999,42 @@ export function QuestionsCard({ attempt, attempts, onError }: { attempt: Attempt
   );
 }
 
-/** A setup or check that can start over, and the run's commands the project changed since it started. */
-function useCommandChanges(attempt: Attempt): CommandChange[] {
-  const [found, setFound] = useState<{ attemptId: string; changes: CommandChange[] } | null>(null);
+/**
+ * A setup or check that can start over, and the run's commands the project changed since it
+ * started. It asks again whenever the project's commands change, so "now" is what they are.
+ */
+function useCommandChanges(attempt: Attempt, projectId: string): CommandChange[] {
+  const commands = useApp((s) => {
+    const project = s.overview.projects.find((p) => p.id === projectId);
+    return JSON.stringify([project?.setupCommand ?? null, project?.checkCommand ?? null]);
+  });
+  const [found, setFound] = useState<{ key: string; changes: CommandChange[] } | null>(null);
   const asks = (attempt.kind === "setup" || attempt.kind === "check") && ["failed", "interrupted", "blocked", "stopped"].includes(attempt.state);
+  const key = `${attempt.id}\n${commands}`;
   useEffect(() => {
     if (!asks) return;
     let current = true;
     api
       .runCommandChanges(attempt.runId)
-      .then((changes) => current && setFound({ attemptId: attempt.id, changes: changes ?? [] }))
+      .then((changes) => current && setFound({ key, changes: changes ?? [] }))
       .catch(() => {});
     return () => {
       current = false;
     };
-  }, [asks, attempt.id, attempt.runId]);
-  return asks && found?.attemptId === attempt.id ? found.changes : [];
+  }, [asks, key, attempt.runId]);
+  return asks && found?.key === key ? found.changes : [];
+}
+
+/**
+ * Whether starting over with the project's commands runs anything else: the step's own command,
+ * or for a check, the setup that installs what it needs, which then runs again first.
+ */
+function startsOverDifferently(attempt: Attempt, changes: CommandChange[]): boolean {
+  return changes.some((change) => change.stepId === attempt.stepId || (attempt.kind === "check" && change.kind === "setup"));
 }
 
 /** Each command as the run started with it and as the project has it now. */
-function CommandChanges({ changes }: { changes: CommandChange[] }) {
+function CommandChanges({ changes, setupFirst }: { changes: CommandChange[]; setupFirst: boolean }) {
   const { t } = useTranslation();
   return (
     <div className="mt-2.5 rounded-md border border-border p-3">
@@ -1036,6 +1052,7 @@ function CommandChanges({ changes }: { changes: CommandChange[] }) {
           </div>
         ))}
       </dl>
+      {setupFirst && <p className="mt-2 text-[11.5px] text-muted">{t("run.commandsSetupFirst")}</p>}
       <p className="mt-2 text-[11.5px] text-subtle">{t("run.commandsChangedHint")}</p>
     </div>
   );
@@ -1044,7 +1061,7 @@ function CommandChanges({ changes }: { changes: CommandChange[] }) {
 export function Actions({ attempt, projectId, onError }: { attempt: Attempt; projectId: string; onError: (message: string) => void }) {
   const { t } = useTranslation();
   const navigate = useApp((s) => s.navigate);
-  const changes = useCommandChanges(attempt);
+  const changes = useCommandChanges(attempt, projectId);
   const act = (run: () => Promise<unknown>) => run().catch((e) => onError(errorText(t, e)));
   if (attempt.reason?.code === "reworkLimit") {
     return (
@@ -1094,11 +1111,12 @@ export function Actions({ attempt, projectId, onError }: { attempt: Attempt; pro
   if (attempt.state === "succeeded" || attempt.state === "abandoned" || attempt.state === "rejected" || attempt.state === "skipped" || attempt.state === "returned" || attempt.state === "postponed") return null;
   const canResume = attempt.kind === "agent" && ["interrupted", "blocked", "stopped", "failed"].includes(attempt.state);
   // Only when what it would start over runs something else now.
-  const commandChanged = changes.some((change) => change.stepId === attempt.stepId);
+  const commandChanged = startsOverDifferently(attempt, changes);
+  const setupFirst = attempt.kind !== "setup" && changes.some((change) => change.kind === "setup");
   return (
     <Card className="p-4">
       {attempt.reason && <p className="selectable text-[12.5px] text-warning">{reasonText(t, attempt.reason)}</p>}
-      {commandChanged && <CommandChanges changes={changes} />}
+      {commandChanged && <CommandChanges changes={changes} setupFirst={setupFirst} />}
       <div className={cx("flex flex-wrap gap-2", (attempt.reason || commandChanged) && "mt-2.5")}>
         {needsSignIn(attempt.reason) && <Button onClick={() => void act(() => api.openClaudeLogin())}>{t("run.signIn")}</Button>}
         {needsProjectSettings(attempt.reason) && <Button onClick={() => navigate({ name: "projects", projectId })}>{t("newRun.openProject")}</Button>}

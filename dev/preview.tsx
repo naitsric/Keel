@@ -383,11 +383,12 @@ const sentBackWith = say("Return 0 instead of raising when the list is empty.", 
 const returnedApproval = ran("approval", "returned", { kind: "approval", tools: "none", modelRequested: "", modelActual: null, output: { instructions: sentBackWith, ...(assistantBy ? { by: assistantBy } : {}) } as unknown as Attempt["output"] });
 const nextRound = (a: Attempt): Attempt => ({ ...a, id: `${a.stepId}-1-2`, round: 1, number: 2 });
 // flow=commands is a check that failed, and the person changed the project's commands after the run
-// started: it can start over with the new ones. flow=newCommands is after that, where node=check,
-// then clickStart=Attempt 1 and then=Activity, says which ones it took.
+// started: it can start over with the new ones. flow=newCommands is after that, with the new setup
+// running before the check comes round again, where node=check, then clickStart=Attempt 1 and
+// then=Activity, says which ones it took.
 const newCommands = [
-  { stepId: "setup", before: "uv sync --frozen", now: "uv sync --frozen --group test" },
-  { stepId: "check", before: "make test", now: "uv run --group test pytest" },
+  { stepId: "setup", kind: "setup", before: "uv sync --frozen", now: "uv sync --frozen --group test" },
+  { stepId: "check", kind: "check", before: "make test", now: "uv run --group test pytest" },
 ];
 const withNewCommands = (steps: WorkflowStep[]): WorkflowStep[] =>
   steps.map((step) => {
@@ -404,7 +405,7 @@ const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Atte
   skipped: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), humanWaits] },
   failed: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("failed"), checkRan("failed", { number: 2 })] },
   commands: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("failed")] },
-  newCommands: { steps: withNewCommands(fullWorkflow), round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("failed"), checkRan("running", { number: 2, prompt: newCommands[1].now, exitCode: null, finishedAt: null })] },
+  newCommands: { steps: withNewCommands(fullWorkflow), round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("postponed", { exitCode: 1 }), ran("setup", "running", { kind: "setup", tools: "setup", number: 2, modelRequested: "", modelActual: null, prompt: newCommands[0].now, finishedAt: null })] },
   many: { steps: manySteps, round: 0, attempts: [setupRan, ...Array.from({ length: 6 }, (_, i) => ran(`step-${i + 1}`, "succeeded", { modelRequested: i % 2 ? "sonnet" : "opus", modelActual: i % 2 ? "claude-sonnet-5-5" : "claude-opus-5-5" })), ran("a-step-whose-name-is-much-too-long-to-fit-in-any-node-at-all", "succeeded", { modelRequested: "claude-a-model-with-a-very-long-name-indeed", modelActual: "claude-a-model-with-a-very-long-name-indeed" }), checkRan(), reviewRan("security", "succeeded", verdict("approved")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", verdict("approved")), reviewRan("a-reviewer-with-a-very-long-name-as-well", "succeeded", verdict("approved")), decided("approve"), ran("after-the-reviews", "succeeded", { filesChanged: ["calc.py"], runFiles: ["calc.py"] }), checkRan("succeeded", { id: "check-again-0-1", stepId: "check-again" }), humanWaits] },
   unreadable: { steps: null, round: 0, attempts: [setupRan, specRan, builderRan(), reviewRan("security", "succeeded", verdict("approved")), checkRan("failed")] },
   try: { steps: [setupStep, { type: "check", id: "try-check", run: "pnpm test" }], round: 0, attempts: [setupRan, checkRan("failed", { id: "try-check-0-1", stepId: "try-check", prompt: "pnpm test" })] },

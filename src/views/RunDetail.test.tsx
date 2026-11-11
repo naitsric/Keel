@@ -1650,10 +1650,15 @@ describe("starting over a step whose command the project changed", () => {
   const button = (text: string) => [...document.querySelectorAll("button")].find((b) => b.textContent === text);
   const settle = () => act(() => Promise.resolve());
   const failedCheck = attempt({ id: "check-2", runId: "r1", stepId: "check", kind: "check", tools: "check", state: "failed", reason: { code: "checkFailed", exitCode: 1 }, prompt: "uv run pytest" });
+  const failedSetup = attempt({ id: "setup-1", runId: "r1", stepId: "setup", kind: "setup", tools: "setup", state: "failed", reason: { code: "setupFailed", exitCode: 1 }, prompt: "uv sync" });
+  const newSetup: CommandChange = { stepId: "setup", kind: "setup", before: "uv sync", now: "uv sync --group test" };
+  const newCheck: CommandChange = { stepId: "check", kind: "check", before: "uv run pytest", now: "uv run --group test pytest" };
+  const offered = () => button("Start over with the new commands") !== undefined;
   const show = async (shown: Attempt) => {
     act(() => root.render(<Actions attempt={shown} projectId="p1" onError={() => {}} />));
     await settle();
   };
+  const projectHas = (setupCommand: string, checkCommand: string) => useApp.setState({ overview: { ...useApp.getState().overview, projects: [{ id: "p1", setupCommand, checkCommand }] as never } });
 
   beforeEach(async () => {
     await i18next.changeLanguage("en");
@@ -1664,6 +1669,7 @@ describe("starting over a step whose command the project changed", () => {
       if (command === "attempt_retry") retried.push(args);
       return null;
     });
+    projectHas("uv sync", "uv run pytest");
     root = createRoot(document.body.appendChild(document.createElement("div")));
   });
   afterEach(() => {
@@ -1672,13 +1678,12 @@ describe("starting over a step whose command the project changed", () => {
   });
 
   it("offers the new commands, says which they were and which they are, and runs them only when chosen", async () => {
-    changes = [
-      { stepId: "setup", before: "uv sync", now: "uv sync --group test" },
-      { stepId: "check", before: "uv run pytest", now: "uv run --group test pytest" },
-    ];
+    changes = [newSetup, newCheck];
     await show(failedCheck);
     expect(page()).toContain("The project's commands changed after this run started.");
     for (const command of ["uv sync", "uv sync --group test", "uv run pytest", "uv run --group test pytest"]) expect(page()).toContain(command);
+    // The setup runs again first, so what it installs is there for the check.
+    expect(page()).toContain("The new setup runs first, then this step again.");
     act(() => button("Start over")?.click());
     await settle();
     act(() => button("Start over with the new commands")?.click());
@@ -1689,27 +1694,56 @@ describe("starting over a step whose command the project changed", () => {
     ]);
   });
 
-  it("offers nothing new when the step's own command is the project's", async () => {
+  it("offers them to a check when its setup changed, though the check didn't", async () => {
+    changes = [newSetup];
+    await show(failedCheck);
+    expect(offered()).toBe(true);
+    expect(page()).toContain("The new setup runs first, then this step again.");
+  });
+
+  it("offers them to a setup only when the setup changed", async () => {
+    changes = [newCheck];
+    await show(failedSetup);
+    expect(offered()).toBe(false);
+    changes = [newSetup];
+    await show({ ...failedSetup, id: "setup-2" });
+    expect(offered()).toBe(true);
+    // It is the setup, so nothing else runs before it.
+    expect(page()).not.toContain("runs first");
+  });
+
+  it("offers nothing new when what the step needs is still the project's", async () => {
     await show(failedCheck);
     expect(button("Start over")).toBeDefined();
-    expect(button("Start over with the new commands")).toBeUndefined();
+    expect(offered()).toBe(false);
     expect(page()).not.toContain("changed after this run started");
-    // What it would start over runs the same command either way.
-    changes = [{ stepId: "setup", before: "uv sync", now: "uv sync --group test" }];
-    await show({ ...failedCheck, id: "check-3" });
-    expect(button("Start over with the new commands")).toBeUndefined();
+    // A check of the workflow's own runs the same either way.
+    changes = [newCheck];
+    await show({ ...failedCheck, id: "lint-1", stepId: "lint" });
+    expect(offered()).toBe(false);
+  });
+
+  it("asks again once the project's commands change, so what it says now is what the project has", async () => {
+    changes = [newCheck];
+    await show(failedCheck);
+    expect(page()).toContain("uv run --group test pytest");
+    changes = [{ ...newCheck, now: "uv run --group test --group dev pytest" }];
+    act(() => projectHas("uv sync", "uv run --group test --group dev pytest"));
+    await settle();
+    expect(page()).toContain("uv run --group test --group dev pytest");
   });
 
   it("is all in Spanish too", async () => {
     await i18next.changeLanguage("es");
-    changes = [{ stepId: "check", before: "uv run pytest", now: "uv run --group test pytest" }];
+    changes = [newSetup, newCheck];
     await show(failedCheck);
     expect(page()).toContain("Los comandos del proyecto cambiaron después de que empezó esta ejecución.");
+    expect(page()).toContain("La preparación nueva corre primero, y después este paso otra vez.");
     expect(button("Empezar de nuevo con los comandos nuevos")).toBeDefined();
   });
 
   it("says in the activity which commands the step started over with", async () => {
-    const event: AuditEvent = { seq: 1, attemptId: "check-2", at: "2026-01-01T00:00:00Z", kind: "commandsUpdated", data: { changes: [{ stepId: "check", before: "uv run pytest", now: "uv run --group test pytest" }] } };
+    const event: AuditEvent = { seq: 1, attemptId: "check-2", at: "2026-01-01T00:00:00Z", kind: "commandsUpdated", data: { changes: [newCheck] } };
     act(() => root.render(<ActivityTab events={[event]} role="worker" />));
     expect(page()).toContain("Started over with the project's new commands");
     expect(page()).toContain("check: uv run pytest → uv run --group test pytest");

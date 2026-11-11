@@ -41,7 +41,7 @@ use keel_store::rusqlite_value::Value;
 use keel_store::{
     Decision, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
 };
-pub use project_commands::CommandChange;
+pub use project_commands::{CommandChange, CommandKind};
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
 pub use prompts::full_workflow;
 pub use screenshots::{Screenshot, Screenshots};
@@ -812,6 +812,7 @@ impl Engine {
         self.check_can_run(&project, &request.workflow)?;
         // Preparation always comes first, and from what's published, before any agent touches it.
         let mut workflow = request.workflow;
+        let mut project_setup = None;
         if let Some(run) = project
             .setup_command
             .as_deref()
@@ -840,14 +841,21 @@ impl Engine {
                     run: run.to_owned(),
                 },
             );
+            project_setup = Some(id);
         }
+        // So a retry knows which commands are the project's, and can take them as they are then.
+        let saved_id = request
+            .saved_workflow
+            .as_ref()
+            .map(|saved| saved.id.as_str());
+        let workflow = project_commands::marked(&workflow, project_setup, saved_id);
         let run_id = new_id();
         let run = NewRun {
             id: run_id.clone(),
             project_id: project.id,
             title: request.title.unwrap_or_else(|| title_from(&request.request)),
             request: request.request,
-            workflow: serde_json::to_string(&workflow).unwrap_or_else(|_| "[]".into()),
+            workflow: workflow.to_string(),
             language: request.language,
             source_issue: request.source_issue.as_ref().map(|issue| {
                 json!({ "number": issue.number, "title": issue.title, "author": issue.author, "url": issue.url }).to_string()
@@ -1201,10 +1209,9 @@ impl Engine {
             return Ok(Vec::new());
         }
         let project = self.inner.store.project(&run.project_id)?;
-        let steps: Vec<WorkflowStep> =
-            serde_json::from_value(run.workflow.clone()).unwrap_or_default();
         Ok(project_commands::changed(
-            &steps,
+            &run.workflow,
+            run.workflow_id.as_deref(),
             project.setup_command.as_deref(),
             project.check_command.as_deref(),
         ))
@@ -1269,21 +1276,15 @@ impl Engine {
         } else {
             Vec::new()
         };
-        let steps: Vec<WorkflowStep> =
-            serde_json::from_value(run.workflow.clone()).unwrap_or_default();
-        let steps = project_commands::with_changes(&steps, &changes);
+        let workflow = project_commands::with_changes(&run.workflow, &changes);
+        let steps: Vec<WorkflowStep> = serde_json::from_value(workflow.clone()).unwrap_or_default();
         let step = workflows::find_step(&steps, &attempt.step_id).ok_or(Error::InvalidState)?;
-        // Every later step and round reads the run's copy, so they run the same commands. Each
-        // attempt keeps the command it ran.
-        if !changes.is_empty() {
-            let workflow = serde_json::to_string(&steps).map_err(|_| Error::InvalidState)?;
-            store.patch_run(&attempt.run_id, &[("workflow", Value::Text(workflow))])?;
-            store.append_event(
-                attempt_id,
-                "commandsUpdated",
-                &json!({ "changes": changes }),
-            )?;
-        }
+        // What a new setup installs, the steps after it need: it runs first, and this step comes
+        // round again once it's through, with nothing in between run again.
+        let setup_first = changes
+            .iter()
+            .filter(|change| change.kind == CommandKind::Setup && change.step_id != step.id())
+            .find_map(|change| workflows::find_step(&steps, &change.step_id));
         let resume = (resume && attempt.kind == "agent").then(|| Resume {
             session: attempt.session_id.clone(),
             from: attempt.id.clone(),
@@ -1302,8 +1303,36 @@ impl Engine {
         if run.finished_at.is_some() {
             store.patch_run(&attempt.run_id, &[("finished_at", Value::Null)])?;
         }
-        self.inner
-            .start_step(&attempt.run_id, &step, number, resume)
+        let started = match &setup_first {
+            Some(setup) => {
+                let number = workflows::next_number(&attempts, setup.id());
+                self.inner
+                    .start_step(&attempt.run_id, setup, number, None)?
+            }
+            None => self
+                .inner
+                .start_step(&attempt.run_id, &step, number, resume)?,
+        };
+        // Only once something is on its way, so a run that couldn't retry stays as it was. Nothing
+        // reads the run's steps meanwhile: `advance` waits for the lock held here. Every later step
+        // and round reads the run's copy, so they run the same commands, and each attempt keeps
+        // the one it ran.
+        if !changes.is_empty() {
+            store.patch_run(
+                &attempt.run_id,
+                &[("workflow", Value::Text(workflow.to_string()))],
+            )?;
+            if setup_first.is_some() {
+                store.change_state(attempt_id, state, AttemptState::Postponed)?;
+            }
+            store.append_event(
+                attempt_id,
+                "commandsUpdated",
+                &json!({ "changes": changes }),
+            )?;
+            self.inner.changed(&attempt.run_id);
+        }
+        Ok(started)
     }
 
     pub fn abandon(&self, attempt_id: &str) -> Result<()> {

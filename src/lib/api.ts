@@ -481,6 +481,7 @@ export interface Totals {
 /** A run's setup or check whose command the project changed after the run started. */
 export interface CommandChange {
   stepId: string;
+  kind: "setup" | "check";
   before: string;
   now: string;
 }
