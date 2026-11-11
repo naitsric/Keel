@@ -29,7 +29,7 @@ const REASONS: Partial<Record<AttemptState, Reason>> = {
   blocked: { code: "unexpectedAuth", source: "ANTHROPIC_API_KEY" },
   failed: { code: "resultError", subtype: "error_max_turns", detail: "Reached the turn limit." },
   interrupted: { code: "agentLost" },
-  queued: { code: "waitingForProject" },
+  queued: { code: "waitingForProject", step: "builder", runId: "r9", title: "Fix the calendar" },
 };
 const finished = !["queued", "preparing", "running", "stalled"].includes(state);
 const at = (minutes: number) => new Date(Date.now() - minutes * 60000).toISOString();

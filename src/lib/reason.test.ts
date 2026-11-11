@@ -26,6 +26,19 @@ describe("reasonText", () => {
   });
 });
 
+describe("a step waiting for its project's turn", () => {
+  it("names the step and the run that have the turn, and that it's about running commands", () => {
+    const reason = { code: "waitingForProject", step: "builder", runId: "r44", title: "The runs' folders" };
+    expect(reasonText(t("es"), reason)).toBe("Espera a que termine el paso «builder» de «The runs' folders». Cada corrida trabaja en su propia copia, pero un proyecto corre un solo paso con comandos a la vez.");
+    expect(reasonText(t("en"), reason)).toBe("Waiting for the “builder” step of “The runs' folders” to finish. Each run works in its own copy, but a project runs one step with commands at a time.");
+  });
+
+  it("still says why when it doesn't know who has the turn", () => {
+    expect(reasonText(t("es"), { code: "waitingForProject" })).toBe("Espera su turno. Cada corrida trabaja en su propia copia, pero un proyecto corre un solo paso con comandos a la vez.");
+    expect(reasonText(t("en"), { code: "waitingForProject" })).toBe("Waiting for its turn. Each run works in its own copy, but a project runs one step with commands at a time.");
+  });
+});
+
 describe("what's said about a verifier", () => {
   const JARGON = /\bspec\b|\[TBC\]|acceptance|\bscope\b|edge case|assumption|\bdelta\b|criteria/i;
 

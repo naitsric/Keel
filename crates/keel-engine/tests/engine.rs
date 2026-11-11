@@ -138,6 +138,32 @@ impl Harness {
         }
     }
 
+    /// What a step waiting for the project's turn is told while the builder of `run` has it.
+    fn waiting_for(&self, run: &str) -> Reason {
+        Reason::WaitingForProject {
+            step: "builder".into(),
+            run_id: run.to_owned(),
+            title: self.store.run(run).unwrap().title,
+        }
+    }
+
+    fn wait_for_reason(&self, run: &str, expected: &Reason) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let attempt = self.latest(run);
+            let found = attempt.reason.clone().map(|_| reason(&attempt));
+            if found.as_ref() == Some(expected) {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "still {found:?} in {}",
+                attempt.state
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn kinds(&self, attempt: &str) -> Vec<String> {
         self.store
             .events(attempt, 0)
@@ -522,7 +548,7 @@ fn a_project_runs_one_command_step_at_a_time_and_reviews_are_not_held_back() {
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(reason(&h.latest(&second)), Reason::WaitingForProject);
+    assert_eq!(reason(&h.latest(&second)), h.waiting_for(&first));
 
     // A read-only step can't run commands, so it doesn't wait.
     let review = h.start(ToolProfile::ReadOnly);
@@ -536,6 +562,39 @@ fn a_project_runs_one_command_step_at_a_time_and_reviews_are_not_held_back() {
     h.wait_for(&first, &[AttemptState::Succeeded]);
     let a = h.wait_for(&second, &[AttemptState::Succeeded]);
     assert!(a.reason.is_none());
+}
+
+#[test]
+fn a_step_waiting_for_its_turn_names_the_one_that_has_it_as_the_turn_passes() {
+    let body = format!(
+        "cat > /dev/null\n{}\nsleep 1\n{OK_RESULT}",
+        init(BUILD_TOOLS, "none")
+    );
+    let h = harness_with(&body, LOGGED_IN, "2.1.318", |c| c.max_agents = 5);
+    let first = h.start(ToolProfile::Build);
+    h.wait_for(&first, &[AttemptState::Running]);
+    let second = h.start(ToolProfile::Build);
+    let third = h.start(ToolProfile::Build);
+    h.wait_for_reason(&second, &h.waiting_for(&first));
+    h.wait_for_reason(&third, &h.waiting_for(&first));
+
+    // The first ends, one of the others takes the turn, and the last one now names that one.
+    h.wait_for(&first, &[AttemptState::Succeeded]);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (next, last) = loop {
+        if h.latest(&second).state != "queued" {
+            break (&second, &third);
+        }
+        if h.latest(&third).state != "queued" {
+            break (&third, &second);
+        }
+        assert!(Instant::now() < deadline, "nobody took the turn");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    h.wait_for_reason(last, &h.waiting_for(next));
+
+    h.wait_for(next, &[AttemptState::Succeeded]);
+    h.wait_for(last, &[AttemptState::Succeeded]);
 }
 
 #[test]

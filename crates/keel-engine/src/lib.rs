@@ -292,8 +292,9 @@ const TRY_CHECK_STEP: &str = "try-check";
 #[derive(Default)]
 struct Slots {
     active: HashSet<String>,
-    /// Projects with a step that can run commands. Only one at a time per project.
-    command_steps: HashSet<String>,
+    /// Projects with a step that can run commands, only one at a time per project, and what a step
+    /// waiting for its turn is told: which step has it, and in which run.
+    command_steps: HashMap<String, Reason>,
 }
 
 /// Continuing a session rather than starting one.
