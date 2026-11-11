@@ -365,6 +365,8 @@ export interface Decision_ {
   risk: "low" | "medium" | "high";
   reasons: string;
   instructions: string;
+  /** What the specification decided on its own that a review questions, for the person to settle. Older answers don't have it. */
+  questioned?: { decided: string; why: string }[];
   overriddenByPerson?: boolean;
 }
 

@@ -18,7 +18,7 @@ use crate::{brain, prompts, sizing, specs, verification};
 const MAX_ROUNDS: u32 = 5;
 
 pub const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"verdict":{"type":"string","enum":["approved","changes"]},"findings":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"},"unread":{"type":"array","items":{"type":"string"},"description":"Each file of the change you could not read, if any. A review that left one out is not an approval."}},"required":["verdict","findings","summary","unread"],"additionalProperties":false}"#;
-pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"}},"required":["decision","risk","reasons","instructions"],"additionalProperties":false}"#;
+pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"},"questioned":{"type":"array","items":{"type":"object","properties":{"decided":{"type":"string"},"why":{"type":"string"}},"required":["decided","why"],"additionalProperties":false},"description":"Each thing the specification decided on its own that a finding questions, quoted as `decided` says it, and why it does not hold. A person decides these at the approval, so none is a reason for rework."}},"required":["decision","risk","reasons","instructions","questioned"],"additionalProperties":false}"#;
 
 /// What a reviewer answered, as Keel keeps it. One that says it couldn't read part of the change
 /// didn't review all of it, so it's never an approval, whatever it says. `None` if it stands.
@@ -550,14 +550,14 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
 
     let review = |focus_en: &'static str, focus_es: &'static str| {
         format!(
-            "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{{{{rework}}}}\n\n{}\n{{{{diff}}}}",
+            "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{{{{answers}}}}\n\n{{{{rework}}}}\n\n{}\n{{{{diff}}}}",
             if es {
                 format!(
-                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque. Una cuyo `taken` es `person` la eligió una persona: déjala. Reporta solo problemas reales de este cambio, cada uno con archivo y línea, incluida una decisión que no se sostenga con el cambio ya hecho. Si no hay, el veredicto es approved. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
+                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque. No cuestiones lo que eligió una persona: una decisión cuyo `taken` es `person`, o lo que la persona respondió. Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Una decisión que no se sostenga con el cambio ya hecho también lo es: cítala como la dice `decided`, con el archivo y la línea donde se ve, si los hay. Si no hay, el veredicto es approved. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
                 )
             } else {
                 format!(
-                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Also question what the specification decided on its own, in `decided`, where it touches your focus. One whose `taken` is `person` was a person's choice: leave it. Report only real problems in this change, each with its file and line, including a decision that doesn't hold up now that the change is made. If there are none, the verdict is approved. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
+                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Also question what the specification decided on its own, in `decided`, where it touches your focus. Don't question what a person chose: a decision whose `taken` is `person`, or what the person answered. Report only real problems in this change, each with its file and line. A decision that doesn't hold up now that the change is made is one too: quote it as `decided` says it, with the file and line where it shows, if any. If there are none, the verdict is approved. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
                 )
             },
             text("Specification:", "Especificación:"),
@@ -570,12 +570,17 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
         ("security", "code", "approver", "human")
     };
     let approver_prompt = format!(
-        "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{VERIFY_STEP}: {{{{steps.{VERIFY_STEP}.output}}}}\n{security}: {{{{steps.{security}.output}}}}\nux: {{{{steps.ux.output}}}}\nui: {{{{steps.ui.output}}}}\n{code}: {{{{steps.{code}.output}}}}\n\n{{{{rework}}}}",
+        "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{VERIFY_STEP}: {{{{steps.{VERIFY_STEP}.output}}}}\n{security}: {{{{steps.{security}.output}}}}\nux: {{{{steps.ux.output}}}}\nui: {{{{steps.ui.output}}}}\n{code}: {{{{steps.{code}.output}}}}\n\n{}\n\n{{{{rework}}}}",
         text(
             "You decide whether this change is ready for a person to review, using the reviews below and what `verify` found, and you edit nothing. Check each finding in the code before believing it, and discard false ones. A review with files in `unread` didn't check them: check them yourself before you approve. Anything `unmet` in `verify` is a finding, unless what was sent back below changed it. `unverified` only means no test proves it, and isn't a finding by itself. decision = rework if a real finding remains, approve if not. risk = high if it touches authorization, personal data, money, contractual deadlines or the database schema; low if it's contained and easy to revert; medium otherwise. In instructions, say exactly what to fix.",
             "Decides si este cambio está listo para que lo revise una persona, usando las revisiones de abajo y lo que encontró `verify`, y no editas nada. Comprueba cada hallazgo en el código antes de creerle y descarta los falsos. Una revisión con archivos en `unread` no los revisó: revísalos tú antes de aprobar. Todo lo que esté `unmet` en `verify` es un hallazgo, salvo que lo devuelto abajo lo haya cambiado. `unverified` solo significa que ninguna prueba lo demuestra, y por sí solo no es un hallazgo. decision = rework si queda un hallazgo real, approve si no. risk = high si toca autorización, datos personales, dinero, plazos contractuales o el esquema de base; low si es acotado y fácil de revertir; medium en otro caso. En instructions, di exactamente qué corregir. Responde en español.",
         ),
         text("Specification:", "Especificación:"),
+        // What the specification decided on its own is the person's to settle, not the builder's.
+        text(
+            "A finding that questions what the specification decided on its own, in `decided`, is not a reason for rework, even if it's right: a person decides that, and can change it at the approval. Put each one in `questioned`, quoting the decision as `decided` says it and saying why it doesn't hold, mention them in reasons, and leave them out of instructions.",
+            "Un hallazgo que cuestiona lo que la especificación decidió por su cuenta, en `decided`, no es motivo de rework, aunque tenga razón: eso lo decide una persona, que puede cambiarlo en la aprobación. Pon cada uno en `questioned`, citando la decisión como la dice `decided` y diciendo por qué no se sostiene, menciónalos en reasons y déjalos fuera de instructions.",
+        ),
     );
 
     // The simple one is the base, up to where a person gets involved.
@@ -1012,6 +1017,88 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn reviewers_question_what_was_decided_alone_and_the_approver_leaves_it_to_the_person() {
+        for (language, question, chosen, quoted, settled) in [
+            (
+                "en",
+                "Also question what the specification decided on its own, in `decided`, where it touches your focus.",
+                "Don't question what a person chose: a decision whose `taken` is `person`, or what the person answered.",
+                "A decision that doesn't hold up now that the change is made is one too: quote it as `decided` says it",
+                "is not a reason for rework, even if it's right: a person decides that, and can change it at the approval. Put each one in `questioned`",
+            ),
+            (
+                "es",
+                "Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque.",
+                "No cuestiones lo que eligió una persona: una decisión cuyo `taken` es `person`, o lo que la persona respondió.",
+                "Una decisión que no se sostenga con el cambio ya hecho también lo es: cítala como la dice `decided`",
+                "no es motivo de rework, aunque tenga razón: eso lo decide una persona, que puede cambiarlo en la aprobación. Pon cada uno en `questioned`",
+            ),
+        ] {
+            let (mut reviewers, mut approvers) = (0, 0);
+            for workflow in builtin(language, None) {
+                for step in &workflow.steps {
+                    let specs: Vec<&StepSpec> = match step {
+                        WorkflowStep::Agent(spec) => vec![spec],
+                        WorkflowStep::Parallel { steps, .. } => steps.iter().collect(),
+                        _ => Vec::new(),
+                    };
+                    for spec in specs {
+                        let told: &[&str] = match spec.role {
+                            // What was decided comes in the specification, and what the person
+                            // chose in their answers.
+                            StepRole::Reviewer => {
+                                reviewers += 1;
+                                &[
+                                    question,
+                                    chosen,
+                                    quoted,
+                                    "{{steps.spec.output}}",
+                                    "{{answers}}",
+                                ]
+                            }
+                            StepRole::Approver { .. } => {
+                                approvers += 1;
+                                &[settled]
+                            }
+                            _ => &[],
+                        };
+                        for part in told {
+                            assert!(
+                                spec.prompt.contains(part),
+                                "{language} {} {}: {part}",
+                                workflow.id,
+                                spec.id
+                            );
+                        }
+                    }
+                }
+            }
+            // The full one and the one that fits the change have four reviews and an approver each,
+            // and the simple one has none.
+            assert_eq!((reviewers, approvers), (8, 2), "{language}");
+        }
+        // Even an approver of a workflow saved before this is asked for them.
+        let schema: Value = serde_json::from_str(DECISION_SCHEMA).unwrap();
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&Value::from("questioned"))
+        );
+        let questioned = &schema["properties"]["questioned"];
+        assert_eq!(
+            questioned["items"]["required"],
+            serde_json::json!(["decided", "why"])
+        );
+        assert!(
+            questioned["description"]
+                .as_str()
+                .unwrap()
+                .contains("A person decides these at the approval")
+        );
     }
 
     #[test]
@@ -1957,50 +2044,6 @@ mod tests {
             }
         }
         assert!(VERDICT_SCHEMA.contains(r#""required":["verdict","findings","summary","unread"]"#));
-    }
-
-    #[test]
-    fn every_built_in_reviewer_questions_what_was_decided_without_asking_but_not_what_a_person_chose()
-     {
-        for (language, question, holds, chosen) in [
-            (
-                "en",
-                "Also question what the specification decided on its own, in `decided`, where it touches your focus.",
-                "including a decision that doesn't hold up now that the change is made",
-                "One whose `taken` is `person` was a person's choice: leave it.",
-            ),
-            (
-                "es",
-                "Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque.",
-                "incluida una decisión que no se sostenga con el cambio ya hecho",
-                "Una cuyo `taken` es `person` la eligió una persona: déjala.",
-            ),
-        ] {
-            let mut reviewers = 0;
-            for workflow in builtin(language, None) {
-                for step in &workflow.steps {
-                    let WorkflowStep::Parallel { steps: group, .. } = step else {
-                        continue;
-                    };
-                    for spec in group {
-                        reviewers += 1;
-                        // What it decided comes in what the specifier answered.
-                        for part in [question, holds, chosen, "{{steps.spec.output}}"] {
-                            assert!(
-                                spec.prompt.contains(part),
-                                "{language} {} {}: {part}",
-                                workflow.id,
-                                spec.id
-                            );
-                        }
-                    }
-                }
-            }
-            assert_eq!(
-                reviewers, 8,
-                "{language}: the full one and the one that fits"
-            );
-        }
     }
 
     #[test]
