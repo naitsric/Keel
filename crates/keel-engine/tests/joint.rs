@@ -273,6 +273,16 @@ fn both() -> Value {
     agreed(&[("valora", "Sends the token"), ("app", "Reads the token")])
 }
 
+/// Both, with what the parts have to agree on exactly: K1 names both, and K2 only app.
+fn with_contract() -> Value {
+    let mut agreed = both();
+    agreed["contract"] = json!([
+        { "when": "valora posts /session with `token`", "then": "app answers 201", "projects": ["valora", "app"] },
+        { "when": "the token is wrong", "then": "app answers 401", "projects": ["app"] },
+    ]);
+    agreed
+}
+
 impl World {
     /// What the specifier answers, in order.
     fn answers(&self, outputs: &[Value]) {
@@ -355,6 +365,75 @@ impl World {
                 )
                 .unwrap();
         }
+    }
+
+    /// Both projects' cards run a specifier, a builder, a check that passes and a verifier, and
+    /// then wait for a person.
+    fn verifying_workflows(&self) {
+        for project in [&self.app, &self.valora] {
+            let workflow = self
+                .engine
+                .save_workflow(
+                    project,
+                    &Workflow {
+                        id: String::new(),
+                        name: "Verifying".into(),
+                        steps: vec![
+                            agent("spec", StepRole::Specifier, None, "{{request}}"),
+                            agent_with(
+                                "build",
+                                ToolProfile::Build,
+                                StepRole::Worker,
+                                None,
+                                "Build it",
+                            ),
+                            WorkflowStep::Check {
+                                id: "check".into(),
+                                run: "true".into(),
+                            },
+                            agent(
+                                "verify",
+                                StepRole::Verifier,
+                                None,
+                                "Check this: {{steps.spec.output}}",
+                            ),
+                            WorkflowStep::Approval {
+                                id: "approval".into(),
+                            },
+                        ],
+                        builtin: false,
+                    },
+                )
+                .unwrap();
+            self.engine
+                .update_project(
+                    project,
+                    &keel_store::ProjectSettings {
+                        default_workflow: Some(workflow.id),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    /// Each point of the contract, with what each part it names last said about it, by project:
+    /// "K1 valora=Some(Met) app=None".
+    fn contract(&self, card: &str) -> Vec<String> {
+        self.engine
+            .joint_change(card)
+            .unwrap()
+            .contract
+            .into_iter()
+            .map(|point| {
+                let parts: Vec<String> = point
+                    .parts
+                    .iter()
+                    .map(|part| format!("{}={:?}", part.project, part.result))
+                    .collect();
+                format!("{} {}", point.id, parts.join(" "))
+            })
+            .collect()
     }
 
     /// Both projects run a specifier and a builder that commits, wait for a person, and open a
@@ -1122,6 +1201,104 @@ fn each_part_reads_the_whole_request_and_not_only_its_own_line() {
         assert!(w.call(2).contains("Original request:"), "the builder's own");
         assert!(w.call(4).contains("Original request:"), "the builder's own");
     }
+}
+
+#[test]
+fn each_part_verifies_the_contract_points_that_name_it_and_the_change_shows_each() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.verifying_workflows();
+    // Valora's specifier writes K1 in its own words. What was agreed is what's verified.
+    let mut valora = plain("Valora sends the token");
+    valora["criteria"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "id": "K1", "when": "its own words", "then": "for the same point" }));
+    w.answers(&[
+        with_contract(),
+        valora,
+        json!({}),
+        json!({ "criteria": [
+            { "id": "C1", "result": "met", "evidence": "send.test.ts:3" },
+            { "id": "K1", "result": "met", "evidence": "send.test.ts:9" },
+        ], "summary": "Both hold." }),
+        plain("back-adm reads the token"),
+        json!({}),
+        // It leaves K1 out.
+        json!({ "criteria": [
+            { "id": "C1", "result": "met", "evidence": "read.test.ts:1" },
+            { "id": "K2", "result": "unmet", "evidence": "session.ts:4" },
+        ], "summary": "It answers 400." }),
+    ]);
+    let (card, run) = w.agreeing();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    let agreed = w.store.joint_change(&card).unwrap().agreed.unwrap();
+    assert_eq!(agreed["contract"][1]["id"], "K2");
+
+    // No part has said anything about any of them yet.
+    assert_eq!(
+        w.contract(&card),
+        ["K1 valora=None app=None", "K2 app=None"]
+    );
+
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+    // Valora's part has to keep K1, in the agreement's words, and nothing says it has to keep K2.
+    let spec = w.attempts(&first, "spec")[0].output.clone().unwrap();
+    let criteria: Vec<(&str, &str)> = spec["criteria"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["id"].as_str().unwrap(), c["when"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        criteria,
+        [
+            ("C1", "it's asked"),
+            ("K1", "valora posts /session with `token`")
+        ]
+    );
+    // Every part still reads all of what was agreed, and is told which points are its own.
+    let call = w.call(1);
+    for told in [
+        "K1 (valora, app): valora posts /session with `token` → app answers 201",
+        "K2 (app): the token is wrong → app answers 401",
+        "Keel adds the points of the contract that name valora to this part's criteria",
+    ] {
+        assert!(call.contains(told), "{told}: {call}");
+    }
+    assert!(w.call(3).contains("valora posts /session with `token`"));
+
+    w.engine.card_stop_waiting(&parts[1].id).unwrap();
+    w.engine.board_tick().unwrap();
+    let second = w.store.card(&parts[1].id).unwrap().run_id.unwrap();
+    w.wait_for(&second, "approval", AttemptState::WaitingApproval);
+    let spec = w.attempts(&second, "spec")[0].output.clone().unwrap();
+    let ids: Vec<&str> = spec["criteria"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["C1", "K1", "K2"]);
+    // Its verifier left K1 out, and K1 is still on the list.
+    let verified = w.attempts(&second, "verify")[0].output.clone().unwrap();
+    let k1 = &verified["criteria"][1];
+    assert_eq!(
+        (&k1["id"], &k1["result"], &k1["corrected"]),
+        (&json!("K1"), &json!("unverified"), &json!("leftOut"))
+    );
+
+    assert_eq!(
+        w.contract(&card),
+        [
+            "K1 valora=Some(Met) app=Some(Unverified)",
+            "K2 app=Some(Unmet)"
+        ]
+    );
 }
 
 #[test]

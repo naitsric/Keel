@@ -1008,6 +1008,12 @@ describe("the approval card", () => {
       expect(answers).toEqual([{ attemptId: "human", approve: true, text: "" }]);
     });
 
+    it("shows what the parts agree on exactly, so it's approved along with them", () => {
+      show([specifier({ parts, contract: [{ id: "K1", when: "valora posts /session", then: "app answers 201", projects: ["valora", "app"] }] }), human], [], agreement);
+      expect(page()).toContain("What the parts agree on exactly");
+      expect(page()).toContain("K1 (valora, app): valora posts /session → app answers 201");
+    });
+
     it("is an ordinary approval when nothing has parts", () => {
       show([specifier(), human], [], agreement);
       expect(page()).not.toContain("Approve what was agreed?");

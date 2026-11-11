@@ -1346,7 +1346,9 @@ impl Inner {
             Some(agreement) => {
                 specs::judge_agreement(output, fixing_a_limit, rounds_answered, &agreement.names())
             }
-            None => specs::judge(output, fixing_a_limit, rounds_answered),
+            // A part of a change across projects also keeps the points of the contract that name it.
+            None => specs::judge(output, fixing_a_limit, rounds_answered)
+                .with_contract(&self.contract_of(&m.run_id).unwrap_or_default()),
         }
     }
 

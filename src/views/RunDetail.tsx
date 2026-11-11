@@ -16,7 +16,7 @@ import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } fro
 import { ProposalRow } from "./BrainPage";
 import { FlowDiagram } from "./FlowDiagram";
 import { JointChangeDialog } from "./JointChangeDialog";
-import { SpecView } from "./SpecView";
+import { ContractLine, SpecView } from "./SpecView";
 
 type Tab = "understood" | "found" | "activity" | "commands" | "changes" | "prompt" | "details" | "output";
 
@@ -631,6 +631,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const parts = spec?.parts ?? [];
   const agreeing = parts.length > 0;
   const together = agreeing ? (spec?.together ?? []) : [];
+  const contract = agreeing ? (spec?.contract ?? []) : [];
   // Right after working out what's asked, nobody has done anything yet. Saying it finished without
   // an explanation would read as something gone wrong.
   const nothingToExplain = asked !== null && !attempts.some((a) => a.kind === "agent" && a.role === "worker");
@@ -673,6 +674,17 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             <ul className="selectable list-disc space-y-0.5 pl-4 break-words">
               {together.map((text, index) => (
                 <li key={index}>{text}</li>
+              ))}
+            </ul>
+          </ApprovalRow>
+        )}
+        {contract.length > 0 && (
+          <ApprovalRow label={t("run.specContract")} note={t("run.generated")}>
+            <ul className="selectable list-disc space-y-0.5 pl-4 break-words">
+              {contract.map((point) => (
+                <li key={point.id}>
+                  <ContractLine point={point} />
+                </li>
               ))}
             </ul>
           </ApprovalRow>

@@ -12,7 +12,7 @@ import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
 import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
-import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, JointChange, JointCheck, PartOf, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunJoint, RunRow, SpecOutput, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
+import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, ContractPoint, Issue, JointCard, JointChange, JointCheck, PartOf, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunJoint, RunRow, SpecOutput, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
 import { useApp, type View } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -193,6 +193,21 @@ const previewSpec = {
     ...(questionedShown ? [{ text: say("Sorts the invoices by date, as the list does today.", "Ordena las facturas por fecha, como la lista de hoy.") }] : []),
   ],
   questions: [],
+  // agreement=1, with specifier=1: where a change across projects is agreed, with each part, what's
+  // tried together and what the parts agree on exactly.
+  ...(params.get("agreement") === "1"
+    ? {
+        parts: [
+          { project: "payments", text: say("Add an endpoint that settles one invoice", "Agrega un endpoint que liquida una factura") },
+          { project: "demo", text: say("Call it when an invoice is paid", "Lo llama cuando se paga una factura") },
+        ],
+        together: [say("Pay an invoice in demo and see it settled in payments", "Paga una factura en demo y mírala liquidada en payments")],
+        contract: [
+          { id: "K1", when: say("demo posts /invoices/{id}/settle", "demo hace POST a /invoices/{id}/settle"), then: say("payments answers 200 with settledAt", "payments responde 200 con settledAt"), projects: ["payments", "demo"] },
+          { id: "K2", when: say("payments settles an invoice", "payments liquida una factura"), then: say("its state goes from open to settled", "su estado pasa de open a settled"), projects: ["payments"] },
+        ],
+      }
+    : {}),
 };
 // What questioned=1 has the approver question. The first names its line by its number and quotes it in
 // other words. The second quotes its line as it is, with no number, like an answer from before there
@@ -663,6 +678,24 @@ const jointAgreed: SpecOutput = {
     { project: "demo", text: "Call it when an invoice is paid" },
   ],
   together: jointChecks.map((check) => check.text),
+  contract: [
+    { id: "K1", when: "demo posts /invoices/{id}/settle", then: "payments answers 200 with `settledAt`", projects: ["payments", "demo"] },
+    { id: "K2", when: "the invoice is already settled", then: "payments answers 409 and demo shows it as paid", projects: ["payments", "demo"] },
+    { id: "K3", when: "payments settles an invoice", then: "its state goes from open to settled", projects: ["payments"] },
+  ],
+};
+// What each part found of each point: met, not met, not verified, and not checked yet.
+// ?jointContract=none is an agreement without any.
+const jointContract = (parts: JointCard[]): ContractPoint[] => {
+  if (params.get("jointContract") === "none") return [];
+  const found: Record<string, ContractPoint["parts"][number]["result"][]> = { K1: ["met", "met"], K2: ["unmet", null], K3: ["unverified"] };
+  // The parts are first to last, as the projects each point names.
+  return (jointAgreed.contract ?? []).map((point) => ({
+    id: point.id,
+    when: point.when,
+    then: point.then,
+    parts: parts.slice(0, point.projects.length).map((card, index) => ({ cardId: card.cardId, position: card.part?.position ?? index + 1, project: card.project, result: found[point.id]?.[index] ?? null })),
+  }));
 };
 function partOf(changeId: string, position: number, extra: Partial<PartOf> = {}): PartOf {
   return { changeId, position, total: 2, waitsFor: null, warnings: [], ...extra };
@@ -677,10 +710,11 @@ function jointChange(changeId: string): JointChange {
     id: changeId,
     agreedIn: agreeing ? view(agreeing) : null,
     projects: [agreeing?.projectId ?? "p1", ...(agreeing?.alsoTouches ?? ["p2"])].map((id) => ({ id, name: name(id) })),
-    agreed: agreed ? jointAgreed : null,
+    agreed: agreed ? { ...jointAgreed, contract: params.get("jointContract") === "none" ? [] : jointAgreed.contract } : null,
     parts: parts.map(view),
     readOnly: [],
     checks: agreed ? jointChecks : [],
+    contract: agreed ? jointContract(parts.map(view)) : [],
   };
 }
 // ?joint=agree or ?joint=part shows a run in a change across projects.

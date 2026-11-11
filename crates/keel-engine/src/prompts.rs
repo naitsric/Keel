@@ -223,6 +223,7 @@ const AGREEMENT_EN: &str = r#"This request touches several projects, and you're 
 - parts: one for each project that has to change, in the order they're done: what the others depend on first. `project` is its name exactly as it's listed below, and `text` says what changes there, in up to 200 characters. A project that's only read isn't a part. Up to 5.
 - together: up to 5 things that only work with every part in place, each in one line, for a person to try once they're all done. Nobody can prove them in a single project.
 - limits: also what has to stay the same between the projects for them to keep working together, such as a name, a route or a format the other side relies on.
+- contract: up to 7 points where the parts must match exactly: a route, a field and its type, a response code or a change of state. `when` and `then` say it as a criterion does, within the same limit, and `projects` names each project whose part has to keep it. Keel numbers them K1, K2 and so on, and each part verifies those that name it like the rest of its criteria. Leave it empty if the parts share nothing.
 
 The projects:
 {{projects}}
@@ -233,6 +234,7 @@ const AGREEMENT_ES: &str = r#"Este pedido toca varios proyectos, y estás en uno
 - parts: una por cada proyecto que tiene que cambiar, en el orden en que se hacen: primero aquello de lo que dependen los demás. `project` es su nombre exactamente como aparece abajo, y `text` dice qué cambia ahí, en hasta 200 caracteres. Un proyecto que solo se lee no es una parte. Hasta 5.
 - together: hasta 5 cosas que solo funcionan con todas las partes hechas, cada una en una línea, para que una persona las pruebe cuando estén todas. Nadie puede demostrarlas en un solo proyecto.
 - limits: también lo que tiene que quedar igual entre los proyectos para que sigan funcionando juntos, como un nombre, una ruta o un formato del que depende el otro lado.
+- contract: hasta 7 puntos en los que las partes tienen que coincidir exactamente: una ruta, un campo y su tipo, un código de respuesta o un cambio de estado. `when` y `then` lo dicen como un criterio, con el mismo límite, y `projects` nombra cada proyecto cuya parte tiene que cumplirlo. Keel los numera K1, K2 y así, y cada parte verifica los que la nombran como el resto de sus criterios. Déjalo vacío si las partes no comparten nada.
 
 Los proyectos:
 {{projects}}

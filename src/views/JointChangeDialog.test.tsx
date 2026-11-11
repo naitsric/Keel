@@ -27,7 +27,26 @@ const agreed: JointChange = {
   ],
   readOnly: [{ id: "p3", name: "dupplaBack" }],
   checks: [{ seq: 1, text: "Log in on Valora and land in back-adm", confirmedAt: null }],
+  contract: [],
 };
+
+const contract: JointChange["contract"] = [
+  {
+    id: "K1",
+    when: "valora posts /session with token",
+    then: "app answers 201",
+    parts: [
+      { cardId: "one", position: 1, project: "valora", result: "met" },
+      { cardId: "two", position: 2, project: "app", result: null },
+    ],
+  },
+  {
+    id: "K2",
+    when: "the token is wrong",
+    then: "app answers 401",
+    parts: [{ cardId: "two", position: 2, project: "app", result: "unmet" }],
+  },
+];
 
 describe("a change across several projects, in one place", () => {
   let root: Root;
@@ -94,6 +113,27 @@ describe("a change across several projects, in one place", () => {
     expect(useApp.getState().view).toEqual({ name: "run", runId: "r1", backTo: { name: "board", projectId: "p1" } });
   });
 
+  it("shows, for each point the parts agree on, what each part that keeps it found", async () => {
+    shown = { ...agreed, agreed: { ...agreed.agreed!, contract: [{ id: "K1", when: "valora posts /session with token", then: "app answers 201", projects: ["valora", "app"] }] }, contract };
+    await render();
+    const points = [...document.querySelectorAll("[data-contract]")].map((point) => point.textContent ?? "");
+    expect(points).toHaveLength(2);
+    expect(points[0]).toContain("K1");
+    expect(points[0]).toContain("valora posts /session with token → app answers 201");
+    expect(points[0]).toContain("Part 1, valora: Met");
+    expect(points[0]).toContain("Part 2, app: Not checked yet");
+    expect(points[1]).toContain("Part 2, app: Not met");
+    expect(page()).toContain("What the parts agree on exactly");
+    // Once is enough: not again in what was agreed.
+    expect(page().match(/app answers 201/g)).toHaveLength(1);
+  });
+
+  it("says nothing about it for an agreement without any", async () => {
+    await render();
+    expect(document.querySelector("[data-contract]")).toBeNull();
+    expect(page()).not.toContain("What the parts agree on exactly");
+  });
+
   it("before it's agreed, says where that happens and which projects it touches", async () => {
     shown = { ...agreed, agreedIn: card({ cardId: "plan", column: "inProgress", runId: "r0", runState: "running" }), agreed: null, parts: [], readOnly: [], checks: [] };
     await render();
@@ -104,10 +144,14 @@ describe("a change across several projects, in one place", () => {
 
   it("is all in Spanish too", async () => {
     await i18next.changeLanguage("es");
+    shown = { ...agreed, contract };
     await render();
     expect(page()).toContain("Cambio en varios proyectos");
     expect(page()).toContain("Parte 2 de 2");
     expect(page()).toContain("Para probar juntos");
+    expect(page()).toContain("Lo que las partes acuerdan entre sí");
+    expect(page()).toContain("Parte 1, valora: Se cumple");
+    expect(page()).toContain("Parte 2, app: Sin revisar aún");
     expect(button("No esperar")).toBeDefined();
   });
 });

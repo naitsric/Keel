@@ -315,6 +315,8 @@ export interface SpecOutput {
   parts?: { project: string; text: string }[];
   /** Only there too: what only works with every part in place, for a person to try. */
   together?: string[];
+  /** Only there too: what the parts agree on exactly. Keel numbers them K1, K2… and each part that a point names keeps it as one of its own. */
+  contract?: { id: string; when: string; then: string; projects: string[] }[];
 }
 
 /** One thing the specifier said has to be true, in its words, and what became of it. */
@@ -638,6 +640,23 @@ export interface JointChange {
   /** What it touches that no part changes. */
   readOnly: { id: string; name: string }[];
   checks: JointCheck[];
+  /** What the parts agree on exactly, point by point. Empty until it's agreed, and for an agreement without any. */
+  contract: ContractPoint[];
+}
+
+/** A point the parts agree on exactly, and what each part that keeps it found. */
+export interface ContractPoint {
+  id: string;
+  when: string;
+  then: string;
+  /** First to last. */
+  parts: {
+    cardId: string;
+    position: number;
+    project: string;
+    /** What its verifier said of it in its run's latest round. Null until it said something. */
+    result: CheckedCriterion["result"] | null;
+  }[];
 }
 
 /** What a run's page says about the change across projects it's in. */

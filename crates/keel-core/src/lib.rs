@@ -628,6 +628,20 @@ pub enum SpecProblem {
         count: usize,
         limit: usize,
     },
+    TooManyContract {
+        count: usize,
+        limit: usize,
+    },
+    /// A point of the contract between the parts names a project that isn't one of those the
+    /// change touches.
+    ContractUnknownProject {
+        id: String,
+        project: String,
+    },
+    /// A point of the contract that names no project with a part, so no part would check it.
+    ContractWithoutPart {
+        id: String,
+    },
 }
 
 impl Reason {

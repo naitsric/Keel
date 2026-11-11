@@ -417,6 +417,7 @@
     "specAnswered": "Lo que respondiste",
     "specParts": "Qué cambia en cada proyecto",
     "specTogether": "Para probar juntos",
+    "specContract": "Lo que las partes acuerdan entre sí",
     "verifyMet_one": "{{count}} de {{total}} se cumple",
     "verifyMet_other": "{{count}} de {{total}} se cumplen",
     "verifyUnmet_one": "{{count}} no se cumple",
@@ -1110,7 +1111,10 @@
     "tooManyParts": "cambia {{count}} proyectos, y el máximo es {{limit}}",
     "unknownProject": "nombra {{project}}, que no es ninguno de los proyectos que elegiste",
     "repeatedPart": "pone {{project}} dos veces",
-    "tooManyTogether": "pone {{count}} cosas para probar juntas, y el máximo es {{limit}}"
+    "tooManyTogether": "pone {{count}} cosas para probar juntas, y el máximo es {{limit}}",
+    "tooManyContract": "pone {{count}} puntos en los que las partes deben coincidir, y el máximo es {{limit}}",
+    "contractUnknownProject": "{{id}} nombra {{project}}, que no es ninguno de los proyectos que elegiste",
+    "contractWithoutPart": "{{id}} no nombra ningún proyecto que cambie"
   },
   "invalidAnswers": {
     "unknownQuestion": "Esa respuesta es para una pregunta que este paso no hizo.",
@@ -1202,6 +1206,10 @@
     "agreed": "Lo acordado",
     "together": "Para probar juntos",
     "togetherHint": "Ninguna parte lo prueba por sí sola. Pruébalo cuando todas las partes estén en su lugar, y marca lo que funciona.",
+    "contract": "Lo que las partes acuerdan entre sí",
+    "contractHint": "Cada parte comprueba los puntos que la nombran, como el resto de lo que tiene que cumplir.",
+    "contractPart": "Parte {{position}}, {{project}}",
+    "notChecked": "Sin revisar aún",
     "stopWaiting": "No esperar",
     "stopWaitingHint": "Deja que esta parte arranque sin el pull request de la anterior.",
     "openRun": "Abrir run",

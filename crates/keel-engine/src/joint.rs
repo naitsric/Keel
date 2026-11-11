@@ -15,8 +15,9 @@ use serde_json::{Value, json};
 
 use crate::deliver::repo_url;
 use crate::git::{BASE_REF, BRANCH_PREFIX, Git, RemoteAuth};
-use crate::specs::{GivenAnswer, Spec};
-use crate::{Error, Inner, Result, locked, new_id, prompts, specs, workflows};
+use crate::specs::{Criterion, GivenAnswer, Spec};
+use crate::verification::Outcome;
+use crate::{Error, Inner, Result, locked, new_id, prompts, specs, verification, workflows};
 
 /// The specifier's usual id, so that whatever reads a run's spec finds this one too.
 const AGREE_STEP: &str = "spec";
@@ -97,6 +98,30 @@ pub struct JointChangeView {
     pub read_only: Vec<Named>,
     /// What only works with every part in place, which only a person can try.
     pub checks: Vec<keel_store::JointCheck>,
+    /// What the parts agree on exactly, point by point, with what each part that keeps it verified.
+    /// Empty until it's agreed, and for an agreement without any.
+    pub contract: Vec<ContractView>,
+}
+
+/// A point of what the parts agree on exactly.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractView {
+    pub id: String,
+    pub when: String,
+    pub then: String,
+    /// The parts that keep it, first to last.
+    pub parts: Vec<ContractPart>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractPart {
+    pub card_id: String,
+    pub position: i64,
+    pub project: String,
+    /// What its verifier said of it in its run's latest round. None until it said something.
+    pub result: Option<Outcome>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,6 +259,17 @@ pub(crate) fn issue_ref(issue: &Value, repo: &str) -> Option<String> {
     })
 }
 
+/// What was agreed, as a spec. None until it was.
+fn agreed_spec(change: &JointChange) -> Option<Spec> {
+    serde_json::from_value(change.agreed.clone()?).ok()
+}
+
+/// The name a part's project goes by in what was agreed.
+fn part_name(spec: &Spec, position: i64) -> Option<&str> {
+    let index = usize::try_from(position - 1).ok()?;
+    spec.parts.get(index).map(|part| part.project.as_str())
+}
+
 /// How many parts were agreed.
 fn total(change: &JointChange) -> i64 {
     let agreed = change
@@ -277,6 +313,7 @@ impl crate::Engine {
             .filter(|project| !parts.iter().any(|part| part.project_id == project.id))
             .cloned()
             .collect();
+        let contract = inner.contract_view(&change, &parts)?;
         Ok(JointChangeView {
             id: change.id.clone(),
             agreed_in: agreeing
@@ -292,6 +329,7 @@ impl crate::Engine {
             agreed: change.agreed,
             parts,
             checks: change.checks,
+            contract,
         })
     }
 
@@ -411,6 +449,77 @@ impl Inner {
             .and_then(|agreed| agreed.get(ASKED))
             .and_then(Value::as_str)
             .map(str::to_owned))
+    }
+
+    /// The points of the contract a run's part has to keep, as criteria. Empty for any other run,
+    /// and for a part of an agreement without any.
+    pub(crate) fn contract_of(&self, run_id: &str) -> Result<Vec<Criterion>> {
+        let Some((card, change)) = self.joint_card(run_id)? else {
+            return Ok(Vec::new());
+        };
+        let (Some(here), Some(spec)) = (card.joint_position, agreed_spec(&change)) else {
+            return Ok(Vec::new());
+        };
+        Ok(part_name(&spec, here)
+            .map(|name| spec.contract_of(name))
+            .unwrap_or_default())
+    }
+
+    /// Each point of the contract, with what the verifier of each part that keeps it said of it in
+    /// that part's latest round, the same round its pull request reports.
+    fn contract_view(
+        &self,
+        change: &JointChange,
+        parts: &[JointCard],
+    ) -> Result<Vec<ContractView>> {
+        let Some(spec) = agreed_spec(change).filter(|spec| !spec.contract.is_empty()) else {
+            return Ok(Vec::new());
+        };
+        let mut verified = Vec::new();
+        for card in parts {
+            let latest = match &card.run_id {
+                Some(run_id) => {
+                    let run = self.store.run(run_id)?;
+                    let attempts = self.store.attempts_of_run(run_id)?;
+                    verification::in_round(&attempts, run.round).pop()
+                }
+                None => None,
+            };
+            verified.push(latest);
+        }
+        Ok(spec
+            .contract
+            .iter()
+            .map(|point| ContractView {
+                id: point.id.clone(),
+                when: point.when.clone(),
+                then: point.then.clone(),
+                parts: parts
+                    .iter()
+                    .zip(&verified)
+                    .filter_map(|(card, latest)| {
+                        let position = card.part.as_ref()?.position;
+                        let name = part_name(&spec, position)?;
+                        point
+                            .projects
+                            .iter()
+                            .any(|named| named == name)
+                            .then(|| ContractPart {
+                                card_id: card.card_id.clone(),
+                                position,
+                                project: card.project.clone(),
+                                result: latest.as_ref().and_then(|latest| {
+                                    latest
+                                        .criteria
+                                        .iter()
+                                        .find(|checked| checked.id == point.id)
+                                        .map(|checked| checked.result)
+                                }),
+                            })
+                    })
+                    .collect(),
+            })
+            .collect())
     }
 
     /// Whether a run does one part of a change across projects.
@@ -865,6 +974,14 @@ impl Inner {
                 text.push_str(&format!(
                     "\n## What the person answered\n\n{}\n",
                     specs::answer_lines(&answered)
+                ));
+            }
+            let contract = spec.contract_of(name);
+            if !contract.is_empty() {
+                let ids: Vec<&str> = contract.iter().map(|point| point.id.as_str()).collect();
+                text.push_str(&format!(
+                    "\nKeel adds the points of the contract that name {name} to this part's criteria, with their ids ({}), and they're verified like the rest. Don't write them again as criteria of your own.\n",
+                    ids.join(", ")
                 ));
             }
             if !spec.together.is_empty() {
