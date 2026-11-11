@@ -463,6 +463,16 @@ describe("the approval card", () => {
       expect(page()).not.toMatch(/criteria|acceptance/i);
     });
 
+    it("says when a test exists but didn't run here, apart from when there's none", async () => {
+      show([builder(["calc.py"]), check, verifier([met, { ...said("C2", "unverified", "tests/db.rs:12, needs Postgres"), why: "notRun" }, { ...said("C3", "unverified"), why: "noTest" }]), human], ["calc.py"]);
+      const list = proof()?.querySelector("ul")?.textContent ?? "";
+      expect(list).toContain("Its test exists, but didn't run here.tests/db.rs:12, needs Postgres");
+      expect(list).toContain("Not verifiedwhen c3 → then c3It found nothing that proves this.");
+      await i18next.changeLanguage("es");
+      show([builder(["calc.py"]), check, verifier([met, { ...said("C2", "unverified", "tests/db.rs:12"), why: "notRun" }]), human], ["calc.py"]);
+      expect(proof()?.querySelector("ul")?.textContent).toContain("Su prueba existe, pero no corrió aquí.");
+    });
+
     it("stands out when something isn't met", () => {
       show([builder(["calc.py"]), check, verifier([met, said("C2", "unmet", "calc.py:3")]), human], ["calc.py"]);
       const line = proof()?.querySelector("summary span");
@@ -574,6 +584,29 @@ describe("the approval card", () => {
     it("says one in the singular", () => {
       show([builder(["calc.py"]), check, verifier([met, said("C2", "unverified")]), human], ["calc.py"]);
       expect(lines("1 thing wasn't proven")).toHaveLength(1);
+    });
+
+    it("says why, counting each why apart, so a test that didn't run here doesn't read like no test", () => {
+      const notRun = (id: string) => ({ ...said(id, "unverified", `tests/db.rs:${id}`), why: "notRun" });
+      show([builder(["calc.py"]), check, verifier([met, notRun("C2"), notRun("C3"), notRun("C4"), { ...said("C5", "unverified"), why: "noTest" }, { ...said("C6", "unverified", "test_calc.py:9"), corrected: "noCheckPassed" }]), looked("ux", ["How the Save bar looks in dark mode"]), human], ["calc.py"]);
+      const found = lines("6 things weren't proven");
+      expect(found).toHaveLength(1);
+      const why = [...(found[0].parentElement?.querySelectorAll("li") ?? [])].map((li) => li.textContent);
+      expect(why).toEqual(["1: the reviews couldn't check it by reading the code", "3: their tests exist, but didn't run here", "1: no test proves it", "1: it was said to be met, but no check passed in this round"]);
+      // It stays outside the list, by the note.
+      expect(list().contains(found[0])).toBe(false);
+    });
+
+    it("says why in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      const notRun = (id: string) => ({ ...said(id, "unverified", `tests/db.rs:${id}`), why: "notRun" });
+      show([builder(["calc.py"]), check, verifier([notRun("C1"), notRun("C2"), notRun("C3"), notRun("C4"), notRun("C5")]), human], ["calc.py"]);
+      const found = lines("5 cosas quedaron sin probar");
+      expect(found).toHaveLength(1);
+      expect(found[0].parentElement?.querySelector("li")?.textContent).toBe("5: sus pruebas existen, pero no corrieron aquí");
+      show([builder(["calc.py"]), check, verifier([{ ...said("C1", "unverified", "tests/db.rs:1"), why: "notRun" }, said("C2", "unverified")]), human], ["calc.py"]);
+      const why = [...(lines("2 cosas quedaron sin probar")[0].parentElement?.querySelectorAll("li") ?? [])].map((li) => li.textContent);
+      expect(why).toEqual(["1: su prueba existe, pero no corrió aquí", "1: ninguna prueba la demuestra"]);
     });
 
     it("counts each one the verifier couldn't verify when it verified none", () => {

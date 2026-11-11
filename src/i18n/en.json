@@ -336,6 +336,22 @@
     "notProvenCount_other": "{{count}} things weren't proven",
     "notProvenSee_one": "See which",
     "notProvenSee_other": "See which",
+    "notProvenWhy": {
+      "byReviews_one": "{{count}}: the reviews couldn't check it by reading the code",
+      "byReviews_other": "{{count}}: the reviews couldn't check them by reading the code",
+      "notRun_one": "{{count}}: its test exists, but didn't run here",
+      "notRun_other": "{{count}}: their tests exist, but didn't run here",
+      "noTest_one": "{{count}}: no test proves it",
+      "noTest_other": "{{count}}: no test proves them",
+      "noCheckPassed_one": "{{count}}: it was said to be met, but no check passed in this round",
+      "noCheckPassed_other": "{{count}}: they were said to be met, but no check passed in this round",
+      "noEvidence_one": "{{count}}: it was said to be met, but not what proves it",
+      "noEvidence_other": "{{count}}: they were said to be met, but not what proves them",
+      "leftOut_one": "{{count}}: nothing was said about it",
+      "leftOut_other": "{{count}}: nothing was said about them",
+      "notSaid_one": "{{count}}: nobody said why",
+      "notSaid_other": "{{count}}: nobody said why"
+    },
     "approvalSkipped": "{{names}}: skipped, nothing they cover changed",
     "workflowWarning": "This change edits `.github/workflows`. Those files can run with the repo's secrets as soon as the branch is pushed. Read them first.",
     "secretWarning": "This change might hold a secret. Masking only hides it here: approving pushes it with the branch. Check the changes first.",
@@ -434,7 +450,8 @@
       "noEvidence": "It said this was met, but not what proves it.",
       "noCheckPassed": "It said this was met, but no check passed in this round.",
       "leftOut": "It said nothing about this.",
-      "noProof": "It found nothing that proves this."
+      "noTest": "It found nothing that proves this.",
+      "notRun": "Its test exists, but didn't run here."
     }
   },
   "tabs": {

@@ -13,7 +13,7 @@ use crate::specs::{Spec, one_line};
 const MAX_EVIDENCE: usize = 140;
 const MAX_SUMMARY: usize = 200;
 
-pub const VERIFY_SCHEMA: &str = r#"{"type":"object","properties":{"criteria":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"result":{"type":"string","enum":["met","unmet","unverified"]},"evidence":{"type":"string"}},"required":["id","result","evidence"],"additionalProperties":false}},"summary":{"type":"string"}},"required":["criteria","summary"],"additionalProperties":false}"#;
+pub const VERIFY_SCHEMA: &str = r#"{"type":"object","properties":{"criteria":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"result":{"type":"string","enum":["met","unmet","unverified"]},"evidence":{"type":"string"},"why":{"type":"string","enum":["","noTest","notRun"],"description":"Only for unverified: notRun if a test for it exists but didn't run here, because the command Keel ran doesn't run it or skipped it, and noTest if no test proves it. Empty for met and unmet."}},"required":["id","result","evidence","why"],"additionalProperties":false}},"summary":{"type":"string"}},"required":["criteria","summary"],"additionalProperties":false}"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -46,6 +46,31 @@ pub enum Correction {
     LeftOut,
 }
 
+/// Why nothing proves something, as the verifier says it. Only for what it left unverified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Unproven {
+    /// No test proves it.
+    NoTest,
+    /// A test for it exists, but didn't run here: the command Keel ran doesn't run it, or skipped it.
+    NotRun,
+}
+
+/// Why something wasn't proven, as a person reads it: what Keel corrected, or else what the
+/// verifier said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WhyNotProven {
+    NotRun,
+    NoTest,
+    NoCheckPassed,
+    NoEvidence,
+    LeftOut,
+    /// It pointed at something, but didn't say why that doesn't prove it. Only answers from before
+    /// it said why, or that left it empty.
+    NotSaid,
+}
+
 /// One thing that has to be true, in the spec's words, and what became of it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Checked {
@@ -56,6 +81,9 @@ pub struct Checked {
     pub evidence: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub corrected: Option<Correction>,
+    /// Why nothing proves it, if the verifier said so. Answers from before it did don't say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<Unproven>,
 }
 
 /// What a verifier's attempt holds once the engine has corrected it.
@@ -87,6 +115,16 @@ struct AnswerItem {
     result: Outcome,
     #[serde(default)]
     evidence: String,
+    #[serde(default, deserialize_with = "known_unproven")]
+    why: Option<Unproven>,
+}
+
+/// A why Keel knows. Anything else, such as an empty one, says nothing, and doesn't make the whole
+/// answer unreadable.
+fn known_unproven<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Unproven>, D::Error> {
+    Ok(serde_json::from_value(Value::deserialize(deserializer)?).ok())
 }
 
 /// What the engine did to an answer.
@@ -118,6 +156,7 @@ pub fn correct(output: &Value, spec: &Spec, check_passed: bool) -> Option<Correc
             id: one_line(&item.id),
             result: item.result,
             evidence: fit(&item.evidence, MAX_EVIDENCE),
+            why: item.why,
         })
         .collect();
     let criteria = spec
@@ -138,6 +177,10 @@ pub fn correct(output: &Value, spec: &Spec, check_passed: bool) -> Option<Correc
                 }
                 Some((result, _)) => (result, None),
             };
+            // Only for what it left unverified itself: where Keel didn't take its word, that's why.
+            let why = said
+                .filter(|item| item.result == Outcome::Unverified)
+                .and_then(|item| item.why);
             Checked {
                 id: criterion.id.clone(),
                 when: criterion.when.clone(),
@@ -145,6 +188,7 @@ pub fn correct(output: &Value, spec: &Spec, check_passed: bool) -> Option<Correc
                 result,
                 evidence: said.map(|item| item.evidence.clone()).unwrap_or_default(),
                 corrected,
+                why,
             }
         })
         .collect();
@@ -264,26 +308,47 @@ impl Verification {
 }
 
 impl Checked {
+    /// Why nothing proves it. `None` if it was met or found not met, which isn't unproven.
+    pub fn why_not_proven(&self) -> Option<WhyNotProven> {
+        if self.result != Outcome::Unverified {
+            return None;
+        }
+        Some(match (self.corrected, self.why) {
+            (Some(Correction::NoEvidence), _) => WhyNotProven::NoEvidence,
+            (Some(Correction::NoCheckPassed), _) => WhyNotProven::NoCheckPassed,
+            (Some(Correction::LeftOut), _) => WhyNotProven::LeftOut,
+            (None, Some(Unproven::NotRun)) => WhyNotProven::NotRun,
+            (None, Some(Unproven::NoTest)) => WhyNotProven::NoTest,
+            // Pointing at nothing, it found nothing that proves it.
+            (None, None) if self.evidence.is_empty() => WhyNotProven::NoTest,
+            (None, None) => WhyNotProven::NotSaid,
+        })
+    }
+
     /// What goes with its outcome: why the engine changed it, and what the verifier pointed at.
     fn note(&self, spanish: bool) -> String {
         let say = |en: &'static str, es: &'static str| if spanish { es } else { en };
-        let why = match self.corrected {
-            Some(Correction::NoEvidence) => Some(say(
+        let why = match self.why_not_proven() {
+            Some(WhyNotProven::NoEvidence) => Some(say(
                 "it said this was met, but not what proves it",
                 "dijo que se cumple, pero no qué lo demuestra",
             )),
-            Some(Correction::NoCheckPassed) => Some(say(
+            Some(WhyNotProven::NoCheckPassed) => Some(say(
                 "it said this was met, but no check passed in this round",
                 "dijo que se cumple, pero ninguna verificación pasó en esta ronda",
             )),
-            Some(Correction::LeftOut) => {
+            Some(WhyNotProven::LeftOut) => {
                 Some(say("it said nothing about this", "no dijo nada sobre esto"))
             }
-            None if self.result == Outcome::Unverified && self.evidence.is_empty() => Some(say(
+            Some(WhyNotProven::NotRun) => Some(say(
+                "its test exists, but didn't run here",
+                "su prueba existe, pero no corrió aquí",
+            )),
+            Some(WhyNotProven::NoTest) => Some(say(
                 "it found nothing that proves it",
                 "no encontró nada que lo demuestre",
             )),
-            None => None,
+            Some(WhyNotProven::NotSaid) | None => None,
         };
         match why {
             Some(why) if self.evidence.is_empty() => why.to_owned(),
@@ -619,6 +684,123 @@ mod tests {
     }
 
     #[test]
+    fn it_says_why_nothing_proves_something_and_only_for_what_it_left_unverified() {
+        let items = json!([
+            { "id": "C1", "result": "unverified", "evidence": "tests/db.rs:12, needs Postgres", "why": "notRun" },
+            { "id": "C2", "result": "unverified", "evidence": "", "why": "noTest" },
+            { "id": "C3", "result": "met", "evidence": "tests/calc.rs:1", "why": "notRun" },
+            { "id": "C4", "result": "unmet", "evidence": "src/a.rs:9", "why": "noTest" },
+            // Anything else says nothing: empty, unknown, or not even a word.
+            { "id": "C5", "result": "unverified", "evidence": "", "why": "" },
+            { "id": "C6", "result": "unverified", "evidence": "", "why": "itsComplicated" },
+            { "id": "C7", "result": "unverified", "evidence": "", "why": 3 },
+            { "id": "C8", "result": "unverified", "evidence": "", "why": null },
+        ]);
+        let ids = ["C1", "C2", "C3", "C4", "C5", "C6", "C7", "C8"];
+        let corrected = correct(&answer(items), &spec(&ids), true).unwrap();
+        let whys: Vec<Option<Unproven>> = corrected
+            .verification
+            .criteria
+            .iter()
+            .map(|checked| checked.why)
+            .collect();
+        assert_eq!(
+            whys,
+            [
+                Some(Unproven::NotRun),
+                Some(Unproven::NoTest),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            ]
+        );
+        assert_eq!(corrected.verification.criteria[0].result, Unverified);
+
+        // When Keel didn't take its word, what Keel corrected says why.
+        let items =
+            json!([{ "id": "C1", "result": "met", "evidence": "tests/a.rs:1", "why": "notRun" }]);
+        let corrected = correct(&answer(items), &spec(&["C1"]), false).unwrap();
+        let checked = &corrected.verification.criteria[0];
+        assert_eq!(checked.corrected, Some(Correction::NoCheckPassed));
+        assert_eq!(checked.why, None);
+    }
+
+    #[test]
+    fn an_answer_from_before_it_said_why_still_reads_and_keeps_its_shape() {
+        // A verifier from before answered without `why`, and Keel kept it without one.
+        let items = json!([{ "id": "C1", "result": "unverified", "evidence": "" }]);
+        let corrected = correct(&answer(items), &spec(&["C1"]), true).unwrap();
+        assert_eq!(corrected.verification.criteria[0].why, None);
+        let kept = json!(corrected.verification);
+        assert_eq!(kept["criteria"][0].get("why"), None, "{kept}");
+
+        let mut attempts = recorded(&[("verify", "agent", "readOnly", 0, Succeeded, "")]);
+        attempts[0].output = Some(json!({
+            "criteria": [{ "id": "C1", "when": "w", "then": "t", "result": "unverified", "evidence": "" }],
+            "summary": "From before",
+        }));
+        let read = of_attempt(&attempts[0]).unwrap();
+        assert_eq!(read.criteria[0].why, None);
+        assert_eq!(
+            read.criteria[0].why_not_proven(),
+            Some(WhyNotProven::NoTest)
+        );
+
+        // And one that said why reads back as it was kept.
+        attempts[0].output = Some(json!(verification_saying(&[(
+            Unverified,
+            "tests/db.rs:12",
+            None,
+            Some(Unproven::NotRun)
+        )])));
+        let read = of_attempt(&attempts[0]).unwrap();
+        assert_eq!(read.criteria[0].why, Some(Unproven::NotRun));
+    }
+
+    #[test]
+    fn why_something_was_not_proven_is_what_keel_corrected_or_else_what_the_verifier_said() {
+        let why = |result: Outcome,
+                   evidence: &str,
+                   corrected: Option<Correction>,
+                   said: Option<Unproven>| {
+            verification_saying(&[(result, evidence, corrected, said)]).criteria[0].why_not_proven()
+        };
+        use WhyNotProven as W;
+        assert_eq!(
+            why(Unverified, "tests/db.rs:12", None, Some(Unproven::NotRun)),
+            Some(W::NotRun)
+        );
+        assert_eq!(
+            why(Unverified, "", None, Some(Unproven::NoTest)),
+            Some(W::NoTest)
+        );
+        for (correction, expected) in [
+            (Correction::NoEvidence, W::NoEvidence),
+            (Correction::NoCheckPassed, W::NoCheckPassed),
+            (Correction::LeftOut, W::LeftOut),
+        ] {
+            assert_eq!(
+                why(Unverified, "a", Some(correction), Some(Unproven::NotRun)),
+                Some(expected)
+            );
+        }
+        // An answer that didn't say: nothing it pointed at means it found nothing that proves it.
+        assert_eq!(why(Unverified, "", None, None), Some(W::NoTest));
+        assert_eq!(
+            why(Unverified, "tests/a.rs:1", None, None),
+            Some(W::NotSaid)
+        );
+        // What was proven either way isn't unproven.
+        assert_eq!(why(Met, "a", None, None), None);
+        assert_eq!(why(Unmet, "b", None, Some(Unproven::NoTest)), None);
+        assert_eq!(json!(W::NotRun), json!("notRun"));
+        assert_eq!(json!(W::NotSaid), json!("notSaid"));
+    }
+
+    #[test]
     fn an_answer_about_nothing_leaves_everything_not_verified() {
         let corrected = correct(&answer(json!([])), &spec(&["C1", "C2"]), true).unwrap();
         assert_eq!(corrected.verification.counts().unverified, 2);
@@ -882,17 +1064,29 @@ mod tests {
     }
 
     fn verification(results: &[(Outcome, &str, Option<Correction>)]) -> Verification {
+        let said: Vec<_> = results
+            .iter()
+            .map(|(result, evidence, corrected)| (*result, *evidence, *corrected, None))
+            .collect();
+        verification_saying(&said)
+    }
+
+    /// As `verification`, with why the verifier said nothing proves each.
+    fn verification_saying(
+        results: &[(Outcome, &str, Option<Correction>, Option<Unproven>)],
+    ) -> Verification {
         Verification {
             criteria: results
                 .iter()
                 .enumerate()
-                .map(|(index, (result, evidence, corrected))| Checked {
+                .map(|(index, (result, evidence, corrected, why))| Checked {
                     id: format!("C{}", index + 1),
                     when: format!("when {}", index + 1),
                     then: format!("then {}", index + 1),
                     result: *result,
                     evidence: (*evidence).into(),
                     corrected: *corrected,
+                    why: *why,
                 })
                 .collect(),
             summary: "x".into(),
@@ -982,6 +1176,28 @@ mod tests {
     }
 
     #[test]
+    fn the_pull_request_section_says_when_a_test_exists_but_did_not_run_here() {
+        let saying = verification_saying(&[
+            (Unverified, "tests/db.rs:12", None, Some(Unproven::NotRun)),
+            (Unverified, "", None, Some(Unproven::NoTest)),
+        ]);
+        let section = saying.pr_section(false);
+        for line in [
+            "- Not verified: when 1 → then 1 (its test exists, but didn't run here: tests/db.rs:12)\n",
+            "- Not verified: when 2 → then 2 (it found nothing that proves it)\n",
+        ] {
+            assert!(section.contains(line), "{line}\n{section}");
+        }
+        let section = saying.pr_section(true);
+        assert!(
+            section.contains(
+                "- Sin verificar: when 1 → then 1 (su prueba existe, pero no corrió aquí: tests/db.rs:12)\n"
+            ),
+            "{section}"
+        );
+    }
+
+    #[test]
     fn the_pull_request_section_is_in_the_language_of_the_run() {
         let section = verification(&[(Met, "a", None), (Unverified, "", None)]).pr_section(true);
         assert!(section.contains("### Lo que tenía que cumplirse"));
@@ -1023,7 +1239,19 @@ mod tests {
         assert_eq!(schema["required"], json!(["criteria", "summary"]));
         assert_eq!(
             schema["properties"]["criteria"]["items"]["required"],
-            json!(["id", "result", "evidence"])
+            json!(["id", "result", "evidence", "why"])
         );
+        // Saved workflows keep an older copy of the prompt, so the schema says what `why` is.
+        let why = &schema["properties"]["criteria"]["items"]["properties"]["why"];
+        assert_eq!(why["enum"], json!(["", "noTest", "notRun"]));
+        let description = why["description"].as_str().unwrap();
+        for part in [
+            "unverified",
+            "didn't run here",
+            "skipped",
+            "Empty for met and unmet",
+        ] {
+            assert!(description.contains(part), "{part}: {description}");
+        }
     }
 }

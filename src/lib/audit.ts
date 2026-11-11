@@ -1,5 +1,5 @@
 import type { TFunction } from "i18next";
-import type { Attempt, AuditEvent, GivenAnswer, ShownState, SpecOutput, VerificationOutput } from "./api";
+import type { Attempt, AuditEvent, CheckedCriterion, GivenAnswer, ShownState, SpecOutput, VerificationOutput } from "./api";
 
 export interface CommandEnd {
   /** `unclear` is a command that finished with code 0, but where that 0 may hide a failure. */
@@ -173,6 +173,31 @@ export function verificationInRound(attempts: { round: number; role?: string; st
 export function verificationCounts(verification: VerificationOutput) {
   const count = (result: string) => verification.criteria.filter((c) => c.result === result).length;
   return { met: count("met"), unmet: count("unmet"), unverified: count("unverified"), total: verification.criteria.length };
+}
+
+/** Why nothing proves one thing that had to be true, in the engine's words: the MCP's `why`. */
+export type WhyNotProven = "notRun" | "noTest" | "noCheckPassed" | "noEvidence" | "leftOut" | "notSaid";
+
+/**
+ * Why nothing proves it: what Keel corrected, or else what the verifier said. Null when it was met or
+ * found not met, which isn't unproven.
+ */
+export function whyNotProven(item: CheckedCriterion): WhyNotProven | null {
+  if (item.result !== "unverified") return null;
+  if (item.corrected) return item.corrected;
+  if (item.why === "notRun" || item.why === "noTest") return item.why;
+  // From before the verifier said why: pointing at nothing, it found nothing that proves it.
+  return item.evidence ? "notSaid" : "noTest";
+}
+
+/** What the reviews couldn't check by reading the code comes first, as in what proves it. */
+const NOT_PROVEN_ORDER = ["byReviews", "notRun", "noTest", "noCheckPassed", "noEvidence", "leftOut", "notSaid"] as const;
+export type NotProvenGroup = { why: (typeof NOT_PROVEN_ORDER)[number]; count: number };
+
+/** How many things weren't proven in a round, by why. Nothing when everything was. */
+export function notProvenInRound(attempts: { stepId: string; role: string; state?: string; round: number; output: unknown }[], round: number): NotProvenGroup[] {
+  const whys: NotProvenGroup["why"][] = [...uncheckedInRound(attempts, round).map(() => "byReviews" as const), ...(verificationInRound(attempts, round)?.criteria.map(whyNotProven) ?? []).filter((why) => why !== null)];
+  return NOT_PROVEN_ORDER.map((why) => ({ why, count: whys.filter((each) => each === why).length })).filter((group) => group.count > 0);
 }
 
 /** "3 of 4 met, 1 not verified", or that none of them could be, which is a normal thing to find. */

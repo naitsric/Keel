@@ -50,7 +50,7 @@ pub use sizing::skipped_steps;
 pub use specs::of_attempt as spec_of_attempt;
 pub use specs::{Answer, AnswerChoice, Spec};
 pub use verification::of_attempt as verification_of_attempt;
-pub use verification::{Outcome, Verification};
+pub use verification::{Outcome, Verification, WhyNotProven};
 pub use workflows::{Workflow, WorkflowDraft, can_send_back, files_changed};
 
 const RESUME_PROMPT: &str = "Continue where you left off.";

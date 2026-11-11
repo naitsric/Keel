@@ -588,8 +588,8 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
     let approver_prompt = format!(
         "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{VERIFY_STEP}: {{{{steps.{VERIFY_STEP}.output}}}}\n{security}: {{{{steps.{security}.output}}}}\nux: {{{{steps.ux.output}}}}\nui: {{{{steps.ui.output}}}}\n{code}: {{{{steps.{code}.output}}}}\n\n{}\n\n{{{{rework}}}}",
         text(
-            "You decide whether this change is ready for a person to review, using the reviews below and what `verify` found, and you edit nothing. Check each finding in the code before believing it, and discard false ones. A review with files in `unread` didn't check them: check them yourself before you approve. Anything `unmet` in `verify` is a finding, unless what was sent back below changed it. `unverified` only means no test proves it, and isn't a finding by itself. What a review put in `unchecked` is what reading the code can't prove, such as how it looks on screen: Keel shows it to the person to check, so it isn't a finding and no reason to send the work back. decision = rework if a real finding remains, approve if not. risk = high if it touches authorization, personal data, money, contractual deadlines or the database schema; low if it's contained and easy to revert; medium otherwise. In instructions, say exactly what to fix.",
-            "Decides si este cambio está listo para que lo revise una persona, usando las revisiones de abajo y lo que encontró `verify`, y no editas nada. Comprueba cada hallazgo en el código antes de creerle y descarta los falsos. Una revisión con archivos en `unread` no los revisó: revísalos tú antes de aprobar. Todo lo que esté `unmet` en `verify` es un hallazgo, salvo que lo devuelto abajo lo haya cambiado. `unverified` solo significa que ninguna prueba lo demuestra, y por sí solo no es un hallazgo. Lo que una revisión puso en `unchecked` es lo que leer el código no puede comprobar, como cómo se ve en pantalla: Keel se lo muestra a la persona para que lo compruebe, así que no es un hallazgo ni motivo para devolver el trabajo. decision = rework si queda un hallazgo real, approve si no. risk = high si toca autorización, datos personales, dinero, plazos contractuales o el esquema de base; low si es acotado y fácil de revertir; medium en otro caso. En instructions, di exactamente qué corregir. Responde en español.",
+            "You decide whether this change is ready for a person to review, using the reviews below and what `verify` found, and you edit nothing. Check each finding in the code before believing it, and discard false ones. A review with files in `unread` didn't check them: check them yourself before you approve. Anything `unmet` in `verify` is a finding, unless what was sent back below changed it. `unverified` only means no test proves it, and isn't a finding by itself. If the risk you'll set is medium or high, read the code of each `unverified` item yourself, and say in reasons, item by item, whether the code backs it up: one it doesn't back up is a finding. What a review put in `unchecked` is what reading the code can't prove, such as how it looks on screen: Keel shows it to the person to check, so it isn't a finding and no reason to send the work back. decision = rework if a real finding remains, approve if not. risk = high if it touches authorization, personal data, money, contractual deadlines or the database schema; low if it's contained and easy to revert; medium otherwise. In instructions, say exactly what to fix.",
+            "Decides si este cambio está listo para que lo revise una persona, usando las revisiones de abajo y lo que encontró `verify`, y no editas nada. Comprueba cada hallazgo en el código antes de creerle y descarta los falsos. Una revisión con archivos en `unread` no los revisó: revísalos tú antes de aprobar. Todo lo que esté `unmet` en `verify` es un hallazgo, salvo que lo devuelto abajo lo haya cambiado. `unverified` solo significa que ninguna prueba lo demuestra, y por sí solo no es un hallazgo. Si el riesgo que vas a poner es medium o high, lee tú el código de cada elemento `unverified` y di en reasons, uno por uno, si el código lo sostiene: uno que el código no sostiene es un hallazgo. Lo que una revisión puso en `unchecked` es lo que leer el código no puede comprobar, como cómo se ve en pantalla: Keel se lo muestra a la persona para que lo compruebe, así que no es un hallazgo ni motivo para devolver el trabajo. decision = rework si queda un hallazgo real, approve si no. risk = high si toca autorización, datos personales, dinero, plazos contractuales o el esquema de base; low si es acotado y fácil de revertir; medium en otro caso. En instructions, di exactamente qué corregir. Responde en español.",
         ),
         text("Specification:", "Especificación:"),
         // What the specification decided on its own is the person's to settle, not the builder's.
@@ -2174,6 +2174,34 @@ mod tests {
                 })
                 .unwrap();
             assert!(approver.prompt.contains("`unchecked`"), "{language}");
+            assert!(approver.prompt.contains(told), "{language}");
+        }
+    }
+
+    /// No test proves it isn't a finding, but where the risk isn't low somebody has to read the code.
+    #[test]
+    fn the_approver_reads_the_code_of_what_no_test_proves_unless_the_risk_is_low() {
+        for (language, told) in [
+            (
+                "en",
+                "If the risk you'll set is medium or high, read the code of each `unverified` item yourself, and say in reasons, item by item, whether the code backs it up: one it doesn't back up is a finding.",
+            ),
+            (
+                "es",
+                "Si el riesgo que vas a poner es medium o high, lee tú el código de cada elemento `unverified` y di en reasons, uno por uno, si el código lo sostiene: uno que el código no sostiene es un hallazgo.",
+            ),
+        ] {
+            let full = builtin(language, None).remove(0);
+            let approver = full
+                .steps
+                .iter()
+                .find_map(|step| match step {
+                    WorkflowStep::Agent(spec) if matches!(spec.role, StepRole::Approver { .. }) => {
+                        Some(spec)
+                    }
+                    _ => None,
+                })
+                .unwrap();
             assert!(approver.prompt.contains(told), "{language}");
         }
     }

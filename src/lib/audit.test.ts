@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { Attempt, AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, notProvenInRound, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows, whyNotProven } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -73,6 +73,45 @@ describe("what a verifier found", () => {
     expect(line("es", item("unverified"), item("unverified"))).toBe("No se pudo verificar ninguno de los 2");
     expect(line("en", item("unverified"))).toBe("It couldn't be verified");
     expect(line("es", item("unverified"))).toBe("No se pudo verificar");
+  });
+
+  it("says why nothing proves something: what Keel corrected, or else what the verifier said", () => {
+    expect(whyNotProven(item("unverified", { evidence: "tests/db.rs:12", why: "notRun" }))).toBe("notRun");
+    expect(whyNotProven(item("unverified", { why: "noTest" }))).toBe("noTest");
+    for (const corrected of ["noEvidence", "noCheckPassed", "leftOut"] as const) {
+      expect(whyNotProven(item("unverified", { evidence: "a", corrected, why: "notRun" }))).toBe(corrected);
+    }
+    // From before the verifier said why: pointing at nothing, it found nothing that proves it.
+    expect(whyNotProven(item("unverified"))).toBe("noTest");
+    expect(whyNotProven(item("unverified", { evidence: "tests/a.rs:1" }))).toBe("notSaid");
+    // What was proven either way isn't unproven.
+    expect(whyNotProven(item("met"))).toBeNull();
+    expect(whyNotProven(item("unmet", { evidence: "calc.py:3" }))).toBeNull();
+  });
+});
+
+describe("how much wasn't proven in a round, and why", () => {
+  const item = (result: CheckedCriterion["result"], fields: Partial<CheckedCriterion> = {}): CheckedCriterion => ({ id: "C1", when: "w", then: "t", result, evidence: "", ...fields });
+  const verifier = (criteria: CheckedCriterion[], round = 0) => ({ stepId: "verify", role: "verifier", state: "succeeded", round, output: { criteria, summary: "" } });
+  const review = (unchecked: string[]) => ({ stepId: "ux", role: "reviewer", state: "succeeded", round: 0, output: { verdict: "approved", findings: [], summary: "", unread: [], unchecked } });
+
+  it("groups by why, what the reviews couldn't check first, and leaves out what was proven either way", () => {
+    const attempts = [
+      verifier([item("met", { evidence: "a" }), item("unverified", { why: "noTest" }), item("unverified", { evidence: "tests/db.rs:12", why: "notRun" }), item("unverified", { evidence: "tests/db.rs:30", why: "notRun" }), item("unverified", { corrected: "noCheckPassed" }), item("unmet", { evidence: "calc.py:3" })]),
+      review(["How it looks in dark mode"]),
+    ];
+    expect(notProvenInRound(attempts, 0)).toEqual([
+      { why: "byReviews", count: 1 },
+      { why: "notRun", count: 2 },
+      { why: "noTest", count: 1 },
+      { why: "noCheckPassed", count: 1 },
+    ]);
+  });
+
+  it("is nothing when everything was proven, and only counts the round it's asked about", () => {
+    expect(notProvenInRound([verifier([item("met", { evidence: "a" })])], 0)).toEqual([]);
+    expect(notProvenInRound([verifier([item("unverified")], 0), verifier([item("met", { evidence: "a" })], 1)], 1)).toEqual([]);
+    expect(notProvenInRound([review(["The page in a wide window", "Its colours"])], 0)).toEqual([{ why: "byReviews", count: 2 }]);
   });
 });
 

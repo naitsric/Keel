@@ -255,7 +255,7 @@ const VERIFY_PROMPT_EN: &str = r#"You check whether a change really does what wa
 For each item in `criteria` below, find the test that really proves it, and read that test to be sure.
 - met: a test proves it, and it's a test that the command Keel ran this round executed (see below). `evidence` is that test's name, or its file and line.
 - unmet: the code shows it isn't so. `evidence` is the file and line that shows it.
-- unverified: no test proves it, or you can't tell. That's a normal answer, so give it rather than stretch a test that's only related. If the test exists but that command doesn't run it (another language, runner or package), it's unverified too: put that test in `evidence` and say in `evidence` that it didn't run. How something looks on screen is unverified too, unless a test that command ran looks at the screen, such as one that takes a screenshot.
+- unverified: no test proves it, or you can't tell. That's a normal answer, so give it rather than stretch a test that's only related. If the test exists but that command doesn't run it (another language, runner or package), it's unverified too: put that test in `evidence` and say in `evidence` that it didn't run. How something looks on screen is unverified too, unless a test that command ran looks at the screen, such as one that takes a screenshot. In `why`, say `notRun` if a test for it exists but didn't run here, and `noTest` if not.
 
 Each `evidence` is one line of up to 140 characters. `summary` is one sentence for the person who asked for the change. Answer for every item, using its `id`, and don't add any. If work was sent back below and that changes what an item asks for, what was sent back wins, so don't call the item `unmet` for following it.
 
@@ -275,7 +275,7 @@ const VERIFY_PROMPT_ES: &str = r#"Compruebas si un cambio de verdad hace lo que 
 Para cada elemento de `criteria` de abajo, busca la prueba que de verdad lo demuestra, y léela para estar seguro.
 - met: lo demuestra una prueba que el comando que Keel corrió en esta ronda ejecutó (ver abajo). `evidence` es el nombre de esa prueba, o su archivo y línea.
 - unmet: el código muestra que no es así. `evidence` es el archivo y la línea que lo muestran.
-- unverified: ninguna prueba lo demuestra, o no puedes saberlo. Es una respuesta normal, así que dala en vez de estirar una prueba que solo se relaciona. Si la prueba existe pero ese comando no la ejecuta (otro lenguaje, runner o paquete), también es unverified: pon esa prueba en `evidence` y di en `evidence` que no corrió. Cómo se ve algo en pantalla también es unverified, salvo que lo mire una prueba que ese comando ejecutó, como una que toma una captura.
+- unverified: ninguna prueba lo demuestra, o no puedes saberlo. Es una respuesta normal, así que dala en vez de estirar una prueba que solo se relaciona. Si la prueba existe pero ese comando no la ejecuta (otro lenguaje, runner o paquete), también es unverified: pon esa prueba en `evidence` y di en `evidence` que no corrió. Cómo se ve algo en pantalla también es unverified, salvo que lo mire una prueba que ese comando ejecutó, como una que toma una captura. En `why`, pon `notRun` si existe una prueba para eso pero no corrió aquí, y `noTest` si no.
 
 Cada `evidence` es una línea de hasta 140 caracteres. `summary` es una frase para la persona que pidió el cambio. Responde por cada elemento, usando su `id`, y no agregues ninguno. Si abajo se devolvió trabajo y eso cambia lo que pide un elemento, manda lo que se devolvió, así que no lo marques `unmet` por seguirlo.
 
@@ -705,6 +705,24 @@ mod tests {
             }
             // The rule sits before the fact it refers to.
             assert!(prompt.find(ran) < prompt.find("{{check}}"), "{language}");
+        }
+    }
+
+    #[test]
+    fn the_verifier_says_why_nothing_proves_what_it_left_unverified() {
+        for (language, why) in [
+            (
+                "en",
+                "In `why`, say `notRun` if a test for it exists but didn't run here, and `noTest` if not.",
+            ),
+            (
+                "es",
+                "En `why`, pon `notRun` si existe una prueba para eso pero no corrió aquí, y `noTest` si no.",
+            ),
+        ] {
+            let prompt = verify_prompt(language);
+            assert!(prompt.contains(why), "{language}");
+            assert!(prompt.find(why) < prompt.find("{{check}}"), "{language}");
         }
     }
 

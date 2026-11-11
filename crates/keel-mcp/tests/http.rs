@@ -1500,7 +1500,9 @@ async fn a_run_reports_what_it_did_and_brings_what_the_person_has_to_decide() {
             "notProven": [{
                 "id": "C1", "when": "it runs", "then": "it works",
                 "result": "unverified", "evidence": "", "corrected": "noEvidence",
+                "why": "noEvidence",
             }],
+            "notProvenWhy": { "noEvidence": 1 },
             "reviews": [
                 { "step": "security", "verdict": "changes", "findings": ["Line 3 divides by zero"] },
                 // What an approver that approved only noted isn't something to do.

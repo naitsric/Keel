@@ -1,7 +1,7 @@
 //! What each tool does: plain methods of [`McpServer`], each leaving a row in the audit log. The
 //! engine blocks, so they run on tokio's blocking threads.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -12,8 +12,8 @@ use keel_core::{
 };
 use keel_engine::{
     Error, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
-    can_send_back, files_changed, request_from_issue, skipped_steps, spec_of_attempt,
-    verification_of_attempt,
+    Verification, WhyNotProven, can_send_back, files_changed, request_from_issue, skipped_steps,
+    spec_of_attempt, verification_of_attempt,
 };
 use keel_store::{Attempt, MAX_OPEN_RUNS_CEILING, McpClient, NewMcpCall, Project, Run};
 use schemars::JsonSchema;
@@ -1526,6 +1526,7 @@ impl McpServer {
             "filesChanged": files,
             "check": self.check_report(run, attempts)?,
             "notProven": not_proven(attempts),
+            "notProvenWhy": not_proven_why(attempts),
             "reviews": reviews(attempts),
             "skipped": skipped_steps(attempts),
             "prUrl": run.pr_url,
@@ -1725,24 +1726,52 @@ fn answer(attempts: &[Attempt]) -> Option<String> {
         .map(|text| capped(text, MAX_TEXT))
 }
 
-/// What the verifier says no test proves, after Keel corrected what it said. Null when no verifier
-/// has answered, which isn't the same as everything being proven.
-fn not_proven(attempts: &[Attempt]) -> Json {
-    let verification = attempts
+/// What the latest verifier said, after Keel corrected it.
+fn latest_verification(attempts: &[Attempt]) -> Option<Verification> {
+    attempts
         .iter()
         .rev()
         .find(|a| a.role == "verifier")
-        .and_then(verification_of_attempt);
-    match verification {
+        .and_then(verification_of_attempt)
+}
+
+/// What the verifier says no test proves, after Keel corrected what it said, each unproven one with
+/// `why`. Null when no verifier has answered, which isn't the same as everything being proven.
+fn not_proven(attempts: &[Attempt]) -> Json {
+    match latest_verification(attempts) {
         Some(verification) => json!(
             verification
                 .criteria
                 .into_iter()
                 .filter(|checked| checked.result != Outcome::Met)
+                .map(|checked| {
+                    let why = checked.why_not_proven();
+                    let mut item = json!(checked);
+                    if let Some(why) = why {
+                        item["why"] = json!(why);
+                    }
+                    item
+                })
                 .collect::<Vec<_>>()
         ),
         None => Json::Null,
     }
+}
+
+/// How many of those no test proves, by why. Null when no verifier has answered.
+fn not_proven_why(attempts: &[Attempt]) -> Json {
+    let Some(verification) = latest_verification(attempts) else {
+        return Json::Null;
+    };
+    let mut counts: BTreeMap<WhyNotProven, usize> = BTreeMap::new();
+    for why in verification
+        .criteria
+        .iter()
+        .filter_map(|checked| checked.why_not_proven())
+    {
+        *counts.entry(why).or_default() += 1;
+    }
+    json!(counts)
 }
 
 /// Each reviewer's verdict and each approver's decision, from the latest of each. As in the
@@ -2872,5 +2901,90 @@ mod tests {
         let output = &view["commandOutput"];
         assert!(output["stdout"].as_str().unwrap().ends_with("o\no\n"));
         assert!(output["stderr"].as_str().unwrap().ends_with('\u{1}'));
+    }
+
+    /// A verifier's attempt that answered this, as Keel kept it.
+    fn verifier(criteria: Json) -> Attempt {
+        let mut verifier = attempt("verify", 1);
+        verifier.role = "verifier".into();
+        verifier.output = Some(json!({ "criteria": criteria, "summary": "Looked" }));
+        verifier
+    }
+
+    fn item(id: &str, result: &str, evidence: &str, more: Json) -> Json {
+        let mut item =
+            json!({ "id": id, "when": "w", "then": "t", "result": result, "evidence": evidence });
+        if let (Some(item), Some(more)) = (item.as_object_mut(), more.as_object()) {
+            item.extend(more.clone());
+        }
+        item
+    }
+
+    #[test]
+    fn what_no_test_proves_says_why_each_and_counts_them_by_why() {
+        let attempts = [verifier(json!([
+            item("C1", "met", "tests/a.rs:1", json!({})),
+            item(
+                "C2",
+                "unverified",
+                "tests/db.rs:12",
+                json!({ "why": "notRun" })
+            ),
+            item(
+                "C3",
+                "unverified",
+                "tests/db.rs:30",
+                json!({ "why": "notRun" })
+            ),
+            item("C4", "unverified", "", json!({ "why": "noTest" })),
+            item(
+                "C5",
+                "unverified",
+                "",
+                json!({ "corrected": "noCheckPassed" })
+            ),
+            item("C6", "unmet", "src/a.rs:9", json!({})),
+            // From before the verifier said why.
+            item("C7", "unverified", "", json!({})),
+            item("C8", "unverified", "tests/b.rs:2", json!({})),
+        ]))];
+        let listed = not_proven(&attempts);
+        let whys: Vec<&Json> = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| &item["why"])
+            .collect();
+        assert_eq!(
+            whys,
+            [
+                &json!("notRun"),
+                &json!("notRun"),
+                &json!("noTest"),
+                &json!("noCheckPassed"),
+                // Found not met, which isn't unproven.
+                &Json::Null,
+                &json!("noTest"),
+                &json!("notSaid"),
+            ]
+        );
+        assert_eq!(listed[3]["corrected"], "noCheckPassed");
+        assert_eq!(
+            not_proven_why(&attempts),
+            json!({ "notRun": 2, "noTest": 2, "noCheckPassed": 1, "notSaid": 1 })
+        );
+
+        // With no verifier, nothing says what was proven.
+        let none = [attempt("review", 1)];
+        assert_eq!(not_proven(&none), Json::Null);
+        assert_eq!(not_proven_why(&none), Json::Null);
+        // With everything proven, there's nothing to count.
+        let all = [verifier(json!([item(
+            "C1",
+            "met",
+            "tests/a.rs:1",
+            json!({})
+        )]))];
+        assert_eq!(not_proven_why(&all), json!({}));
     }
 }
