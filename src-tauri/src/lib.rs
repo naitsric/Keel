@@ -25,6 +25,10 @@ use keel_store::{
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, RunEvent, State, WindowEvent};
 
+/// The program Claude Code runs around a builder's Bash commands, built by `build.rs` from
+/// `crates/keel-hook`.
+const BASH_HOOK: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/keel-hook"));
+
 const LANGUAGE_KEY: &str = "language";
 const CHANGED_EVENT: &str = "keel://changed";
 const QUIT_EVENT: &str = "keel://quit-requested";
@@ -923,10 +927,14 @@ pub fn run() {
             let mut config = Config::new(data_dir.clone());
             // No spaces, and macOS doesn't clear it on its own.
             if let Some(home) = std::env::var_os("HOME") {
-                config.runs_dir = std::path::PathBuf::from(home).join(".keel").join("runs");
+                let keel = std::path::PathBuf::from(home).join(".keel");
+                config.runs_dir = keel.join("runs");
+                // Without it, builders just get no note.
+                config.bash_hook = keel_harness::hook::install(&keel.join("bin"), BASH_HOOK).ok();
+                if let Some(hook) = config.bash_hook.clone() {
+                    std::thread::spawn(move || keel_harness::hook::warm_up(&hook));
+                }
             }
-            // This same program answers Claude Code's hook, see `main.rs`.
-            config.bash_hook = std::env::current_exe().ok();
             let engine = Engine::new(store.clone(), config, Tools::default(), move |run_id| {
                 let _ = handle.emit(CHANGED_EVENT, run_id);
             });

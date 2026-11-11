@@ -248,14 +248,23 @@ echo changed > fixed.txt
 }
 
 #[test]
-fn only_a_step_that_can_edit_has_its_bash_commands_checked() {
+fn only_a_step_that_can_edit_has_its_bash_commands_watched() {
+    keel_harness::needs!(sandbox);
     let body = format!(
         "cat > /dev/null\n{}\n{OK_RESULT}",
         init(BUILD_TOOLS, "none")
     );
-    let keel = "/Applications/Keel.app/Contents/MacOS/keel";
+    let bin = tempfile::tempdir().unwrap();
+    let hook_path = bin.path().join("keel-hook-0123456789abcdef");
+    std::fs::write(&hook_path, "").unwrap();
+    let month_ago = std::time::SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60);
+    std::fs::File::open(&hook_path)
+        .unwrap()
+        .set_modified(month_ago)
+        .unwrap();
+    let hook = hook_path.to_str().unwrap();
     let h = harness_with(&body, LOGGED_IN, "2.1.318", |c| {
-        c.bash_hook = Some(PathBuf::from(keel));
+        c.bash_hook = Some(hook_path.clone());
     });
     let done = [
         AttemptState::Succeeded,
@@ -263,19 +272,48 @@ fn only_a_step_that_can_edit_has_its_bash_commands_checked() {
         AttemptState::Blocked,
     ];
     let build = h.wait_for(&h.start(ToolProfile::Build), &done);
-    let group = &build.settings["hooks"]["PreToolUse"][0];
-    assert_eq!(group["matcher"], "Bash");
-    assert_eq!(group["hooks"][0]["command"], keel);
-    assert_eq!(group["hooks"][0]["args"][1], build.workspace.as_str());
+    let hooks = &build.settings["hooks"];
+    let workspace = Path::new(&build.workspace);
+    for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure"] {
+        let group = &hooks[event][0];
+        assert_eq!(group["matcher"], "Bash", "{event}");
+        assert_eq!(group["hooks"][0]["command"], hook);
+        let args = group["hooks"][0]["args"].as_array().unwrap();
+        // The git Keel found, the project, a folder beside it the sandbox can't write to, and
+        // the sandbox the hook's git runs in: a `check` step's.
+        assert!(
+            Path::new(args[0].as_str().unwrap()).ends_with("git"),
+            "{args:?}"
+        );
+        assert_eq!(args[1], build.workspace.as_str());
+        let state = Path::new(args[2].as_str().unwrap());
+        assert_eq!(state, workspace.with_file_name("hook"));
+        assert!(!state.starts_with(workspace));
+        let profile = std::fs::read_to_string(args[3].as_str().unwrap()).unwrap();
+        assert!(profile.contains("(deny network*)"), "{profile}");
+        assert!(profile.contains("(deny file-read* (subpath"), "{profile}");
+    }
     // What the step was launched with, not only what was recorded.
     let log = h.store.events(&build.id, 0).unwrap();
     let args = log[0].data["args"].as_array().unwrap();
     let at = args.iter().position(|a| a == "--settings").unwrap();
     let file = std::fs::read_to_string(args[at + 1].as_str().unwrap()).unwrap();
-    assert!(file.contains("\"PreToolUse\""), "{file}");
+    assert!(file.contains("\"PostToolUse\""), "{file}");
+    // Naming the build marks it as used, so another Keel's install leaves it alone.
+    let modified = std::fs::metadata(&hook_path).unwrap().modified().unwrap();
+    assert!(modified > month_ago + Duration::from_secs(24 * 60 * 60));
 
     let read = h.wait_for(&h.start(ToolProfile::ReadOnly), &done);
     assert!(read.settings.get("hooks").is_none(), "{}", read.settings);
+
+    // A build that's gone isn't named.
+    std::fs::remove_file(&hook_path).unwrap();
+    let without = h.wait_for(&h.start(ToolProfile::Build), &done);
+    assert!(
+        without.settings.get("hooks").is_none(),
+        "{}",
+        without.settings
+    );
 }
 
 #[test]

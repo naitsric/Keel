@@ -112,8 +112,9 @@ pub struct Config {
     pub github_git_base: String,
     /// How long what Keel knows about a pull request is good for, in the background.
     pub pr_look_again: Duration,
-    /// What Claude Code runs before each Bash command of a step that can edit, to turn back the
-    /// ones that change project files. The app points it at itself. Without it, no hook.
+    /// What Claude Code runs around each Bash command of a step that can edit, to tell the agent
+    /// which project files changed (see `keel_harness::hook`). The app installs it. Without it, or
+    /// without git, no hook.
     pub bash_hook: Option<PathBuf>,
 }
 
@@ -1914,10 +1915,37 @@ impl Inner {
                     ),
                     &self.read_only_dirs(run_id, &spec.role)?,
                 );
-                // Builders changed files from Bash even when told to use Edit and Write. Only a
-                // step that can edit has Bash.
-                if can_edit && let Some(program) = &self.config.bash_hook {
-                    agent_settings = settings::with_bash_hook(agent_settings, program, &workspace);
+                // Builders changed files from Bash even when told to use Edit and Write, and an
+                // edit there that matches nothing says nothing. Only a step that can edit has Bash.
+                let git = locked(&self.tools).git.clone();
+                if can_edit
+                    && let (Some(program), Some(git)) = (&self.config.bash_hook, git)
+                {
+                    // Beside the workspace, where the sandbox can't write. The hook's git runs in
+                    // the sandbox Keel's own git gets on a workspace, and without it, no hook.
+                    let state = dir.join("hook");
+                    let profile = state.join("git.sb");
+                    let written = Git::new(git.clone())
+                        .workspace_profile(&workspace)
+                        .ok()
+                        .and_then(|text| {
+                            std::fs::create_dir_all(&state).ok()?;
+                            std::fs::write(&profile, text).ok()
+                        });
+                    // Marked as used, so another Keel doesn't clear it away as an old build; and if
+                    // one already did, the step goes without.
+                    if written.is_some() && keel_harness::hook::touch(program) {
+                        agent_settings = settings::with_bash_hook(
+                            agent_settings,
+                            &settings::BashHook {
+                                program,
+                                git: &git,
+                                workspace: &workspace,
+                                state: &state,
+                                profile: &profile,
+                            },
+                        );
+                    }
                 }
                 (
                     spec.model.clone(),

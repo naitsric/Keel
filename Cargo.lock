@@ -2065,10 +2065,17 @@ version = "0.2.1"
 dependencies = [
  "keel-core",
  "libc",
- "regex",
  "serde",
  "serde_json",
  "sha2",
+ "tempfile",
+]
+
+[[package]]
+name = "keel-hook"
+version = "0.2.1"
+dependencies = [
+ "keel-harness",
  "tempfile",
 ]
 
