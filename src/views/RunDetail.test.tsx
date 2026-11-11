@@ -712,6 +712,28 @@ describe("the approval card", () => {
         expect(page()).toContain("The rounds of questions ran out, so Keel stopped asking and took the recommended option.");
       });
 
+      it("says on its line what a review questions, for the person to decide, and quotes one that matches no line", () => {
+        const questioned = [
+          { decided: "“keeps the rounding  as it is.”", why: "Totals now drift by a cent." },
+          { decided: "Sorts by name", why: "The list was by date." },
+        ];
+        const approver = attempt({ id: "approver", stepId: "approver", role: "approver", output: { decision: "approve", risk: "low", reasons: "The code review questions the rounding, which is the person's to decide.", instructions: "", questioned } as unknown as Attempt["output"] });
+        show([specifier({ decided }), builder(["calc.py"]), approver, human], ["calc.py"], building);
+        const line = (text: string) => [...document.querySelectorAll("li")].find((li) => li.textContent?.startsWith(text))?.textContent ?? "";
+        expect(line("Keeps the rounding as it is")).toContain("A review questions this, and it's yours to decide: Totals now drift by a cent.");
+        expect(change("Keeps the rounding as it is")).not.toBeNull();
+        expect(line("If it's 0?")).not.toContain("A review questions");
+        expect(page()).toContain("A review questions “Sorts by name”, and it's yours to decide: The list was by date.");
+        expect(page().match(/A review questions/g)).toHaveLength(2);
+      });
+
+      it("questions nothing when the approver's answer is from before it could", () => {
+        const approver = attempt({ id: "approver", stepId: "approver", role: "approver", output: { decision: "approve", risk: "low", reasons: "Fine.", instructions: "" } as unknown as Attempt["output"] });
+        show([specifier({ decided }), builder(["calc.py"]), approver, human], ["calc.py"], building);
+        expect(page()).toContain("Keeps the rounding as it is");
+        expect(page()).not.toContain("A review questions");
+      });
+
       it("isn't there if it decided nothing", () => {
         show([specifier(), builder(["calc.py"]), human], ["calc.py"], building);
         expect(page()).not.toContain("What it decided alone");

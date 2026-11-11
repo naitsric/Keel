@@ -451,13 +451,28 @@ function useArmed() {
   return armed;
 }
 
-/** What it settled by itself. Each line can go back to whoever does the work, without starting over. */
-function DecidedList({ attemptId, decided, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
+/** The same line, however a quote of it was spaced, cased or put between quotation marks. */
+function sameLine(quoted: string, line: string): boolean {
+  const plain = (text: string) =>
+    text
+      .replace(/\s+/g, " ")
+      .replace(/^[\s"'`“”«»]+|[\s"'`“”«».]+$/g, "")
+      .toLowerCase();
+  return plain(quoted) === plain(line);
+}
+
+/**
+ * What it settled by itself. Each line can go back to whoever does the work, without starting over.
+ * What a review questions of it is the person's to settle, so it shows on its line.
+ */
+function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; questioned: { decided: string; why: string }[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
   const { t } = useTranslation();
   const [changing, setChanging] = useState<number | null>(null);
   const draftKey = `${attemptId}:change:${changing}`;
   const instruction = useApp((s) => s.approvalDrafts[draftKey] ?? "");
   const setDraft = useApp((s) => s.setApprovalDraft);
+  // One that matches no line still reaches the person, quoted as it came.
+  const elsewhere = questioned.filter((q) => !decided.some((item) => sameLine(q.decided, item.text)));
   return (
     <ul className="space-y-1.5">
       {decided.map((item, index) => (
@@ -473,6 +488,13 @@ function DecidedList({ attemptId, decided, canChange, armed, busy, onSend }: { a
           </div>
           {item.taken === "person" && <p className="text-[11.5px] text-subtle">{t("run.decidedYouChose")}</p>}
           {item.taken === "roundsLimit" && <p className="text-[11.5px] text-warning">{t("run.decidedKeelTook")}</p>}
+          {questioned
+            .filter((q) => sameLine(q.decided, item.text))
+            .map((q, at) => (
+              <p key={at} className="selectable text-[11.5px] break-words text-warning">
+                {t("run.decidedQuestioned", { why: q.why })}
+              </p>
+            ))}
           {changing === index && (
             <div className="mt-1.5 rounded-md border border-border bg-inset p-2">
               <Field label={t("run.sendBackLabel")} hint={t("run.sendBackHint")}>
@@ -488,6 +510,11 @@ function DecidedList({ attemptId, decided, canChange, armed, busy, onSend }: { a
               </div>
             </div>
           )}
+        </li>
+      ))}
+      {elsewhere.map((q, at) => (
+        <li key={`elsewhere-${at}`} className="selectable text-[11.5px] break-words text-warning">
+          {t("run.decidedQuestionedElsewhere", { decided: q.decided, why: q.why })}
         </li>
       ))}
     </ul>
@@ -590,6 +617,9 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const nothingToExplain = asked !== null && !attempts.some((a) => a.kind === "agent" && a.role === "worker");
   const { reviewers, approver } = reviewsOfRound(attempts, run.round);
   const reviewed = reviewers.some((review) => review.state !== "skipped") || approver != null;
+  // What a review questions of what was decided alone, which the approver left to the person.
+  const raised = approver?.output?.questioned;
+  const questioned = Array.isArray(raised) ? raised.filter((q) => typeof q?.decided === "string" && typeof q.why === "string") : [];
   const skippedForSize = skippedSteps(attempts);
   const hiddenFiles = files.length - SHOWN_FILES;
   const sentBack = sentBackByAssistant(attempts, run.round);
@@ -638,9 +668,9 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             <p className="selectable break-words">{askedGist.text}</p>
           </ApprovalRow>
         )}
-        {spec && spec.decided.length > 0 && (
+        {spec && (spec.decided.length > 0 || questioned.length > 0) && (
           <ApprovalRow label={t("run.decidedTitle")} note={t("run.generated")}>
-            <DecidedList attemptId={attempt.id} decided={spec.decided} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
+            <DecidedList attemptId={attempt.id} decided={spec.decided} questioned={questioned} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
           </ApprovalRow>
         )}
         {sentBack && (
