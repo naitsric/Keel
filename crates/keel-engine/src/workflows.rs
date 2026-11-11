@@ -553,11 +553,11 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
             "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{{{{rework}}}}\n\n{}\n{{{{diff}}}}",
             if es {
                 format!(
-                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Si no hay, el veredicto es approved. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
+                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque. Una cuyo `taken` es `person` la eligió una persona: déjala. Reporta solo problemas reales de este cambio, cada uno con archivo y línea, incluida una decisión que no se sostenga con el cambio ya hecho. Si no hay, el veredicto es approved. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
                 )
             } else {
                 format!(
-                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Report only real problems in this change, each with its file and line. If there are none, the verdict is approved. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
+                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Also question what the specification decided on its own, in `decided`, where it touches your focus. One whose `taken` is `person` was a person's choice: leave it. Report only real problems in this change, each with its file and line, including a decision that doesn't hold up now that the change is made. If there are none, the verdict is approved. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
                 )
             },
             text("Specification:", "Especificación:"),
@@ -1957,6 +1957,50 @@ mod tests {
             }
         }
         assert!(VERDICT_SCHEMA.contains(r#""required":["verdict","findings","summary","unread"]"#));
+    }
+
+    #[test]
+    fn every_built_in_reviewer_questions_what_was_decided_without_asking_but_not_what_a_person_chose()
+     {
+        for (language, question, holds, chosen) in [
+            (
+                "en",
+                "Also question what the specification decided on its own, in `decided`, where it touches your focus.",
+                "including a decision that doesn't hold up now that the change is made",
+                "One whose `taken` is `person` was a person's choice: leave it.",
+            ),
+            (
+                "es",
+                "Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque.",
+                "incluida una decisión que no se sostenga con el cambio ya hecho",
+                "Una cuyo `taken` es `person` la eligió una persona: déjala.",
+            ),
+        ] {
+            let mut reviewers = 0;
+            for workflow in builtin(language, None) {
+                for step in &workflow.steps {
+                    let WorkflowStep::Parallel { steps: group, .. } = step else {
+                        continue;
+                    };
+                    for spec in group {
+                        reviewers += 1;
+                        // What it decided comes in what the specifier answered.
+                        for part in [question, holds, chosen, "{{steps.spec.output}}"] {
+                            assert!(
+                                spec.prompt.contains(part),
+                                "{language} {} {}: {part}",
+                                workflow.id,
+                                spec.id
+                            );
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                reviewers, 8,
+                "{language}: the full one and the one that fits"
+            );
+        }
     }
 
     #[test]
