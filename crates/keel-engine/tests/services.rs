@@ -440,16 +440,19 @@ fn setup_runs_first_and_later_steps_use_their_own_cache() {
             &ProjectSettings { setup_command: Some("echo $XDG_CACHE_HOME > setup-cache.txt; mkdir -p \"$XDG_CACHE_HOME\"; touch \"$XDG_CACHE_HOME/from-setup\"".into()), ..ProjectSettings::default() },
         )
         .unwrap();
+    // The approval keeps the run open, since a run that ends frees its copy of the cache.
     let run = w.run(vec![
         check("after", "echo $XDG_CACHE_HOME > check-cache.txt; mkdir -p \"$XDG_CACHE_HOME\"; touch \"$XDG_CACHE_HOME/from-check\""),
         agent("builder", ToolProfile::Build),
+        WorkflowStep::Approval { id: "human".into() },
     ]);
+    assert_eq!(w.wait_done(&run, "human").state, "waitingApproval");
     let builder = w.wait_done(&run, "builder");
     assert_eq!(builder.state, "succeeded");
     let attempts = w.store.attempts_of_run(&run).unwrap();
     assert_eq!(
         attempts.iter().map(|a| a.kind.as_str()).collect::<Vec<_>>(),
-        ["setup", "check", "agent"]
+        ["setup", "check", "agent", "approval"]
     );
     assert_eq!(
         attempts[0].state,

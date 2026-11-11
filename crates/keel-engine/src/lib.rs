@@ -910,6 +910,7 @@ impl Engine {
             self.inner.advance(&attempt.run_id)?;
         } else {
             store.patch_run(&attempt.run_id, &[("finished_at", Value::Text(now()))])?;
+            self.inner.free_builds(&attempt.run_id);
         }
         (self.inner.on_change)(&attempt.run_id);
         Ok(())
@@ -1283,14 +1284,16 @@ impl Engine {
         self.inner
             .store
             .patch_run(&attempt.run_id, &[("finished_at", Value::Text(now()))])?;
+        self.inner.free_builds(&attempt.run_id);
         drop(guard);
         (self.inner.on_change)(&attempt.run_id);
         Ok(())
     }
 
-    /// Run once at startup. Reconnects to steps that outlived the app, closes out the rest, and
-    /// continues any run that stopped between two steps. Approvals and questions simply keep
-    /// waiting: nothing is running for them.
+    /// Run once at startup, once the tools are known. Reconnects to steps that outlived the app,
+    /// closes out the rest, and continues any run that stopped between two steps. Approvals and
+    /// questions simply keep waiting: nothing is running for them. Ended runs that still hold what
+    /// their tools built are freed in the background.
     pub fn recover(&self) -> Result<()> {
         self.inner.store.release_claimed_cards()?;
         for attempt in self.inner.store.active_attempts()? {
@@ -1299,6 +1302,7 @@ impl Engine {
         for run in self.inner.store.open_runs()? {
             self.inner.advance(&run.id)?;
         }
+        self.inner.free_ended_runs();
         Ok(())
     }
 
@@ -1613,6 +1617,62 @@ fn restrict_dir(dir: &Path) {
     let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
 }
 
+/// What a run's tools build in its copy and would build again: Rust's, Node's and Python's, and the
+/// run's own copy of the caches. A run that compiles Rust leaves gigabytes.
+const REBUILT: [&str; 4] = ["target", "node_modules", ".venv", git::RUN_CACHE];
+
+/// What setup installs. A step tried again doesn't run setup, so it would find them gone.
+const SETUP_INSTALLS: [&str; 2] = ["node_modules", ".venv"];
+
+/// Where, in a run's folder, what's freed from its copy goes to be deleted. Outside the copy, so a
+/// step tried there again finds a folder whole or not at all, never half deleted.
+const TRASH: &str = "trash";
+
+/// The folders right in `workspace` that tools build, named exactly as they are on disk. The Mac's
+/// disk would also find `Target` as `target`, which is someone's own folder, not cargo's.
+fn built_folders(workspace: &Path) -> Vec<String> {
+    std::fs::read_dir(workspace)
+        .into_iter()
+        .flatten()
+        .flatten()
+        // Not following links, so a link stays, and so does what it points to.
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| REBUILT.contains(&name.as_str()))
+        .collect()
+}
+
+/// A run that is someone trying a command. See `Inner::close_failed_trial`.
+fn is_trial(run: &keel_store::Run) -> bool {
+    let steps: Vec<WorkflowStep> = serde_json::from_value(run.workflow.clone()).unwrap_or_default();
+    steps.iter().any(|s| s.id() == TRY_CHECK_STEP)
+}
+
+/// Deletes a folder, even one a tool made read-only, as Go does with the modules it downloads.
+fn remove_all(dir: &Path) {
+    if std::fs::remove_dir_all(dir).is_err() {
+        let_owner_change(dir);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Deleting what's in a folder takes being able to change it. Links are left as they are, so
+/// nothing outside `dir` changes.
+fn let_owner_change(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::symlink_metadata(dir) else {
+        return;
+    };
+    if !meta.is_dir() {
+        return;
+    }
+    let mode = meta.permissions().mode() | 0o700;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode));
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let_owner_change(&entry.path());
+    }
+}
+
 /// Helpers shared with `runner` and `deliver`.
 impl Inner {
     fn changed(&self, run_id: &str) {
@@ -1621,19 +1681,19 @@ impl Inner {
 
     /// Any other run that fails waits for a person to retry or abandon it. Someone trying a command
     /// has already seen the answer, and no agent was paid for. Left open, this run would stop the
-    /// project from being removed. Retrying it from its page still works.
-    fn close_failed_trial(&self, run_id: &str, state: AttemptState) {
+    /// project from being removed. Retrying it from its page still works, and rebuilds what's freed.
+    fn close_failed_trial(self: &Arc<Self>, run_id: &str, state: AttemptState) {
         if matches!(state, AttemptState::Succeeded | AttemptState::Skipped) {
             return;
         }
         let Ok(run) = self.store.run(run_id) else {
             return;
         };
-        let steps: Vec<WorkflowStep> = serde_json::from_value(run.workflow).unwrap_or_default();
-        if run.finished_at.is_none() && steps.iter().any(|s| s.id() == TRY_CHECK_STEP) {
+        if run.finished_at.is_none() && is_trial(&run) {
             let _ = self
                 .store
                 .patch_run(run_id, &[("finished_at", Value::Text(now()))]);
+            self.free_builds(run_id);
         }
     }
 
@@ -1643,6 +1703,84 @@ impl Inner {
 
     fn workspace(&self, run_id: &str) -> PathBuf {
         self.run_dir(run_id).join("workspace")
+    }
+
+    /// `free_now`, on a thread of its own, since a build can take a while to delete.
+    fn free_builds(self: &Arc<Self>, run_id: &str) {
+        let inner = Arc::clone(self);
+        let run_id = run_id.to_owned();
+        std::thread::spawn(move || inner.free_now(&run_id));
+    }
+
+    /// `free_now` for every run that has ended, one after another on a thread of its own. Catches
+    /// one that ended before git was found, and one whose freeing the app quit in the middle of.
+    fn free_ended_runs(self: &Arc<Self>) {
+        let Ok(ended) = self.store.ended_run_ids() else {
+            return;
+        };
+        let inner = Arc::clone(self);
+        std::thread::spawn(move || {
+            for run_id in ended {
+                inner.free_now(&run_id);
+            }
+        });
+    }
+
+    /// Frees what a run that has ended no longer needs: whatever its tools built. Its transcripts,
+    /// diffs and logs are outside the workspace and stay, and so does the copy with its commits, so
+    /// a step tried there again builds what it needs anew. A folder git keeps any file in is the
+    /// project's own and stays too, and so does everything while git isn't found yet: `recover`
+    /// comes back for it. Each folder is moved out of the copy at once and deleted after, and only
+    /// while the run is still ended, so a run a person opens again stops being freed.
+    fn free_now(&self, run_id: &str) {
+        let Some(git) = locked(&self.tools).git.clone().map(Git::new) else {
+            return;
+        };
+        let run_dir = self.run_dir(run_id);
+        let (workspace, trash) = (run_dir.join("workspace"), run_dir.join(TRASH));
+        if workspace.join(".git").exists() {
+            for name in built_folders(&workspace) {
+                if git.tracks(&workspace, &name) {
+                    continue;
+                }
+                // What `retry` holds while it opens the run again and starts the step.
+                let _guard = locked(&self.advancing);
+                if !self.may_free(run_id, &name) {
+                    continue;
+                }
+                let _ = std::fs::create_dir_all(&trash);
+                let _ = std::fs::rename(workspace.join(&name), trash.join(new_id()));
+            }
+        }
+        for entry in std::fs::read_dir(&trash).into_iter().flatten().flatten() {
+            remove_all(&entry.path());
+        }
+        let _ = std::fs::remove_dir(&trash);
+    }
+
+    /// Whether `name` can go from the run's copy now. Not while the run is open. A trial that failed
+    /// is closed to be tried again from its page, without setup, so what setup installed stays.
+    fn may_free(&self, run_id: &str, name: &str) -> bool {
+        let Ok(run) = self.store.run(run_id) else {
+            return false;
+        };
+        if run.finished_at.is_none() {
+            return false;
+        }
+        if !SETUP_INSTALLS.contains(&name) || !is_trial(&run) {
+            return true;
+        }
+        let latest = self
+            .store
+            .attempts_of_run(run_id)
+            .ok()
+            .and_then(|attempts| attempts.last().map(|a| a.state.clone()));
+        latest.is_some_and(|state| {
+            matches!(
+                AttemptState::parse(&state),
+                Some(AttemptState::Succeeded | AttemptState::Skipped)
+            )
+        })
     }
 
     /// Where a change too big for a prompt is saved, one file per changed file, for an agent to
@@ -2047,6 +2185,7 @@ impl Inner {
             }
             self.store
                 .patch_run(run_id, &[("finished_at", Value::Text(now()))])?;
+            self.free_builds(run_id);
             self.changed(run_id);
             return Ok(());
         }

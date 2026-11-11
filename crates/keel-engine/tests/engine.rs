@@ -897,6 +897,165 @@ fn abandon_closes_an_interrupted_run() {
     assert!(h.kinds(&a.id).contains(&"abandoned".to_owned()));
 }
 
+/// What tools build in a run's copy: Rust's, Node's and Python's, and Go's modules, which Go makes
+/// read-only.
+const BUILDS: &str =
+    "mkdir -p target/debug node_modules/left-pad .venv/bin .keel-cache/go/pkg/mod/m@v1
+echo bin > target/debug/app
+echo js > node_modules/left-pad/index.js
+echo py > .venv/bin/python
+echo mod > .keel-cache/go/pkg/mod/m@v1/go.mod
+chmod -R a-w .keel-cache/go/pkg/mod";
+
+const REBUILT: [&str; 4] = ["target", "node_modules", ".venv", ".keel-cache"];
+
+fn until(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !done() {
+        assert!(Instant::now() < deadline, "{what} never happened");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn closing_a_run_frees_what_its_tools_rebuild_and_keeps_its_record() {
+    let body = format!(
+        "cat > /dev/null\n{}\n{BUILDS}\nexit 1",
+        init(BUILD_TOOLS, "none")
+    );
+    let h = harness(&body);
+    std::fs::write(
+        h.repo.join(".gitignore"),
+        "target/\nnode_modules/\n.venv/\n",
+    )
+    .unwrap();
+    git(&h.repo, &["add", "-A"]);
+    git(&h.repo, &["commit", "-qm", "ignore builds"]);
+    let run = h.start(ToolProfile::Build);
+    let failed = h.wait_for(&run, &[AttemptState::Failed]);
+    let workspace = PathBuf::from(&failed.workspace);
+    // A step that failed can be tried again while the run is open, so nothing goes yet.
+    for name in REBUILT {
+        assert!(workspace.join(name).is_dir(), "{name} went too early");
+    }
+
+    h.engine.abandon(&failed.id).unwrap();
+    until("the builds being freed", || {
+        REBUILT.iter().all(|name| !workspace.join(name).exists())
+    });
+    // The copy and its commits stay, and so does everything the run has to show.
+    assert!(workspace.join(".git").is_dir());
+    assert!(workspace.join("CLAUDE.md").exists());
+    let failed = h.store.attempt(&failed.id).unwrap();
+    let raw = Path::new(&failed.raw_path);
+    assert!(raw.exists());
+    assert!(raw.with_file_name("builder-1.stderr.txt").exists());
+    assert!(Path::new(failed.diff_path.as_deref().unwrap()).exists());
+}
+
+#[test]
+fn a_run_that_ends_frees_them_too_but_not_what_the_project_keeps_in_git() {
+    let body = format!(
+        "cat > /dev/null\n{}\nmkdir -p target/debug\necho bin > target/debug/app\n{OK_RESULT}",
+        init(BUILD_TOOLS, "none")
+    );
+    let h = harness(&body);
+    // Like a GitHub Action, which keeps its packages in the repo.
+    std::fs::write(h.repo.join(".gitignore"), "target/\n").unwrap();
+    std::fs::create_dir(h.repo.join("node_modules")).unwrap();
+    std::fs::write(h.repo.join("node_modules/action.js"), "kept\n").unwrap();
+    git(&h.repo, &["add", "-A"]);
+    git(&h.repo, &["commit", "-qm", "vendored"]);
+    let run = h.start(ToolProfile::Build);
+    let done = h.wait_for(&run, &[AttemptState::Succeeded]);
+    let workspace = PathBuf::from(&done.workspace);
+    until("the build being freed", || {
+        !workspace.join("target").exists() && !workspace.join(".keel-cache").exists()
+    });
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("node_modules/action.js")).unwrap(),
+        "kept\n"
+    );
+}
+
+/// Where what's freed waits to be deleted, next to the run's copy.
+fn trash_of(workspace: &Path) -> PathBuf {
+    workspace.with_file_name("trash")
+}
+
+#[test]
+fn a_folder_the_project_keeps_stays_whatever_its_capitals() {
+    // The Mac's disk doesn't tell `Target` from `target`. Git does, and still keeps `Target`.
+    let body = format!(
+        "cat > /dev/null\n{}\nmv Target t && mv t target\n{OK_RESULT}",
+        init(BUILD_TOOLS, "none")
+    );
+    let h = harness(&body);
+    for own in ["Target", "Node_Modules"] {
+        std::fs::create_dir(h.repo.join(own)).unwrap();
+        std::fs::write(h.repo.join(own).join("kept.txt"), "kept\n").unwrap();
+    }
+    git(&h.repo, &["add", "-A"]);
+    git(&h.repo, &["commit", "-qm", "own folders"]);
+    let run = h.start(ToolProfile::Build);
+    let done = h.wait_for(&run, &[AttemptState::Succeeded]);
+    let workspace = PathBuf::from(&done.workspace);
+    until("the run's cache being freed", || {
+        !workspace.join(".keel-cache").exists() && !trash_of(&workspace).exists()
+    });
+    for kept in ["target/kept.txt", "Node_Modules/kept.txt"] {
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(kept)).unwrap(),
+            "kept\n",
+            "{kept}"
+        );
+    }
+}
+
+#[test]
+fn reopening_the_app_frees_what_ended_runs_still_hold() {
+    let body = format!(
+        "cat > /dev/null\n{}\n{BUILDS}\nexit 1",
+        init(BUILD_TOOLS, "none")
+    );
+    let h = harness(&body);
+    std::fs::write(
+        h.repo.join(".gitignore"),
+        "target/\nnode_modules/\n.venv/\n",
+    )
+    .unwrap();
+    git(&h.repo, &["add", "-A"]);
+    git(&h.repo, &["commit", "-qm", "ignore builds"]);
+    let run = h.start(ToolProfile::Build);
+    let failed = h.wait_for(&run, &[AttemptState::Failed]);
+    let workspace = PathBuf::from(&failed.workspace);
+
+    // Closed by an app that hasn't found git yet, which can't tell what the project keeps.
+    let mut config = Config::new(h.dir.path().join("data"));
+    config.keep_awake = false;
+    let early = Engine::new(
+        h.store.clone(),
+        config,
+        Tools::from_dirs(&[h.dir.path().join("bin")]),
+        |_| {},
+    );
+    early.abandon(&failed.id).unwrap();
+    // And an earlier freeing the app quit in the middle of.
+    let half = trash_of(&workspace).join("half-deleted");
+    std::fs::create_dir_all(half.join("debug")).unwrap();
+    std::fs::write(half.join("debug/app"), "bin").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    for name in REBUILT {
+        assert!(workspace.join(name).is_dir(), "{name} went without git");
+    }
+
+    restart(&h).recover().unwrap();
+    until("the ended run being freed", || {
+        REBUILT.iter().all(|name| !workspace.join(name).exists()) && !trash_of(&workspace).exists()
+    });
+    assert!(workspace.join("CLAUDE.md").exists());
+}
+
 #[test]
 fn a_new_run_works_in_runs_dir_not_in_the_data_folder() {
     let h = harness_with("echo hi > new.txt\n", LOGGED_IN, "2.1.318", |c| {
