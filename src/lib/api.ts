@@ -355,10 +355,16 @@ export interface ProjectProposal {
   gone: boolean;
 }
 
+/**
+ * One problem a review found: where, what, and the id of the criterion it breaks, or `L<n>` for the
+ * specification's limit number n. Older answers wrote only text.
+ */
+export type Finding = string | { file: string | null; line: number | null; text: string; breaks: string | null };
+
 /** A reviewer's answer. */
 export interface Verdict {
   verdict: "approved" | "changes";
-  findings: string[];
+  findings: Finding[];
   summary: string;
   /** Files of the change it couldn't read. Keel never counts such a review as an approval. Older answers don't have it. */
   unread?: string[];

@@ -11,8 +11,8 @@ use keel_core::{
     mask_secrets, mask_value,
 };
 use keel_engine::{
-    Error, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
-    can_send_back, files_changed, request_from_issue, skipped_steps, spec_of_attempt,
+    Error, Finding, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
+    can_send_back, files_changed, findings_of, request_from_issue, skipped_steps, spec_of_attempt,
     verification_of_attempt,
 };
 use keel_store::{Attempt, MAX_OPEN_RUNS_CEILING, McpClient, NewMcpCall, Project, Run};
@@ -1761,14 +1761,24 @@ fn reviews(attempts: &[Attempt]) -> Vec<Json> {
             };
             match a.role.as_str() {
                 "reviewer" => {
-                    let findings: Vec<String> = output
-                        .get("findings")
-                        .and_then(Json::as_array)
+                    // Text, as reviews wrote them before, or where, what and what it breaks.
+                    let findings: Vec<Finding> = findings_of(output)
                         .into_iter()
-                        .flatten()
-                        .filter_map(Json::as_str)
                         .take(MAX_FINDINGS)
-                        .map(|finding| capped(finding, MAX_FINDING))
+                        .map(|finding| match finding {
+                            Finding::Text(text) => Finding::Text(capped(&text, MAX_FINDING)),
+                            Finding::Found {
+                                file,
+                                line,
+                                text,
+                                breaks,
+                            } => Finding::Found {
+                                file: file.map(|file| capped(&file, MAX_FINDING)),
+                                line,
+                                text: capped(&text, MAX_FINDING),
+                                breaks: breaks.map(|id| capped(&id, MAX_FINDING)),
+                            },
+                        })
                         .collect();
                     Some(json!({
                         "step": a.step_id,
@@ -2734,6 +2744,41 @@ mod tests {
 
         let (views, left_out) = steps_view(&attempts[..8]);
         assert_eq!((views.len(), left_out), (8, 0));
+    }
+
+    #[test]
+    fn the_report_shows_findings_written_as_text_before_and_with_what_they_break_now() {
+        let long = "x".repeat(MAX_FINDING + 10);
+        let mut old = attempt("security", 1);
+        old.output = Some(json!({ "verdict": "changes", "findings": ["Line 3 divides by zero"] }));
+        let mut new = attempt("code", 1);
+        new.output = Some(json!({ "verdict": "changes", "findings": [
+            { "file": "src/jobs.py", "line": 42, "text": "Sends the notice twice", "breaks": "C5" },
+            { "file": null, "line": null, "text": long, "breaks": null },
+        ]}));
+        let report = reviews(&[old.clone(), new.clone()]);
+        assert_eq!(report[0]["findings"], json!(["Line 3 divides by zero"]));
+        let findings = &report[1]["findings"];
+        assert_eq!(
+            findings[0],
+            json!({ "file": "src/jobs.py", "line": 42, "text": "Sends the notice twice", "breaks": "C5" })
+        );
+        assert_eq!(findings[1]["breaks"], Json::Null);
+        assert_eq!(findings[1]["text"], json!(capped(&long, MAX_FINDING)));
+        // get_step has each as it was kept.
+        let parts = LongParts {
+            prompt: String::new(),
+            diff: None,
+            printed: None,
+        };
+        assert_eq!(
+            step_overview(&old, &parts)["output"]["findings"],
+            json!(["Line 3 divides by zero"])
+        );
+        assert_eq!(
+            step_overview(&new, &parts)["output"]["findings"][0]["breaks"],
+            "C5"
+        );
     }
 
     #[test]

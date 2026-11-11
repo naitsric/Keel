@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { Attempt, AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, findingsOf, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -354,6 +354,34 @@ describe("what the reviews couldn't check by reading the code", () => {
       { stepId: "builder", role: "worker", round: 0, output: { unchecked: ["Not a review"] } },
     ];
     expect(uncheckedInRound(attempts, 0)).toEqual([]);
+  });
+});
+
+describe("what a review found", () => {
+  it("reads text from before Keel asked, and where it is and what it breaks now", () => {
+    const output = {
+      verdict: "changes",
+      findings: [
+        "app/api.py:42 doesn't call require_role",
+        { file: "calc.py", line: 3, text: "Subtracts when one is negative", breaks: "C2" },
+        { file: " test_calc.py ", line: null, text: "The test name could say more", breaks: " " },
+        { file: null, line: null, text: "Touches the public API", breaks: "L1" },
+        7,
+        null,
+      ],
+    };
+    expect(findingsOf(output)).toEqual([
+      { where: null, text: "app/api.py:42 doesn't call require_role", breaks: null },
+      { where: "calc.py:3", text: "Subtracts when one is negative", breaks: "C2" },
+      { where: "test_calc.py", text: "The test name could say more", breaks: null },
+      { where: null, text: "Touches the public API", breaks: "L1" },
+    ]);
+  });
+
+  it("is nothing for an answer it can't read", () => {
+    expect(findingsOf(null)).toEqual([]);
+    expect(findingsOf({ verdict: "approved" })).toEqual([]);
+    expect(findingsOf({ findings: "Not a list" })).toEqual([]);
   });
 });
 

@@ -551,6 +551,25 @@ describe("the approval card", () => {
     });
   });
 
+  describe("what the reviews found", () => {
+    const found = (stepId: string, findings: unknown[]) => attempt({ id: stepId, stepId, role: "reviewer", output: { verdict: "changes", findings, summary: "Two things.", unread: [], unchecked: [] } as unknown as Attempt["output"] });
+    const both = () => [builder(["calc.py"]), check, found("security", ["app/api.py:42 doesn't call require_role"]), found("code", [{ file: "calc.py", line: 3, text: "Subtracts when one is negative", breaks: "C2" }, { file: "test_calc.py", line: null, text: "The test name could say more", breaks: null }]), human];
+    const items = () => [...document.querySelectorAll('[role="dialog"] li li')].map((li) => li.textContent);
+
+    it("shows text from before Keel asked as it was, and what a finding breaks before where it is", () => {
+      show(both(), ["calc.py"]);
+      press("See the reviews");
+      expect(items()).toEqual(["app/api.py:42 doesn't call require_role", "Breaks C2. calc.py:3 Subtracts when one is negative", "test_calc.py The test name could say more"]);
+    });
+
+    it("says it in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      show(both(), ["calc.py"]);
+      press("Ver las revisiones");
+      expect(items()).toContain("Rompe C2. calc.py:3 Subtracts when one is negative");
+    });
+  });
+
   // In a short window, "What proves it" can be far down the list, or out of it.
   describe("how much wasn't proven, where it can't scroll out of view", () => {
     const looked = (stepId: string, unchecked: string[]) => attempt({ id: stepId, stepId, role: "reviewer", output: { verdict: "approved", findings: [], summary: "Fine.", unread: [], unchecked } as unknown as Attempt["output"] });
@@ -775,6 +794,8 @@ describe("the approval card", () => {
       expect(dialog).toContain("add(1, 2) → it returns 3");
       expect(dialog).toContain("Changes: add stops subtracting");
       expect(dialog).toContain("What stays as it is");
+      // By the id a review names it by when it says the change breaks it.
+      expect(dialog).toContain("L1 Its signature stays");
       expect(dialog).not.toContain("{");
     });
 
@@ -1639,5 +1660,33 @@ describe("an answer Keel asked to fix", () => {
     expect(page()).not.toContain("Falló");
     expect(page()).toContain("Estado final: Keel pidió corregirlo");
     expect(page()).toContain("el punto 1 de lo que decidió por su cuenta tiene 141 caracteres y el límite es 140");
+  });
+});
+
+describe("a review that approved what breaks a criterion", () => {
+  let root: Root;
+  const page = () => document.body.textContent ?? "";
+  const events: AuditEvent[] = [{ seq: 1, attemptId: "code", at: "2026-01-01T00:00:00Z", kind: "reviewBreaks", data: { breaks: ["C5", "L2"] } }];
+  const inActivity = () => act(() => root.render(<ActivityTab events={events} role="reviewer" />));
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    mockIPC(() => null);
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("says why Keel doesn't count it as an approval", () => {
+    inActivity();
+    expect(page()).toContain("It says the change breaks C5, L2, so Keel doesn't count it as an approval.");
+  });
+
+  it("says it in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    inActivity();
+    expect(page()).toContain("Dice que el cambio rompe C5, L2, así que Keel no lo cuenta como aprobación.");
   });
 });

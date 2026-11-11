@@ -74,6 +74,10 @@ REVIEW-READ*)
   result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{{"verdict":"approved","findings":[],"summary":"Read it all","unread":[]}}}}';;
 REVIEW-UNREAD*)
   result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{{"verdict":"approved","findings":[],"summary":"Fine as far as I got","unread":["built.tsx"]}}}}';;
+REVIEW-BREAKS*)
+  result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{{"verdict":"approved","findings":[{{"file":"built.tsx","line":1,"text":"Sends the notice twice","breaks":"C5"}}],"summary":"Only minor things","unread":[]}}}}';;
+REVIEW-MINOR*)
+  result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{{"verdict":"approved","findings":[{{"file":"built.tsx","line":1,"text":"Could be shorter","breaks":null}}],"summary":"Fine","unread":[]}}}}';;
 REVIEW-NOANSWER*)
   result='{{"type":"result","subtype":"success","is_error":false,"result":"I looked.","num_turns":1}}';;
 REVIEW*)
@@ -997,6 +1001,74 @@ fn a_review_that_could_not_read_all_of_the_change_is_not_an_approval() {
     let approver = w.all(&run, "approver").pop().unwrap();
     assert!(
         approver.prompt.contains(r#""verdict":"changes""#),
+        "{}",
+        approver.prompt
+    );
+}
+
+#[test]
+fn a_review_that_says_a_criterion_is_broken_is_not_an_approval_and_the_approver_hears_it_apart() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let mut steps = one_review("BUILD", "REVIEW-BREAKS");
+    if let WorkflowStep::Parallel { steps: group, .. } = &mut steps[1] {
+        group.push(spec(
+            "ux",
+            ToolProfile::ReadOnly,
+            StepRole::Reviewer,
+            &[],
+            "REVIEW-MINOR",
+        ));
+    }
+    steps.insert(
+        2,
+        WorkflowStep::Agent(spec(
+            "approver",
+            ToolProfile::ReadOnly,
+            StepRole::Approver {
+                rework_to: "builder".into(),
+                max_rounds: 2,
+            },
+            &[],
+            "APPROVE\nsecurity={{steps.security.output}}",
+        )),
+    );
+    let run = w.start(steps);
+    w.wait(&run, "human", AttemptState::WaitingApproval);
+
+    // It said approved and that the change breaks C5, so Keel keeps it as asking for changes.
+    let review = w.all(&run, "security").pop().unwrap();
+    assert_eq!(review.state, "succeeded");
+    let output = review.output.clone().unwrap();
+    assert_eq!(output["verdict"], "changes");
+    assert_eq!(output["findings"][0]["breaks"], "C5");
+    let events = w.store.events(&review.id, 0).unwrap();
+    let broken = events.iter().find(|e| e.kind == "reviewBreaks").unwrap();
+    assert_eq!(broken.data["breaks"], serde_json::json!(["C5"]));
+    let result = events.iter().find(|e| e.kind == "result").unwrap();
+    assert!(
+        result.data.to_string().contains(r#""verdict":"approved""#),
+        "{}",
+        result.data
+    );
+
+    // One whose findings break nothing stands as it said.
+    let minor = w.all(&run, "ux").pop().unwrap();
+    assert_eq!(minor.output.unwrap()["verdict"], "approved");
+    let events = w.store.events(&minor.id, 0).unwrap();
+    assert!(events.iter().all(|e| e.kind != "reviewBreaks"));
+
+    // The approver hears it apart, even though its prompt only asked for the review.
+    let approver = w.all(&run, "approver").pop().unwrap();
+    assert!(
+        approver
+            .prompt
+            .contains("\n- security: breaks C5. built.tsx:1 Sends the notice twice"),
+        "{}",
+        approver.prompt
+    );
+    assert!(
+        !approver.prompt.contains("ux: breaks"),
         "{}",
         approver.prompt
     );

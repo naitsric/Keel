@@ -12,7 +12,7 @@ import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
 import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
-import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, JointChange, JointCheck, PartOf, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunJoint, RunRow, SpecOutput, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
+import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Finding, Issue, JointChange, JointCheck, PartOf, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunJoint, RunRow, SpecOutput, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
 import { useApp, type View } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -256,7 +256,7 @@ const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "ch
 const approvalAttempt: Attempt = { ...attempt, id: "a3", stepId: "approval", kind: "approval", tools: "none", round, state: delivered ? "succeeded" : "waitingApproval", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, rawSha256: null, finishedAt: delivered ? at(0) : null };
 const prAttempt: Attempt = { ...attempt, id: "a4", stepId: "pull-request", kind: "deliver", tools: "none", state: "succeeded", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: "https://github.com/acme/app/pull/12", rawSha256: null, finishedAt: at(0) };
 const reworkAttempt: Attempt = { ...builtAttempt, id: "a1b", number: 2, round: 1, resultText: "I added the role check the security review asked for, in app/api.py.\n\nTests: `make test` passes." };
-const reviewer = (id: string, verdict: "approved" | "changes", summary: string, findings: string[], unchecked: string[] = []): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "succeeded", reason: null, tools: "readOnly", filesChanged: null, resultText: null, finishedAt: at(1), output: { verdict, findings, summary, unchecked } as Attempt["output"] });
+const reviewer = (id: string, verdict: "approved" | "changes", summary: string, findings: Finding[], unchecked: string[] = []): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "succeeded", reason: null, tools: "readOnly", filesChanged: null, resultText: null, finishedAt: at(1), output: { verdict, findings, summary, unchecked } as Attempt["output"] });
 const skippedReviewer = (id: string): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "skipped", reason: { code: "noMatchingPaths", paths: ["**/*.tsx"] }, tools: "readOnly", filesChanged: null, resultText: null, modelActual: null, finishedAt: at(1), output: null });
 const approverAttempt = (decision: "approve" | "rework"): Attempt => ({ ...attempt, id: "r-approver", stepId: "approver", role: "approver", round, state: params.get("flow") === "limit" ? "blocked" : "succeeded", reason: params.get("flow") === "limit" ? { code: "reworkLimit", rounds: 2 } : null, tools: "readOnly", modelActual: "claude-opus-5-5", filesChanged: null, resultText: null, finishedAt: at(1), output: { decision, risk: params.get("risk") ?? "medium", reasons: long ? "The security finding is real: the new endpoint skips the role check, and the same pattern repeats in every handler. ".repeat(6) : "The security finding is real: the new endpoint skips the role check.", instructions: "Add the role check.", overriddenByPerson: params.get("override") === "1", ...(questionedShown ? { questioned: previewQuestioned } : {}) } as Attempt["output"] });
 const verifiedItems = () => {
@@ -280,12 +280,24 @@ const verifiedItems = () => {
 const verifierOutput = () => ({ criteria: verifiedItems(), summary: atLimit(say("Tests prove the sum works, and nothing covers the invoices page.", "Las pruebas demuestran que la suma funciona, y nada cubre la página de facturas."), 200) }) as unknown as Attempt["output"];
 const verifierAttempt = (s: AttemptState, fields: Partial<Attempt> = {}): Attempt => ({ ...attempt, id: "v1", stepId: "verify", role: "verifier", round: verifyMode === "old" ? 0 : round, tools: "readOnly", state: s, reason: null, filesChanged: null, resultText: null, finishedAt: at(1), output: s === "succeeded" ? verifierOutput() : null, ...fields });
 const verifiedAttempts = verifyMode !== null ? [verifierAttempt("succeeded")] : [];
+// findings=1 has the security review find a problem, as text, the way reviews wrote them before Keel
+// asked where each is and what it breaks. findings=breaks adds the code review calling two things
+// minor, one of which breaks C2: Keel keeps it as asking for changes, and node=code says why in its
+// Activity.
+const breaksShown = params.get("findings") === "breaks";
+const securityFinds = params.get("findings") === "1" || breaksShown;
+const codeFindings: Finding[] = breaksShown
+  ? [
+      { file: "calc.py", line: 3, text: say("Still subtracts when one argument is negative", "Sigue restando cuando un argumento es negativo"), breaks: "C2" },
+      { file: "test_calc.py", line: null, text: say("The test's name could say which case it covers", "El nombre de la prueba podría decir qué caso cubre"), breaks: null },
+    ]
+  : [];
 const reviews: Attempt[] = [
-  reviewer("security", params.get("findings") === "1" ? "changes" : "approved", params.get("findings") === "1" ? "The new endpoint skips the role check." : "No problems in authorization, logs or input handling.", params.get("findings") === "1" ? ["app/api.py:42 doesn't call require_role"] : []),
+  reviewer("security", securityFinds ? "changes" : "approved", securityFinds ? "The new endpoint skips the role check." : "No problems in authorization, logs or input handling.", securityFinds ? ["app/api.py:42 doesn't call require_role"] : []),
   skippedReviewer("ux"),
   skippedReviewer("ui"),
-  reviewer("code", "approved", "It meets each criterion, and the tests prove it.", [], previewUnchecked),
-  approverAttempt(params.get("findings") === "1" ? "rework" : "approve"),
+  reviewer("code", breaksShown ? "changes" : "approved", breaksShown ? say("Two minor things, nothing that blocks.", "Dos cosas menores, nada que bloquee.") : "It meets each criterion, and the tests prove it.", codeFindings, previewUnchecked),
+  approverAttempt(securityFinds ? "rework" : "approve"),
 ];
 const built = [builtAttempt, ...(round > 0 ? [reworkAttempt] : [])];
 const gated = gate === "build" ? [specAttempt, approvalAttempt] : gate === "end" ? [specAttempt, builtAttempt, approvalAttempt] : null;
@@ -919,6 +931,7 @@ mockIPC((command, args) => {
         if (params.get("flow") === "movedUp") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: false, because: WHY_MOVED_UP, round: 0 } }];
       }
       if ((args as { attemptId?: string } | undefined)?.attemptId === "c1" && params.get("flow") === "corrected") return correctedEvents;
+      if ((args as { attemptId?: string } | undefined)?.attemptId === "r-code" && breaksShown) return [{ seq: 100, attemptId: "r-code", at: at(1), kind: "reviewBreaks", data: { breaks: ["C2"] } }];
       if ((args as { attemptId?: string } | undefined)?.attemptId === returnedApproval.id && (params.get("flow") === "returned" || params.get("flow") === "sentBack")) {
         return [{ seq: 100, attemptId: returnedApproval.id, at: at(5), kind: "returned", data: { instructions: sentBackWith, round: 1, ...(assistantBy ? { by: assistantBy } : {}) } }];
       }

@@ -40,7 +40,15 @@ export function SpecView({ spec }: { spec: SpecOutput }) {
         ))}
       />
       <SpecList title={t("run.specChanges")} items={spec.changes.map((change) => `${t(kinds[change.kind])}: ${change.text}`)} />
-      <SpecList title={t("run.specLimits")} items={spec.limits} />
+      <SpecList
+        title={t("run.specLimits")}
+        items={spec.limits.map((limit, index) => (
+          // Reviews name a limit the change breaks by this id, as they do a criterion.
+          <>
+            <span className="font-mono text-[12px] text-muted">L{index + 1}</span> {limit}
+          </>
+        ))}
+      />
       <SpecList title={t("run.specTogether")} items={spec.together ?? []} />
       <SpecList
         title={t("run.decidedTitle")}

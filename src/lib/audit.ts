@@ -257,6 +257,27 @@ export function uncheckedOf(output: unknown): string[] {
   return unchecked.filter((text): text is string => typeof text === "string" && text.trim() !== "").map((text) => text.trim());
 }
 
+/** A finding as the app shows it: where, what, and the criterion or limit it breaks. One from an older answer is only text. */
+export interface FindingShown {
+  where: string | null;
+  text: string;
+  breaks: string | null;
+}
+
+/** What one review found, old text included. Anything else is left out. */
+export function findingsOf(output: unknown): FindingShown[] {
+  const findings = (output as { findings?: unknown } | null)?.findings;
+  if (!Array.isArray(findings)) return [];
+  const filled = (value: unknown) => (typeof value === "string" && value.trim() !== "" ? value.trim() : null);
+  return findings.flatMap((finding): FindingShown[] => {
+    if (typeof finding === "string") return [{ where: null, text: finding, breaks: null }];
+    if (!finding || typeof finding !== "object") return [];
+    const { file, line, text, breaks } = finding as Record<string, unknown>;
+    const at = filled(file);
+    return [{ where: at && typeof line === "number" ? `${at}:${line}` : at, text: typeof text === "string" ? text : "", breaks: filled(breaks) }];
+  });
+}
+
 export type ApprovalOutcome = "delivers" | "deliversLater" | "noDelivery" | "nothingToDeliver";
 
 /**

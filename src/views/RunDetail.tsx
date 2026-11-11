@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -1181,6 +1181,8 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       );
     case "reviewIncomplete":
       return line(t("activity.reviewIncomplete", { files: (data.unread ?? []).join(", ") }), "text-warning");
+    case "reviewBreaks":
+      return line(t("activity.reviewBreaks", { ids: (data.breaks ?? []).join(", ") }), "text-warning");
     case "verificationCorrected":
       return (
         <div>
@@ -1426,10 +1428,15 @@ function ReviewsList({ attempts, round }: { attempts: Attempt[]; round: number }
             {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
             {(review.output?.unread ?? []).length > 0 && <p className="selectable mt-0.5 text-warning">{t("run.unreadFiles", { files: review.output?.unread?.join(", ") })}</p>}
             {uncheckedOf(review.output).length > 0 && <p className="selectable mt-0.5 text-muted">{t("run.reviewUnchecked", { items: uncheckedOf(review.output).join("; ") })}</p>}
-            {(review.output?.findings ?? []).length > 0 && (
+            {findingsOf(review.output).length > 0 && (
               <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 text-muted">
-                {review.output?.findings.map((finding, index) => (
-                  <li key={index}>{finding}</li>
+                {findingsOf(review.output).map((finding, index) => (
+                  // A review's list, in its order: two findings can say the same.
+                  <li key={index}>
+                    {finding.breaks && <span className="font-medium text-warning">{t("run.findingBreaks", { id: finding.breaks })} </span>}
+                    {finding.where && <span className="font-mono text-[12px]">{finding.where} </span>}
+                    {finding.text}
+                  </li>
                 ))}
               </ul>
             )}

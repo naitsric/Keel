@@ -17,27 +17,150 @@ use crate::{brain, prompts, sizing, specs, verification};
 
 const MAX_ROUNDS: u32 = 5;
 
-pub const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"verdict":{"type":"string","enum":["approved","changes"]},"findings":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"},"unread":{"type":"array","items":{"type":"string"},"description":"Each file of the change you could not read, if any. A review that left one out is not an approval."},"unchecked":{"type":"array","items":{"type":"string"},"description":"Each thing in this change you could not check by reading the code, such as how it looks on screen, in one line, if any. Keel shows them to the person as not proven."}},"required":["verdict","findings","summary","unread","unchecked"],"additionalProperties":false}"#;
+pub const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"verdict":{"type":"string","enum":["approved","changes"]},"findings":{"type":"array","items":{"type":"object","properties":{"file":{"type":["string","null"]},"line":{"type":["integer","null"]},"text":{"type":"string"},"breaks":{"type":["string","null"],"description":"The `id` of the criterion of the specification this breaks, or `L<n>` for its limit number n. null if it breaks neither. One that breaks either is never minor: the verdict can't be approved."}},"required":["file","line","text","breaks"],"additionalProperties":false}},"summary":{"type":"string"},"unread":{"type":"array","items":{"type":"string"},"description":"Each file of the change you could not read, if any. A review that left one out is not an approval."},"unchecked":{"type":"array","items":{"type":"string"},"description":"Each thing in this change you could not check by reading the code, such as how it looks on screen, in one line, if any. Keel shows them to the person as not proven."}},"required":["verdict","findings","summary","unread","unchecked"],"additionalProperties":false}"#;
 pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"},"questioned":{"type":"array","items":{"type":"object","properties":{"decided":{"type":"string"},"number":{"type":"integer","description":"The `number` that decision has in `decided`."},"why":{"type":"string"}},"required":["decided","number","why"],"additionalProperties":false},"description":"Each thing the specification decided on its own that a finding questions, quoted as `decided` says it, with the `number` it has there, and why it does not hold. A person decides these at the approval, so none is a reason for rework."}},"required":["decision","risk","reasons","instructions","questioned"],"additionalProperties":false}"#;
 
+/// One problem a review found. Reviews from before Keel asked where it is and what it breaks wrote
+/// only text, and they still read as that.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum Finding {
+    Text(String),
+    Found {
+        file: Option<String>,
+        line: Option<u64>,
+        text: String,
+        /// The `id` of the criterion it breaks, or `L<n>` for the specification's limit number n.
+        breaks: Option<String>,
+    },
+}
+
+impl Finding {
+    /// The criterion or limit it says the change breaks.
+    pub fn breaks(&self) -> Option<&str> {
+        match self {
+            Finding::Found { breaks, .. } => breaks.as_deref(),
+            Finding::Text(_) => None,
+        }
+    }
+
+    /// Where it is and what it says, on one line: `src/jobs.py:42 Sends it twice`.
+    pub fn where_and_what(&self) -> String {
+        match self {
+            Finding::Text(text) => text.clone(),
+            Finding::Found {
+                file, line, text, ..
+            } => match (file, line) {
+                (Some(file), Some(line)) => format!("{file}:{line} {text}"),
+                (Some(file), None) => format!("{file} {text}"),
+                _ => text.clone(),
+            },
+        }
+    }
+}
+
+/// What a review found, as Keel reads it, old text included. Anything else is left out.
+pub fn findings_of(output: &Value) -> Vec<Finding> {
+    let filled = |value: Option<&Value>| {
+        value
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    output
+        .get("findings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|finding| match finding {
+            Value::String(text) => Some(Finding::Text(text.clone())),
+            Value::Object(found) => Some(Finding::Found {
+                file: filled(found.get("file")),
+                line: found.get("line").and_then(Value::as_u64),
+                text: found
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                breaks: filled(found.get("breaks")),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Why Keel doesn't take a reviewer's approval as one.
+#[derive(Debug, Default, PartialEq)]
+pub struct NotAnApproval {
+    /// The files of the change it couldn't read.
+    pub unread: Vec<String>,
+    /// The criteria and limits its findings say the change breaks, each once.
+    pub breaks: Vec<String>,
+}
+
 /// What a reviewer answered, as Keel keeps it. One that says it couldn't read part of the change
-/// didn't review all of it, so it's never an approval, whatever it says. `None` if it stands.
-pub fn review_as_kept(output: &Value) -> Option<(Value, Vec<String>)> {
+/// didn't review all of it, and one that says the change breaks a criterion or a limit found a
+/// reason not to approve it, however minor it called it. Neither is an approval, whatever it says.
+/// `None` if it stands.
+pub fn review_as_kept(output: &Value) -> Option<(Value, NotAnApproval)> {
+    if output.get("verdict")? != "approved" {
+        return None;
+    }
     let unread: Vec<String> = output
-        .get("unread")?
-        .as_array()?
-        .iter()
+        .get("unread")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
         .filter_map(Value::as_str)
         .map(str::trim)
         .filter(|file| !file.is_empty())
         .map(str::to_owned)
         .collect();
-    if unread.is_empty() || output.get("verdict")? != "approved" {
+    let mut breaks: Vec<String> = Vec::new();
+    for finding in findings_of(output) {
+        if let Some(id) = finding.breaks()
+            && !breaks.iter().any(|seen| seen == id)
+        {
+            breaks.push(id.to_owned());
+        }
+    }
+    if unread.is_empty() && breaks.is_empty() {
         return None;
     }
     let mut kept = output.clone();
     kept["verdict"] = Value::from("changes");
-    Some((kept, unread))
+    Some((kept, NotAnApproval { unread, breaks }))
+}
+
+/// What the latest review of each step says the change breaks, for the approver to read apart: a
+/// review can call it minor and approve. Empty if none says so.
+pub fn broken_text(attempts: &[Attempt], language: &str) -> String {
+    let es = language.starts_with("es");
+    let breaks = if es { "rompe" } else { "breaks" };
+    let lines: Vec<String> = attempts
+        .iter()
+        .filter(|a| a.role == "reviewer" && is_latest_of_its_step(attempts, a))
+        .filter_map(|a| Some((&a.step_id, findings_of(a.output.as_ref()?))))
+        .flat_map(|(step, findings)| {
+            findings.into_iter().filter_map(move |finding| {
+                let id = finding.breaks()?;
+                Some(format!(
+                    "- {step}: {breaks} {id}. {}",
+                    finding.where_and_what()
+                ))
+            })
+        })
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let intro = if es {
+        "Estos hallazgos dicen que el cambio rompe un criterio o un límite de la especificación. Cada uno es motivo de rework, salvo que digas en reasons dónde lo cumple el código, con archivo y línea:"
+    } else {
+        "These findings say the change breaks a criterion or a limit of the specification. Each one is a reason for rework, unless you say in reasons where the code meets it, with file and line:"
+    };
+    format!("{intro}\n{}", lines.join("\n"))
 }
 
 pub fn schema_for(role: &StepRole) -> Option<&'static str> {
@@ -337,7 +460,9 @@ pub fn output_of(attempts: &[Attempt], step_id: &str) -> String {
         return "(skipped: nothing it covers changed)".to_owned();
     }
     match &attempt.output {
-        Some(output) if attempt.role == "specifier" => numbered_decided(output).to_string(),
+        Some(output) if attempt.role == "specifier" => {
+            limits_with_ids(numbered_decided(output)).to_string()
+        }
         Some(output) => output.to_string(),
         None => attempt.result_text.clone().unwrap_or_default(),
     }
@@ -352,6 +477,20 @@ fn numbered_decided(output: &Value) -> Value {
         for (index, line) in lines.iter_mut().enumerate() {
             if let Some(line) = line.as_object_mut() {
                 line.insert("number".into(), Value::from(index + 1));
+            }
+        }
+    }
+    output
+}
+
+/// A specification with each of its limits as an id and its text, from `L1`, in the order the person
+/// sees them. They have no id of their own, and a review names the one a change breaks by it, as it
+/// does a criterion.
+fn limits_with_ids(mut output: Value) -> Value {
+    if let Some(limits) = output.get_mut("limits").and_then(Value::as_array_mut) {
+        for (index, limit) in limits.iter_mut().enumerate() {
+            if let Some(text) = limit.as_str() {
+                *limit = serde_json::json!({ "id": format!("L{}", index + 1), "text": text });
             }
         }
     }
@@ -569,11 +708,11 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
             "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{{{{answers}}}}\n\n{{{{rework}}}}\n\n{}\n{{{{diff}}}}",
             if es {
                 format!(
-                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque. No cuestiones lo que eligió una persona: una decisión cuyo `taken` es `person`, o lo que la persona respondió. Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Una decisión que no se sostenga con el cambio ya hecho también lo es: cítala como la dice `decided`, con el archivo y la línea donde se ve, si los hay. Si no hay, el veredicto es approved. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
+                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque. No cuestiones lo que eligió una persona: una decisión cuyo `taken` es `person`, o lo que la persona respondió. Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Una decisión que no se sostenga con el cambio ya hecho también lo es: cítala como la dice `decided`, con el archivo y la línea donde se ve, si los hay. Si no hay, el veredicto es approved. En `breaks`, pon el `id` del criterio o del límite que rompe cada problema, si rompe uno: entonces el veredicto no puede ser approved, por menor que parezca. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
                 )
             } else {
                 format!(
-                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Also question what the specification decided on its own, in `decided`, where it touches your focus. Don't question what a person chose: a decision whose `taken` is `person`, or what the person answered. Report only real problems in this change, each with its file and line. A decision that doesn't hold up now that the change is made is one too: quote it as `decided` says it, with the file and line where it shows, if any. If there are none, the verdict is approved. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
+                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Also question what the specification decided on its own, in `decided`, where it touches your focus. Don't question what a person chose: a decision whose `taken` is `person`, or what the person answered. Report only real problems in this change, each with its file and line. A decision that doesn't hold up now that the change is made is one too: quote it as `decided` says it, with the file and line where it shows, if any. If there are none, the verdict is approved. In `breaks`, put the `id` of the criterion or limit each problem breaks, if it breaks one: then the verdict can't be approved, however minor it looks. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
                 )
             },
             text("Specification:", "Especificación:"),
@@ -2092,11 +2231,12 @@ mod tests {
     #[test]
     fn a_review_that_left_part_of_the_change_unread_is_never_an_approval() {
         let review = |verdict: &str, unread: Value| serde_json::json!({ "verdict": verdict, "findings": [], "summary": "Fine", "unread": unread });
-        let (kept, unread) =
+        let (kept, why) =
             review_as_kept(&review("approved", serde_json::json!(["src/b.ts", " "]))).unwrap();
         assert_eq!(kept["verdict"], "changes");
         assert_eq!(kept["summary"], "Fine");
-        assert_eq!(unread, ["src/b.ts"]);
+        assert_eq!(why.unread, ["src/b.ts"]);
+        assert!(why.breaks.is_empty());
         // Read it all, or already asking for changes, or from before Keel asked: it stands.
         assert!(review_as_kept(&review("approved", serde_json::json!([]))).is_none());
         assert!(review_as_kept(&review("approved", serde_json::json!(["  "]))).is_none());
@@ -2107,6 +2247,193 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn a_review_that_says_a_criterion_or_limit_is_broken_is_never_an_approval() {
+        use serde_json::json;
+        let review = |verdict: &str, findings: Value| json!({ "verdict": verdict, "findings": findings, "summary": "Fine", "unread": [] });
+        let found = |breaks: Value| json!({ "file": "src/jobs.py", "line": 42, "text": "Sends the notice twice", "breaks": breaks });
+        let findings = json!([
+            found(json!("C5")),
+            found(Value::Null),
+            found(json!(" L2 ")),
+            found(json!("C5"))
+        ]);
+        let (kept, why) = review_as_kept(&review("approved", findings.clone())).unwrap();
+        assert_eq!(kept["verdict"], "changes");
+        assert_eq!(kept["findings"], findings);
+        assert_eq!(why.breaks, ["C5", "L2"]);
+        assert!(why.unread.is_empty());
+        // Only minor ones, or text from before Keel asked, or already asking for changes: it stands.
+        let minor = json!([found(Value::Null), found(json!(" "))]);
+        assert!(review_as_kept(&review("approved", minor)).is_none());
+        let old = json!(["src/jobs.py:42 breaks C5"]);
+        assert!(review_as_kept(&review("approved", old)).is_none());
+        let asked = json!([found(json!("C5"))]);
+        assert!(review_as_kept(&review("changes", asked)).is_none());
+        // Both at once, and each reason is kept.
+        let both = json!({ "verdict": "approved", "findings": [found(json!("C1"))], "summary": "" , "unread": ["src/b.ts"] });
+        let (_, why) = review_as_kept(&both).unwrap();
+        assert_eq!(why.unread, ["src/b.ts"]);
+        assert_eq!(why.breaks, ["C1"]);
+    }
+
+    #[test]
+    fn findings_read_as_the_text_they_were_and_as_where_what_and_what_they_break() {
+        use serde_json::json;
+        let output = json!({ "findings": [
+            "a.py:1 written before Keel asked",
+            { "file": "src/jobs.py", "line": 42, "text": "Sends it twice", "breaks": "C5" },
+            { "file": null, "line": null, "text": "Says nothing new", "breaks": null },
+            { "file": " src/b.py ", "line": "x", "text": "No line", "breaks": " " },
+            7,
+        ]});
+        let findings = findings_of(&output);
+        let found = |file: Option<&str>, line: Option<u64>, text: &str, breaks: Option<&str>| {
+            Finding::Found {
+                file: file.map(str::to_owned),
+                line,
+                text: text.to_owned(),
+                breaks: breaks.map(str::to_owned),
+            }
+        };
+        assert_eq!(
+            findings,
+            [
+                Finding::Text("a.py:1 written before Keel asked".into()),
+                found(Some("src/jobs.py"), Some(42), "Sends it twice", Some("C5")),
+                found(None, None, "Says nothing new", None),
+                found(Some("src/b.py"), None, "No line", None),
+            ]
+        );
+        assert_eq!(findings[0].breaks(), None);
+        assert_eq!(findings[1].breaks(), Some("C5"));
+        let lines: Vec<String> = findings.iter().map(Finding::where_and_what).collect();
+        assert_eq!(
+            lines,
+            [
+                "a.py:1 written before Keel asked",
+                "src/jobs.py:42 Sends it twice",
+                "Says nothing new",
+                "src/b.py No line"
+            ]
+        );
+        // What comes back is what was there, old text as text.
+        assert_eq!(
+            serde_json::to_value(&findings[..2]).unwrap(),
+            json!(["a.py:1 written before Keel asked", { "file": "src/jobs.py", "line": 42, "text": "Sends it twice", "breaks": "C5" }])
+        );
+        assert!(findings_of(&json!({ "verdict": "approved" })).is_empty());
+    }
+
+    #[test]
+    fn what_a_review_says_is_broken_reaches_the_approver_apart() {
+        use serde_json::json;
+        let mut attempts = recorded(&[
+            ("code", "agent", "reviewer", Succeeded, ""),
+            ("security", "agent", "reviewer", Succeeded, ""),
+            ("ux", "agent", "reviewer", Succeeded, ""),
+            ("code", "agent", "reviewer", Succeeded, ""),
+        ]);
+        attempts[0].output = Some(json!({ "verdict": "changes", "findings": [
+            { "file": "old.py", "line": 1, "text": "From an earlier try", "breaks": "C1" },
+        ]}));
+        attempts[1].output =
+            Some(json!({ "verdict": "approved", "findings": ["a.py:1 text from before"] }));
+        attempts[2].output = Some(json!({ "verdict": "approved", "findings": [
+            { "file": "src/a.tsx", "line": null, "text": "Could be shorter", "breaks": null },
+        ]}));
+        attempts[3].output = Some(json!({ "verdict": "changes", "findings": [
+            { "file": "src/jobs.py", "line": 42, "text": "Sends the notice twice", "breaks": "C5" },
+            { "file": null, "line": null, "text": "Changes the public API", "breaks": "L2" },
+        ]}));
+        let en = broken_text(&attempts, "en");
+        assert!(
+            en.ends_with(
+                ":\n- code: breaks C5. src/jobs.py:42 Sends the notice twice\n- code: breaks L2. Changes the public API"
+            ),
+            "{en}"
+        );
+        assert!(
+            en.contains("unless you say in reasons where the code meets it"),
+            "{en}"
+        );
+        for left_out in ["earlier try", "Could be shorter", "from before"] {
+            assert!(!en.contains(left_out), "{left_out}");
+        }
+        let es = broken_text(&attempts, "es");
+        assert!(
+            es.contains("\n- code: rompe C5. src/jobs.py:42 Sends the notice twice"),
+            "{es}"
+        );
+        assert!(
+            es.contains("salvo que digas en reasons dónde lo cumple el código"),
+            "{es}"
+        );
+        // Nothing broken, nothing to say.
+        assert_eq!(broken_text(&attempts[1..3], "en"), "");
+    }
+
+    #[test]
+    fn the_specifications_limits_reach_the_agents_with_an_id_numbered_from_one() {
+        let mut attempts = recorded(&[("spec", "agent", "specifier", Succeeded, "")]);
+        attempts[0].output = Some(serde_json::json!({
+            "summary": "s", "criteria": [], "changes": [], "decided": [], "questions": [],
+            "limits": ["Its signature stays the same", "No new dependency"],
+        }));
+        let read: Value = serde_json::from_str(&output_of(&attempts, "spec")).unwrap();
+        assert_eq!(
+            read["limits"],
+            serde_json::json!([
+                { "id": "L1", "text": "Its signature stays the same" },
+                { "id": "L2", "text": "No new dependency" },
+            ])
+        );
+        // What Keel keeps is what the specifier wrote.
+        assert_eq!(
+            attempts[0].output.as_ref().unwrap()["limits"][0],
+            "Its signature stays the same"
+        );
+    }
+
+    #[test]
+    fn each_finding_says_where_it_is_and_which_criterion_or_limit_it_breaks() {
+        let schema: Value = serde_json::from_str(VERDICT_SCHEMA).unwrap();
+        let finding = &schema["properties"]["findings"]["items"];
+        assert_eq!(
+            finding["required"],
+            serde_json::json!(["file", "line", "text", "breaks"])
+        );
+        let breaks = &finding["properties"]["breaks"];
+        assert_eq!(breaks["type"], serde_json::json!(["string", "null"]));
+        let description = breaks["description"].as_str().unwrap();
+        assert!(description.contains("`L<n>`"), "{description}");
+        for (language, told) in [
+            (
+                "en",
+                "In `breaks`, put the `id` of the criterion or limit each problem breaks",
+            ),
+            (
+                "es",
+                "En `breaks`, pon el `id` del criterio o del límite que rompe cada problema",
+            ),
+        ] {
+            let full = builtin(language, None).remove(0);
+            let reviewers: Vec<&StepSpec> = full
+                .steps
+                .iter()
+                .flat_map(|step| match step {
+                    WorkflowStep::Parallel { steps, .. } => steps.iter().collect(),
+                    _ => Vec::new(),
+                })
+                .filter(|spec| spec.role == StepRole::Reviewer)
+                .collect();
+            assert_eq!(reviewers.len(), 4, "{language}");
+            for reviewer in reviewers {
+                assert!(reviewer.prompt.contains(told), "{language} {}", reviewer.id);
+            }
+        }
     }
 
     #[test]

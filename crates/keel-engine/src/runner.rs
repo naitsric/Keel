@@ -1398,10 +1398,11 @@ impl Inner {
         true
     }
 
-    /// A review that couldn't read part of the change isn't an approval of it, and the record says
-    /// what it left out. What it answered as it came stays in the `result` event.
+    /// A review that couldn't read part of the change, or that says it breaks a criterion or a
+    /// limit, isn't an approval of it, and the record says why. What it answered as it came stays
+    /// in the `result` event.
     fn correct_review(&self, m: &Monitor) {
-        let Some((kept, unread)) = self
+        let Some((kept, why)) = self
             .store
             .attempt(&m.attempt_id)
             .ok()
@@ -1411,11 +1412,20 @@ impl Inner {
             return;
         };
         self.keep_output(m, &kept);
-        let _ = self.store.append_event(
-            &m.attempt_id,
-            "reviewIncomplete",
-            &json!({ "unread": unread }),
-        );
+        if !why.unread.is_empty() {
+            let _ = self.store.append_event(
+                &m.attempt_id,
+                "reviewIncomplete",
+                &json!({ "unread": why.unread }),
+            );
+        }
+        if !why.breaks.is_empty() {
+            let _ = self.store.append_event(
+                &m.attempt_id,
+                "reviewBreaks",
+                &json!({ "breaks": why.breaks }),
+            );
+        }
     }
 
     /// Resumes the same session once, saying exactly what to fix.
