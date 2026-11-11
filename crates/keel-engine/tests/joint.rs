@@ -273,11 +273,13 @@ fn both() -> Value {
     agreed(&[("valora", "Sends the token"), ("app", "Reads the token")])
 }
 
-/// Both, with what the parts have to agree on exactly: K1 names both, and K2 only app.
+/// Both, with what the parts have to agree on exactly, one side to each point: K1 is what valora
+/// sends, and K2 and K3 how app answers it.
 fn with_contract() -> Value {
     let mut agreed = both();
     agreed["contract"] = json!([
-        { "when": "valora posts /session with `token`", "then": "app answers 201", "projects": ["valora", "app"] },
+        { "when": "someone logs in on valora", "then": "valora sends POST /session with `token`", "projects": ["valora"] },
+        { "when": "app gets POST /session with `token`", "then": "it answers 201", "projects": ["app"] },
         { "when": "the token is wrong", "then": "app answers 401", "projects": ["app"] },
     ]);
     agreed
@@ -418,7 +420,7 @@ impl World {
     }
 
     /// Each point of the contract, with what each part it names last said about it, by project:
-    /// "K1 valora=Some(Met) app=None".
+    /// "K1 valora=Some(Met)", and "K1 valora=None, unverifiable" for a part that has no verifier.
     fn contract(&self, card: &str) -> Vec<String> {
         self.engine
             .joint_change(card)
@@ -429,11 +431,23 @@ impl World {
                 let parts: Vec<String> = point
                     .parts
                     .iter()
-                    .map(|part| format!("{}={:?}", part.project, part.result))
+                    .map(|part| {
+                        let unverifiable = if part.verifies { "" } else { ", unverifiable" };
+                        format!("{}={:?}{unverifiable}", part.project, part.result)
+                    })
                     .collect();
                 format!("{} {}", point.id, parts.join(" "))
             })
             .collect()
+    }
+
+    /// What an agent was asked, without what Keel told it in its system prompt.
+    fn asked(&self, index: usize) -> String {
+        self.call(index)
+            .split("--- schema")
+            .next()
+            .unwrap_or_default()
+            .to_owned()
     }
 
     /// Both projects run a specifier and a builder that commits, wait for a person, and open a
@@ -1224,10 +1238,10 @@ fn each_part_verifies_the_contract_points_that_name_it_and_the_change_shows_each
         ], "summary": "Both hold." }),
         plain("back-adm reads the token"),
         json!({}),
-        // It leaves K1 out.
+        // It leaves K2 out.
         json!({ "criteria": [
             { "id": "C1", "result": "met", "evidence": "read.test.ts:1" },
-            { "id": "K2", "result": "unmet", "evidence": "session.ts:4" },
+            { "id": "K3", "result": "unmet", "evidence": "session.ts:4" },
         ], "summary": "It answers 400." }),
     ]);
     let (card, run) = w.agreeing();
@@ -1235,20 +1249,21 @@ fn each_part_verifies_the_contract_points_that_name_it_and_the_change_shows_each
     w.engine.answer_approval(&approval.id, true, "").unwrap();
     let parts = w.parts(&card);
     let agreed = w.store.joint_change(&card).unwrap().agreed.unwrap();
-    assert_eq!(agreed["contract"][1]["id"], "K2");
+    assert_eq!(agreed["contract"][2]["id"], "K3");
 
     // No part has said anything about any of them yet.
     assert_eq!(
         w.contract(&card),
-        ["K1 valora=None app=None", "K2 app=None"]
+        ["K1 valora=None", "K2 app=None", "K3 app=None"]
     );
 
     w.engine.board_tick().unwrap();
     let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
     w.wait_for(&first, "approval", AttemptState::WaitingApproval);
-    // Valora's part has to keep K1, in the agreement's words, and nothing says it has to keep K2.
-    let spec = w.attempts(&first, "spec")[0].output.clone().unwrap();
-    let criteria: Vec<(&str, &str)> = spec["criteria"]
+    // Valora's part keeps its side, K1, in the agreement's words. App's side isn't checked there.
+    let spec = &w.attempts(&first, "spec")[0];
+    let output = spec.output.clone().unwrap();
+    let criteria: Vec<(&str, &str)> = output["criteria"]
         .as_array()
         .unwrap()
         .iter()
@@ -1256,21 +1271,35 @@ fn each_part_verifies_the_contract_points_that_name_it_and_the_change_shows_each
         .collect();
     assert_eq!(
         criteria,
-        [
-            ("C1", "it's asked"),
-            ("K1", "valora posts /session with `token`")
-        ]
+        [("C1", "it's asked"), ("K1", "someone logs in on valora")]
     );
+    // What it wrote of K1 in its own words gave way, and the record says so.
+    let replaced: Vec<Value> = w
+        .store
+        .events(&spec.id, 0)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "contractReplaced")
+        .map(|event| event.data)
+        .collect();
+    assert_eq!(replaced, [json!({ "replaced": ["K1"] })]);
     // Every part still reads all of what was agreed, and is told which points are its own.
     let call = w.call(1);
     for told in [
-        "K1 (valora, app): valora posts /session with `token` → app answers 201",
-        "K2 (app): the token is wrong → app answers 401",
-        "Keel adds the points of the contract that name valora to this part's criteria",
+        "K1 (valora): someone logs in on valora → valora sends POST /session with `token`",
+        "K2 (app): app gets POST /session with `token` → it answers 201",
+        "Keel adds the points of the contract that name valora to this part's criteria, with their ids (K1)",
+        "The other points are what the other parts promise",
     ] {
         assert!(call.contains(told), "{told}: {call}");
     }
-    assert!(w.call(3).contains("valora posts /session with `token`"));
+    // Its verifier is asked about K1 as part of what has to be true, and not about app's side.
+    let verifier = w.asked(3);
+    assert!(
+        verifier.contains("valora sends POST /session with `token`"),
+        "{verifier}"
+    );
+    assert!(!verifier.contains("it answers 201"), "{verifier}");
 
     w.engine.card_stop_waiting(&parts[1].id).unwrap();
     w.engine.board_tick().unwrap();
@@ -1283,21 +1312,47 @@ fn each_part_verifies_the_contract_points_that_name_it_and_the_change_shows_each
         .iter()
         .map(|c| c["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, ["C1", "K1", "K2"]);
-    // Its verifier left K1 out, and K1 is still on the list.
+    assert_eq!(ids, ["C1", "K2", "K3"]);
+    // Its verifier left K2 out, and K2 is still on the list.
     let verified = w.attempts(&second, "verify")[0].output.clone().unwrap();
-    let k1 = &verified["criteria"][1];
+    let k2 = &verified["criteria"][1];
     assert_eq!(
-        (&k1["id"], &k1["result"], &k1["corrected"]),
-        (&json!("K1"), &json!("unverified"), &json!("leftOut"))
+        (&k2["id"], &k2["result"], &k2["corrected"]),
+        (&json!("K2"), &json!("unverified"), &json!("leftOut"))
     );
 
     assert_eq!(
         w.contract(&card),
         [
-            "K1 valora=Some(Met) app=Some(Unverified)",
-            "K2 app=Some(Unmet)"
+            "K1 valora=Some(Met)",
+            "K2 app=Some(Unverified)",
+            "K3 app=Some(Unmet)"
         ]
+    );
+}
+
+#[test]
+fn a_part_whose_workflow_has_no_verifier_says_so_rather_than_not_yet() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.short_workflows();
+    w.answers(&[
+        with_contract(),
+        plain("Valora sends the token"),
+        json!({}),
+        json!({}),
+    ]);
+    let (card, run) = w.agreeing();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+    // App's part hasn't started, so nothing says yet whether it verifies.
+    assert_eq!(
+        w.contract(&card),
+        ["K1 valora=None, unverifiable", "K2 app=None", "K3 app=None"]
     );
 }
 

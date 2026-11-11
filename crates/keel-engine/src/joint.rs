@@ -122,6 +122,20 @@ pub struct ContractPart {
     pub project: String,
     /// What its verifier said of it in its run's latest round. None until it said something.
     pub result: Option<Outcome>,
+    /// False once its run shows a workflow with no verifier, which never will. Until it has a run,
+    /// nothing says.
+    pub verifies: bool,
+}
+
+/// Whether a workflow has a step that checks what its spec says has to be true.
+fn has_verifier(steps: &[WorkflowStep]) -> bool {
+    steps.iter().any(|step| match step {
+        WorkflowStep::Agent(spec) => spec.role == StepRole::Verifier,
+        WorkflowStep::Parallel { steps, .. } => {
+            steps.iter().any(|spec| spec.role == StepRole::Verifier)
+        }
+        _ => false,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -477,15 +491,20 @@ impl Inner {
         };
         let mut verified = Vec::new();
         for card in parts {
-            let latest = match &card.run_id {
+            let found = match &card.run_id {
                 Some(run_id) => {
                     let run = self.store.run(run_id)?;
                     let attempts = self.store.attempts_of_run(run_id)?;
-                    verification::in_round(&attempts, run.round).pop()
+                    let steps: Vec<WorkflowStep> =
+                        serde_json::from_value(run.workflow).unwrap_or_default();
+                    (
+                        verification::in_round(&attempts, run.round).pop(),
+                        has_verifier(&steps),
+                    )
                 }
-                None => None,
+                None => (None, true),
             };
-            verified.push(latest);
+            verified.push(found);
         }
         Ok(spec
             .contract
@@ -497,7 +516,7 @@ impl Inner {
                 parts: parts
                     .iter()
                     .zip(&verified)
-                    .filter_map(|(card, latest)| {
+                    .filter_map(|(card, (latest, verifies))| {
                         let position = card.part.as_ref()?.position;
                         let name = part_name(&spec, position)?;
                         point
@@ -515,6 +534,7 @@ impl Inner {
                                         .find(|checked| checked.id == point.id)
                                         .map(|checked| checked.result)
                                 }),
+                                verifies: *verifies,
                             })
                     })
                     .collect(),
@@ -982,6 +1002,16 @@ impl Inner {
                 text.push_str(&format!(
                     "\nKeel adds the points of the contract that name {name} to this part's criteria, with their ids ({}), and they're verified like the rest. Don't write them again as criteria of your own.\n",
                     ids.join(", ")
+                ));
+            }
+            if spec.contract.len() > contract.len() {
+                let which = if contract.is_empty() {
+                    "\nThe points of the contract"
+                } else {
+                    "The other points"
+                };
+                text.push_str(&format!(
+                    "{which} are what the other parts promise: rely on them, but they aren't verified in this part.\n"
                 ));
             }
             if !spec.together.is_empty() {

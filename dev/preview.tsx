@@ -203,8 +203,8 @@ const previewSpec = {
         ],
         together: [say("Pay an invoice in demo and see it settled in payments", "Paga una factura en demo y mírala liquidada en payments")],
         contract: [
-          { id: "K1", when: say("demo posts /invoices/{id}/settle", "demo hace POST a /invoices/{id}/settle"), then: say("payments answers 200 with settledAt", "payments responde 200 con settledAt"), projects: ["payments", "demo"] },
-          { id: "K2", when: say("payments settles an invoice", "payments liquida una factura"), then: say("its state goes from open to settled", "su estado pasa de open a settled"), projects: ["payments"] },
+          { id: "K1", when: say("payments gets POST /invoices/{id}/settle", "payments recibe POST /invoices/{id}/settle"), then: say("it answers 200 with settledAt", "responde 200 con settledAt"), projects: ["payments"] },
+          { id: "K2", when: say("an invoice is paid in demo", "se paga una factura en demo"), then: say("demo sends POST /invoices/{id}/settle", "demo envía POST /invoices/{id}/settle"), projects: ["demo"] },
         ],
       }
     : {}),
@@ -678,23 +678,31 @@ const jointAgreed: SpecOutput = {
     { project: "demo", text: "Call it when an invoice is paid" },
   ],
   together: jointChecks.map((check) => check.text),
+  // One side to each point: what payments answers, and what demo sends and shows.
   contract: [
-    { id: "K1", when: "demo posts /invoices/{id}/settle", then: "payments answers 200 with `settledAt`", projects: ["payments", "demo"] },
-    { id: "K2", when: "the invoice is already settled", then: "payments answers 409 and demo shows it as paid", projects: ["payments", "demo"] },
-    { id: "K3", when: "payments settles an invoice", then: "its state goes from open to settled", projects: ["payments"] },
+    { id: "K1", when: "payments gets POST /invoices/{id}/settle", then: "it answers 200 with `settledAt`", projects: ["payments"] },
+    { id: "K2", when: "an invoice is paid in demo", then: "demo sends POST /invoices/{id}/settle", projects: ["demo"] },
+    { id: "K3", when: "the invoice is already settled", then: "payments answers 409", projects: ["payments"] },
+    { id: "K4", when: "demo gets a 409", then: "it shows the invoice as paid", projects: ["demo"] },
   ],
 };
 // What each part found of each point: met, not met, not verified, and not checked yet.
 // ?jointContract=none is an agreement without any.
+// ?jointVerify=none has demo's part run a workflow with no verifier.
 const jointContract = (parts: JointCard[]): ContractPoint[] => {
   if (params.get("jointContract") === "none") return [];
-  const found: Record<string, ContractPoint["parts"][number]["result"][]> = { K1: ["met", "met"], K2: ["unmet", null], K3: ["unverified"] };
-  // The parts are first to last, as the projects each point names.
+  const noVerifier = params.get("jointVerify") === "none";
+  const found: Record<string, ContractPoint["parts"][number]["result"]> = { K1: "met", K2: null, K3: "unmet", K4: "unverified" };
   return (jointAgreed.contract ?? []).map((point) => ({
     id: point.id,
     when: point.when,
     then: point.then,
-    parts: parts.slice(0, point.projects.length).map((card, index) => ({ cardId: card.cardId, position: card.part?.position ?? index + 1, project: card.project, result: found[point.id]?.[index] ?? null })),
+    parts: parts
+      .filter((card) => point.projects.includes(card.project))
+      .map((card) => {
+        const unverifiable = noVerifier && card.project === "demo";
+        return { cardId: card.cardId, position: card.part?.position ?? 0, project: card.project, result: unverifiable ? null : (found[point.id] ?? null), verifies: !unverifiable };
+      }),
   }));
 };
 function partOf(changeId: string, position: number, extra: Partial<PartOf> = {}): PartOf {
@@ -953,6 +961,15 @@ mockIPC((command, args) => {
         if (params.get("flow") === "movedUp") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: false, because: WHY_MOVED_UP, round: 0 } }];
       }
       if ((args as { attemptId?: string } | undefined)?.attemptId === "c1" && params.get("flow") === "corrected") return correctedEvents;
+      // contractReplaced=1, with specifier=1: a part's specifier wrote points of the contract again,
+      // and Keel kept them as agreed. flow=approval&node=spec&then=Activity shows it.
+      if ((args as { attemptId?: string } | undefined)?.attemptId === specAttempt.id && params.get("contractReplaced") === "1") {
+        return [
+          { seq: 100, attemptId: specAttempt.id, at: at(2), kind: "result", data: {} },
+          { seq: 101, attemptId: specAttempt.id, at: at(2), kind: "contractReplaced", data: { replaced: ["K1", "K3"] } },
+          { seq: 102, attemptId: specAttempt.id, at: at(2), kind: "finished", data: { state: "succeeded" } },
+        ];
+      }
       if ((args as { attemptId?: string } | undefined)?.attemptId === returnedApproval.id && (params.get("flow") === "returned" || params.get("flow") === "sentBack")) {
         return [{ seq: 100, attemptId: returnedApproval.id, at: at(5), kind: "returned", data: { instructions: sentBackWith, round: 1, ...(assistantBy ? { by: assistantBy } : {}) } }];
       }

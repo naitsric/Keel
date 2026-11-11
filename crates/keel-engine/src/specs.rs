@@ -742,21 +742,65 @@ pub enum Verdict {
     KeptAsking { output: Value, rounds: usize },
 }
 
-impl Verdict {
-    /// For one part of a change across projects: the points of the contract that it has to keep join
-    /// its criteria, in the agreement's words and with their ids, so they're verified like any other.
-    /// The engine adds them, since an agent could leave one out, and one the specifier wrote with
-    /// the same id gives way. They don't count towards its limit: it didn't write them.
-    pub fn with_contract(self, contract: &[Criterion]) -> Self {
-        if contract.is_empty() {
-            return self;
+/// Whether a criterion as an agent wrote it has the id of one of these points.
+fn is_one_of(criterion: &Value, contract: &[Criterion]) -> bool {
+    let id = criterion.get("id").and_then(Value::as_str).map(one_line);
+    contract
+        .iter()
+        .any(|point| id.as_deref() == Some(point.id.as_str()))
+}
+
+/// The points of the contract a part's specifier also wrote, in its own words, which give way to
+/// what was agreed.
+pub fn replaced_by_contract(output: Option<&Value>, contract: &[Criterion]) -> Vec<String> {
+    let mut replaced: Vec<String> = Vec::new();
+    let written = output
+        .and_then(|output| output.get("criteria"))
+        .and_then(Value::as_array);
+    for criterion in written.into_iter().flatten() {
+        if let Some(id) = criterion.get("id").and_then(Value::as_str).map(one_line)
+            && is_one_of(criterion, contract)
+            && !replaced.contains(&id)
+        {
+            replaced.push(id);
         }
+    }
+    replaced
+}
+
+/// [`judge`] for one part of a change across projects: the points of the contract it has to keep
+/// join its criteria, in the agreement's words and with their ids, so they're verified like any
+/// other. The engine adds them, since an agent could leave one out. One the specifier wrote with
+/// the same id gives way before its limits are counted: they're only for what it wrote itself, and
+/// it needs none of its own if the points say it all.
+pub fn judge_part(
+    output: Option<&Value>,
+    after_correction: bool,
+    rounds_answered: usize,
+    contract: &[Criterion],
+) -> Verdict {
+    if contract.is_empty() {
+        return judge(output, after_correction, rounds_answered);
+    }
+    let own = output.map(|output| {
+        let mut output = output.clone();
+        if let Some(criteria) = output.get_mut("criteria").and_then(Value::as_array_mut) {
+            criteria.retain(|criterion| !is_one_of(criterion, contract));
+            if criteria.is_empty() {
+                criteria.extend(contract.iter().map(|point| json!(point)));
+            }
+        }
+        output
+    });
+    judge(own.as_ref(), after_correction, rounds_answered).with_contract(contract)
+}
+
+impl Verdict {
+    /// Its spec with these points among its criteria, in place of any with the same id.
+    fn with_contract(self, contract: &[Criterion]) -> Self {
         let add = |mut output: Value| {
             if let Some(criteria) = output.get_mut("criteria").and_then(Value::as_array_mut) {
-                criteria.retain(|criterion| {
-                    let id = criterion.get("id").and_then(Value::as_str);
-                    !contract.iter().any(|point| id == Some(point.id.as_str()))
-                });
+                criteria.retain(|criterion| !is_one_of(criterion, contract));
                 criteria.extend(contract.iter().map(|point| json!(point)));
             }
             output
@@ -1894,9 +1938,10 @@ mod tests {
             ]),
             json!([]),
         );
+        // Each point is one side, kept by whichever parts make it true.
         output["contract"] = json!([
-            point("valora posts /session with `token`", &["valora", "back-adm"]),
-            { "id": "X9", "when": "  the token is wrong\n", "then": "back-adm answers 401", "projects": ["back-adm"] },
+            point("back-adm gets POST /session with `token`", &["back-adm"]),
+            { "id": "X9", "when": "  someone logs in\n", "then": "valora sends POST /session with `token`", "projects": ["valora"] },
         ]);
         let Verdict::Ready(kept) = judged(&output) else {
             panic!("{:?}", judged(&output));
@@ -1904,11 +1949,13 @@ mod tests {
         let spec: Spec = serde_json::from_value(kept).unwrap();
         let ids: Vec<&str> = spec.contract.iter().map(|p| p.id.as_str()).collect();
         assert_eq!(ids, ["K1", "K2"], "only Keel numbers them");
-        assert_eq!(spec.contract[1].when, "the token is wrong");
-        assert_eq!(spec.contract[0].projects, ["valora", "back-adm"]);
+        assert_eq!(spec.contract[1].when, "someone logs in");
+        assert_eq!(spec.contract[0].projects, ["back-adm"]);
         let text = spec.readable("en");
         assert!(
-            text.contains("K1 (valora, back-adm): valora posts /session with `token` → it answers 201 with `id`"),
+            text.contains(
+                "K1 (back-adm): back-adm gets POST /session with `token` → it answers 201 with `id`"
+            ),
             "{text}"
         );
         assert!(
@@ -1968,12 +2015,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_part_keeps_the_contract_points_that_name_it_whatever_its_specifier_wrote() {
-        let contract = [
+    fn contract() -> [Criterion; 2] {
+        [
             Criterion {
                 id: "K1".into(),
-                when: "valora posts /session".into(),
+                when: "app gets POST /session".into(),
                 then: "it answers 201".into(),
             },
             Criterion {
@@ -1981,13 +2027,19 @@ mod tests {
                 when: "the token is wrong".into(),
                 then: "it answers 401".into(),
             },
-        ];
+        ]
+    }
+
+    #[test]
+    fn a_part_keeps_the_contract_points_that_name_it_whatever_its_specifier_wrote() {
+        let contract = contract();
         let mut own = valid();
         own["criteria"] = json!([
             { "id": "C1", "when": "it's asked", "then": "it answers" },
             { "id": "K1", "when": "its own words", "then": "for the same point" },
         ]);
-        let Verdict::Ready(kept) = judge(Some(&own), false, 0).with_contract(&contract) else {
+        assert_eq!(replaced_by_contract(Some(&own), &contract), ["K1"]);
+        let Verdict::Ready(kept) = judge_part(Some(&own), false, 0, &contract) else {
             panic!();
         };
         let spec: Spec = serde_json::from_value(kept).unwrap();
@@ -2011,21 +2063,60 @@ mod tests {
             "text": "Which channel?",
             "options": [{ "label": "A header", "recommended": true }, { "label": "A cookie", "recommended": false }],
         }]);
-        let Verdict::Ask { output, .. } = judge(Some(&asks), false, 0).with_contract(&contract)
-        else {
+        let Verdict::Ask { output, .. } = judge_part(Some(&asks), false, 0, &contract) else {
             panic!();
         };
         assert_eq!(output["criteria"][2]["id"], "K2");
         let Verdict::TookRecommended { output, .. } =
-            judge(Some(&asks), false, MAX_QUESTION_ROUNDS).with_contract(&contract)
+            judge_part(Some(&asks), false, MAX_QUESTION_ROUNDS, &contract)
         else {
             panic!();
         };
         assert_eq!(output["criteria"][2]["id"], "K2");
         // A part with none to keep, or any other run, is as it was.
         assert_eq!(
-            judge(Some(&valid()), false, 0).with_contract(&[]),
+            judge_part(Some(&valid()), false, 0, &[]),
             judge(Some(&valid()), false, 0)
+        );
+        assert!(replaced_by_contract(Some(&valid()), &contract).is_empty());
+    }
+
+    #[test]
+    fn what_a_specifier_rewrote_of_the_contract_is_replaced_before_its_limits_count() {
+        let contract = contract();
+        // Six of its own, and both points again, too long: eight, over the limit.
+        let mut own = valid();
+        let mut criteria: Vec<Value> = (1..=6)
+            .map(|i| json!({ "id": format!("C{i}"), "when": "it's asked", "then": "it answers" }))
+            .collect();
+        for id in ["K1", "K2"] {
+            criteria.push(json!({ "id": id, "when": "x".repeat(150), "then": "x".repeat(150) }));
+        }
+        own["criteria"] = json!(criteria);
+        let Verdict::Ready(kept) = judge_part(Some(&own), false, 0, &contract) else {
+            panic!("{:?}", judge_part(Some(&own), false, 0, &contract));
+        };
+        let spec: Spec = serde_json::from_value(kept).unwrap();
+        assert_eq!(spec.criteria.len(), 8);
+        assert_eq!(spec.criteria[6..], contract);
+        // A part that has only the points to keep needs none of its own.
+        own["criteria"] = json!([{ "id": "K1", "when": "its own words", "then": "for it" }]);
+        let Verdict::Ready(kept) = judge_part(Some(&own), false, 0, &contract) else {
+            panic!("{:?}", judge_part(Some(&own), false, 0, &contract));
+        };
+        assert_eq!(kept["criteria"], json!(contract));
+        // Its own still keep to the limit.
+        own["criteria"] = json!(
+            (1..=8)
+                .map(|i| json!({ "id": format!("C{i}"), "when": "a", "then": "b" }))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            judge_part(Some(&own), false, 0, &contract),
+            Verdict::Correct(vec![SpecProblem::TooManyCriteria {
+                count: 8,
+                limit: MAX_CRITERIA
+            }])
         );
     }
 
@@ -2067,9 +2158,17 @@ mod tests {
         assert!(
             prompt.find("Los proyectos:").unwrap() < prompt.find("Pregunta solo cuando").unwrap()
         );
-        for (language, numbered) in [
-            ("en", "Keel numbers them K1, K2 and so on"),
-            ("es", "Keel los numera K1, K2 y así"),
+        for (language, numbered, one_side) in [
+            (
+                "en",
+                "Keel numbers them K1, K2 and so on",
+                "A promise between two parts is two points, one for each side",
+            ),
+            (
+                "es",
+                "Keel los numera K1, K2 y así",
+                "Una promesa entre dos partes son dos puntos, uno por cada lado",
+            ),
         ] {
             let prompt = prompts::agreement_prompt(language);
             let contract = prompt.find("- contract:").expect(language);
@@ -2078,6 +2177,7 @@ mod tests {
                 "{language}"
             );
             assert!(prompt.contains(numbered), "{language}");
+            assert!(prompt.contains(one_side), "{language}");
         }
         for problem in [
             SpecProblem::NoParts,

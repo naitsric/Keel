@@ -656,6 +656,8 @@ export interface ContractPoint {
     project: string;
     /** What its verifier said of it in its run's latest round. Null until it said something. */
     result: CheckedCriterion["result"] | null;
+    /** False once its run shows a workflow with no verifier, which never will. */
+    verifies: boolean;
   }[];
 }
 

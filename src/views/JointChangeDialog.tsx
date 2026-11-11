@@ -77,7 +77,7 @@ function ContractRow({ point }: { point: ContractPoint }) {
       <ul className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11.5px]">
         {point.parts.map((part) => (
           <li key={part.cardId}>
-            {t("joint.contractPart", { position: part.position, project: part.project })}: <span className={part.result ? RESULT_TONES[part.result] : "text-subtle"}>{part.result ? t(`run.verifyResult.${part.result}`) : t("joint.notChecked")}</span>
+            {t("joint.contractPart", { position: part.position, project: part.project })}: <span className={part.result ? RESULT_TONES[part.result] : "text-subtle"}>{part.result ? t(`run.verifyResult.${part.result}`) : t(part.verifies ? "joint.notChecked" : "joint.noVerifier")}</span>
           </li>
         ))}
       </ul>

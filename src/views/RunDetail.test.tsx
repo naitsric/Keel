@@ -1646,4 +1646,13 @@ describe("an answer Keel asked to fix", () => {
     expect(page()).toContain("Estado final: Keel pidió corregirlo");
     expect(page()).toContain("el punto 1 de lo que decidió por su cuenta tiene 141 caracteres y el límite es 140");
   });
+
+  it("says which points of the contract a part's specifier wrote again, and that what was agreed stands", async () => {
+    const replaced = [event(1, "contractReplaced", { replaced: ["K1", "K3"] }), event(2, "finished", { state: "succeeded" })];
+    act(() => root.render(<ActivityTab events={replaced} role="specifier" corrected={false} />));
+    expect(page()).toContain("It wrote K1, K3 in its own words. Keel kept them as they were agreed.");
+    await i18next.changeLanguage("es");
+    act(() => root.render(<ActivityTab events={[...replaced]} role="specifier" corrected={false} />));
+    expect(page()).toContain("Escribió K1, K3 con sus propias palabras. Keel los dejó como se acordaron.");
+  });
 });

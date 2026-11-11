@@ -1193,6 +1193,8 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       );
     case "reviewIncomplete":
       return line(t("activity.reviewIncomplete", { files: (data.unread ?? []).join(", ") }), "text-warning");
+    case "contractReplaced":
+      return line(t("activity.contractReplaced", { ids: (data.replaced ?? []).join(", ") }));
     case "verificationCorrected":
       return (
         <div>
