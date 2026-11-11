@@ -17,7 +17,7 @@ use crate::{brain, prompts, sizing, specs, verification};
 
 const MAX_ROUNDS: u32 = 5;
 
-pub const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"verdict":{"type":"string","enum":["approved","changes"]},"findings":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"},"unread":{"type":"array","items":{"type":"string"},"description":"Each file of the change you could not read, if any. A review that left one out is not an approval."}},"required":["verdict","findings","summary","unread"],"additionalProperties":false}"#;
+pub const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"verdict":{"type":"string","enum":["approved","changes"]},"findings":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"},"unread":{"type":"array","items":{"type":"string"},"description":"Each file of the change you could not read, if any. A review that left one out is not an approval."},"unchecked":{"type":"array","items":{"type":"string"},"description":"Each thing in this change you could not check by reading the code, such as how it looks on screen, in one line, if any. Keel shows them to the person as not proven."}},"required":["verdict","findings","summary","unread","unchecked"],"additionalProperties":false}"#;
 pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"},"questioned":{"type":"array","items":{"type":"object","properties":{"decided":{"type":"string"},"why":{"type":"string"}},"required":["decided","why"],"additionalProperties":false},"description":"Each thing the specification decided on its own that a finding questions, quoted as `decided` says it, and why it does not hold. A person decides these at the approval, so none is a reason for rework."}},"required":["decision","risk","reasons","instructions","questioned"],"additionalProperties":false}"#;
 
 /// What a reviewer answered, as Keel keeps it. One that says it couldn't read part of the change
@@ -572,8 +572,8 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
     let approver_prompt = format!(
         "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{VERIFY_STEP}: {{{{steps.{VERIFY_STEP}.output}}}}\n{security}: {{{{steps.{security}.output}}}}\nux: {{{{steps.ux.output}}}}\nui: {{{{steps.ui.output}}}}\n{code}: {{{{steps.{code}.output}}}}\n\n{}\n\n{{{{rework}}}}",
         text(
-            "You decide whether this change is ready for a person to review, using the reviews below and what `verify` found, and you edit nothing. Check each finding in the code before believing it, and discard false ones. A review with files in `unread` didn't check them: check them yourself before you approve. Anything `unmet` in `verify` is a finding, unless what was sent back below changed it. `unverified` only means no test proves it, and isn't a finding by itself. decision = rework if a real finding remains, approve if not. risk = high if it touches authorization, personal data, money, contractual deadlines or the database schema; low if it's contained and easy to revert; medium otherwise. In instructions, say exactly what to fix.",
-            "Decides si este cambio está listo para que lo revise una persona, usando las revisiones de abajo y lo que encontró `verify`, y no editas nada. Comprueba cada hallazgo en el código antes de creerle y descarta los falsos. Una revisión con archivos en `unread` no los revisó: revísalos tú antes de aprobar. Todo lo que esté `unmet` en `verify` es un hallazgo, salvo que lo devuelto abajo lo haya cambiado. `unverified` solo significa que ninguna prueba lo demuestra, y por sí solo no es un hallazgo. decision = rework si queda un hallazgo real, approve si no. risk = high si toca autorización, datos personales, dinero, plazos contractuales o el esquema de base; low si es acotado y fácil de revertir; medium en otro caso. En instructions, di exactamente qué corregir. Responde en español.",
+            "You decide whether this change is ready for a person to review, using the reviews below and what `verify` found, and you edit nothing. Check each finding in the code before believing it, and discard false ones. A review with files in `unread` didn't check them: check them yourself before you approve. Anything `unmet` in `verify` is a finding, unless what was sent back below changed it. `unverified` only means no test proves it, and isn't a finding by itself. What a review put in `unchecked` is what reading the code can't prove, such as how it looks on screen: Keel shows it to the person to check, so it isn't a finding and no reason to send the work back. decision = rework if a real finding remains, approve if not. risk = high if it touches authorization, personal data, money, contractual deadlines or the database schema; low if it's contained and easy to revert; medium otherwise. In instructions, say exactly what to fix.",
+            "Decides si este cambio está listo para que lo revise una persona, usando las revisiones de abajo y lo que encontró `verify`, y no editas nada. Comprueba cada hallazgo en el código antes de creerle y descarta los falsos. Una revisión con archivos en `unread` no los revisó: revísalos tú antes de aprobar. Todo lo que esté `unmet` en `verify` es un hallazgo, salvo que lo devuelto abajo lo haya cambiado. `unverified` solo significa que ninguna prueba lo demuestra, y por sí solo no es un hallazgo. Lo que una revisión puso en `unchecked` es lo que leer el código no puede comprobar, como cómo se ve en pantalla: Keel se lo muestra a la persona para que lo compruebe, así que no es un hallazgo ni motivo para devolver el trabajo. decision = rework si queda un hallazgo real, approve si no. risk = high si toca autorización, datos personales, dinero, plazos contractuales o el esquema de base; low si es acotado y fácil de revertir; medium en otro caso. En instructions, di exactamente qué corregir. Responde en español.",
         ),
         text("Specification:", "Especificación:"),
         // What the specification decided on its own is the person's to settle, not the builder's.
@@ -2043,7 +2043,56 @@ mod tests {
                 }
             }
         }
-        assert!(VERDICT_SCHEMA.contains(r#""required":["verdict","findings","summary","unread"]"#));
+        assert!(VERDICT_SCHEMA.contains(r#""required":["verdict","findings","summary","unread","#));
+    }
+
+    #[test]
+    fn every_reviewer_says_apart_what_it_could_not_check_by_reading_the_code() {
+        let schema: Value = serde_json::from_str(VERDICT_SCHEMA).unwrap();
+        assert_eq!(
+            schema["required"],
+            serde_json::json!(["verdict", "findings", "summary", "unread", "unchecked"])
+        );
+        let unchecked = &schema["properties"]["unchecked"];
+        assert_eq!(unchecked["type"], "array");
+        assert_eq!(unchecked["items"]["type"], "string");
+        let description = unchecked["description"].as_str().unwrap();
+        assert!(
+            description.contains("how it looks on screen"),
+            "{description}"
+        );
+        assert!(description.contains("not proven"), "{description}");
+        // Every reviewer answers with it, built in or saved by the person.
+        assert_eq!(schema_for(&StepRole::Reviewer), Some(VERDICT_SCHEMA));
+    }
+
+    /// Code can't fix what only a person can see, so the approver mustn't send the work back for it.
+    #[test]
+    fn the_approver_knows_what_no_review_could_check_is_for_the_person() {
+        for (language, told) in [
+            (
+                "en",
+                "Keel shows it to the person to check, so it isn't a finding and no reason to send the work back.",
+            ),
+            (
+                "es",
+                "Keel se lo muestra a la persona para que lo compruebe, así que no es un hallazgo ni motivo para devolver el trabajo.",
+            ),
+        ] {
+            let full = builtin(language, None).remove(0);
+            let approver = full
+                .steps
+                .iter()
+                .find_map(|step| match step {
+                    WorkflowStep::Agent(spec) if matches!(spec.role, StepRole::Approver { .. }) => {
+                        Some(spec)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert!(approver.prompt.contains("`unchecked`"), "{language}");
+            assert!(approver.prompt.contains(told), "{language}");
+        }
     }
 
     #[test]

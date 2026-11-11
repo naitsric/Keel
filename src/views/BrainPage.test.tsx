@@ -67,3 +67,34 @@ describe("a decision on the Brain page", () => {
     expect(page).not.toContain("You answered: Use");
   });
 });
+
+describe("the Brain page in a wide window", () => {
+  let root: Root;
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    mockIPC((command) => (command === "brain_get" ? brain : null));
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.replaceChildren();
+  });
+
+  // The same centered column as Settings, so the pages don't jump from side to side.
+  const column = () => document.querySelector("main > .mx-auto.w-full.max-w-3xl");
+
+  it.each([
+    ["with projects", [{ id: "p1", name: "demo" }], "brain.learnings"],
+    ["without projects", [], "brain.noProjects"],
+  ])("sits in the middle, like Settings, %s", async (_, projects, inside) => {
+    useApp.setState({ overview: { ...useApp.getState().overview, projects: projects as never } });
+    await act(async () => root.render(<BrainPage />));
+    expect(column()).not.toBeNull();
+    expect(column()?.textContent).toContain(i18next.t("brain.subtitle"));
+    expect(column()?.textContent).toContain(i18next.t(inside));
+  });
+});

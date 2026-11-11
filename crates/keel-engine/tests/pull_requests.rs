@@ -46,7 +46,8 @@ fn write_script(path: &Path, text: &str) {
 }
 
 /// Steps asked for a structure answer with what's in `spec-json` or `verify-json`, or with no
-/// proposals. Other read-only steps answer with what's in `spec-text`, and build steps change a file.
+/// proposals. Other read-only steps answer with what's in `spec-text`, and build steps change a file,
+/// and also build with `builds` there.
 fn fake_claude(flags: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -77,6 +78,9 @@ if [ "$tools" = "Read,Grep,Glob" ]; then
   text="$(cat "{flags}/spec-text")"
 else
   text="Fixed it."
+  if [ -f "{flags}/builds" ]; then
+    mkdir -p target/debug node_modules/x && echo bin > target/debug/app && echo js > node_modules/x/index.js
+  fi
   echo work >> fixed.txt
   git add -A && git commit -qm "fix"
 fi
@@ -535,6 +539,32 @@ fn what_a_verifier_points_at_is_masked_like_the_rest_of_the_pull_request() {
     let body = delivered_with_verifier(&w, &said, "en");
     assert!(body.contains("- Met: add(1, 2) → it returns 3 ("), "{body}");
     assert!(!body.contains(&secret), "masked: {body}");
+}
+
+#[test]
+fn delivering_frees_what_the_build_left_in_the_run_copy() {
+    let w = world();
+    let (repo, remote) = (
+        w._dir.path().join("app"),
+        w._dir.path().join("remotes/acme/app.git"),
+    );
+    std::fs::write(repo.join(".gitignore"), "target/\nnode_modules/\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-qm", "ignore builds"]);
+    git(&repo, &["push", "-q", &remote.to_string_lossy(), "main"]);
+    std::fs::write(w.flags.join("builds"), "").unwrap();
+
+    let run = w.delivered();
+    assert!(w.store.run(&run).unwrap().pr_url.is_some());
+    let builder = w.step(&run, "builder").unwrap();
+    let workspace = Path::new(&builder.workspace);
+    w.until("the build being freed", || {
+        ["target", "node_modules", ".keel-cache"]
+            .iter()
+            .all(|name| !workspace.join(name).exists())
+    });
+    assert!(workspace.join("fixed.txt").exists());
+    assert!(Path::new(&builder.raw_path).exists());
 }
 
 #[test]

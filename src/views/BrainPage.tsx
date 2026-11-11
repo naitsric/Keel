@@ -136,117 +136,120 @@ export function BrainPage() {
   return (
     <>
       <main className="flex-1 overflow-y-auto p-5">
-        {/* The top bar already says which page this is. */}
-        <h1 className="sr-only">{t("brain.title")}</h1>
-        <p className="text-[12.5px] text-muted">{t("brain.subtitle")}</p>
-        {projects.length === 0 ? (
-          <div className="mt-4">
-            <p className="text-[12.5px] text-subtle">{t("brain.noProjects")}</p>
-            <AddProject className="mt-2" variant="primary" />
-          </div>
-        ) : (
-          <div className="mt-4 max-w-3xl space-y-4">
-            <div className="flex flex-wrap items-end gap-4">
-              <div className="w-64">
-                <Field label={t("brain.project")}>
-                  <select value={projectId} onChange={(e) => setProjectId(e.target.value)} className={inputClass}>
-                    {projects.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.name}
-                      </option>
-                    ))}
-                  </select>
-                </Field>
-              </div>
-              {brain && (
-                <div className={cx("pb-1.5 text-[12px]", over ? "text-warning" : "text-muted")}>
-                  {/* Two rooms, so the map never crowds out what you let in. */}
-                  <p>{t("brain.usage", { used: kilobytes(brain.used), limit: kilobytes(brain.limit) })}</p>
-                  <p>{t("brain.mapUsage", { used: kilobytes(brain.mapUsed), limit: kilobytes(brain.mapLimit) })}</p>
-                  {over && <p>{t("brain.overLimit")}</p>}
+        {/* Centered like Settings, so a wide window doesn't leave it against the left edge. */}
+        <div className="mx-auto w-full max-w-3xl">
+          {/* The top bar already says which page this is. */}
+          <h1 className="sr-only">{t("brain.title")}</h1>
+          <p className="text-[12.5px] text-muted">{t("brain.subtitle")}</p>
+          {projects.length === 0 ? (
+            <div className="mt-4">
+              <p className="text-[12.5px] text-subtle">{t("brain.noProjects")}</p>
+              <AddProject className="mt-2" variant="primary" />
+            </div>
+          ) : (
+            <div className="mt-4 space-y-4">
+              <div className="flex flex-wrap items-end gap-4">
+                <div className="w-64">
+                  <Field label={t("brain.project")}>
+                    <select value={projectId} onChange={(e) => setProjectId(e.target.value)} className={inputClass}>
+                      {projects.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  </Field>
                 </div>
+                {brain && (
+                  <div className={cx("pb-1.5 text-[12px]", over ? "text-warning" : "text-muted")}>
+                    {/* Two rooms, so the map never crowds out what you let in. */}
+                    <p>{t("brain.usage", { used: kilobytes(brain.used), limit: kilobytes(brain.limit) })}</p>
+                    <p>{t("brain.mapUsage", { used: kilobytes(brain.mapUsed), limit: kilobytes(brain.mapLimit) })}</p>
+                    {over && <p>{t("brain.overLimit")}</p>}
+                  </div>
+                )}
+              </div>
+              {error && (
+                <p role="alert" className="text-[12.5px] text-danger">
+                  {error}
+                </p>
+              )}
+              {brain && brain.proposals.length > 0 && (
+                <Section title={t("brain.proposals")} hint={t("brain.proposalsHint")}>
+                  <ul className="space-y-2">
+                    {brain.proposals.map((note) => (
+                      <ProposalRow key={note.seq} note={note} onDone={changed} onError={setError} />
+                    ))}
+                  </ul>
+                </Section>
+              )}
+              {brain && (
+                <Section title={t("brain.map")} hint={t("brain.mapHint")}>
+                  {brain.mapRun ? (
+                    <p className="mb-2.5 text-[12.5px] text-muted">
+                      {t("brain.mapRunning")}{" "}
+                      <button type="button" className="text-accent hover:underline" onClick={() => brain.mapRun && openRun(brain.mapRun)}>
+                        {t("brain.mapRunningLink")}
+                      </button>
+                    </p>
+                  ) : (
+                    brain.map.length === 0 && <p className="mb-2.5 text-[12.5px] text-subtle">{t("brain.mapEmpty")}</p>
+                  )}
+                  {staleCount > 0 && <p className="mb-2.5 text-[12.5px] text-warning">{t("brain.staleCount", { count: staleCount })}</p>}
+                  {brain.map.length > 0 && (
+                    <ul className="mb-3 space-y-1.5">
+                      {brain.map.map((note) => (
+                        <NoteRow key={note.seq} note={note} onRetire={() => act(() => api.brainRetire(note.seq))} />
+                      ))}
+                    </ul>
+                  )}
+                  <div className="flex flex-wrap items-end gap-2">
+                    <div className="w-44">
+                      <ModelField label={t("newRun.model")} value={model} onChange={setModel} />
+                    </div>
+                    <Button disabled={!model || brain.mapRun !== null} onClick={generate}>
+                      <RefreshCw size={13} />
+                      {brain.map.length === 0 ? t("brain.mapGenerate") : t("brain.mapRegenerate")}
+                    </Button>
+                  </div>
+                </Section>
+              )}
+              {brain && (
+                <Section title={t("brain.learnings")} hint={t("brain.learningsHint")}>
+                  {brain.learnings.length === 0 ? (
+                    <p className="text-[12.5px] text-subtle">{t("brain.learningsEmpty")}</p>
+                  ) : (
+                    <ul className="space-y-1.5">
+                      {brain.learnings.map((note) => (
+                        <NoteRow key={note.seq} note={note} onRetire={() => act(() => api.brainRetire(note.seq))} />
+                      ))}
+                    </ul>
+                  )}
+                </Section>
+              )}
+              {brain && (
+                <Section title={t("brain.decisions")} hint={t("brain.decisionsHint")}>
+                  {brain.decisions.length === 0 ? (
+                    <p className="text-[12.5px] text-subtle">{t("brain.decisionsEmpty")}</p>
+                  ) : (
+                    <ul className="space-y-1.5">
+                      {brain.decisions.map((decision) => (
+                        <DecisionRow key={decision.seq} decision={decision} onRetire={() => act(() => api.decisionRetire(decision.seq))} />
+                      ))}
+                    </ul>
+                  )}
+                </Section>
+              )}
+              {brain?.prompt && (
+                <details className="rounded-lg border border-border bg-surface p-4">
+                  <summary className="cursor-pointer text-[13px] font-semibold">{t("brain.prompt")}</summary>
+                  <p className="mt-1 text-[12px] text-muted">{t("brain.promptHint")}</p>
+                  <pre className="selectable mt-2 max-h-96 overflow-auto rounded bg-inset p-2 font-mono text-[11.5px] whitespace-pre-wrap">{brain.prompt.trim()}</pre>
+                </details>
               )}
             </div>
-            {error && (
-              <p role="alert" className="text-[12.5px] text-danger">
-                {error}
-              </p>
-            )}
-            {brain && brain.proposals.length > 0 && (
-              <Section title={t("brain.proposals")} hint={t("brain.proposalsHint")}>
-                <ul className="space-y-2">
-                  {brain.proposals.map((note) => (
-                    <ProposalRow key={note.seq} note={note} onDone={changed} onError={setError} />
-                  ))}
-                </ul>
-              </Section>
-            )}
-            {brain && (
-              <Section title={t("brain.map")} hint={t("brain.mapHint")}>
-                {brain.mapRun ? (
-                  <p className="mb-2.5 text-[12.5px] text-muted">
-                    {t("brain.mapRunning")}{" "}
-                    <button type="button" className="text-accent hover:underline" onClick={() => brain.mapRun && openRun(brain.mapRun)}>
-                      {t("brain.mapRunningLink")}
-                    </button>
-                  </p>
-                ) : (
-                  brain.map.length === 0 && <p className="mb-2.5 text-[12.5px] text-subtle">{t("brain.mapEmpty")}</p>
-                )}
-                {staleCount > 0 && <p className="mb-2.5 text-[12.5px] text-warning">{t("brain.staleCount", { count: staleCount })}</p>}
-                {brain.map.length > 0 && (
-                  <ul className="mb-3 space-y-1.5">
-                    {brain.map.map((note) => (
-                      <NoteRow key={note.seq} note={note} onRetire={() => act(() => api.brainRetire(note.seq))} />
-                    ))}
-                  </ul>
-                )}
-                <div className="flex flex-wrap items-end gap-2">
-                  <div className="w-44">
-                    <ModelField label={t("newRun.model")} value={model} onChange={setModel} />
-                  </div>
-                  <Button disabled={!model || brain.mapRun !== null} onClick={generate}>
-                    <RefreshCw size={13} />
-                    {brain.map.length === 0 ? t("brain.mapGenerate") : t("brain.mapRegenerate")}
-                  </Button>
-                </div>
-              </Section>
-            )}
-            {brain && (
-              <Section title={t("brain.learnings")} hint={t("brain.learningsHint")}>
-                {brain.learnings.length === 0 ? (
-                  <p className="text-[12.5px] text-subtle">{t("brain.learningsEmpty")}</p>
-                ) : (
-                  <ul className="space-y-1.5">
-                    {brain.learnings.map((note) => (
-                      <NoteRow key={note.seq} note={note} onRetire={() => act(() => api.brainRetire(note.seq))} />
-                    ))}
-                  </ul>
-                )}
-              </Section>
-            )}
-            {brain && (
-              <Section title={t("brain.decisions")} hint={t("brain.decisionsHint")}>
-                {brain.decisions.length === 0 ? (
-                  <p className="text-[12.5px] text-subtle">{t("brain.decisionsEmpty")}</p>
-                ) : (
-                  <ul className="space-y-1.5">
-                    {brain.decisions.map((decision) => (
-                      <DecisionRow key={decision.seq} decision={decision} onRetire={() => act(() => api.decisionRetire(decision.seq))} />
-                    ))}
-                  </ul>
-                )}
-              </Section>
-            )}
-            {brain?.prompt && (
-              <details className="rounded-lg border border-border bg-surface p-4">
-                <summary className="cursor-pointer text-[13px] font-semibold">{t("brain.prompt")}</summary>
-                <p className="mt-1 text-[12px] text-muted">{t("brain.promptHint")}</p>
-                <pre className="selectable mt-2 max-h-96 overflow-auto rounded bg-inset p-2 font-mono text-[11.5px] whitespace-pre-wrap">{brain.prompt.trim()}</pre>
-              </details>
-            )}
-          </div>
-        )}
+          )}
+        </div>
       </main>
     </>
   );

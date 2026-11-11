@@ -19,6 +19,9 @@ export type AttemptState =
   | "skipped"
   | "abandoned";
 
+/** What the app calls a state. `corrected` is a failed answer that Keel had fixed at once: see `shownState`. */
+export type ShownState = AttemptState | "corrected";
+
 export type ToolProfile = "readOnly" | "build";
 
 /** What became of a pull request after Keel opened it, as of the last time it looked. */
@@ -357,6 +360,8 @@ export interface Verdict {
   summary: string;
   /** Files of the change it couldn't read. Keel never counts such a review as an approval. Older answers don't have it. */
   unread?: string[];
+  /** What it couldn't check by reading the code, such as how it looks on screen. Older answers don't have it. */
+  unchecked?: string[];
 }
 
 /** The approver's answer. */
@@ -496,6 +501,8 @@ export interface Attempt {
   prompt: string;
   settings: unknown;
   sessionId: string;
+  /** The attempt whose session this one went on with. */
+  resumedFrom: string | null;
   workspace: string;
   rawPath: string;
   rawSha256: string | null;

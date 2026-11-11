@@ -468,6 +468,66 @@ fn retrying_a_failed_try_opens_it_again_and_it_ends_again() {
     }
 }
 
+fn until(what: &str, done: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(40);
+    while !done() {
+        assert!(Instant::now() < deadline, "{what} never happened");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_failed_try_frees_what_a_retry_rebuilds_and_keeps_what_setup_installed() {
+    let w = world(true);
+    std::fs::write(
+        w.repo.join(".gitignore"),
+        "target/\nnode_modules/\n.venv/\n",
+    )
+    .unwrap();
+    git(&w.repo, &["add", "-A"]);
+    git(&w.repo, &["commit", "-qm", "ignore builds"]);
+    let id = w.add();
+    let run = w
+        .engine
+        .try_check(
+            &id,
+            "mkdir -p node_modules/pkg .venv/bin && echo js > node_modules/pkg/index.js && echo py > .venv/bin/python",
+            "mkdir -p target/debug && echo bin > target/debug/app && test -f node_modules/pkg/index.js && test -e passes.txt",
+            "en",
+        )
+        .unwrap();
+    w.wait_finished(&run);
+    let failed = w.store.attempts_of_run(&run).unwrap().pop().unwrap();
+    assert_eq!(failed.state, "failed");
+    let workspace = PathBuf::from(&failed.workspace);
+    let trash = workspace.with_file_name("trash");
+    until("the build being freed", || {
+        !workspace.join("target").exists()
+            && !workspace.join(".keel-cache").exists()
+            && !trash.exists()
+    });
+    // A retry doesn't run setup again, so what it installed stays for the check.
+    assert!(workspace.join("node_modules/pkg/index.js").exists());
+    assert!(workspace.join(".venv/bin/python").exists());
+
+    std::fs::write(workspace.join("passes.txt"), "").unwrap();
+    w.engine.retry(&failed.id, false).unwrap();
+    until("the retry ending", || {
+        w.store.attempts_of_run(&run).unwrap().len() == 3
+            && w.store.run(&run).unwrap().finished_at.is_some()
+    });
+    let passed = w.store.attempts_of_run(&run).unwrap().pop().unwrap();
+    assert_eq!(passed.state, "succeeded", "{:?}", passed.reason);
+    // A try that passed is done with all of it.
+    until("everything being freed", || {
+        ["target", "node_modules", ".venv", ".keel-cache"]
+            .iter()
+            .all(|name| !workspace.join(name).exists())
+            && !trash.exists()
+    });
+    assert!(workspace.join("passes.txt").exists());
+}
+
 #[test]
 fn only_a_try_closes_itself_when_it_fails() {
     let w = world(true);
