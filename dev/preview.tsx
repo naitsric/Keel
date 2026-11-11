@@ -71,6 +71,7 @@ const attempt: Attempt = {
   outputTokens: finished ? 412 : null,
   turns: finished ? 6 : null,
   durationMs: finished ? 41000 : null,
+  skippedTests: null,
   startedAt: at(state === "stalled" ? 14 : 3),
   finishedAt: finished ? at(1) : null,
   lastActivityAt: at(state === "stalled" ? 11 : 1),
@@ -248,7 +249,10 @@ const correctedEvents: AuditEvent[] = [
   { seq: 102, attemptId: "c1", at: at(2), kind: "specCorrected", data: { problems: didNotFit } },
 ];
 const builtAttempt: Attempt = { ...attempt, state: "succeeded", reason: null, shaAfter: "28c696fd11223344556677889900aabbccddeeff", finishedAt: at(1), rawSha256: "9f2c", resultText: builtText, filesChanged: builtFiles, runFiles: builtFiles };
-const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", round, state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12" };
+// skipped=385 has the check pass with that many tests skipped, as its test tools said: the approval
+// (flow=approval), the run once delivered (flow=delivered) and the check's Output (node=check) say so.
+const skippedShown = params.get("skipped") === null ? null : Number(params.get("skipped"));
+const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", round, state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: skippedShown ? "cargo test --workspace" : "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12", skippedTests: skippedShown };
 const approvalAttempt: Attempt = { ...attempt, id: "a3", stepId: "approval", kind: "approval", tools: "none", round, state: delivered ? "succeeded" : "waitingApproval", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, rawSha256: null, finishedAt: delivered ? at(0) : null };
 const prAttempt: Attempt = { ...attempt, id: "a4", stepId: "pull-request", kind: "deliver", tools: "none", state: "succeeded", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: "https://github.com/acme/app/pull/12", rawSha256: null, finishedAt: at(0) };
 const reworkAttempt: Attempt = { ...builtAttempt, id: "a1b", number: 2, round: 1, resultText: "I added the role check the security review asked for, in app/api.py.\n\nTests: `make test` passes." };
@@ -356,6 +360,7 @@ const WHY_MOVED_UP: Reason[] =
         { code: "keelChoseAnAnswer" },
         { code: "noCheck" },
         { code: "checkNotPassed" },
+        { code: "checkSkippedTests", count: 385 },
         { code: "issueFromSomeoneElse", author: "someone" },
         { code: "issueFromUnknownAuthor" },
         { code: "issueWithNoAccount" },
@@ -915,6 +920,11 @@ mockIPC((command, args) => {
       if ((args as { attemptId?: string } | undefined)?.attemptId === "c1" && params.get("flow") === "corrected") return correctedEvents;
       if ((args as { attemptId?: string } | undefined)?.attemptId === returnedApproval.id && (params.get("flow") === "returned" || params.get("flow") === "sentBack")) {
         return [{ seq: 100, attemptId: returnedApproval.id, at: at(5), kind: "returned", data: { instructions: sentBackWith, round: 1, ...(assistantBy ? { by: assistantBy } : {}) } }];
+      }
+      if ((args as { attemptId?: string } | undefined)?.attemptId === checkAttempt.id && skippedShown !== null) {
+        const stdout = "test result: ok. 805 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 41.20s\n";
+        const stderr = "skipped a_check_runs_in_its_own_sandbox: it starts a sandbox, and macOS refuses that inside the one this runs in\n";
+        return [{ seq: 100, attemptId: checkAttempt.id, at: at(1), kind: "checkResult", data: { kind: "check", exitCode: 0, stdout, stderr, truncated: false, leftWorkspaceDirty: false } }];
       }
       // Only one step has a log, or the run's commands would count once per step.
       return (args as { attemptId?: string } | undefined)?.attemptId === attempt.id ? events : [];

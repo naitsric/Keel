@@ -665,6 +665,22 @@ fn a_workflow_with_no_check_is_never_small() {
 }
 
 #[test]
+fn a_check_that_passed_skipping_tests_is_not_enough_to_be_small() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let mut steps = fitting();
+    // What pytest prints when it skipped two. The check still passes.
+    steps[2] = WorkflowStep::Check {
+        id: "check".into(),
+        run: "test -f built.txt && echo '1 passed, 2 skipped in 0.01s'".into(),
+    };
+    let run = w.start(steps);
+    w.moved_up(&run, "checkSkippedTests");
+    assert_eq!(w.step(&run, "check").state, "succeeded");
+    assert_eq!(w.because(&run, "checkSkippedTests")["count"], 2);
+}
+
+#[test]
 fn a_check_further_along_has_not_passed_yet_so_the_run_is_not_small() {
     keel_harness::needs!(sandbox);
     let w = world();

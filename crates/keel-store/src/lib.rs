@@ -301,6 +301,11 @@ const MIGRATIONS: &[&str] = &[
     create index card_by_joint_change on card (joint_change_id, joint_position);
     alter table run add column pr_head text;
 "#,
+    // 15: How many tests a check skipped, as its test tools said. Null when Keel didn't recognise
+    // how they say it, and on older attempts.
+    r#"
+    alter table attempt add column skipped_tests integer;
+"#,
 ];
 
 /// Whether the card a query calls `card` can start as far as other cards go: it waits for none,
@@ -701,6 +706,9 @@ pub struct Attempt {
     pub output_tokens: Option<i64>,
     pub turns: Option<i64>,
     pub duration_ms: Option<i64>,
+    /// How many tests a check skipped, as its test tools said, though it may have passed. `None`
+    /// when Keel didn't recognise how they say it, and for anything that isn't a check.
+    pub skipped_tests: Option<i64>,
     pub started_at: String,
     pub finished_at: Option<String>,
     pub last_activity_at: Option<String>,
@@ -1143,6 +1151,7 @@ fn attempt_from(row: &Row) -> rusqlite::Result<Attempt> {
         output_tokens: row.get("output_tokens")?,
         turns: row.get("turns")?,
         duration_ms: row.get("duration_ms")?,
+        skipped_tests: row.get("skipped_tests")?,
         started_at: row.get("started_at")?,
         finished_at: row.get("finished_at")?,
         last_activity_at: row.get("last_activity_at")?,
@@ -2812,6 +2821,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;
                  drop table joint_check;
                  drop trigger joint_change_agreed_fixed;
@@ -4561,6 +4571,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;
                  drop index card_by_joint_change;
                  alter table card drop column basis;
@@ -5281,5 +5292,39 @@ mod tests {
         }
         assert!(store.has_todo_cards().unwrap());
         assert_eq!(claim(&store).as_deref(), Some("next"));
+    }
+
+    #[test]
+    fn how_many_tests_a_check_skipped_is_unknown_until_keel_counts_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        // What the version before left.
+        let before = 14;
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..before] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.pragma_update(None, "user_version", before as i64)
+                .unwrap();
+            conn.execute_batch(
+                "insert into project (id, name, path, created_at) values ('p', 'demo', '/demo', 'then');
+                 insert into run (id, project_id, title, created_at) values ('r', 'p', 'old', 'then');",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        store
+            .add_attempt(&new_attempt("a", "r", "check", AttemptState::Running))
+            .unwrap();
+        assert_eq!(store.attempt("a").unwrap().skipped_tests, None);
+        store
+            .patch_attempt("a", &[("skipped_tests", Value::Integer(385))])
+            .unwrap();
+        assert_eq!(store.attempt("a").unwrap().skipped_tests, Some(385));
+        assert_eq!(
+            serde_json::to_value(store.attempt("a").unwrap()).unwrap()["skippedTests"],
+            385
+        );
     }
 }

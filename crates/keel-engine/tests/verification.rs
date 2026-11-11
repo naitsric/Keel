@@ -464,6 +464,30 @@ fn a_check_says_what_really_happened() {
         prompt.contains("FACT: Keel ran `test -f built.txt` in this round, and it passed."),
         "{prompt}"
     );
+    // It printed nothing a test tool would, so how many it skipped isn't known, rather than none.
+    assert_eq!(w.step(&run, "check").skipped_tests, None);
+}
+
+#[test]
+fn a_check_that_passed_skipping_tests_says_how_many_and_that_they_prove_nothing() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // What Rust's harness prints with one test ignored, and what `keel_harness::needs!` writes for
+    // one it stopped. The check passes, as such a check does.
+    let skipping = WorkflowStep::Check {
+        id: "check".into(),
+        run: "echo 'test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s'; echo 'skipped tests::a_socket: it opens local sockets' >&2".into(),
+    };
+    let run = w.start(vec![specifier(), builder(), skipping, verifier(), human()]);
+    w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    let check = w.step(&run, "check");
+    assert_eq!(check.state, AttemptState::Succeeded.as_str());
+    assert_eq!(check.skipped_tests, Some(2));
+    let prompt = w.step(&run, "verify").prompt;
+    assert!(
+        prompt.contains("and it passed, but its test tools said 2 tests were skipped. A skipped test didn't run, so it proves nothing"),
+        "{prompt}"
+    );
 }
 
 #[test]

@@ -524,6 +524,8 @@ export interface Attempt {
   outputTokens: number | null;
   turns: number | null;
   durationMs: number | null;
+  /** How many tests a check skipped, as its test tools said, though it may have passed. Null when Keel didn't recognise how they say it, and for anything that isn't a check. */
+  skippedTests: number | null;
   startedAt: string;
   finishedAt: string | null;
   lastActivityAt: string | null;
