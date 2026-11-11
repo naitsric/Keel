@@ -479,10 +479,12 @@ function questionedLines(q: Questioned, decided: SpecDecided[]): number[] {
 }
 
 /**
- * What it settled by itself. Each line can go back to whoever does the work, without starting over.
- * What a review questions of it is the person's to settle, so it shows on its line.
+ * What it settled by itself, or what the request already had: the lines of `decided` that `only` picks,
+ * by their place among all of them. Each line can go back to whoever does the work, without starting
+ * over. What a review questions of it is the person's to settle, so it shows on its line, and one that
+ * matches no line shows where `elsewhere` says.
  */
-function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; questioned: Questioned[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
+function DecidedList({ attemptId, decided, only, elsewhere: showElsewhere, questioned, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; only: (item: SpecDecided) => boolean; elsewhere: boolean; questioned: Questioned[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
   const { t } = useTranslation();
   const [changing, setChanging] = useState<number | null>(null);
   const draftKey = `${attemptId}:change:${changing}`;
@@ -490,10 +492,11 @@ function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, o
   const setDraft = useApp((s) => s.setApprovalDraft);
   const lines = questioned.map((q) => questionedLines(q, decided));
   // One that matches no line still reaches the person, quoted as it came.
-  const elsewhere = questioned.filter((_, at) => lines[at].length === 0);
+  const elsewhere = showElsewhere ? questioned.filter((_, at) => lines[at].length === 0) : [];
+  const shown = decided.flatMap((item, index) => (only(item) ? [{ item, index }] : []));
   return (
     <ul className="space-y-1.5">
-      {decided.map((item, index) => (
+      {shown.map(({ item, index }) => (
         // Lines of a fixed text: their position is their identity.
         <li key={index}>
           <div className="flex items-start gap-2">
@@ -505,7 +508,7 @@ function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, o
             )}
           </div>
           {item.taken === "person" && <p className="text-[11.5px] text-subtle">{t("run.decidedYouChose")}</p>}
-          {item.taken === "request" && <p className="selectable text-[11.5px] break-words text-subtle">{fromRequest(t, item)}</p>}
+          {item.taken === "request" && item.assistant && <p className="text-[11.5px] text-subtle">{t("run.decidedWrittenBy", { client: item.assistant })}</p>}
           {item.taken === "roundsLimit" && <p className="text-[11.5px] text-warning">{t("run.decidedKeelTook")}</p>}
           {questioned
             .filter((_, at) => lines[at].includes(index))
@@ -693,9 +696,14 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             <p className="selectable break-words">{askedGist.text}</p>
           </ApprovalRow>
         )}
-        {spec && (spec.decided.length > 0 || questioned.length > 0) && (
+        {spec && spec.decided.some(fromRequest) && (
+          <ApprovalRow label={t("run.decidedInRequest")}>
+            <DecidedList attemptId={attempt.id} decided={spec.decided} only={fromRequest} elsewhere={false} questioned={questioned} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
+          </ApprovalRow>
+        )}
+        {spec && (spec.decided.some((item) => !fromRequest(item)) || questioned.some((q) => questionedLines(q, spec.decided).length === 0)) && (
           <ApprovalRow label={t("run.decidedTitle")} note={t("run.generated")}>
-            <DecidedList attemptId={attempt.id} decided={spec.decided} questioned={questioned} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
+            <DecidedList attemptId={attempt.id} decided={spec.decided} only={(item) => !fromRequest(item)} elsewhere questioned={questioned} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
           </ApprovalRow>
         )}
         {sentBack && (

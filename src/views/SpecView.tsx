@@ -1,11 +1,8 @@
-import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { SpecDecided, SpecOutput } from "../lib/api";
 
-/** Says a line came from the request, word for word, and who wrote it when an assistant did. */
-export function fromRequest(t: TFunction, decided: SpecDecided): string {
-  return decided.assistant ? t("run.decidedFromRequestBy", { client: decided.assistant }) : t("run.decidedFromRequest");
-}
+/** Whether a line is what the request already decided, word for word, rather than what the agent decided. */
+export const fromRequest = (decided: SpecDecided) => decided.taken === "request";
 
 function SpecList({ title, items }: { title: string; items: React.ReactNode[] }) {
   if (items.length === 0) return null;
@@ -49,15 +46,25 @@ export function SpecView({ spec }: { spec: SpecOutput }) {
       <SpecList title={t("run.specLimits")} items={spec.limits} />
       <SpecList title={t("run.specTogether")} items={spec.together ?? []} />
       <SpecList
-        title={t("run.decidedTitle")}
-        items={spec.decided.map((decided) => (
+        title={t("run.decidedInRequest")}
+        items={spec.decided.filter(fromRequest).map((decided) => (
           <>
             {decided.text}
-            {decided.taken === "person" && <span className="block text-[11.5px] text-subtle">{t("run.decidedYouChose")}</span>}
-            {decided.taken === "request" && <span className="block text-[11.5px] break-words text-subtle">{fromRequest(t, decided)}</span>}
-            {decided.taken === "roundsLimit" && <span className="block text-[11.5px] text-warning">{t("run.decidedKeelTook")}</span>}
+            {decided.assistant && <span className="block text-[11.5px] text-subtle">{t("run.decidedWrittenBy", { client: decided.assistant })}</span>}
           </>
         ))}
+      />
+      <SpecList
+        title={t("run.decidedTitle")}
+        items={spec.decided
+          .filter((decided) => !fromRequest(decided))
+          .map((decided) => (
+            <>
+              {decided.text}
+              {decided.taken === "person" && <span className="block text-[11.5px] text-subtle">{t("run.decidedYouChose")}</span>}
+              {decided.taken === "roundsLimit" && <span className="block text-[11.5px] text-warning">{t("run.decidedKeelTook")}</span>}
+            </>
+          ))}
       />
       <SpecList title={t("run.specAsked")} items={spec.questions.map((question) => `${question.text} ${question.options.map((option) => option.label).join(" / ")}`)} />
       <SpecList title={t("run.specAnswered")} items={(spec.answered ?? []).map((answer) => `${answer.asked} ${answer.answer}`)} />

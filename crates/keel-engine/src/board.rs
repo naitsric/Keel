@@ -204,6 +204,7 @@ impl Engine {
             body: body.trim().to_owned(),
             issue: None,
             issue_number: None,
+            body_by: None,
         })?;
         self.inner.changed("");
         Ok(id)
@@ -221,6 +222,7 @@ impl Engine {
             body: String::new(),
             issue: serde_json::to_string(issue).ok(),
             issue_number: Some(issue.number),
+            body_by: None,
         })?;
         self.inner.changed("");
         Ok(id)
@@ -437,6 +439,8 @@ impl Engine {
                     body,
                     issue: issue.and_then(|issue| serde_json::to_string(issue).ok()),
                     issue_number: issue.map(|issue| issue.number),
+                    // An assistant that starts it wrote what it says, and a run from it later keeps that.
+                    body_by: request.started_by.clone(),
                 },
                 &request.language,
                 joint_projects,

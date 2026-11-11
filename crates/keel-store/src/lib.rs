@@ -326,6 +326,11 @@ const MIGRATIONS: &[&str] = &[
                       where value = '~/.rustup');
     alter table run add column extra_read text not null default '[]';
 "#,
+    // 17: Who wrote what a card says: the assistant that started a run from outside, or null for
+    // a person. A person who changes it makes it theirs.
+    r#"
+    alter table card add column body_by text;
+"#,
 ];
 
 /// Whether the card a query calls `card` can start as far as other cards go: it waits for none,
@@ -841,6 +846,8 @@ pub struct Card {
     pub project_id: String,
     pub title: String,
     pub body: String,
+    /// The assistant that wrote `body`, which a run from the card keeps. None for a person.
+    pub body_by: Option<String>,
     pub issue: Option<serde_json::Value>,
     pub issue_number: Option<i64>,
     pub lane: CardLane,
@@ -892,6 +899,8 @@ pub struct NewCard {
     pub body: String,
     pub issue: Option<String>,
     pub issue_number: Option<i64>,
+    /// The assistant that wrote `body`. None for a person.
+    pub body_by: Option<String>,
 }
 
 /// A change across several projects. The card where it's agreed has the same id.
@@ -939,6 +948,7 @@ fn card_from(r: &Row) -> rusqlite::Result<Card> {
         project_id: r.get("project_id")?,
         title: r.get("title")?,
         body: r.get("body")?,
+        body_by: r.get("body_by")?,
         issue: json_col(r, "issue")?,
         issue_number: r.get("issue_number")?,
         lane: CardLane::parse(&lane).unwrap_or(CardLane::Backlog),
@@ -2157,8 +2167,8 @@ impl Store {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         tx.execute(
-            "insert or ignore into card (id, project_id, title, body, issue, issue_number, lane, position, created_at)
-             values (?1, ?2, ?3, ?4, ?5, ?6, 'backlog', ?7, ?8)",
+            "insert or ignore into card (id, project_id, title, body, issue, issue_number, lane, position, created_at, body_by)
+             values (?1, ?2, ?3, ?4, ?5, ?6, 'backlog', ?7, ?8, ?9)",
             params![
                 card.id,
                 card.project_id,
@@ -2167,7 +2177,8 @@ impl Store {
                 card.issue,
                 card.issue_number,
                 bottom_of_backlog(&tx, &card.project_id)?,
-                now()
+                now(),
+                card.body_by
             ],
         )?;
         let id = match card.issue_number {
@@ -2194,14 +2205,16 @@ impl Store {
         Ok(cards)
     }
 
-    /// Changes what a card says, if a person can still change it. `false` if not.
+    /// Changes what a card says, if a person can still change it. `false` if not. Once they change
+    /// its body, it's theirs.
     pub fn update_card(&self, id: &str, title: &str, body: &str) -> Result<bool> {
         let conn = self.lock();
         if !read_card(&conn, id)?.is_waiting() {
             return Ok(false);
         }
         conn.execute(
-            "update card set title = ?2, body = ?3 where id = ?1",
+            "update card set title = ?2, body = ?3, body_by = case when body = ?3 then body_by end
+             where id = ?1",
             params![id, title, body],
         )?;
         Ok(true)
@@ -2553,8 +2566,8 @@ impl Store {
             }
             None => {
                 tx.execute(
-                    "insert into card (id, project_id, title, body, issue, issue_number, lane, position, language, created_at)
-                     values (?1, ?2, ?3, ?4, ?5, ?6, 'started', ?7, ?8, ?9)",
+                    "insert into card (id, project_id, title, body, issue, issue_number, lane, position, language, created_at, body_by)
+                     values (?1, ?2, ?3, ?4, ?5, ?6, 'started', ?7, ?8, ?9, ?10)",
                     params![
                         card.id,
                         card.project_id,
@@ -2564,7 +2577,8 @@ impl Store {
                         card.issue_number,
                         bottom_of_backlog(&tx, &card.project_id)?,
                         language,
-                        now()
+                        now(),
+                        card.body_by
                     ],
                 )?;
                 card.id.clone()
@@ -2862,6 +2876,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 alter table card drop column body_by;
                  alter table run drop column extra_read;
                  alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;
@@ -3183,6 +3198,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 15;
+                 alter table card drop column body_by;
                  alter table run drop column extra_read;
                  update project set allowed_read = 'not a list' where id = 'bad';",
             )
@@ -3252,6 +3268,7 @@ mod tests {
                 body: String::new(),
                 issue: None,
                 issue_number: None,
+                body_by: None,
             })
             .unwrap()
     }
@@ -3952,6 +3969,7 @@ mod tests {
             body: String::new(),
             issue: Some(r#"{"number":7}"#.into()),
             issue_number: Some(7),
+            body_by: None,
         };
         let first = store.add_card(&issue("one", "p", "Broken")).unwrap();
         assert_eq!(first, "one");
@@ -4343,6 +4361,41 @@ mod tests {
     }
 
     #[test]
+    fn a_card_keeps_who_wrote_what_it_says_until_a_person_changes_it() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_card(&NewCard {
+                id: "c".into(),
+                project_id: "p".into(),
+                title: "Export".into(),
+                body: "Decided:\n- No login.".into(),
+                issue: None,
+                issue_number: None,
+                body_by: Some("Claude Code".into()),
+            })
+            .unwrap();
+        let by = || store.card("c").unwrap().body_by;
+        assert_eq!(by().as_deref(), Some("Claude Code"));
+        // Moving it, or changing only its title, keeps who wrote it.
+        assert!(store.move_card("c", CardLane::Todo, 0, "en").unwrap());
+        assert!(store.move_card("c", CardLane::Backlog, 0, "en").unwrap());
+        assert!(
+            store
+                .update_card("c", "Export the threads", "Decided:\n- No login.")
+                .unwrap()
+        );
+        assert_eq!(by().as_deref(), Some("Claude Code"));
+        // Changing what it says makes it the person's.
+        assert!(
+            store
+                .update_card("c", "Export the threads", "Decided:\n- A login.")
+                .unwrap()
+        );
+        assert_eq!(by(), None);
+    }
+
+    #[test]
     fn claiming_returns_the_card_as_it_is_at_that_moment() {
         let (_dir, store) = store();
         seeded(&store);
@@ -4568,6 +4621,7 @@ mod tests {
                     body: String::new(),
                     issue: None,
                     issue_number: None,
+                    body_by: None,
                 })
                 .unwrap();
             assert!(store.move_card(id, CardLane::Todo, index, "en").unwrap());
@@ -4713,6 +4767,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table card drop column body_by;
                  alter table run drop column extra_read;
                  alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;
@@ -5085,6 +5140,7 @@ mod tests {
                 body: String::new(),
                 issue: Some(issue.into()),
                 issue_number: Some(434),
+                body_by: None,
             })
             .unwrap();
 
@@ -5206,6 +5262,7 @@ mod tests {
             body: String::new(),
             issue: Some(r#"{"number":434}"#.into()),
             issue_number: Some(434),
+            body_by: None,
         };
         store.add_card(&issue("plan")).unwrap();
         // The person marks «Also touches» after the engine looked at the board, and before the

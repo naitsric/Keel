@@ -1357,10 +1357,21 @@ impl Inner {
         if part {
             return self.asked_written(run_id);
         }
+        // An assistant that started it wrote what it asks. Started from a card, it's in the words
+        // of whoever wrote the card, which a person rerunning it doesn't change.
+        let writer = match (&run.started_by, self.store.card_of_run(run_id)) {
+            (Some(assistant), _) => Some(assistant.clone()),
+            (None, Ok(None)) => None,
+            (None, Ok(Some(card))) => match self.store.card(&card) {
+                Ok(card) => card.body_by,
+                Err(_) => return Vec::new(),
+            },
+            (None, Err(_)) => return Vec::new(),
+        };
         let Some(issue) = &run.source_issue else {
             return vec![specs::Written {
                 text: run.request,
-                assistant: run.started_by,
+                assistant: writer,
             }];
         };
         let text = |key: &str| issue.get(key).and_then(serde_json::Value::as_str);
@@ -1382,7 +1393,7 @@ impl Inner {
         if let Some(added) = text("added") {
             written.push(specs::Written {
                 text: added.to_owned(),
-                assistant: run.started_by.clone(),
+                assistant: writer,
             });
         }
         written

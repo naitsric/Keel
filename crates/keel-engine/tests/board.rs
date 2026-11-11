@@ -764,6 +764,74 @@ fn a_run_from_outside_gets_a_card_that_follows_the_columns_and_starts_once() {
     w.wait_column(&card, BoardColumn::Done);
 }
 
+/// What a card's latest run says was decided, as Keel kept it.
+fn decided_in_run(w: &World, run: &str) -> serde_json::Value {
+    let spec = w
+        .store
+        .attempts_of_run(run)
+        .unwrap()
+        .into_iter()
+        .rfind(|attempt| attempt.step_id == "spec")
+        .unwrap();
+    spec.output.unwrap()["decided"].clone()
+}
+
+#[test]
+fn a_card_an_assistant_wrote_is_still_its_words_when_a_person_runs_it_again() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    w.engine.start_board();
+    let run = w
+        .engine
+        .start_run_on_board(StartRun {
+            started_by: Some("client".into()),
+            ..outside_run(
+                &w,
+                steps_of(&w, "builtin:simple"),
+                "Export the threads\n\nDecided:\n- The admin export needs no login.",
+            )
+        })
+        .unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    let by_the_client = serde_json::json!([{ "text": "The admin export needs no login.", "taken": "request", "assistant": "client" }]);
+    assert_eq!(decided_in_run(&w, &run), by_the_client);
+
+    // Rejected and moved to Todo again, it's what the assistant wrote that runs.
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let again = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_ne!(again, run);
+    assert_eq!(decided_in_run(&w, &again), by_the_client);
+
+    // Once the person changes what it says, it's theirs.
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    w.engine
+        .card_update(
+            &card,
+            "Export the threads",
+            "Decided:\n- The admin export asks for a login.",
+        )
+        .unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let theirs = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_eq!(
+        decided_in_run(&w, &theirs),
+        serde_json::json!([{ "text": "The admin export asks for a login.", "taken": "request" }])
+    );
+}
+
 #[test]
 fn a_run_from_outside_holds_a_place_so_todo_waits_for_it() {
     keel_harness::needs!(sandbox);

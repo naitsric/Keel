@@ -22,6 +22,8 @@ const MAX_DECIDED_TEXT: usize = 140;
 /// What the request decided doesn't count with what the specifier decided alone: a request can
 /// settle many things at once. Past this many, the rest stay in the request, for agents to read.
 const MAX_FROM_REQUEST: usize = 10;
+/// Each goes into every prompt after the spec, so a longer one stays only in the request.
+const MAX_REQUEST_ITEM: usize = 300;
 /// What a list of what the person already decided can be called, as a heading.
 const DECIDED_HEADINGS: [&str; 4] = [
     "decisiones ya tomadas",
@@ -270,7 +272,8 @@ impl Spec {
         }
     }
 
-    fn problems(&self) -> Vec<SpecProblem> {
+    /// What breaks a limit. What the request decided, in `from_request`, has none of these.
+    fn problems(&self, from_request: &[Decided]) -> Vec<SpecProblem> {
         let mut problems = Vec::new();
         if self.summary.is_empty() {
             problems.push(SpecProblem::NoSummary);
@@ -340,13 +343,21 @@ impl Spec {
             });
         }
 
-        if self.decided.len() > MAX_DECIDED {
+        // A copy of what the request decided isn't the spec's own, but the agent counts it in its
+        // numbers, so that's what it's told.
+        let own: Vec<(usize, &Decided)> = self
+            .decided
+            .iter()
+            .enumerate()
+            .filter(|(_, decided)| !from_request.iter().any(|item| item.text == decided.text))
+            .collect();
+        if own.len() > MAX_DECIDED {
             problems.push(SpecProblem::TooManyDecided {
-                count: self.decided.len(),
+                count: own.len(),
                 limit: MAX_DECIDED,
             });
         }
-        for (index, decided) in self.decided.iter().enumerate() {
+        for (index, decided) in own {
             if chars(&decided.text) > MAX_DECIDED_TEXT {
                 problems.push(SpecProblem::DecidedTooLong {
                     position: index + 1,
@@ -532,6 +543,19 @@ impl Spec {
             say("What stays as it is", "Qué se queda igual"),
             self.limits.clone(),
         );
+        let from_request = |decided: &&Decided| decided.taken == Some(Taken::Request);
+        section(
+            say("Decided in the request", "Lo que se decidió en el pedido"),
+            self.decided
+                .iter()
+                .filter(from_request)
+                .map(|decided| match &decided.assistant {
+                    Some(assistant) if es => format!("{} (lo escribió {assistant})", decided.text),
+                    Some(assistant) => format!("{} ({assistant} wrote it)", decided.text),
+                    None => decided.text.clone(),
+                })
+                .collect(),
+        );
         section(
             say(
                 "What was decided along the way",
@@ -539,6 +563,7 @@ impl Spec {
             ),
             self.decided
                 .iter()
+                .filter(|decided| !from_request(decided))
                 .map(|decided| match decided.taken {
                     Some(Taken::RoundsLimit) => format!(
                         "{} {}",
@@ -614,52 +639,127 @@ fn list_item(line: &str) -> Option<&str> {
     rest.starts_with(char::is_whitespace).then(|| rest.trim())
 }
 
+/// How far a line is indented, with a tab as four spaces.
+fn indent(line: &str) -> usize {
+    line.chars()
+        .take_while(|c| c.is_whitespace())
+        .map(|c| if c == '\t' { 4 } else { 1 })
+        .sum()
+}
+
+/// The fence a line opens or closes a code block with, if it's one: its character and length.
+fn fence(line: &str) -> Option<(char, usize)> {
+    if indent(line) > 3 {
+        return None;
+    }
+    let line = line.trim_start();
+    let mark = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+    let length = line.chars().take_while(|c| *c == mark).count();
+    (length >= 3).then_some((mark, length))
+}
+
+/// A list of what was decided, as it's read item by item.
+#[derive(Default)]
+struct DecidedList {
+    decided: Vec<String>,
+    /// Under a heading that says what follows was decided, and not past the list yet.
+    open: bool,
+    /// How far its items are indented, once one is read. Anything deeper is part of one.
+    items_at: Option<usize>,
+    /// The item being read, and whether it's a task still open.
+    item: Option<(String, bool)>,
+}
+
+impl DecidedList {
+    fn end_item(&mut self) {
+        if let Some((text, open_task)) = self.item.take() {
+            let text = one_line(&text);
+            let fits = !text.is_empty() && chars(&text) <= MAX_REQUEST_ITEM;
+            if !open_task && fits && !self.decided.contains(&text) {
+                self.decided.push(text);
+            }
+        }
+    }
+
+    fn end(&mut self) {
+        self.end_item();
+        (self.open, self.items_at) = (false, None);
+    }
+}
+
 /// What a person settled in so many words in a text: each item of a list under a heading such as
-/// "Decided" or "Decisiones ya tomadas", on one line. The list ends at a blank line followed by
-/// anything but another item, or at any other line that isn't one, but a line indented under an
-/// item goes on with it. Nothing in a code block or a quote counts: someone else may be speaking.
+/// "Decided" or "Decisiones ya tomadas", on one line. As in Markdown, a line right under an item
+/// goes on with it, and an item under another is part of it. The list ends at a blank line or a
+/// heading. A task still open isn't decided, nor is anything in code, a quote or a comment:
+/// someone else may be speaking there. An item too long to carry into every prompt stays only in
+/// the request.
 pub(crate) fn decided_in(text: &str) -> Vec<String> {
-    let mut items: Vec<String> = Vec::new();
-    let (mut in_code, mut in_list, mut in_item, mut after_blank) = (false, false, false, false);
+    let mut list = DecidedList::default();
+    let mut code: Option<(char, usize)> = None;
+    let mut comment = false;
     for line in text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            (in_code, in_list) = (!in_code, false);
+        // A fence ends only with one of the same kind, as long or longer.
+        if let Some((mark, length)) = code {
+            if fence(line).is_some_and(|(m, n)| m == mark && n >= length)
+                && line.trim().chars().all(|c| c == mark)
+            {
+                code = None;
+            }
             continue;
         }
-        if in_code {
+        if comment {
+            comment = !line.contains("-->");
+            continue;
+        }
+        let trimmed = line.trim();
+        let depth = indent(line);
+        if let Some(opened) = fence(line) {
+            list.end();
+            code = Some(opened);
+            continue;
+        }
+        if depth <= 3 && trimmed.starts_with("<!--") {
+            comment = !trimmed[4..].contains("-->");
             continue;
         }
         if trimmed.is_empty() {
-            (after_blank, in_item) = (true, false);
+            // Between a heading and its list it's fine. After an item, the list is over.
+            if list.item.is_some() {
+                list.end();
+            }
             continue;
         }
-        let blank_before = std::mem::take(&mut after_blank);
-        if trimmed.starts_with('>') {
-            in_list = false;
-        } else if let Some(item) = list_item(line) {
-            if in_list {
-                items.push(item.to_owned());
-                in_item = true;
+        if let (Some((item, _)), Some(at)) = (&mut list.item, list.items_at)
+            && depth > at
+        {
+            item.push(' ');
+            item.push_str(trimmed);
+            continue;
+        }
+        // Code, a quote, or a tag on its own line, such as one that closes an issue.
+        let tag = trimmed.starts_with('<') && trimmed.ends_with('>');
+        if depth >= 4 || trimmed.starts_with('>') || tag {
+            list.end();
+        } else if let Some(said) = list_item(line) {
+            if list.open {
+                list.end_item();
+                list.items_at.get_or_insert(depth);
+                list.item = Some((said.to_owned(), said.starts_with("[ ]")));
             }
         } else if is_decided_heading(line) {
-            (in_list, in_item) = (true, false);
-        } else if in_item && !blank_before && line.starts_with(char::is_whitespace) {
-            if let Some(last) = items.last_mut() {
-                last.push(' ');
-                last.push_str(trimmed);
-            }
+            list.end();
+            list.open = true;
+        } else if trimmed.starts_with('#') {
+            list.end();
+        } else if let Some((item, _)) = &mut list.item {
+            item.push(' ');
+            item.push_str(trimmed);
         } else {
-            (in_list, in_item) = (false, false);
+            list.end();
         }
     }
-    let mut decided: Vec<String> = Vec::new();
-    for item in items.iter().map(|item| one_line(item)) {
-        if !item.is_empty() && !decided.contains(&item) {
-            decided.push(item);
-        }
-    }
-    decided
+    list.end();
+    list.decided
 }
 
 /// What the request decided, as lines of `decided` that say so and who wrote them. Where two
@@ -708,9 +808,7 @@ fn validate_spec_for(
     // What the request decided, Keel adds after the limits, which are for what the spec decided.
     // What the spec copied of it is the request's, and not its own.
     let from_request = from_request(written);
-    spec.decided
-        .retain(|own| !from_request.iter().any(|item| item.text == own.text));
-    let mut problems = spec.problems();
+    let mut problems = spec.problems(&from_request);
     match projects {
         Some(projects) => problems.extend(spec.part_problems(projects)),
         None => {
@@ -719,6 +817,8 @@ fn validate_spec_for(
         }
     }
     if problems.is_empty() {
+        spec.decided
+            .retain(|own| !from_request.iter().any(|item| item.text == own.text));
         spec.decided.splice(0..0, from_request);
         Ok(spec)
     } else {
@@ -1515,15 +1615,11 @@ mod tests {
                 "Si el autor resuelve su propio hilo critical, por ahora no cuenta como arreglado.",
             ]
         );
-        // Numbered too. A blank line between items keeps the list going, and anything else ends it.
-        let numbered = "## Decided\n1. Old threads stay.\n2) Critical ones count.\n\n3. Even after a blank line.\nSomething else.\n4. Not this one.";
+        // Numbered too, and with a blank line before the list, as Markdown often has.
+        let numbered = "## Decided\n\n1. Old threads stay.\n2) Critical ones count.";
         assert_eq!(
             decided_in(numbered),
-            [
-                "Old threads stay.",
-                "Critical ones count.",
-                "Even after a blank line."
-            ]
+            ["Old threads stay.", "Critical ones count."]
         );
         for heading in [
             "**Decisions already made:**",
@@ -1542,6 +1638,124 @@ mod tests {
         assert_eq!(
             decided_in("Decided:\n- It stays.\n## Questions\n- Should it?"),
             ["It stays."]
+        );
+    }
+
+    #[test]
+    fn a_line_right_under_an_item_goes_on_with_it_indented_or_not() {
+        assert_eq!(
+            decided_in("Decided:\n- Old threads are deleted\nonly when their author asks."),
+            ["Old threads are deleted only when their author asks."]
+        );
+        assert_eq!(
+            decided_in(
+                "Decisiones ya tomadas:\n- Los hilos viejos no cuentan,\nsalvo los critical.\n- Otra cosa queda igual."
+            ),
+            [
+                "Los hilos viejos no cuentan, salvo los critical.",
+                "Otra cosa queda igual."
+            ]
+        );
+        // A tag on its own line isn't words: it ends the list.
+        assert_eq!(decided_in("Decided:\n- It stays.\n</issue>"), ["It stays."]);
+    }
+
+    #[test]
+    fn only_the_list_s_own_items_count_up_to_a_blank_line_and_not_open_tasks() {
+        // What comes after a blank line is something else, such as steps to follow.
+        assert_eq!(
+            decided_in(
+                "Decisiones ya tomadas:\n- La tabla vieja se queda.\n\n1. Agrega la columna.\n2. Borra la tabla vieja."
+            ),
+            ["La tabla vieja se queda."]
+        );
+        // An item under another one is part of it.
+        assert_eq!(
+            decided_in(
+                "Decided:\n- Use the new API for:\n  - reads\n  - writes\n- Pendiente, no decidido:\n    - ¿Cuenta el hilo critical?"
+            ),
+            [
+                "Use the new API for: - reads - writes",
+                "Pendiente, no decidido: - ¿Cuenta el hilo critical?"
+            ]
+        );
+        // A task still open isn't decided, nor anything under it.
+        assert_eq!(
+            decided_in("Decided:\n- [ ] Open thing\n  that goes on.\n- [x] Old threads stay."),
+            ["[x] Old threads stay."]
+        );
+    }
+
+    #[test]
+    fn code_and_comments_never_count() {
+        // A fence ends only with one of the same kind, as long or longer.
+        let longer =
+            "````md\nDecided:\n- Drop the table.\n```\n- Drop it too.\n````\nDecided:\n- It stays.";
+        assert_eq!(decided_in(longer), ["It stays."]);
+        let other = "```\n~~~\nDecided:\n- Drop the table.\n```\nDecided:\n- It stays.";
+        assert_eq!(decided_in(other), ["It stays."]);
+        // Code indented four spaces, and comments on their own lines, as issue templates have.
+        assert!(decided_in("    Decided:\n    - Drop the table.").is_empty());
+        assert!(decided_in("<!--\nDecided:\n- Drop the table.\n-->").is_empty());
+        assert_eq!(
+            decided_in("Decided:\n<!-- one per line -->\n- It stays."),
+            ["It stays."]
+        );
+    }
+
+    #[test]
+    fn an_item_too_long_to_carry_into_every_prompt_is_not_taken_as_decided() {
+        // 61 words are 304 characters, and 59 are 294.
+        let long = vec!["word"; 61].join(" ");
+        assert_eq!(
+            decided_in(&format!("Decided:\n- {long}\n- It stays.")),
+            ["It stays."]
+        );
+        let fits = vec!["word"; 59].join(" ");
+        assert_eq!(decided_in(&format!("Decided:\n- {fits}")), [fits]);
+    }
+
+    #[test]
+    fn a_limit_a_spec_line_breaks_is_told_by_the_spec_s_own_numbers() {
+        let asked = typed("Decided:\n- Old threads stay.");
+        let decided = json!([{ "text": "Old threads stay." }, { "text": "Own" }, { "text": "x".repeat(141) }]);
+        let Verdict::Correct(problems) =
+            super::judge(Some(&with("decided", decided)), &asked, false, 0)
+        else {
+            panic!()
+        };
+        assert_eq!(
+            problems,
+            [SpecProblem::DecidedTooLong {
+                position: 3,
+                chars: 141,
+                limit: 140
+            }]
+        );
+        // And a copy of the request doesn't count against its five.
+        let six: Vec<Value> = std::iter::once(json!({ "text": "Old threads stay." }))
+            .chain((1..=5).map(|i| json!({ "text": format!("Own {i}") })))
+            .collect();
+        assert!(matches!(
+            super::judge(Some(&with("decided", json!(six))), &asked, false, 0),
+            Verdict::Ready(_)
+        ));
+    }
+
+    #[test]
+    fn what_the_request_decided_reads_apart_from_what_the_spec_decided() {
+        let spec = kept(
+            json!([{ "text": "Keeps the rounding" }]),
+            &typed("Decided:\n- Old threads stay."),
+        );
+        let text = spec.readable("en");
+        assert!(
+            text.contains("**Decided in the request**\n\n- Old threads stay.\n\n**What was decided along the way**\n\n- Keeps the rounding"),
+            "{text}"
+        );
+        assert!(
+            spec.readable("es")
+                .contains("**Lo que se decidió en el pedido**")
         );
     }
 
