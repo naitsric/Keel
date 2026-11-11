@@ -1029,6 +1029,7 @@
     "ciMissing": "Your CI runs this and your check doesn't:",
     "ciMissingAdd": "Add to the check",
     "ciLeftOut": "Your CI also runs this, which Keel can't run offline:",
+    "pyrightNode": "pyright needs Node available offline.",
     "proposalBanner_one": "{{client}} proposes adding {{name}}",
     "proposalBanner_other": "{{client}} proposes adding {{name}}, and {{more}} more are waiting",
     "proposalReview": "Review",

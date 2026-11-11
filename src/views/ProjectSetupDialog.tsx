@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type Attempt, type AuditEvent, type GithubStatus, type MapStart, type ProjectSetup } from "../lib/api";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
-import { accountToSelect, checkOptionsLeft, commandNotFound, foldersToOffer, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withFolders, withSetup, withSetupOption } from "../lib/projects";
+import { accountToSelect, checkOptionsLeft, commandNotFound, foldersToOffer, needsNode, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withFolders, withSetup, withSetupOption } from "../lib/projects";
 import { errorText, needsSignIn, reasonText } from "../lib/reason";
 import { type ProjectSetupRequest, useApp } from "../lib/store";
 import { Button, cx, Field, inputClass, Modal } from "../ui/primitives";
@@ -398,6 +398,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
         <p>
           {fromGuess && `${t(guess?.fromCi ? "setup.fromCi" : "setup.guessed", { files: guess?.from.join(", ") })} `}
           {fromCiChecks.length > 0 && `${t("setup.fromCiChecks", { commands: fromCiChecks.join(", ") })} `}
+          {needsNode(fromCiChecks) && `${t("projects.pyrightNode")} `}
           {guess && guess.ciLeftOut.length > 0 && `${t("setup.ciLeftOut", { commands: guess.ciLeftOut.join(", ") })} `}
           {nothingToGo && `${t("setup.noGuess")} `}
           {t("setup.tryNote")}

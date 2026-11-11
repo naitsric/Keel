@@ -240,6 +240,7 @@ describe("the setup dialog", () => {
       expect(page()).toContain("Guessed from uv.lock, .github/workflows/ci.yml.");
       expect(page()).toContain("From your CI: uv run --frozen ruff check ., uv run --frozen pyright.");
       expect(page()).toContain("Your CI also runs semgrep ci, which Keel can't run offline.");
+      expect(page()).toContain(i18next.t("projects.pyrightNode"));
       expect(called("project_update")).toEqual([]);
       await type(inputs()[0], "uv run --frozen pytest");
       expect(page()).not.toContain("From your CI");
@@ -250,6 +251,7 @@ describe("the setup dialog", () => {
       expect(page()).toContain("Guessed from");
       expect(page()).not.toContain("From your CI");
       expect(page()).not.toContain("Your CI also runs");
+      expect(page()).not.toContain(i18next.t("projects.pyrightNode"));
       await type(inputs()[0], "pnpm test:unit");
       expect(page()).not.toContain("Guessed from");
     });

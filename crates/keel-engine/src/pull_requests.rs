@@ -126,11 +126,12 @@ impl Inner {
         else {
             return;
         };
-        // An answer that doesn't say which commit, or what the CI says, leaves what Keel knew of it.
+        // An answer that doesn't say which commit leaves what Keel knew of it. One that doesn't say
+        // what the CI says leaves that unknown: what Keel knew may be about another commit by now.
         let head = status.head.or_else(|| run.pr_head.clone());
         let (ci, failed) = match status.ci {
             Some(checks) => (Some(checks.state), checks.failed),
-            None => (run.pr_ci, run.pr_ci_failed.clone()),
+            None => (None, Vec::new()),
         };
         if run.pr_state == Some(status.state)
             && run.pr_state_at == status.at

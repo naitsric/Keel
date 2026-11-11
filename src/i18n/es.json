@@ -1029,6 +1029,7 @@
     "ciMissing": "Tu CI corre esto y tu verificación no:",
     "ciMissingAdd": "Agregar a la verificación",
     "ciLeftOut": "Tu CI también corre esto, que Keel no puede correr sin red:",
+    "pyrightNode": "pyright necesita Node disponible sin red.",
     "proposalBanner_one": "{{client}} propone agregar {{name}}",
     "proposalBanner_other": "{{client}} propone agregar {{name}}, y hay {{more}} más esperando",
     "proposalReview": "Revisar",

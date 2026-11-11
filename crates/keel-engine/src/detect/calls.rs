@@ -1,55 +1,20 @@
-//! What a command from a CI calls once its wrappers are off: a Python package's tool, one of the
-//! project's scripts, a binary of its JavaScript packages, or a program. Two commands that call the
-//! same tool in the same mode check the same thing, and one whose tool the project's own setup
-//! installs runs with no network, in the form its stack runs it. Only reads the repo.
+//! Which of a CI's checks Keel can run with no network, and what a check already runs. A command
+//! is proposed only when it's one simple command, its tool and mode are on a short list of checks
+//! that work offline, and the project's own setup installs that tool. Everything else is only
+//! mentioned. Only reads the repo, and each file once.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::{
-    dotnet, is_file, is_real_script, node_tool, normalized, pip, read, requirement_name,
-    run_script, scripts,
+    dotnet, is_file, node_tool, normalized, pip, poetry_installs, read, requirement_name, scripts,
+    uv_installs,
 };
 
-/// Words of tools that reach the network, drive a browser, or build environments of their own.
-const NEEDS_NETWORK: [&str; 20] = [
-    "e2e",
-    "playwright",
-    "cypress",
-    "puppeteer",
-    "selenium",
-    "lighthouse",
-    "chromatic",
-    "semgrep",
-    "terraform",
-    "tox",
-    "nox",
-    "codecov",
-    "coveralls",
-    "sonar",
-    "snyk",
-    "trivy",
-    "audit",
-    "deny",
-    "outdated",
-    "pre-commit",
-];
 /// Programs whose first word after them says what they do: `cargo clippy`, `ruff format`.
 const SUBCOMMANDS: [&str; 19] = [
     "cargo", "go", "ruff", "mix", "dotnet", "make", "zig", "deno", "biome", "gradle", "gradlew",
     "mvn", "mvnw", "swift", "flutter", "dart", "composer", "bun", "rake",
-];
-/// What each stack's own program runs with what its setup fetched, and the file that says the
-/// stack is there. dotnet has no one file.
-const OWN: [(&str, &str, &[&str]); 4] = [
-    (
-        "cargo",
-        "Cargo.toml",
-        &["test", "check", "clippy", "fmt", "doc"],
-    ),
-    ("go", "go.mod", &["test", "vet"]),
-    ("mix", "mix.exs", &["test", "format"]),
-    ("dotnet", "", &["test", "format", "build"]),
 ];
 /// A binary whose package has another name.
 const PACKAGES: [(&str, &str); 3] = [
@@ -57,12 +22,40 @@ const PACKAGES: [(&str, &str); 3] = [
     ("biome", "@biomejs/biome"),
     ("ng", "@angular/cli"),
 ];
-/// `uv run` flags that don't change what runs.
-const UV_RUN: [&str; 4] = ["--frozen", "--locked", "--no-sync", "--offline"];
-/// `npx` flags that don't change what runs.
-const NPX: [&str; 5] = ["--no-install", "--no", "--yes", "-y", "--offline"];
-/// A script that runs a script can't go on for ever.
-const MOST_DEPTH: usize = 3;
+/// Options of `uv run` and `poetry run` that take a value, when it isn't written with `=`.
+const VALUED: [&str; 25] = [
+    "--with",
+    "--with-editable",
+    "--with-requirements",
+    "--extra",
+    "--extras",
+    "--no-extra",
+    "--group",
+    "--only-group",
+    "--no-group",
+    "--package",
+    "--python",
+    "--env-file",
+    "--index",
+    "--default-index",
+    "--index-url",
+    "--extra-index-url",
+    "--find-links",
+    "--directory",
+    "--project",
+    "--config-file",
+    "--cache-dir",
+    "-p",
+    "-C",
+    "-P",
+    "-E",
+];
+/// Options of `npx` that take a value.
+const NPX_VALUED: [&str; 2] = ["-p", "--package"];
+/// Scripts and Makefile targets read in all, to tell what a check runs.
+const MOST_EXPANSIONS: usize = 50;
+/// Lines read of each.
+const MOST_LINES: usize = 200;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Called {
@@ -93,37 +86,37 @@ fn base(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// The words after these flags, or None for a flag it doesn't know, which can change what runs.
-fn after_flags<'a, 'b>(words: &'a [&'b str], known: &[&str]) -> Option<&'a [&'b str]> {
-    let at = words
-        .iter()
-        .position(|word| !word.starts_with('-'))
-        .unwrap_or(words.len());
-    words[..at]
-        .iter()
-        .all(|flag| known.contains(flag))
-        .then(|| &words[at..])
+/// The words after a runner's options: `--flag`, `--flag=value`, and `--flag value` for those that
+/// take one.
+fn after_options<'a, 'b>(words: &'a [&'b str], valued: &[&str]) -> &'a [&'b str] {
+    let mut at = 0;
+    while let Some(word) = words.get(at) {
+        if !word.starts_with('-') {
+            break;
+        }
+        at += if valued.contains(word) { 2 } else { 1 };
+    }
+    &words[at.min(words.len())..]
 }
 
 fn python(words: &[&str]) -> Option<Call> {
-    let (called, args) = match words {
-        ["python" | "python3", "-m", tool, args @ ..] => (
+    match words {
+        ["python" | "python3", "-m", tool, args @ ..] => Some(Call::new(
             Called::Python {
                 tool: (*tool).to_owned(),
                 module: true,
             },
             args,
-        ),
-        [tool, args @ ..] => (
+        )),
+        [tool, args @ ..] => Some(Call::new(
             Called::Python {
                 tool: base(tool).to_owned(),
                 module: false,
             },
             args,
-        ),
-        [] => return None,
-    };
-    Some(Call::new(called, args))
+        )),
+        [] => None,
+    }
 }
 
 fn node(words: &[&str]) -> Option<Call> {
@@ -144,26 +137,30 @@ impl Call {
     /// What its first words say it calls. `FOO=1` in front only sets a variable for it.
     fn parse(command: &str) -> Option<Self> {
         let words: Vec<&str> = command
+            .trim_matches(['(', ')'])
             .split_whitespace()
             .skip_while(|word| word.contains('=') && !word.starts_with('-'))
             .collect();
         let script = |name: &str, args: &[&str]| Some(Self::new(Called::Script(name.into()), args));
         match words.as_slice() {
-            ["uv", "run", rest @ ..] => python(after_flags(rest, &UV_RUN)?),
-            ["poetry" | "pipenv" | "pdm", "run", rest @ ..] | ["pipx", "run", rest @ ..] => {
-                python(rest)
+            ["uv" | "poetry" | "pipenv" | "pdm", "run", rest @ ..] => {
+                python(after_options(rest, &VALUED))
             }
-            ["uvx", rest @ ..] => python(rest),
+            ["pipx", "run", rest @ ..] => python(after_options(rest, &VALUED)),
+            ["uvx", rest @ ..] => python(after_options(rest, &VALUED)),
             [
                 "python" | "python3" | ".venv/bin/python",
                 "-m",
                 tool,
                 args @ ..,
-            ] => {
-                let tool = (*tool).to_owned();
-                Some(Self::new(Called::Python { tool, module: true }, args))
+            ] => python(&[&["python", "-m", *tool][..], args].concat()),
+            ["npx" | "bunx", rest @ ..] => {
+                // `-c` runs a line of its own.
+                if rest.iter().any(|word| *word == "-c" || *word == "--call") {
+                    return None;
+                }
+                node(after_options(rest, &NPX_VALUED))
             }
-            ["npx" | "bunx", rest @ ..] => node(after_flags(rest, &NPX)?),
             ["pnpm" | "yarn" | "bun", "exec" | "x" | "dlx", rest @ ..] => node(rest),
             ["npm", "test" | "t", args @ ..] => script("test", args),
             [
@@ -173,20 +170,16 @@ impl Call {
                 args @ ..,
             ] => script(name, args),
             ["pnpm" | "yarn", name, args @ ..] if !name.starts_with('-') => script(name, args),
-            [first, args @ ..] if first.starts_with("node_modules/.bin/") => {
-                Some(Self::new(Called::Node(base(first).to_owned()), args))
+            [first, args @ ..] => {
+                let path = first.trim_start_matches("./");
+                if path.starts_with("node_modules/.bin/") {
+                    node(&[&[base(path)][..], args].concat())
+                } else if path.starts_with(".venv/bin/") {
+                    python(&[&[base(path)][..], args].concat())
+                } else {
+                    Some(Self::new(Called::Program((*first).to_owned()), args))
+                }
             }
-            [first, args @ ..] if first.starts_with(".venv/bin/") => {
-                let tool = base(first).to_owned();
-                Some(Self::new(
-                    Called::Python {
-                        tool,
-                        module: false,
-                    },
-                    args,
-                ))
-            }
-            [first, args @ ..] => Some(Self::new(Called::Program((*first).to_owned()), args)),
             [] => None,
         }
     }
@@ -208,6 +201,10 @@ impl Call {
             .map_or("", String::as_str)
     }
 
+    fn has(&self, flag: &str) -> bool {
+        self.args.iter().any(|arg| arg == flag)
+    }
+
     fn sig(&self) -> Sig {
         if let Called::Script(name) = &self.called {
             return Sig {
@@ -225,97 +222,73 @@ impl Call {
     }
 }
 
-/// The commands in a line a shell runs one after the other.
-fn chain(text: &str) -> Vec<&str> {
-    text.split(['\n', ';'])
-        .flat_map(|line| line.split("&&"))
-        .flat_map(|line| line.split("||"))
-        .map(|part| part.trim().trim_matches(['(', ')']).trim())
+/// What a line runs one after the other: split at new lines, `;` and `&&`. A line in parentheses
+/// as a whole runs the same.
+pub(super) fn simple_commands(line: &str) -> Vec<&str> {
+    let line = line.trim();
+    let line = match line
+        .strip_prefix('(')
+        .and_then(|inner| inner.strip_suffix(')'))
+    {
+        Some(inner) if !inner.contains(['(', ')']) => inner,
+        _ => line,
+    };
+    line.split(['\n', ';'])
+        .flat_map(|part| part.split("&&"))
+        .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect()
 }
 
-fn script_text(root: &Path, name: &str) -> Option<String> {
-    let package = read(root, "package.json")?;
-    scripts(&package, "scripts")
-        .get(name)?
-        .as_str()
-        .map(str::to_owned)
+/// Nothing a shell does besides running it: no pipe, redirection, substitution, variable,
+/// background, `||`, subshell, escape or home folder, and quotes that close.
+fn is_plain(command: &str) -> bool {
+    !command.contains(['|', '<', '>', '$', '`', '&', '(', ')', ';', '\\', '~'])
+        && command.matches('"').count().is_multiple_of(2)
+        && command.matches('\'').count().is_multiple_of(2)
 }
 
-/// What a Makefile's target runs, a line each, without the `@` and `-` that only change how.
-fn recipe(root: &Path, target: &str) -> Option<String> {
-    let makefile = ["Makefile", "GNUmakefile", "makefile"]
-        .into_iter()
-        .find_map(|name| read(root, name))?;
-    let mut lines = makefile.lines();
-    lines.find(|line| {
-        !line.starts_with(['\t', ' ', '#'])
-            && line.split_once(':').is_some_and(|(targets, rest)| {
-                !rest.starts_with('=') && targets.split_whitespace().any(|name| name == target)
-            })
-    })?;
-    let commands: Vec<&str> = lines
-        .map_while(|line| line.strip_prefix('\t'))
-        .map(|line| line.trim_start_matches(['@', '-']))
-        .collect();
-    Some(commands.join("\n"))
+#[derive(Clone, Copy)]
+enum Installer {
+    Python,
+    Node,
+    /// The stack's own program: cargo, go, mix or dotnet.
+    Own,
 }
 
-/// What a command checks: its own tool and mode first, then those of what its script or Makefile
-/// target runs, so `npm test` is also the jest it runs.
-pub(super) fn sigs(root: &Path, command: &str) -> Vec<Sig> {
-    sigs_within(root, command, 0)
-}
-
-fn sigs_within(root: &Path, command: &str, depth: usize) -> Vec<Sig> {
-    let Some(call) = Call::parse(command) else {
-        return Vec::new();
-    };
-    let mut found = vec![call.sig()];
-    if depth < MOST_DEPTH {
-        let inner = match &call.called {
-            Called::Script(name) => script_text(root, name),
-            Called::Program(_) if call.name() == "make" => recipe(root, call.subcommand()),
-            _ => None,
-        };
-        for part in inner.iter().flat_map(|text| chain(text)) {
-            found.extend(sigs_within(root, part, depth + 1));
+/// The checks Keel proposes from a CI: each lints, checks types or tests, and works offline once
+/// what it needs is installed. In a mode that only reads the code.
+fn on_the_list(call: &Call) -> Option<Installer> {
+    use Installer::{Node, Own, Python};
+    let sub = call.subcommand();
+    let watches = call.args.iter().any(|arg| arg.starts_with("--watch"));
+    let listed = match call.name().as_str() {
+        "ruff" => sub == "check" || (sub == "format" && call.has("--check")),
+        "black" => call.has("--check"),
+        "isort" => call.has("--check-only") || call.has("--check") || call.has("-c"),
+        "flake8" | "pylint" | "mypy" | "pyright" | "pytest" => true,
+        "eslint" => true,
+        "tsc" => call.has("--noEmit"),
+        "prettier" => call.has("--check") || call.has("-c"),
+        "jest" => !watches,
+        "vitest" => sub == "run" && !watches,
+        "cargo" => {
+            matches!(sub, "clippy" | "test" | "check") || (sub == "fmt" && call.has("--check"))
         }
-    }
-    found
-}
-
-/// What a check runs, every command of it.
-pub(super) fn checked(root: &Path, check: &str) -> HashSet<Sig> {
-    chain(check)
-        .into_iter()
-        .flat_map(|part| sigs(root, part))
-        .collect()
-}
-
-/// A command is checked if its own tool and mode are, or if everything its script runs is.
-pub(super) fn is_checked(root: &Path, checked: &HashSet<Sig>, command: &str) -> bool {
-    let sigs = sigs(root, command);
-    let Some((own, inner)) = sigs.split_first() else {
-        return false;
+        "go" => matches!(sub, "vet" | "test"),
+        "mix" => sub == "test" || (sub == "format" && call.has("--check-formatted")),
+        "dotnet" => sub == "test" || (sub == "format" && call.has("--verify-no-changes")),
+        _ => false,
     };
-    checked.contains(own) || (!inner.is_empty() && inner.iter().all(|sig| checked.contains(sig)))
+    let installer = match call.name().as_str() {
+        "eslint" | "tsc" | "prettier" | "jest" | "vitest" => Node,
+        "cargo" | "go" | "mix" | "dotnet" => Own,
+        _ => Python,
+    };
+    listed.then_some(installer)
 }
 
-pub(super) fn own_sig(command: &str) -> Option<Sig> {
-    Call::parse(command).map(|call| call.sig())
-}
-
-fn needs_network(command: &str) -> bool {
-    let lower = command.to_ascii_lowercase();
-    lower.contains("pre-commit")
-        || lower
-            .split(|c: char| c.is_whitespace() || ":-_./=()@".contains(c))
-            .any(|word| NEEDS_NETWORK.contains(&word))
-}
-
-/// How a project's Python setup runs what it installed, and what that is.
+/// How a project's Python setup runs what it installs, and what that is when nothing more is asked.
 struct PythonSetup {
     /// `uv run --frozen` or `poetry run`. None for the `.venv` that pip installs into.
     run: Option<&'static str>,
@@ -325,23 +298,18 @@ struct PythonSetup {
 impl PythonSetup {
     /// One tool per project, in the order `python` picks it.
     fn of(root: &Path) -> Option<Self> {
-        let locked = |lock: String, run| {
-            let installs = lock
-                .lines()
-                .filter_map(|line| line.strip_prefix("name = \""))
-                .filter_map(|rest| rest.split('"').next())
-                .map(normalized)
-                .collect();
-            Some(Self {
-                run: Some(run),
-                installs,
-            })
-        };
-        if let Some(lock) = read(root, "uv.lock") {
-            return locked(lock, "uv run --frozen");
+        let pyproject = || read(root, "pyproject.toml").unwrap_or_default();
+        if read(root, "uv.lock").is_some() {
+            return Some(Self {
+                run: Some("uv run --frozen"),
+                installs: uv_installs(&pyproject()),
+            });
         }
-        if let (Some(lock), true) = (read(root, "poetry.lock"), is_file(root, "pyproject.toml")) {
-            return locked(lock, "poetry run");
+        if read(root, "poetry.lock").is_some() && is_file(root, "pyproject.toml") {
+            return Some(Self {
+                run: Some("poetry run"),
+                installs: poetry_installs(&pyproject()),
+            });
         }
         let installs = pip(root)?
             .from
@@ -365,11 +333,10 @@ impl PythonSetup {
     }
 }
 
-/// The packages `package.json` names, which its lock installs.
-fn node_packages(root: &Path) -> HashSet<String> {
-    let package = read(root, "package.json").unwrap_or_default();
-    let package: serde_json::Value = serde_json::from_str(&package).unwrap_or_default();
-    ["dependencies", "devDependencies", "optionalDependencies"]
+/// The packages `package.json` depends on, which its lock installs.
+fn node_packages(package: &str) -> HashSet<String> {
+    let package: serde_json::Value = serde_json::from_str(package).unwrap_or_default();
+    ["dependencies", "devDependencies"]
         .into_iter()
         .filter_map(|key| package[key].as_object())
         .flat_map(|names| names.keys().cloned())
@@ -383,53 +350,180 @@ fn package_of(bin: &str) -> &str {
         .map_or(bin, |(_, package)| package)
 }
 
-/// How Keel runs a CI command with no network: a tool the project's setup installs, in the form
-/// its stack runs it, like `uv run --frozen ruff check .`, or one of the stack's own commands, like
-/// `cargo clippy`. None for anything else, and for what needs the network or another toolchain.
-pub(super) fn offline(root: &Path, command: &str) -> Option<String> {
-    if needs_network(command) || command.split_whitespace().any(|word| word.starts_with('+')) {
-        return None;
-    }
-    let call = Call::parse(command)?;
-    let args = call.args.join(" ");
-    let with = |head: String| {
-        if args.is_empty() {
-            head
-        } else {
-            format!("{head} {args}")
-        }
-    };
-    let name = call.name();
-    if let Called::Script(script) = &call.called {
-        let (tool, ..) = node_tool(root)?;
-        let text = script_text(root, script)?;
-        return (is_real_script(&text) && !needs_network(&text))
-            .then(|| with(run_script(tool, script)));
-    }
-    let module = matches!(call.called, Called::Python { module: true, .. });
-    if matches!(call.called, Called::Python { .. } | Called::Program(_))
-        && let Some(setup) = PythonSetup::of(root)
-        && setup.installs.contains(&normalized(&name))
-    {
-        return Some(with(setup.run(&name, module)));
-    }
-    if matches!(call.called, Called::Node(_) | Called::Program(_))
-        && node_tool(root).is_some()
-        && node_packages(root).contains(package_of(&name))
-    {
-        return Some(with(format!("node_modules/.bin/{name}")));
-    }
-    let Called::Program(_) = call.called else {
-        return None;
-    };
-    let (program, _, does) = OWN.iter().find(|(program, file, _)| {
-        *program == name
-            && if file.is_empty() {
-                dotnet(root).is_some()
-            } else {
-                is_file(root, file)
+/// Each target of a Makefile, and the commands it runs without the `@` and `-` that only change how.
+fn targets(makefile: &str) -> HashMap<String, Vec<String>> {
+    let mut targets: HashMap<String, Vec<String>> = HashMap::new();
+    let mut current: Vec<String> = Vec::new();
+    for line in makefile.lines() {
+        if let Some(command) = line.strip_prefix('\t') {
+            let command = command.trim_start_matches(['@', '-']).trim();
+            for name in &current {
+                let lines = targets.entry(name.clone()).or_default();
+                if lines.len() < MOST_LINES {
+                    lines.push(command.to_owned());
+                }
             }
-    })?;
-    does.contains(&call.subcommand())
-        .then(|| with((*program).to_owned()))
+        } else if line.starts_with(['#', ' ']) || line.trim().is_empty() {
+            continue;
+        } else {
+            current = match line.split_once(':') {
+                // `test := 1` and `x = test: 1` set a variable.
+                Some((names, rest))
+                    if !names.contains('=')
+                        && !rest.starts_with('=')
+                        && !rest.starts_with(":=") =>
+                {
+                    names.split_whitespace().map(str::to_owned).collect()
+                }
+                _ => Vec::new(),
+            };
+        }
+    }
+    targets
+}
+
+/// What a repo says about running its checks, read once.
+pub(super) struct Repo {
+    scripts: HashMap<String, String>,
+    targets: HashMap<String, Vec<String>>,
+    python: Option<PythonSetup>,
+    node: Option<HashSet<String>>,
+    own: Vec<&'static str>,
+    /// What each script or target runs, by tool and mode, once read.
+    expanded: HashMap<(bool, String), Vec<Sig>>,
+}
+
+impl Repo {
+    pub(super) fn read(root: &Path) -> Self {
+        let package = read(root, "package.json").unwrap_or_default();
+        let scripts = scripts(&package, "scripts")
+            .into_iter()
+            .filter_map(|(name, text)| Some((name, text.as_str()?.to_owned())))
+            .collect();
+        let makefile = ["Makefile", "GNUmakefile", "makefile"]
+            .into_iter()
+            .find_map(|name| read(root, name))
+            .unwrap_or_default();
+        let own = [
+            ("cargo", is_file(root, "Cargo.toml")),
+            ("go", is_file(root, "go.mod")),
+            ("mix", is_file(root, "mix.exs")),
+            ("dotnet", dotnet(root).is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(program, there)| there.then_some(program))
+        .collect();
+        Self {
+            scripts,
+            targets: targets(&makefile),
+            python: PythonSetup::of(root),
+            node: node_tool(root).map(|_| node_packages(&package)),
+            own,
+            expanded: HashMap::new(),
+        }
+    }
+
+    /// Its own tool and mode first, then, for a script or a Makefile target, those of each command
+    /// it runs, one level down: `npm test` is also the jest it runs.
+    pub(super) fn sigs(&mut self, command: &str) -> Vec<Sig> {
+        let Some(call) = Call::parse(command) else {
+            return Vec::new();
+        };
+        let key = match &call.called {
+            Called::Script(name) => Some((true, name.clone())),
+            Called::Program(_) if call.name() == "make" => {
+                Some((false, call.subcommand().to_owned()))
+            }
+            _ => None,
+        };
+        let mut sigs = vec![call.sig()];
+        if let Some(key) = key {
+            sigs.extend(self.expand(key));
+        }
+        sigs
+    }
+
+    fn expand(&mut self, key: (bool, String)) -> Vec<Sig> {
+        if let Some(sigs) = self.expanded.get(&key) {
+            return sigs.clone();
+        }
+        if self.expanded.len() >= MOST_EXPANSIONS {
+            return Vec::new();
+        }
+        let lines: Vec<String> = if key.0 {
+            self.scripts.get(&key.1).cloned().into_iter().collect()
+        } else {
+            self.targets.get(&key.1).cloned().unwrap_or_default()
+        };
+        let mut sigs: Vec<Sig> = Vec::new();
+        for sig in lines
+            .iter()
+            .flat_map(|line| simple_commands(line))
+            .filter_map(Call::parse)
+            .map(|call| call.sig())
+        {
+            if !sigs.contains(&sig) {
+                sigs.push(sig);
+            }
+        }
+        self.expanded.insert(key, sigs.clone());
+        sigs
+    }
+
+    /// What a check runs, every command of it.
+    pub(super) fn checked(&mut self, check: &str) -> HashSet<Sig> {
+        simple_commands(check)
+            .into_iter()
+            .flat_map(|command| self.sigs(command))
+            .collect()
+    }
+
+    /// How Keel runs a simple command from a CI with no network: one on the list, whose tool the
+    /// project's setup installs, in the form its stack runs it, like `uv run --frozen ruff check .`.
+    pub(super) fn offline(&self, command: &str) -> Option<String> {
+        let changes =
+            |word: &str| word.starts_with('+') || word.starts_with("--fix") || word == "--write";
+        if !is_plain(command) || command.split_whitespace().any(changes) {
+            return None;
+        }
+        let call = Call::parse(command)?;
+        if matches!(call.called, Called::Script(_)) {
+            return None;
+        }
+        let name = call.name();
+        let args = call.args.join(" ");
+        let with = |head: String| {
+            if args.is_empty() {
+                head
+            } else {
+                format!("{head} {args}")
+            }
+        };
+        match on_the_list(&call)? {
+            Installer::Python => {
+                let python = self.python.as_ref()?;
+                let module = matches!(call.called, Called::Python { module: true, .. });
+                python
+                    .installs
+                    .contains(&normalized(&name))
+                    .then(|| with(python.run(&name, module)))
+            }
+            Installer::Node => self
+                .node
+                .as_ref()?
+                .contains(package_of(&name))
+                .then(|| with(format!("node_modules/.bin/{name}"))),
+            Installer::Own => (matches!(call.called, Called::Program(_))
+                && self.own.contains(&name.as_str()))
+            .then(|| with(name.clone())),
+        }
+    }
+}
+
+/// A command is checked if its own tool and mode are, or if everything its script runs is.
+pub(super) fn is_checked(checked: &HashSet<Sig>, sigs: &[Sig]) -> bool {
+    let Some((own, inner)) = sigs.split_first() else {
+        return false;
+    };
+    checked.contains(own) || (!inner.is_empty() && inner.iter().all(|sig| checked.contains(sig)))
 }

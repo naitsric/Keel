@@ -225,12 +225,9 @@ impl World {
         std::fs::read_to_string(self.log.join("gh.log")).unwrap_or_default()
     }
 
-    /// Each look asks once with the checks, and again without them only if that fails.
+    /// Every call, including one asked again without the checks.
     fn asked_about_prs(&self) -> usize {
-        self.gh_log()
-            .lines()
-            .filter(|line| line.starts_with("gh pr view") && line.contains("statusCheckRollup"))
-            .count()
+        self.gh_log().matches("gh pr view").count()
     }
 
     fn body(&self) -> String {
@@ -1076,14 +1073,49 @@ fn a_pull_request_whose_ci_fails_says_so_on_its_run_and_its_card() {
     w.until("the CI reading passed", || ci().0 == Some(CiState::Passed));
     assert!(ci().1.is_empty());
 
-    // A gh that doesn't say leaves what Keel knew.
+    // An answer that doesn't say what the CI says leaves it unknown, since it may be about another
+    // commit by now.
     w.set_pr_view("OPEN", false, "2026-11-06T09:30:00Z");
     w.forget_looking(&run);
     w.engine.look_at_pr(&run);
     w.until("the new time arriving", || {
         w.store.run(&run).unwrap().pr_state_at.as_deref() == Some("2026-11-06T09:30:00Z")
     });
-    assert_eq!(ci().0, Some(CiState::Passed));
+    assert_eq!(ci(), (None, Vec::new()));
+}
+
+#[test]
+fn a_new_commit_read_without_its_checks_leaves_the_ci_unknown() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.delivered();
+    let view = |head: &str, checks: &str| {
+        format!(
+            r#"{{"state":"OPEN","isDraft":false,"updatedAt":"2026-11-06T09:00:00Z","headRefOid":"{head}"{checks}}}"#
+        )
+    };
+    std::fs::write(
+        w.flags.join("pr-view"),
+        view("aaa", &format!(r#","statusCheckRollup":[{LINT_FAILED}]"#)),
+    )
+    .unwrap();
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.until("the CI reading failed", || {
+        w.store.run(&run).unwrap().pr_ci == Some(CiState::Failed)
+    });
+
+    // Someone pushes, and this time the checks can't be read.
+    std::fs::write(w.flags.join("no-checks"), "").unwrap();
+    std::fs::write(w.flags.join("pr-view"), view("bbb", "")).unwrap();
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.until("the new commit arriving", || {
+        w.store.run(&run).unwrap().pr_head.as_deref() == Some("bbb")
+    });
+    let found = w.store.run(&run).unwrap();
+    assert_eq!(found.pr_ci, None, "what failed was another commit");
+    assert!(found.pr_ci_failed.is_empty());
 }
 
 #[test]

@@ -91,6 +91,9 @@ export function withCheckOption(check: string, option: string): string {
   return check.trim() ? `${check.trim()} && ${option}` : option;
 }
 
+/** pyright from PyPI fetches Node the first time unless it's already installed, which a check with no network can't. */
+export const needsNode = (commands: string[]) => commands.some((command) => /\bpyright\b/.test(command));
+
 /** What the CI runs that isn't in this check yet, as it's being typed. */
 export function ciCommandsLeft(check: string, commands: CiGap["commands"]): string[] {
   return commands.filter((command) => !hasOption(check, command));

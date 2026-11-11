@@ -330,9 +330,11 @@ fn names_pytest(requirements: &Value) -> bool {
         .is_some_and(|list| list.iter().any(|r| r.as_str().is_some_and(is_pytest)))
 }
 
-/// Without recursion: a group can include another, and a repo can make that chain as long as it likes.
-fn any_reaches_pytest(groups: &HashMap<String, &Value>, mut waiting: Vec<String>) -> bool {
+/// Every package these groups name, and the groups they include. Without recursion: a group can
+/// include another, and a repo can make that chain as long as it likes.
+fn group_names(groups: &HashMap<String, &Value>, mut waiting: Vec<String>) -> HashSet<String> {
     let mut seen = HashSet::new();
+    let mut names = HashSet::new();
     while let Some(name) = waiting.pop() {
         if !seen.insert(name.clone()) {
             continue;
@@ -340,7 +342,9 @@ fn any_reaches_pytest(groups: &HashMap<String, &Value>, mut waiting: Vec<String>
         let entries = groups.get(&name).and_then(|group| group.as_array());
         for entry in entries.into_iter().flatten() {
             match entry {
-                Value::String(requirement) if is_pytest(requirement) => return true,
+                Value::String(requirement) => {
+                    names.insert(requirement_name(requirement));
+                }
                 Value::Table(include) => waiting.extend(
                     include
                         .get("include-group")
@@ -351,7 +355,87 @@ fn any_reaches_pytest(groups: &HashMap<String, &Value>, mut waiting: Vec<String>
             }
         }
     }
-    false
+    names
+}
+
+fn any_reaches_pytest(groups: &HashMap<String, &Value>, waiting: Vec<String>) -> bool {
+    group_names(groups, waiting).contains("pytest")
+}
+
+/// A pyproject's dependency groups by name, and those `uv sync` installs unless told otherwise:
+/// `dev`, or what `[tool.uv] default-groups` says.
+fn uv_groups(pyproject: &toml::Table) -> (HashMap<String, &Value>, Vec<String>) {
+    let uv = pyproject.get("tool").and_then(|tool| tool.get("uv"));
+    let groups: HashMap<String, &Value> = pyproject
+        .get("dependency-groups")
+        .and_then(Value::as_table)
+        .into_iter()
+        .flatten()
+        .map(|(name, group)| (normalized(name), group))
+        .collect();
+    let default_groups: Vec<String> = match uv.and_then(|uv| uv.get("default-groups")) {
+        Some(Value::Array(names)) => names
+            .iter()
+            .filter_map(Value::as_str)
+            .map(normalized)
+            .collect(),
+        // The only other thing it can be is "all".
+        Some(_) => groups.keys().cloned().collect(),
+        None => vec!["dev".to_owned()],
+    };
+    (groups, default_groups)
+}
+
+/// What a plain `uv sync` installs, by name: the project's dependencies, its old dev-dependencies
+/// and its default groups.
+fn uv_installs(pyproject: &str) -> HashSet<String> {
+    let Ok(pyproject) = toml::from_str::<toml::Table>(pyproject) else {
+        return HashSet::new();
+    };
+    let listed = |list: Option<&Value>| -> Vec<String> {
+        list.and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(requirement_name)
+            .collect()
+    };
+    let project = pyproject.get("project");
+    let uv = pyproject.get("tool").and_then(|tool| tool.get("uv"));
+    let (groups, default_groups) = uv_groups(&pyproject);
+    let mut names = group_names(&groups, default_groups);
+    names.extend(listed(project.and_then(|p| p.get("dependencies"))));
+    names.extend(listed(uv.and_then(|uv| uv.get("dev-dependencies"))));
+    names
+}
+
+/// What `poetry install` installs, by name: every group that isn't optional.
+fn poetry_installs(pyproject: &str) -> HashSet<String> {
+    let Ok(pyproject) = toml::from_str::<toml::Table>(pyproject) else {
+        return HashSet::new();
+    };
+    let poetry = pyproject.get("tool").and_then(|tool| tool.get("poetry"));
+    let keys = |table: Option<&Value>| -> Vec<String> {
+        table
+            .and_then(Value::as_table)
+            .into_iter()
+            .flatten()
+            .map(|(name, _)| normalized(name))
+            .collect()
+    };
+    let mut names: HashSet<String> = keys(poetry.and_then(|p| p.get("dependencies")))
+        .into_iter()
+        .chain(keys(poetry.and_then(|p| p.get("dev-dependencies"))))
+        .collect();
+    let groups = poetry
+        .and_then(|p| p.get("group"))
+        .and_then(Value::as_table);
+    for group in groups.into_iter().flatten().map(|(_, group)| group) {
+        if group.get("optional").and_then(Value::as_bool) != Some(true) {
+            names.extend(keys(group.get("dependencies")));
+        }
+    }
+    names
 }
 
 /// This name ends up in a command, so one a shell or uv could read as anything else doesn't count.
@@ -375,21 +459,7 @@ fn uv_options(pyproject: &str) -> (Vec<String>, Option<String>) {
     let project = pyproject.get("project");
     let uv = pyproject.get("tool").and_then(|tool| tool.get("uv"));
     let group_table = pyproject.get("dependency-groups").and_then(Value::as_table);
-    let groups: HashMap<String, &Value> = group_table
-        .into_iter()
-        .flatten()
-        .map(|(name, group)| (normalized(name), group))
-        .collect();
-    let default_groups: Vec<String> = match uv.and_then(|uv| uv.get("default-groups")) {
-        Some(Value::Array(names)) => names
-            .iter()
-            .filter_map(Value::as_str)
-            .map(normalized)
-            .collect(),
-        // The only other thing it can be is "all".
-        Some(_) => groups.keys().cloned().collect(),
-        None => vec!["dev".to_owned()],
-    };
+    let (groups, default_groups) = uv_groups(&pyproject);
     let installed = |list: Option<&Value>| list.is_some_and(names_pytest);
     let pytest_comes_by_itself = installed(project.and_then(|p| p.get("dependencies")))
         || installed(uv.and_then(|uv| uv.get("dev-dependencies")))

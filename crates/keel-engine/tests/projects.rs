@@ -343,6 +343,11 @@ fn a_saved_check_that_misses_what_ci_runs_is_told_and_left_as_it_is() {
         "[[package]]\nname = \"pyright\"\n\n[[package]]\nname = \"pytest\"\n",
     )
     .unwrap();
+    std::fs::write(
+        w.repo.join("pyproject.toml"),
+        "[dependency-groups]\ndev = [\"pyright\", \"pytest\"]\n",
+    )
+    .unwrap();
     let id = w.add();
     // Nothing saved yet: finishing the setup is what that needs.
     assert!(w.engine.project_ci_gap(&id).unwrap().commands.is_empty());

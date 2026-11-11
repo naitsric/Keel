@@ -153,6 +153,7 @@ describe("the Projects page", () => {
     expect(main().textContent).toContain("uv run --frozen pyright");
     expect(main().textContent).toContain(i18next.t("projects.ciLeftOut"));
     expect(main().textContent).toContain("semgrep ci");
+    expect(main().textContent).toContain(i18next.t("projects.pyrightNode"));
     expect(checkBox().value).toBe("make test");
 
     await typeInto(checkBox(), "make test && uv run --frozen pyright");

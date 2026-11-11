@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next";
 import { api, type CiGap, type EnvVar, type GithubStatus, type Project, type Service, type Workflow } from "../lib/api";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
-import { ciCommandsLeft, foldersToOffer, needsSetup, withCheckOption, withFolders } from "../lib/projects";
+import { ciCommandsLeft, foldersToOffer, needsNode, needsSetup, withCheckOption, withFolders } from "../lib/projects";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass } from "../ui/primitives";
@@ -231,6 +231,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
                     {t("projects.ciMissing")}
                   </p>
                   <CommandList commands={ciMissing} />
+                  {needsNode(ciMissing) && <p className="mt-1 text-[12px] text-muted">{t("projects.pyrightNode")}</p>}
                   <Button className="mt-2" onClick={() => setCheck(ciMissing.reduce(withCheckOption, check))}>
                     {t("projects.ciMissingAdd")}
                   </Button>

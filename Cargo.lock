@@ -2063,6 +2063,7 @@ dependencies = [
 name = "keel-harness"
 version = "0.2.1"
 dependencies = [
+ "chrono",
  "keel-core",
  "libc",
  "serde",

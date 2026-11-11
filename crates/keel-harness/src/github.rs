@@ -1,7 +1,7 @@
 //! GitHub through the user's own `gh`. Keel has no login of its own and stores no token: it asks
 //! `gh` for one when it's about to use it and hands it only to that one process.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -19,6 +19,8 @@ use crate::process::{SIGKILL, signal_group};
 const LOOK_LIMIT: Duration = Duration::from_secs(30);
 /// How a `gh` that went past its limit starts saying so.
 const TOOK_TOO_LONG: &str = "gh took longer than";
+/// How long after a check's runs ended another run of it is a rerun, and not a sibling.
+const RERUN_AFTER_SECS: i64 = 120;
 
 /// A token that can't end up in a log by accident.
 pub struct Token(String);
@@ -416,7 +418,7 @@ impl Gh {
         limit: Duration,
     ) -> Result<PrStatus, GhError> {
         match self.ask_about_pr(token, repo, number, limit, true) {
-            Err(error) if !error.detail.starts_with(TOOK_TOO_LONG) => {
+            Err(error) if about_the_checks(&error) => {
                 self.ask_about_pr(token, repo, number, limit, false)
             }
             answer => answer,
@@ -540,6 +542,67 @@ fn parse_pr_status(value: &serde_json::Value) -> Option<PrStatus> {
     })
 }
 
+/// Whether a failed question can be about the checks alone: GitHub saying the token can't reach
+/// something. Not a token that's signed out, a pull request that isn't there, too many questions, a
+/// GitHub that can't be reached or a `gh` that hangs, which asking again without them won't fix.
+fn about_the_checks(error: &GhError) -> bool {
+    let detail = error.detail.to_ascii_lowercase();
+    let says = |words: &[&str]| words.iter().any(|word| detail.contains(word));
+    says(&[
+        "statuscheckrollup",
+        "checksuite",
+        "checkrun",
+        "not accessible",
+    ]) || (error.kind == "noPermission" && !says(&["not found", "404", "could not resolve"]))
+}
+
+/// When a check started, or ended. GitHub's zero time, for one that hasn't, is none.
+fn check_time(
+    check: &serde_json::Value,
+    key: &str,
+) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    use chrono::Datelike;
+    let text = check.get(key)?.as_str()?;
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .filter(|time| time.year() > 1)
+}
+
+/// Of the runs of one check, those that say where it stands now. One that hasn't started is a rerun
+/// waiting its turn, so it's the newest. A run that starts two minutes or more after the ones
+/// before it ended runs them again. Runs that start closer together than that are siblings, like a
+/// push's and a pull request's, and a failure among them counts.
+fn latest_runs(all: &[serde_json::Value], runs: &[usize]) -> Vec<usize> {
+    let waiting: Vec<usize> = runs
+        .iter()
+        .copied()
+        .filter(|&at| check_time(&all[at], "startedAt").is_none())
+        .collect();
+    if !waiting.is_empty() {
+        return waiting;
+    }
+    let mut timed: Vec<_> = runs
+        .iter()
+        .filter_map(|&at| {
+            let start = check_time(&all[at], "startedAt")?;
+            let end = check_time(&all[at], "completedAt").map_or(start, |end| end.max(start));
+            Some((start, end, at))
+        })
+        .collect();
+    timed.sort();
+    let mut latest = Vec::new();
+    let mut until: Option<chrono::DateTime<chrono::FixedOffset>> = None;
+    for (start, end, at) in timed {
+        if until.is_some_and(|until| start >= until + chrono::Duration::seconds(RERUN_AFTER_SECS)) {
+            latest.clear();
+            until = None;
+        }
+        latest.push(at);
+        until = Some(until.map_or(end, |until| until.max(end)));
+    }
+    latest
+}
+
 /// Each check is a check run, with a status and, once it's done, a conclusion, or a commit status,
 /// with a state. They count the way `gh pr checks` counts them: cancelled is a failure, skipped and
 /// neutral are not, and anything unfinished is pending. A check run again is its latest run, by
@@ -558,22 +621,26 @@ fn parse_checks(rollup: &serde_json::Value) -> Option<PrChecks> {
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| text(check, "context"))
     };
-    // The same job in another workflow is another check.
-    let key = |check: &serde_json::Value| (text(check, "workflowName"), name(check));
-    let when = |check: &serde_json::Value| (text(check, "startedAt"), text(check, "completedAt"));
-    let mut latest: HashMap<(String, String), usize> = HashMap::new();
+    // The same job in another workflow is another check, and so is a commit status with its name.
+    let key = |check: &serde_json::Value| {
+        (
+            text(check, "__typename"),
+            text(check, "workflowName"),
+            name(check),
+        )
+    };
+    let mut runs: HashMap<(String, String, String), Vec<usize>> = HashMap::new();
     for (at, check) in all.iter().enumerate() {
-        let newer = latest
-            .get(&key(check))
-            .is_none_or(|&kept| when(check) >= when(&all[kept]));
-        if newer {
-            latest.insert(key(check), at);
-        }
+        runs.entry(key(check)).or_default().push(at);
     }
+    let kept: HashSet<usize> = runs
+        .values()
+        .flat_map(|runs| latest_runs(all, runs))
+        .collect();
     let checks: Vec<&serde_json::Value> = all
         .iter()
         .enumerate()
-        .filter(|(at, check)| latest.get(&key(check)) == Some(at))
+        .filter(|(at, _)| kept.contains(at))
         .map(|(_, check)| check)
         .collect();
     let mut failed: Vec<String> = Vec::new();
@@ -991,6 +1058,73 @@ echo '{"state":"MERGED","isDraft":false,"mergedAt":"2026-11-06T10:00:00Z"}'"#,
             ci(two_workflows),
             Some((CiState::Failed, vec!["test".to_owned()]))
         );
+    }
+
+    #[test]
+    fn checks_that_start_together_all_count_and_a_queued_rerun_is_the_newest() {
+        let ci = |checks: serde_json::Value| {
+            parse_pr_status(&serde_json::json!({ "state": "OPEN", "statusCheckRollup": checks }))
+                .and_then(|status| status.ci)
+                .map(|ci| (ci.state, ci.failed))
+        };
+        let run = |conclusion: &str, started: &str, completed: &str| serde_json::json!({ "__typename": "CheckRun", "name": "test", "workflowName": "CI", "status": "COMPLETED", "conclusion": conclusion, "startedAt": started, "completedAt": completed });
+        let failed = || Some((CiState::Failed, vec!["test".to_owned()]));
+        // A push and a pull_request run of the same job: neither is a rerun of the other.
+        assert_eq!(
+            ci(serde_json::json!([
+                run("FAILURE", "2026-11-06T10:00:00Z", "2026-11-06T10:00:30Z"),
+                run("SUCCESS", "2026-11-06T10:00:02Z", "2026-11-06T10:00:40Z"),
+            ])),
+            failed()
+        );
+        // Started well after the other ended, it's a rerun.
+        assert_eq!(
+            ci(serde_json::json!([
+                run("FAILURE", "2026-11-06T10:00:00Z", "2026-11-06T10:01:00Z"),
+                run("SUCCESS", "2026-11-06T10:05:00Z", "2026-11-06T10:06:00Z"),
+            ])),
+            Some((CiState::Passed, vec![]))
+        );
+        // A commit status and a check run with the same name are two checks.
+        assert_eq!(
+            ci(serde_json::json!([
+                { "__typename": "StatusContext", "context": "build", "state": "FAILURE", "startedAt": "2026-11-06T10:00:00Z" },
+                { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-11-06T10:10:00Z" },
+            ])),
+            Some((CiState::Failed, vec!["build".to_owned()]))
+        );
+        // A rerun that hasn't started yet has no time, or the zero one, and is what the CI says now.
+        for unset in [
+            serde_json::json!({ "__typename": "CheckRun", "name": "test", "workflowName": "CI", "status": "QUEUED", "conclusion": "", "startedAt": "0001-01-01T00:00:00Z" }),
+            serde_json::json!({ "__typename": "CheckRun", "name": "test", "workflowName": "CI", "status": "QUEUED" }),
+        ] {
+            assert_eq!(
+                ci(serde_json::json!([
+                    run("FAILURE", "2026-11-06T10:00:00Z", "2026-11-06T10:01:00Z"),
+                    unset,
+                ])),
+                Some((CiState::Pending, vec![]))
+            );
+        }
+    }
+
+    #[test]
+    fn only_an_answer_about_the_checks_is_asked_again_without_them() {
+        for said in [
+            "HTTP 401: Bad credentials (https://api.github.com/graphql)",
+            "GraphQL: Could not resolve to a PullRequest with the number of 12. (repository.pullRequest)",
+            "HTTP 404: Not Found (https://api.github.com/graphql)",
+            "GraphQL: API rate limit exceeded for user ID 1.",
+            "error connecting to api.github.com",
+            "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let gh = fake_gh(dir.path(), &format!("echo '{said}' >&2; exit 1"));
+            gh.pr_status(&Token("t".into()), "acme/app", 12)
+                .unwrap_err();
+            let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+            assert_eq!(calls.lines().count(), 1, "{said}: {calls}");
+        }
     }
 
     #[test]
