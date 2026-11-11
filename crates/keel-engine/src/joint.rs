@@ -21,6 +21,9 @@ use crate::{Error, Inner, Result, locked, new_id, prompts, specs, workflows};
 /// The specifier's usual id, so that whatever reads a run's spec finds this one too.
 const AGREE_STEP: &str = "spec";
 
+/// Where what was agreed keeps the request it was agreed from, which each part reads in full.
+const ASKED: &str = "request";
+
 /// Where a project's mirror keeps what Keel last read of its default branch for a run in another
 /// project. Apart from `keel-base`, which a run of this project starts from.
 const READ_BRANCH: &str = "keel-read";
@@ -389,6 +392,25 @@ impl Inner {
             Err(keel_store::Error::NotFound(_)) => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// The request a part's change was agreed from, word for word. None for a part opened before
+    /// Keel kept it.
+    pub(crate) fn asked_of(&self, part: &Card) -> Result<Option<String>> {
+        let Some(change_id) = &part.joint_change_id else {
+            return Ok(None);
+        };
+        let change = match self.store.joint_change(change_id) {
+            Ok(change) => change,
+            Err(keel_store::Error::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        Ok(change
+            .agreed
+            .as_ref()
+            .and_then(|agreed| agreed.get(ASKED))
+            .and_then(Value::as_str)
+            .map(str::to_owned))
     }
 
     /// Whether a run does one part of a change across projects.
@@ -900,7 +922,7 @@ impl Inner {
         if approval.state != AttemptState::Succeeded.as_str() {
             return Ok(true);
         }
-        match self.put_parts_on_board(&agreement, attempts) {
+        match self.put_parts_on_board(run_id, &agreement, attempts) {
             Ok(cards) => {
                 self.store
                     .append_event(&approval.id, "partsOpened", &json!({ "cards": cards }))?;
@@ -923,6 +945,7 @@ impl Inner {
 
     fn put_parts_on_board(
         &self,
+        run_id: &str,
         agreement: &Agreement,
         attempts: &[Attempt],
     ) -> Result<Vec<String>, String> {
@@ -949,6 +972,14 @@ impl Inner {
         if !answered.is_empty() {
             agreed["answered"] = json!(answered);
         }
+        // So does the request, word for word as it was agreed from: what was agreed only sums it
+        // up. It's kept here, since the card where it was agreed may be deleted before a part starts.
+        let request = self
+            .store
+            .run(run_id)
+            .map_err(|error| error.to_string())?
+            .request;
+        agreed[ASKED] = json!(request);
         self.store
             .open_joint_parts(&agreement.change.id, &agreed, &parts, &spec.together)
             .map_err(|error| error.to_string())

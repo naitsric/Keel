@@ -3,12 +3,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Run, type RunJoint, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Reason, type Run, type RunJoint, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
-import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
+import { errorText, needsProjectSettings, needsSignIn, reasonText, specProblemText } from "../lib/reason";
 import { allRecommend, answerFrom, differsFromRecommended, isAnswered, needsText, type QuestionPick, recommendedAnswers, recommendedOption, startingPick } from "../lib/questions";
 import { latestSizeDecision, type SizeDecision, skippedAsSmall, skippedSteps, whyNotSmallText } from "../lib/size";
 import { useApp } from "../lib/store";
@@ -103,6 +103,8 @@ export function Summary({ run, attempts, current, commands, rawCheck, closedBy, 
   // Of the steps working, the one that started last is the one to name.
   const working = attempts.filter((a) => isActive(a.state)).at(-1);
   const verification = verificationInRound(attempts, run?.round ?? 0);
+  // Still not proven once the run is approved: a person approving it didn't make it so.
+  const unchecked = uncheckedInRound(attempts, run?.round ?? 0);
   const skipped = skippedSteps(attempts);
   // A step that's done says nothing about the run while others are still to come.
   const between = !run?.finishedAt && (current.state === "succeeded" || current.state === "skipped");
@@ -147,7 +149,8 @@ export function Summary({ run, attempts, current, commands, rawCheck, closedBy, 
           {latestChecks.length > 0 && (
             <p className={cx(checksPassed === latestChecks.length ? "text-muted" : "font-medium text-danger")}>{t("run.checksPassed", { passed: checksPassed, total: latestChecks.length })}</p>
           )}
-          {verification && <VerificationProof verification={verification} />}
+          <NotProvenByReviews unchecked={unchecked} />
+          {verification && <VerificationProof verification={verification} allProven={unchecked.length === 0} />}
           {skipped.length > 0 && <p className="text-muted">{t("fits.summary", { names: skipped.map((step) => step.stepId).join(", ") })}</p>}
           <p className="text-muted">{commands.length === 0 ? t("run.noRunCommands") : t("run.runCommandsPassed", { passed, total: commands.length })}</p>
           <p className={cx("mt-0.5", rawCheck === "changed" || rawCheck === "missing" ? "font-medium text-danger" : "text-muted")}>
@@ -206,16 +209,17 @@ function VerificationItems({ verification }: { verification: VerificationOutput 
 }
 
 /**
- * One line that opens to the list. The green check only goes with all of it met: anything else says
- * what it is, and not being able to verify something is a normal thing to find, not an alarm.
+ * One line that opens to the list. The green check only goes with all of it met and nothing else left
+ * unproven: anything else says what it is, and not being able to verify something is a normal thing to
+ * find, not an alarm.
  */
-function VerificationProof({ verification }: { verification: VerificationOutput }) {
+function VerificationProof({ verification, allProven }: { verification: VerificationOutput; allProven: boolean }) {
   const { t } = useTranslation();
   const { met, unmet, total } = verificationCounts(verification);
   return (
     <details className="my-0.5">
       <summary className="cursor-pointer">
-        {total > 0 && met === total && <Check size={13} className="mr-1 inline align-[-2px] text-success" />}
+        {allProven && total > 0 && met === total && <Check size={13} className="mr-1 inline align-[-2px] text-success" />}
         <span className={cx(unmet > 0 && "font-medium text-warning")}>{verificationLine(t, verification)}</span>
       </summary>
       <div className="mt-1 mb-1.5 pl-3">
@@ -237,13 +241,35 @@ function VerificationView({ verification }: { verification: VerificationOutput }
   );
 }
 
+/** What the reviews said they couldn't check by reading the code, with the review that said it. Nothing if there's none. */
+function NotProvenByReviews({ unchecked }: { unchecked: { step: string; text: string }[] }) {
+  const { t } = useTranslation();
+  if (unchecked.length === 0) return null;
+  return (
+    <div className="mb-1.5">
+      <p className="font-medium">{t("run.notProvenByReviews")}</p>
+      <ul className="selectable list-disc space-y-0.5 pl-4 break-words">
+        {unchecked.map((item, index) => (
+          // Lines of a fixed text: their position is their identity.
+          <li key={index}>
+            {item.text} <span className="font-mono text-[11.5px] text-muted">{item.step}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { attempts: Attempt[]; round: number; commands: CommandRun[]; rawCheck: RawCheck; reviewed: boolean }) {
   const { t } = useTranslation();
   const checks = latestOfEachStep(attempts.filter((a) => a.kind === "check"));
   const passed = commands.filter((c) => c.status === "ok").length;
   const verification = verificationInRound(attempts, round);
+  // What nobody could check comes first, so a count of what was met can't stand for all of it.
+  const unchecked = uncheckedInRound(attempts, round);
   return (
     <>
+      <NotProvenByReviews unchecked={unchecked} />
       {checks.map((check) =>
         check.state === "succeeded" ? (
           <p key={check.id} className="selectable flex gap-1.5">
@@ -262,7 +288,7 @@ function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { atte
           {reviewed && ` ${t("run.approvalReviewsOnlyRead")}`}
         </p>
       )}
-      {verification && <VerificationProof verification={verification} />}
+      {verification && <VerificationProof verification={verification} allProven={unchecked.length === 0} />}
       <p className="text-muted">
         {commands.length === 0 ? t("run.noCommands") : t("run.commandsPassed", { passed, total: commands.length })} <span className={cx((rawCheck === "changed" || rawCheck === "missing") && "font-medium text-danger")}>{t(auditKey(rawCheck))}</span>
       </p>
@@ -939,7 +965,7 @@ function CommandNotes({ end }: { end: CommandEnd }) {
   );
 }
 
-function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role"] }) {
+function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: Attempt["role"]; corrected: boolean }) {
   const { t } = useTranslation();
   const { event, result } = item;
   const data = event.data;
@@ -1014,7 +1040,17 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
     case "questionsTaken":
       return line(t("activity.questionsTaken", { rounds: data.rounds }), "text-warning");
     case "specCorrected":
-      return line(t("activity.specCorrected"), "text-warning");
+      return (
+        <div>
+          {line(t("activity.specCorrected"), "text-warning")}
+          <ul className="selectable mt-0.5 list-disc space-y-0.5 pl-4 text-[12.5px] break-words text-muted">
+            {(data.problems ?? []).map((problem: Reason, index: number) => (
+              // The engine's list, in its order: two problems can say the same.
+              <li key={index}>{specProblemText(t, problem)}</li>
+            ))}
+          </ul>
+        </div>
+      );
     case "reviewIncomplete":
       return line(t("activity.reviewIncomplete", { files: (data.unread ?? []).join(", ") }), "text-warning");
     case "verificationCorrected":
@@ -1069,7 +1105,7 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
     case "result":
       return line(t("activity.result"), "text-subtle");
     case "finished":
-      return line(t("activity.finished", { state: t(`states.${data.state}`) }), "font-medium");
+      return line(t("activity.finished", { state: t(`states.${corrected && data.state === "failed" ? "corrected" : data.state}`) }), "font-medium");
     case "stalled":
       return line(t("activity.stalled"), "text-warning");
     case "stallCleared":
@@ -1102,7 +1138,8 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
   }
 }
 
-export function ActivityTab({ events, role }: { events: AuditEvent[]; role: Attempt["role"] }) {
+/** `corrected` is an attempt that ended failed, and Keel went straight on to have it fixed: see `shownState`. */
+export function ActivityTab({ events, role, corrected = false }: { events: AuditEvent[]; role: Attempt["role"]; corrected?: boolean }) {
   const { t } = useTranslation();
   const items = useMemo(() => activityFrom(events), [events]);
   if (items.length === 0) return <p className="text-[12.5px] text-subtle">{t("activity.empty")}</p>;
@@ -1110,7 +1147,7 @@ export function ActivityTab({ events, role }: { events: AuditEvent[]; role: Atte
     <ol className="space-y-3">
       {items.map((item) => (
         <li key={item.key}>
-          <ActivityEntry item={item} role={role} />
+          <ActivityEntry item={item} role={role} corrected={corrected} />
         </li>
       ))}
     </ol>
@@ -1259,6 +1296,7 @@ function ReviewsList({ attempts, round }: { attempts: Attempt[]; round: number }
             {review.state === "skipped" && review.reason && <p className="selectable mt-0.5 text-muted">{reasonText(t, review.reason)}</p>}
             {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
             {(review.output?.unread ?? []).length > 0 && <p className="selectable mt-0.5 text-warning">{t("run.unreadFiles", { files: review.output?.unread?.join(", ") })}</p>}
+            {uncheckedOf(review.output).length > 0 && <p className="selectable mt-0.5 text-muted">{t("run.reviewUnchecked", { items: uncheckedOf(review.output).join("; ") })}</p>}
             {(review.output?.findings ?? []).length > 0 && (
               <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 text-muted">
                 {review.output?.findings.map((finding, index) => (
@@ -1398,8 +1436,8 @@ function AttemptChoice({ node, attempt, onChoose }: { node: FlowNode; attempt: A
         label: (
           <span className="flex items-center gap-1.5">
             {[choice.round !== null && t("run.round", { number: choice.round }), choice.number !== null && t("run.attemptTitle", { number: choice.number })].filter(Boolean).join(" · ")}
-            <StateBadge state={choice.attempt.state} label="" />
-            <span className="sr-only">{t(`states.${choice.attempt.state}`)}</span>
+            <StateBadge state={shownState(choice.attempt, node.attempts)} label="" />
+            <span className="sr-only">{t(`states.${shownState(choice.attempt, node.attempts)}`)}</span>
           </span>
         ),
       }))}
@@ -1575,7 +1613,7 @@ export function RunDetail({ runId }: { runId: string }) {
             <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-2">
               <h2 className="min-w-0 truncate text-[13px] font-semibold">{shownNode.id}</h2>
               {shownModel && <span className="min-w-0 truncate font-mono text-[11.5px] text-subtle">{shownModel}</span>}
-              {attempt && <StateBadge state={attempt.state} label={t(`states.${attempt.state}`)} />}
+              {attempt && <StateBadge state={shownState(attempt, attempts)} label={t(`states.${shownState(attempt, attempts)}`)} />}
               {attempt && (
                 <div className="ml-auto max-w-full overflow-x-auto">
                   <AttemptChoice
@@ -1596,7 +1634,7 @@ export function RunDetail({ runId }: { runId: string }) {
               <div className="mt-4">
                 {shownTab === "understood" && understood && <SpecView spec={understood} />}
                 {shownTab === "found" && found && <VerificationView verification={found} />}
-                {shownTab === "activity" && <ActivityTab events={events} role={attempt.role} />}
+                {shownTab === "activity" && <ActivityTab events={events} role={attempt.role} corrected={shownState(attempt, attempts) === "corrected"} />}
                 {shownTab === "commands" && <CommandsTab commands={commands} />}
                 {shownTab === "changes" && <ChangesTab attempt={attempt} revision={revision} />}
                 {shownTab === "output" && <OutputTab events={events} attempt={attempt} />}

@@ -176,24 +176,40 @@ impl Inner {
             .is_some_and(|c| c.stop_requested)
     }
 
+    /// What a step waiting for the project's turn is told while `attempt` has it.
+    fn waiting_for(&self, attempt: &Attempt) -> Reason {
+        Reason::WaitingForProject {
+            step: attempt.step_id.clone(),
+            run_id: attempt.run_id.clone(),
+            title: self
+                .store
+                .run(&attempt.run_id)
+                .map(|run| run.title)
+                .unwrap_or_default(),
+        }
+    }
+
     /// Waits for room. Agents are limited overall, and a project runs one step with commands at
-    /// a time, because tests often share resources such as a database.
+    /// a time, because tests often share resources such as a database. A step waiting for the
+    /// project says which one has the turn, and says it again when the turn passes on.
     fn acquire_slot(
         &self,
-        attempt_id: &str,
-        run_id: &str,
+        attempt: &Attempt,
         project_id: &str,
         holds_project: bool,
         counts_as_agent: bool,
     ) -> bool {
+        let (attempt_id, run_id) = (attempt.id.as_str(), attempt.run_id.as_str());
+        let turn = holds_project.then(|| self.waiting_for(attempt));
         let mut last_reason: Option<Reason> = None;
         let mut slots = locked(&self.slots);
         loop {
             if self.stop_requested(attempt_id) {
                 return false;
             }
-            let reason = if holds_project && slots.command_steps.contains(project_id) {
-                Some(Reason::WaitingForProject)
+            let reason = if holds_project && let Some(waiting) = slots.command_steps.get(project_id)
+            {
+                Some(waiting.clone())
             } else if counts_as_agent
                 && slots.active.len() >= self.max_agents.load(Ordering::SeqCst)
             {
@@ -205,8 +221,8 @@ impl Inner {
                 if counts_as_agent {
                     slots.active.insert(attempt_id.to_owned());
                 }
-                if holds_project {
-                    slots.command_steps.insert(project_id.to_owned());
+                if let Some(turn) = turn {
+                    slots.command_steps.insert(project_id.to_owned(), turn);
                 }
                 return true;
             };
@@ -277,13 +293,7 @@ impl Inner {
         let run_id = attempt.run_id.clone();
         let holds_project = runs_commands(&attempt.kind, ToolProfile::parse(&attempt.tools));
         let counts_as_agent = attempt.kind == "agent";
-        if !self.acquire_slot(
-            &attempt_id,
-            &run_id,
-            &project_id,
-            holds_project,
-            counts_as_agent,
-        ) {
+        if !self.acquire_slot(&attempt, &project_id, holds_project, counts_as_agent) {
             self.end_early(&attempt_id, &run_id, AttemptState::Stopped, None);
             return;
         }
@@ -685,12 +695,13 @@ impl Inner {
             },
         );
         {
+            let turn = context.holds_project.then(|| self.waiting_for(attempt));
             let mut slots = locked(&self.slots);
             if context.counts_as_agent {
                 slots.active.insert(attempt.id.clone());
             }
-            if context.holds_project {
-                slots.command_steps.insert(project_id);
+            if let Some(turn) = turn {
+                slots.command_steps.insert(project_id, turn);
             }
         }
         if alive {

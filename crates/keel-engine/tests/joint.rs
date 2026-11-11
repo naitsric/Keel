@@ -13,7 +13,8 @@ use keel_core::{
     StepSpec, ToolProfile, WorkflowStep,
 };
 use keel_engine::{
-    Answer, AnswerChoice, Config, Engine, Error, Neighbour, PartOf, PartWarning, StartRun, Workflow,
+    Answer, AnswerChoice, Config, Engine, Error, Neighbour, PartOf, PartWarning, StartRun,
+    Workflow, full_workflow,
 };
 use keel_harness::Tools;
 use keel_harness::github::Issue;
@@ -1027,6 +1028,92 @@ fn each_part_reads_what_was_agreed_and_the_branch_of_the_part_before() {
     let more = &w.attempts(&second, "more")[0];
     assert!(w.copies_made(&more.id).is_empty());
     assert!(w.call(8).contains(&format!("--add-dir {}", copy.display())));
+}
+
+#[test]
+fn each_part_reads_the_whole_request_and_not_only_its_own_line() {
+    // Only the request says what the field is called: what was agreed sums it up without it.
+    let asked = "Log in through Valora\n\nThe token travels in the field `x_valora_token`.";
+    for from_a_card in [true, false] {
+        let w = world();
+        let mut steps = full_workflow("en", "fake", "fake", None);
+        steps.retain(|step| !matches!(step, WorkflowStep::Deliver { .. }));
+        for project in [&w.app, &w.valora] {
+            let workflow = w
+                .engine
+                .save_workflow(
+                    project,
+                    &Workflow {
+                        id: String::new(),
+                        name: "Default".into(),
+                        steps: steps.clone(),
+                        builtin: false,
+                    },
+                )
+                .unwrap();
+            w.engine
+                .update_project(
+                    project,
+                    &keel_store::ProjectSettings {
+                        default_workflow: Some(workflow.id),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+        w.answers(&[
+            both(),
+            plain("Valora sends the token"),
+            json!({}),
+            plain("back-adm reads the token"),
+            json!({}),
+        ]);
+        let (card, run) = if from_a_card {
+            let (title, body) = asked.split_once("\n\n").unwrap();
+            let card = w.engine.card_create(&w.app, title, body).unwrap();
+            w.agree_on(card)
+        } else {
+            let run = w
+                .engine
+                .propose_change_on_board(
+                    StartRun {
+                        request: asked.into(),
+                        ..proposal(&w, None)
+                    },
+                    std::slice::from_ref(&w.valora),
+                )
+                .unwrap();
+            (w.store.card_of_run(&run).unwrap().unwrap(), run)
+        };
+        let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+        w.engine.answer_approval(&approval.id, true, "").unwrap();
+        let parts = w.parts(&card);
+
+        w.engine.board_tick().unwrap();
+        let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+        w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+        w.engine.card_stop_waiting(&parts[1].id).unwrap();
+        w.engine.board_tick().unwrap();
+        let second = w.store.card(&parts[1].id).unwrap().run_id.unwrap();
+        w.wait_for(&second, "approval", AttemptState::WaitingApproval);
+
+        // Valora's specifier and builder, then app's.
+        for (call, line) in [
+            (1, "Sends the token"),
+            (2, "Sends the token"),
+            (3, "Reads the token"),
+            (4, "Reads the token"),
+        ] {
+            let call = w.call(call);
+            assert!(
+                call.contains(&format!("In this project: {line}")),
+                "{from_a_card}: {call}"
+            );
+            assert!(call.contains("`x_valora_token`"), "{from_a_card}: {call}");
+        }
+        assert!(w.call(2).contains("Original request:"), "the builder's own");
+        assert!(w.call(4).contains("Original request:"), "the builder's own");
+    }
 }
 
 #[test]

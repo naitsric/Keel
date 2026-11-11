@@ -1068,7 +1068,14 @@ async fn a_run_it_starts_shows_who_started_it_and_waits_for_the_person() {
         json!([{ "path": "fixed.txt", "added": 1, "removed": 0 }]),
         "{step}"
     );
-    assert!(step["prompt"].as_str().unwrap().contains("Fix the bug"));
+    // Its prompt repeats the request, so it comes only when asked for.
+    assert!(step.get("prompt").is_none(), "{step}");
+    let args = json!({ "attempt": attempt, "part": "prompt" });
+    let prompt = ok(&call(&client, "get_step", args).await);
+    assert!(
+        prompt["text"].as_str().unwrap().contains("Fix the bug"),
+        "{prompt}"
+    );
     assert!(
         step["diff"].as_str().unwrap().contains("fixed.txt"),
         "{step}"
@@ -1270,7 +1277,10 @@ async fn a_client_gets_secrets_masked_and_the_record_keeps_them() {
     let attempt = view["steps"][0]["attemptId"].as_str().unwrap();
     let step = ok(&call(&client, "get_step", json!({ "attempt": attempt })).await);
     assert!(!step.to_string().contains(&secret), "{step}");
-    assert!(step["prompt"].as_str().unwrap().contains(MASK), "{step}");
+    let args = json!({ "attempt": attempt, "part": "prompt" });
+    let prompt = ok(&call(&client, "get_step", args).await);
+    assert!(!prompt.to_string().contains(&secret), "{prompt}");
+    assert!(prompt["text"].as_str().unwrap().contains(MASK), "{prompt}");
 
     // A refusal quotes what it was given.
     let wrong = format!("API_KEY={secret}");
@@ -2068,9 +2078,11 @@ async fn a_run_that_went_round_again_reads_in_one_go_and_says_each_thing_once() 
     assert!(written > 80 * 1024, "{written}");
     let size = view.to_string().len();
     assert!(size < 20 * 1024, "{size} bytes: {view}");
-    // wait_for_run returns it the same way.
+    // wait_for_run returns it the same way, without the request.
     let waited = ok(&call(&client, "wait_for_run", json!({ "run": run, "seconds": 1 })).await);
-    assert_eq!(waited, view);
+    let mut without_request = view.clone();
+    without_request.as_object_mut().unwrap().remove("request");
+    assert_eq!(waited, without_request);
 
     // What it waits for comes whole.
     let human = attempts.last().unwrap();
@@ -2171,6 +2183,64 @@ async fn a_run_that_went_round_again_reads_in_one_go_and_says_each_thing_once() 
     client.cancel().await.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn following_a_run_does_not_repeat_its_request_or_a_reviewer_s_prompt() {
+    let w = world().await;
+    let workflow = w.saved(
+        "Build and review",
+        vec![
+            WorkflowStep::Agent(agent("builder", ToolProfile::Build, StepRole::Worker)),
+            WorkflowStep::Parallel {
+                id: "reviews".into(),
+                steps: vec![agent("security", ToolProfile::ReadOnly, StepRole::Reviewer)],
+            },
+            WorkflowStep::Approval { id: "human".into() },
+        ],
+    );
+    let client = w.client(&w.token(true)).await;
+    // A request as long as a real one, which every agent's prompt repeats.
+    let request = at_length("Fix the parser so names with spaces work.", 8 * 1024)
+        .trim()
+        .to_owned();
+    let run = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.args_for(&workflow, &request),
+    )
+    .await));
+
+    // Waiting on it doesn't bring the request back each time. get_run has it.
+    let waited = settled(&client, &run).await;
+    assert_eq!(waited["waitingFor"]["step"], "human", "{waited}");
+    assert!(waited.get("request").is_none(), "{waited}");
+    assert!(!waited.to_string().contains(&request), "{waited}");
+    let mut got = view_of(&client, &run).await;
+    assert_eq!(got["request"], json!(request));
+    got.as_object_mut().unwrap().remove("request");
+    assert_eq!(waited, got);
+    // Nor does waiting on several.
+    let args = json!({ "runs": [run], "seconds": 1 });
+    let many = ok(&call(&client, "wait_for_run", args).await);
+    assert_eq!(many["runs"][0], waited, "{many}");
+
+    // A reviewer's step is what it answered, without the prompt that repeats the request. It says
+    // how long the prompt is, and `part` reads it whole.
+    let steps = waited["steps"].as_array().unwrap();
+    let review = steps.iter().find(|s| s["step"] == "security").unwrap();
+    let review = review["attemptId"].as_str().unwrap().to_owned();
+    let prompt = keel_core::mask_secrets(&w.store.attempt(&review).unwrap().prompt);
+    assert!(prompt.len() > 8 * 1024, "{}", prompt.len());
+    let step = ok(&call(&client, "get_step", json!({ "attempt": review })).await);
+    assert_eq!(step["output"]["verdict"], "changes", "{step}");
+    assert!(step.get("prompt").is_none(), "{step}");
+    let size = step.to_string().len();
+    assert!(size < 2 * 1024, "{size} bytes: {step}");
+    assert_eq!(step["leftOut"], json!({ "prompt": prompt.len() }), "{step}");
+    let (read, _) = read_whole(&client, json!({ "attempt": review, "part": "prompt" })).await;
+    assert!(read == prompt, "the pieces differ from the prompt");
+    client.cancel().await.unwrap();
+}
+
 /// A diff as git writes it: a file moved, one removed, a binary one, one with a space in its name,
 /// one too long for a piece with what JSON escapes and characters of several bytes, then `small`
 /// short new files. Returns it, and each file's path and diff in order.
@@ -2256,15 +2326,17 @@ async fn a_big_change_comes_in_short_and_every_part_of_it_reads_whole_in_pieces(
     let w = world().await;
     let client = w.client(&w.token(true)).await;
 
-    // A small attempt comes whole in one call, as before.
+    // A small attempt comes whole in one call, as before, but for its prompt, which repeats the
+    // request.
     let run = w.person_run("Fix the bug");
     let view = settled(&client, &run).await;
     let small = view["steps"][0]["attemptId"].as_str().unwrap().to_owned();
     let step = ok(&call(&client, "get_step", json!({ "attempt": small })).await);
-    assert_eq!(
-        step["prompt"],
-        json!(w.store.attempt(&small).unwrap().prompt)
-    );
+    assert!(step.get("prompt").is_none(), "{step}");
+    let prompt = w.store.attempt(&small).unwrap().prompt;
+    assert_eq!(step["leftOut"], json!({ "prompt": prompt.len() }), "{step}");
+    let to_read = step["toRead"].as_str().unwrap();
+    assert!(to_read.contains("`part`"), "{to_read}");
     assert_eq!(
         step["diff"],
         json!(w.engine.diff(&small).unwrap()),
@@ -2275,8 +2347,6 @@ async fn a_big_change_comes_in_short_and_every_part_of_it_reads_whole_in_pieces(
         step["filesChanged"],
         json!([{ "path": "fixed.txt", "added": 1, "removed": 0 }])
     );
-    assert!(step.get("leftOut").is_none(), "{step}");
-    assert!(step.get("toRead").is_none(), "{step}");
 
     // A builder that got a long prompt, changed 124 files in about 100 KB, and answered at length.
     // Put together here, so no secret scanner trips on this file.
