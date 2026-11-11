@@ -6,11 +6,12 @@ import { draftFacts } from "../lib/drafts";
 import { flowOf, pathKey, pathOfKey, problemKeys, type StepPath } from "../lib/flow";
 import { formatRelative } from "../lib/format";
 import { errorText, reasonText } from "../lib/reason";
+import { KNOWN_RISKS, riskText } from "../lib/size";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Segmented } from "../ui/primitives";
 import { AddProject } from "./AddProject";
 import { FlowDiagram } from "./FlowDiagram";
-import { ModelField } from "./ModelField";
+import { MODELS, ModelField } from "./ModelField";
 import { WorkflowResultsCard } from "./WorkflowResultsCard";
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -90,6 +91,57 @@ const ALWAYS = "always";
 export function withWhen(spec: StepSpec, when: StepCondition | typeof ALWAYS): StepSpec {
   const { when: _, ...rest } = spec;
   return when === ALWAYS ? rest : { ...rest, when };
+}
+
+/** A step that goes by these risks. With none it says nothing about them, like one saved before there were any. */
+export function withRisks(spec: StepSpec, risks: string[]): StepSpec {
+  const { risks: _, ...rest } = spec;
+  return risks.length === 0 ? rest : { ...rest, risks };
+}
+
+/** A step with this model for a risky change. Empty takes it off. */
+export function withModelWhenRisky(spec: StepSpec, model: string): StepSpec {
+  const { modelWhenRisky: _, ...rest } = spec;
+  return model === "" ? rest : { ...rest, modelWhenRisky: model };
+}
+
+/** What a step does by the risks of what was asked: whether it runs, and with which model. */
+function RiskFields({ spec, onChange }: { spec: StepSpec; onChange: (spec: StepSpec) => void }) {
+  const { t } = useTranslation();
+  const chosen = spec.risks ?? [];
+  // One the engine doesn't know stays, so saving doesn't drop it.
+  const shown = [...KNOWN_RISKS, ...chosen.filter((risk) => !KNOWN_RISKS.includes(risk))];
+  const toggle = (risk: string, on: boolean) => onChange(withRisks(spec, on ? [...chosen, risk] : chosen.filter((other) => other !== risk)));
+  const risky = spec.modelWhenRisky ?? "";
+  return (
+    <>
+      <fieldset>
+        <legend className="text-[12px] font-medium text-muted">{t("workflows.risks")}</legend>
+        <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+          {shown.map((risk) => (
+            <label key={risk} className="flex items-center gap-1.5 text-[12.5px]">
+              <input type="checkbox" checked={chosen.includes(risk)} onChange={(e) => toggle(risk, e.target.checked)} />
+              {riskText(t, risk)}
+            </label>
+          ))}
+        </div>
+        <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t("workflows.risksHint")}</p>
+      </fieldset>
+      <div className="max-w-md">
+        <Field label={t("workflows.modelWhenRisky")} hint={t("workflows.modelWhenRiskyHint")}>
+          <select value={risky} onChange={(e) => onChange(withModelWhenRisky(spec, e.target.value))} className={inputClass}>
+            <option value="">{t("workflows.modelWhenRiskySame")}</option>
+            {MODELS.map((m) => (
+              <option key={m.value} value={m.value}>
+                {m.label}
+              </option>
+            ))}
+            {risky && !MODELS.some((m) => m.value === risky) && <option value={risky}>{risky}</option>}
+          </select>
+        </Field>
+      </div>
+    </>
+  );
 }
 
 /** The fields of an agent, standing alone or inside a group. */
@@ -185,6 +237,7 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
         />
         <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t("workflows.whenHint")}</p>
       </div>
+      {role.kind !== "specifier" && <RiskFields spec={spec} onChange={onChange} />}
       <Field label={t("workflows.paths")} hint={t("workflows.pathsHint")}>
         <input
           value={(spec.paths ?? []).join(", ")}

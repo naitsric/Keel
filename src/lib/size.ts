@@ -11,7 +11,10 @@ export interface SizeDecision {
 }
 
 /** The engine's closed list. Anything else an agent wrote still counts as a risk, and is called one. */
-const KNOWN_RISKS = ["security", "money", "personalData", "irreversibleData", "sharedContracts", "concurrency", "environment", "noRegressionTest"];
+export const KNOWN_RISKS = ["security", "money", "personalData", "irreversibleData", "sharedContracts", "concurrency", "environment", "noRegressionTest"];
+
+/** A risk in the words of someone who asked for the change. */
+export const riskText = (t: TFunction, risk: string) => t(KNOWN_RISKS.includes(risk) ? `fits.risks.${risk}` : "fits.risks.other");
 
 export const skippedAsSmall = (attempt: { state: string; reason?: { code: string } | null }) => attempt.state === "skipped" && attempt.reason?.code === "treatedAsSmall";
 
@@ -36,7 +39,7 @@ export function whyNotSmallText(t: TFunction, why: Reason): string {
   const data = why as Record<string, any>;
   switch (why.code) {
     case "specNamesRisks": {
-      const named = (data.risks ?? []).map((risk: string) => t(KNOWN_RISKS.includes(risk) ? `fits.risks.${risk}` : "fits.risks.other"));
+      const named = (data.risks ?? []).map((risk: string) => riskText(t, risk));
       return t("fits.why.specNamesRisks", { risks: [...new Set(named)].join(", ") });
     }
     case "sensitiveFiles":

@@ -58,17 +58,18 @@ case "$1" in
 auth) echo '{{"loggedIn":true,"subscriptionType":"max","email":"a@example.com"}}'; exit 0;;
 esac
 cat > /dev/null
-tools=""; schema=""; prev=""
+tools=""; schema=""; model=""; prev=""
 for a in "$@"; do
   [ "$prev" = "--tools" ] && tools="$a"
   [ "$prev" = "--json-schema" ] && schema="$a"
+  [ "$prev" = "--model" ] && model="$a"
   prev="$a"
 done
 list=$(printf '%s' "$tools" | sed 's/,/","/g')
 [ -n "$schema" ] && list="$list\",\"StructuredOutput"
 echo "{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"fake\",\"tools\":[\"$list\"],\"apiKeySource\":\"none\"}}"
 result() {{
-  printf '%s\n' "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"num_turns\":1,\"structured_output\":$1}}"
+  printf '%s\n' "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"num_turns\":1,\"modelUsage\":{{\"$model\":{{}}}},\"structured_output\":$1}}"
 }}
 case "$schema" in
 *unverified*)
@@ -215,6 +216,8 @@ fn spec_of(id: &str, tools: ToolProfile, role: StepRole, when: Option<StepCondit
         paths: vec![],
         role,
         when,
+        risks: vec![],
+        model_when_risky: None,
     }
 }
 
@@ -1532,4 +1535,138 @@ fn a_condition_at_or_before_the_first_builder_is_refused_when_it_is_saved() {
         saved.unwrap_err(),
         Error::Blocked(Reason::InvalidWorkflow { ref problem, ref step }) if problem == "whenBeforeBuild" && step == "early"
     ));
+}
+
+impl World {
+    fn start_builtin(&self, id: &str) -> String {
+        let workflow = self
+            .engine
+            .workflow(&self.project_id, id, "en")
+            .unwrap()
+            .unwrap();
+        self.engine
+            .start_run(StartRun {
+                project_id: self.project_id.clone(),
+                title: None,
+                request: "Fix add".into(),
+                workflow: workflow.steps.clone(),
+                saved_workflow: Some(workflow.reference()),
+                language: "en".into(),
+                source_issue: None,
+                started_by: None,
+            })
+            .unwrap()
+    }
+}
+
+#[test]
+fn a_spec_that_names_concurrency_adds_the_state_review_and_the_approver_and_learnings_read_it() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.spec_says(answered_small(
+        json!({ "size": "normal", "risks": ["concurrency"] }),
+    ));
+    let run = w.start_builtin("builtin:full");
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+
+    let state = w.step(&run, "state");
+    assert_eq!(state.state, "succeeded", "{:?}", state.reason);
+    assert!(state.prompt.contains("Focus on STATE"), "{}", state.prompt);
+    let approver = w.step(&run, "approver");
+    assert!(
+        approver.prompt.contains("\nstate: {"),
+        "{}",
+        approver.prompt
+    );
+    // Concurrency alone doesn't call for a stronger model.
+    assert_eq!(w.step(&run, "code").model_requested, "sonnet");
+
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let learner = w.wait_for(&run, "learnings", AttemptState::Succeeded);
+    assert!(learner.prompt.contains("\nstate: {"), "{}", learner.prompt);
+}
+
+#[test]
+fn a_spec_without_a_risk_of_state_leaves_that_review_out_and_says_why() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.spec_says(answered_small(
+        json!({ "size": "normal", "risks": ["security"] }),
+    ));
+    let run = w.start_builtin("builtin:full");
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+
+    let state = w.step(&run, "state");
+    assert_eq!(state.state, "skipped");
+    assert_eq!(
+        state.reason.unwrap(),
+        json!({ "code": "noMatchingRisks", "risks": ["concurrency", "sharedContracts", "irreversibleData"] })
+    );
+    let approver = w.step(&run, "approver");
+    assert!(
+        approver
+            .prompt
+            .contains("state: (skipped: the specification names none of the risks it looks at)"),
+        "{}",
+        approver.prompt
+    );
+    // Security calls for a stronger model on the code review, and only there.
+    assert_eq!(w.step(&run, "code").model_requested, "opus");
+    assert_eq!(w.step(&run, "security").model_requested, "sonnet");
+
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    w.wait_for(&run, "pull-request", AttemptState::Succeeded);
+    let body = w.body();
+    assert!(
+        body.contains("- `state`: skipped: what was asked names none of the risks it looks at"),
+        "{body}"
+    );
+}
+
+#[test]
+fn a_change_over_1500_lines_has_its_code_reviewed_with_the_stronger_model() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.spec_says(answered_small(json!({ "size": "normal", "risks": [] })));
+    w.builder_does(1, "seq 1 1600 > big.txt\n");
+    let run = w.start_builtin("builtin:full");
+    w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    let code = w.step(&run, "code");
+    assert_eq!(code.model_requested, "opus");
+    assert_eq!(
+        code.model_actual.as_deref(),
+        Some("opus"),
+        "what it ran with"
+    );
+    assert_eq!(w.step(&run, "state").state, "skipped");
+}
+
+#[test]
+fn a_persons_own_step_can_go_by_risks_too_also_alone() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.spec_says(answered_small(
+        json!({ "size": "normal", "risks": ["concurrency"] }),
+    ));
+    let only_for = |id: &str, risks: &[&str]| {
+        let mut spec = spec_of(id, ToolProfile::ReadOnly, StepRole::Reviewer, None);
+        spec.risks = risks.iter().map(|r| (*r).to_owned()).collect();
+        WorkflowStep::Agent(spec)
+    };
+    let mut stronger = spec_of("stronger", ToolProfile::ReadOnly, StepRole::Reviewer, None);
+    stronger.model_when_risky = Some("bigger".into());
+    let run = w.start(vec![
+        specifier(),
+        builder(),
+        only_for("money", &["money"]),
+        only_for("races", &["concurrency"]),
+        WorkflowStep::Agent(stronger),
+        human(),
+    ]);
+    w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    let money = w.step(&run, "money");
+    assert_eq!(money.state, "skipped");
+    assert_eq!(money.reason.unwrap()["code"], "noMatchingRisks");
+    assert_eq!(w.step(&run, "races").state, "succeeded");
+    assert_eq!(w.step(&run, "stronger").model_requested, "fake");
 }

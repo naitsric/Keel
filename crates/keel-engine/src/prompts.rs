@@ -328,6 +328,8 @@ pub fn full_workflow(
             max_budget_usd: None,
             paths: Vec::new(),
             when: None,
+            risks: Vec::new(),
+            model_when_risky: None,
             role,
         })
     };

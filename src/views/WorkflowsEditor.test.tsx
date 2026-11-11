@@ -1084,6 +1084,99 @@ describe("the workflow editor", () => {
       expect(page()).toContain("“only” depends on how big the change is, so it has to come after the first step that builds.");
     });
   });
+  describe("what a step does by the risks of what was asked", () => {
+    const RISKY: Workflow = {
+      id: "risky",
+      name: "Risky",
+      builtin: false,
+      steps: [
+        { type: "agent", ...spec("spec", { role: { kind: "specifier" } }) },
+        { type: "agent", ...spec("builder", { tools: "build" }) },
+        { type: "parallel", id: "reviews", steps: [spec("code", { role: { kind: "reviewer" }, modelWhenRisky: "opus" }), spec("state", { role: { kind: "reviewer" }, risks: ["concurrency", "sharedContracts"] })] },
+      ],
+    };
+    const openRisky = async (workflow = RISKY) => {
+      mockIPC((command, args) => {
+        if (command === "workflows_list") return [BUILTIN, workflow];
+        if (command === "workflow_save") {
+          if (saveError) throw saveError;
+          saved.push((args as { workflow: Workflow }).workflow);
+          return (args as { workflow: Workflow }).workflow;
+        }
+        return command === "workflow_results" ? [] : command === "workflow_drafts_list" ? [] : null;
+      });
+      await open();
+      await click(text("Risky"));
+    };
+    const box = (label: string) => [...document.querySelectorAll("label")].find((l) => l.textContent === label)?.querySelector<HTMLInputElement>('input[type="checkbox"]') as HTMLInputElement;
+    const riskyModel = () => labelled<HTMLSelectElement>("If the change is risky, use", "select") as HTMLSelectElement;
+    const choose = (select: HTMLSelectElement, value: string) =>
+      act(() => {
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set?.call(select, value);
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    const reviews = () => (lastSaved().steps[2] as { steps: StepSpec[] }).steps;
+
+    it("is in plain words, and shows what the step has", async () => {
+      await openRisky();
+      await click(node("state"));
+      expect(page()).toContain("Only if what was asked could affect");
+      expect(box("things happening at the same time").checked).toBe(true);
+      expect(box("something other code depends on").checked).toBe(true);
+      expect(box("money").checked).toBe(false);
+      expect(page()).not.toContain("sharedContracts");
+      expect(riskyModel().value).toBe("");
+      await click(node("code"));
+      expect(riskyModel().value).toBe("opus");
+      expect(page()).toContain("the change is over 1,500 lines");
+      await i18next.changeLanguage("es");
+      await flush();
+      expect(page()).toContain("Si el cambio es riesgoso, usar");
+      expect(page()).toContain("Solo si lo pedido puede afectar");
+    });
+
+    it("goes as the engine reads it", async () => {
+      await openRisky();
+      await click(node("state"));
+      await click(box("money"));
+      await click(box("things happening at the same time"));
+      choose(riskyModel(), "opus");
+      await saveNow();
+      expect(reviews()[1].risks).toEqual(["sharedContracts", "money"]);
+      expect(reviews()[1].modelWhenRisky).toBe("opus");
+    });
+
+    it("can be taken off, and then the step says nothing about it, like one saved before", async () => {
+      await openRisky();
+      await click(node("state"));
+      await click(box("things happening at the same time"));
+      await click(box("something other code depends on"));
+      await click(node("code"));
+      choose(riskyModel(), "");
+      await saveNow();
+      expect("risks" in reviews()[1]).toBe(false);
+      expect("modelWhenRisky" in reviews()[0]).toBe(false);
+    });
+
+    it("keeps a risk it doesn't know, and a model that isn't in the list", async () => {
+      const reviewers = [spec("code", { role: { kind: "reviewer" }, modelWhenRisky: "claude-big" }), spec("state", { role: { kind: "reviewer" }, risks: ["somethingNew"] })];
+      await openRisky({ ...RISKY, steps: [...RISKY.steps.slice(0, 2), { type: "parallel", id: "reviews", steps: reviewers }] });
+      await click(node("code"));
+      expect(riskyModel().value).toBe("claude-big");
+      await click(node("state"));
+      expect(box("something it couldn't name").checked).toBe(true);
+      await saveNow();
+      expect(reviews()[0].modelWhenRisky).toBe("claude-big");
+      expect(reviews()[1].risks).toEqual(["somethingNew"]);
+    });
+
+    it("says what the engine refused, on the step", async () => {
+      saveError = { code: "blocked", reason: { code: "invalidWorkflow", problem: "risksNeedSpecifier", step: "state" }, detail: null };
+      await openRisky();
+      await saveNow();
+      expect(page()).toContain("“state” goes by the risks of what was asked, so a step that works out the change has to come before it.");
+    });
+  });
   describe("the results", () => {
     const of = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0, shortRoute: 0, movedUp: 0, movedUpBecause: [], ...fields });
     const cells = (row: string) => [...document.querySelectorAll("tr")].find((tr) => tr.querySelector("th")?.textContent?.startsWith(row))?.querySelectorAll("td");

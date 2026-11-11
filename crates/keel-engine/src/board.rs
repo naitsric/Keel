@@ -687,6 +687,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Done.","nu
                         max_budget_usd: None,
                         paths: vec![],
                         when: None,
+                        risks: vec![],
+                        model_when_risky: None,
                         role: Default::default(),
                     })],
                     builtin: false,

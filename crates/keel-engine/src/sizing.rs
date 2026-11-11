@@ -775,6 +775,8 @@ mod tests {
             paths: vec![],
             role: StepRole::Reviewer,
             when: Some(keel_core::StepCondition::NotSmall),
+            risks: vec![],
+            model_when_risky: None,
         }
     }
 

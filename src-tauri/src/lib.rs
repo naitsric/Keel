@@ -406,6 +406,8 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
                 max_budget_usd: None,
                 paths: vec![],
                 when: None,
+                risks: vec![],
+                model_when_risky: None,
                 role: Default::default(),
             });
             (vec![step], None)

@@ -309,7 +309,10 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
   const latest = latestOfEachStep(reviewers);
   const ran = latest.filter((review) => review.state !== "skipped");
   // Those it skipped for being small are on a line of their own, with what can be done about it.
-  const skipped = latest.filter((review) => review.state === "skipped" && !skippedAsSmall(review));
+  const leftOut = latest.filter((review) => review.state === "skipped" && !skippedAsSmall(review));
+  const forRisks = (review: Attempt) => review.reason?.code === "noMatchingRisks";
+  const skipped = leftOut.filter((review) => !forRisks(review));
+  const skippedForRisks = leftOut.filter(forRisks);
   return (
     <div className="space-y-0.5">
       {ran.length > 0 && (
@@ -330,8 +333,9 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
           </p>
         ))}
       {skipped.length > 0 && <p className="text-subtle">{t("run.approvalSkipped", { names: skipped.map((review) => review.stepId).join(", ") })}</p>}
+      {skippedForRisks.length > 0 && <p className="text-subtle">{t("run.approvalSkippedRisks", { names: skippedForRisks.map((review) => review.stepId).join(", ") })}</p>}
       {approver?.output && (
-        <div className={cx(ran.length + skipped.length > 0 && "pt-1")}>
+        <div className={cx(ran.length + leftOut.length > 0 && "pt-1")}>
           <ApproverVerdict output={approver.output} riskClass={approver.output.risk === "high" ? "font-medium text-warning" : "text-fg"} />
           {approver.output.reasons && <p className="selectable text-muted">{gist(approver.output.reasons, 160).text}</p>}
         </div>
@@ -1130,7 +1134,7 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
     case "waiting":
       return line(t("activity.waiting"), "text-warning");
     case "skipped":
-      return line(data.reason?.code === "treatedAsSmall" ? t("activity.skippedSmall") : t("activity.skipped"), "text-subtle");
+      return line(data.reason?.code === "treatedAsSmall" ? t("activity.skippedSmall") : data.reason?.code === "noMatchingRisks" ? t("activity.skippedRisks") : t("activity.skipped"), "text-subtle");
     case "postponed":
       return line(t("activity.postponed", { names: (data.steps ?? []).join(", ") }), "font-medium");
     case "sizeDecided":

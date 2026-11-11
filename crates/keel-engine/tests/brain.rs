@@ -112,6 +112,8 @@ fn agent(id: &str, role: StepRole, prompt: &str) -> WorkflowStep {
         max_budget_usd: None,
         paths: Vec::new(),
         when: None,
+        risks: Vec::new(),
+        model_when_risky: None,
         role,
     })
 }

@@ -1888,6 +1888,33 @@ impl Inner {
         })
     }
 
+    /// The step with its model for a risky change, if it has one and the change is. Decided each
+    /// time it starts, since the specification and the change only exist once a run gets there.
+    fn with_model_for_the_change(&self, run_id: &str, step: &WorkflowStep) -> Result<WorkflowStep> {
+        let WorkflowStep::Agent(spec) = step else {
+            return Ok(step.clone());
+        };
+        let Some(model) = &spec.model_when_risky else {
+            return Ok(step.clone());
+        };
+        let attempts = self.store.attempts_of_run(run_id)?;
+        let named = workflows::named_risks(&attempts);
+        // Reading the change takes git, so only when the risks didn't already decide it.
+        let risky = workflows::is_risky(&named, None)
+            || workflows::is_risky(
+                &[],
+                self.change_of_run(run_id, &attempts)
+                    .map(|change| change.lines),
+            );
+        if !risky {
+            return Ok(step.clone());
+        }
+        Ok(WorkflowStep::Agent(StepSpec {
+            model: model.clone(),
+            ..spec.clone()
+        }))
+    }
+
     /// Records a step and sets it going. Every caller holds `advancing`, so this never takes it:
     /// the step itself runs on a thread of its own.
     fn start_step(
@@ -1902,6 +1929,7 @@ impl Inner {
         let workspace = self.workspace(run_id);
         let dir = self.run_dir(run_id);
         std::fs::create_dir_all(&dir)?;
+        let step = &self.with_model_for_the_change(run_id, step)?;
 
         let stem = format!("{}-{number}", step.id());
         let id = new_id();
@@ -2147,6 +2175,7 @@ impl Inner {
             for (index, step) in steps.iter().enumerate() {
                 if let WorkflowStep::Parallel { steps: group, .. } = step {
                     let changed = workflows::files_changed(&attempts);
+                    let named = workflows::named_risks(&attempts);
                     let mut pending = false;
                     for spec in group {
                         match latest(&spec.id, index) {
@@ -2158,6 +2187,11 @@ impl Inner {
                                 } else if !workflows::paths_match(&spec.paths, &changed) {
                                     let reason = Reason::NoMatchingPaths {
                                         paths: spec.paths.clone(),
+                                    };
+                                    self.record_skipped(run_id, spec, &attempts, reason)?
+                                } else if !workflows::risks_match(&spec.risks, &named) {
+                                    let reason = Reason::NoMatchingRisks {
+                                        risks: spec.risks.clone(),
                                     };
                                     self.record_skipped(run_id, spec, &attempts, reason)?
                                 } else {
@@ -2196,6 +2230,16 @@ impl Inner {
                         self.say_size(spec, &id, &run, &attempts, &mut size)?;
                         continue 'round;
                     }
+                    if let WorkflowStep::Agent(spec) = step
+                        && !workflows::risks_match(&spec.risks, &workflows::named_risks(&attempts))
+                    {
+                        let reason = Reason::NoMatchingRisks {
+                            risks: spec.risks.clone(),
+                        };
+                        let id = self.record_skipped(run_id, spec, &attempts, reason)?;
+                        self.say_size(spec, &id, &run, &attempts, &mut size)?;
+                        continue 'round;
+                    }
                     let number = workflows::next_number(&attempts, step.id());
                     let id = self.start_step(run_id, step, number, None)?;
                     if let Some(spec) = conditional {
@@ -2203,8 +2247,8 @@ impl Inner {
                     }
                     return Ok(());
                 };
-                // Only a condition gets a step here that stands alone. It holds nothing up, and it has
-                // no answer to act on: an approver that didn't run sends nothing back.
+                // Only a condition or its risks skip a step here that stands alone. It holds nothing
+                // up, and it has no answer to act on: an approver that didn't run sends nothing back.
                 if attempt.state == AttemptState::Skipped.as_str() {
                     continue;
                 }
@@ -2475,6 +2519,8 @@ mod tests {
             max_budget_usd: None,
             paths: vec![],
             when: None,
+            risks: vec![],
+            model_when_risky: None,
             role: Default::default(),
         });
         let back: WorkflowStep =

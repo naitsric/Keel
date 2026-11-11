@@ -117,6 +117,13 @@ pub struct StepSpec {
     /// never skipped this way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<StepCondition>,
+    /// Runs only if the specification names one of these risks. Empty means always.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risks: Vec<String>,
+    /// The model it runs with instead of `model` when the change is risky. The engine decides that
+    /// from the specification and the change, once both exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_when_risky: Option<String>,
 }
 
 /// Something a project's commands need, such as a test database. Keel runs these outside the
@@ -384,6 +391,10 @@ pub enum Reason {
     },
     NoMatchingPaths {
         paths: Vec<String>,
+    },
+    /// The specification names none of the risks the step looks at.
+    NoMatchingRisks {
+        risks: Vec<String>,
     },
     /// The engine found the change small, going by what it could see for itself, and the step only
     /// runs for one that isn't. `lines` and `files` are the size of the change at that moment.
@@ -684,6 +695,7 @@ impl Reason {
             | Self::NoStructuredOutput
             | Self::ReworkLimit { .. }
             | Self::NoMatchingPaths { .. }
+            | Self::NoMatchingRisks { .. }
             | Self::NothingToDeliver
             | Self::RejectionNeedsReason
             | Self::UnsafeBranch { .. }
@@ -952,6 +964,7 @@ mod tests {
             (Reason::NoStructuredOutput, false),
             (Reason::ReworkLimit { rounds: 1 }, false),
             (Reason::NoMatchingPaths { paths: vec![] }, false),
+            (Reason::NoMatchingRisks { risks: vec![] }, false),
             (
                 Reason::InvalidWorkflow {
                     problem: text(),
@@ -1072,6 +1085,7 @@ mod tests {
             Reason::PartsNotOpened { .. } => 44,
             Reason::StartsOnTheBoard => 45,
             Reason::ReadCopyFailed { .. } => 46,
+            Reason::NoMatchingRisks { .. } => 47,
         }
     }
 
@@ -1085,7 +1099,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=46).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=47).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]
@@ -1170,6 +1184,8 @@ mod tests {
             paths: vec![],
             role: StepRole::Reviewer,
             when: None,
+            risks: vec![],
+            model_when_risky: None,
         }
     }
 
@@ -1192,6 +1208,22 @@ mod tests {
             serde_json::from_value::<StepSpec>(without).unwrap(),
             a_step()
         );
+    }
+
+    #[test]
+    fn risks_and_a_model_for_a_risky_change_only_show_up_on_a_step_that_has_them() {
+        let without = serde_json::to_value(a_step()).unwrap();
+        assert_eq!(without.get("risks"), None, "what was saved before stays");
+        assert_eq!(without.get("modelWhenRisky"), None);
+        let with = StepSpec {
+            risks: vec!["concurrency".into()],
+            model_when_risky: Some("opus".into()),
+            ..a_step()
+        };
+        let value = serde_json::to_value(&with).unwrap();
+        assert_eq!(value["risks"], serde_json::json!(["concurrency"]));
+        assert_eq!(value["modelWhenRisky"], "opus");
+        assert_eq!(serde_json::from_value::<StepSpec>(value).unwrap(), with);
     }
 
     #[test]

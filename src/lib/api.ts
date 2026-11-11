@@ -250,6 +250,10 @@ export interface StepSpec {
   role?: StepRole;
   /** Runs only if this holds. Absent means always. */
   when?: StepCondition;
+  /** Runs only if what was asked names one of these risks. Absent means always. */
+  risks?: string[];
+  /** The model it runs with instead when the change is risky. Absent keeps `model`. */
+  modelWhenRisky?: string;
 }
 
 export type WorkflowStep =

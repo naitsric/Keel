@@ -327,6 +327,12 @@ const draftsWaiting: WorkflowDraft[] = [
 const learnerStep: WorkflowStep = { ...agentStep("learnings", "sonnet", "readOnly"), role: { kind: "learner" } };
 const setupStep: WorkflowStep = { type: "setup", id: "setup", run: "uv sync --frozen" };
 const fullWorkflow: WorkflowStep[] = [setupStep, ...workflow, learnerStep];
+// The reviews as Keel ships them: state only for the risks it looks at, and code with a stronger model
+// for a risky change. view=workflows&node=state and node=code show their fields. flow=risks is a run
+// where state was left out and code ran on Opus: node=state says why.
+const shippedReviews: WorkflowStep = { type: "parallel", id: "reviews", steps: [reviewerStep("security", []), reviewerStep("ux", ["**/*.tsx"]), reviewerStep("ui", ["**/*.tsx"]), { ...reviewerStep("code", []), modelWhenRisky: "opus" }, { ...reviewerStep("state", []), risks: ["concurrency", "sharedContracts", "irreversibleData"] }] };
+const withShippedReviews = (steps: WorkflowStep[]) => steps.map((step) => (step.id === "reviews" ? shippedReviews : step));
+const skippedForRisks: Reason = { code: "noMatchingRisks", risks: ["concurrency", "sharedContracts", "irreversibleData"] };
 const ran = (stepId: string, s: AttemptState, fields: Partial<Attempt> = {}): Attempt => ({ ...attempt, id: `${stepId}-${fields.round ?? 0}-${fields.number ?? 1}`, stepId, state: s, reason: null, tools: "readOnly", filesChanged: null, resultText: null, modelActual: s === "skipped" ? null : "claude-sonnet-5-5", ...fields });
 const setupRan = ran("setup", "succeeded", { kind: "setup", tools: "setup", modelRequested: "", modelActual: null });
 const specRan = ran("spec", "succeeded", { modelRequested: "opus", modelActual: "claude-opus-5-5", resultText: "1. add returns the sum.\n2. The tests pass." });
@@ -401,6 +407,7 @@ const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Atte
   corrected: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...correctedAttempts, ...(fixedAtOnce ? [builderRan({ state: "running", finishedAt: null })] : [])] },
   // A person sent it back: the approval they answered says so, and the run is on its next round.
   returned: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), returnedApproval, builderRan({ round: 1, number: 2, state: "running", finishedAt: null })] },
+  risks: { steps: withShippedReviews(fullWorkflow), round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "succeeded", verdict("approved")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", { ...verdict("approved"), modelRequested: "opus", modelActual: "claude-opus-5-5" }), reviewRan("state", "skipped", { reason: skippedForRisks }), decided("approve"), humanWaits] },
   sentBack: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), returnedApproval, ...[builderRan({ resultText: "I made add return 0 for an empty list." }), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), humanWaits].map(nextRound)] },
 };
 const flowScene = FLOW_SCENES[params.get("flow") ?? ""];
@@ -793,7 +800,7 @@ mockIPC((command, args) => {
     case "workflows_list":
       return [
         ...(params.get("flow") === "many" ? [{ id: "many", name: i18next.language === "es" ? "Muchos pasos" : "Many steps", builtin: false, steps: manySteps }] : []),
-        { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: [...workflow, learnerStep] },
+        { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: withShippedReviews([...workflow, learnerStep]) },
         { id: "builtin:organic", name: i18next.language === "es" ? "Se adapta al cambio" : "Fits the change", builtin: true, steps: [...fittingSteps, learnerStep] },
         { id: "mine", name: i18next.language === "es" ? "Solo revisiones" : "Reviews only", builtin: false, steps: workflow.slice(3) },
       ];
@@ -918,6 +925,7 @@ mockIPC((command, args) => {
         if (params.get("flow") === "small" || params.get("flow") === "asked") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "skipped", data: { reason: asSmall.reason } }, { seq: 101, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: true, lines: 12, files: 2, round: 0 } }];
         if (params.get("flow") === "movedUp") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: false, because: WHY_MOVED_UP, round: 0 } }];
       }
+      if ((args as { attemptId?: string } | undefined)?.attemptId === "state-0-1" && params.get("flow") === "risks") return [{ seq: 100, attemptId: "state-0-1", at: at(1), kind: "skipped", data: { paths: [], reason: skippedForRisks } }];
       if ((args as { attemptId?: string } | undefined)?.attemptId === "c1" && params.get("flow") === "corrected") return correctedEvents;
       if ((args as { attemptId?: string } | undefined)?.attemptId === returnedApproval.id && (params.get("flow") === "returned" || params.get("flow") === "sentBack")) {
         return [{ seq: 100, attemptId: returnedApproval.id, at: at(5), kind: "returned", data: { instructions: sentBackWith, round: 1, ...(assistantBy ? { by: assistantBy } : {}) } }];
