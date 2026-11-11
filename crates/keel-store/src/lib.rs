@@ -306,6 +306,26 @@ const MIGRATIONS: &[&str] = &[
     r#"
     alter table attempt add column skipped_tests integer;
 "#,
+    // 16: Until now every project could read these toolchains in the home folder. Keel finds each
+    // project's own from here on, and a person confirms them, so a project from before gets them in
+    // its own list, where the person sees them, and nothing it ran stops working. A list that isn't
+    // one is left as it is. A run can read folders of its own besides: what a person was trying,
+    // before saving it.
+    r#"
+    update project set allowed_read = json_insert(allowed_read, '$[#]', '~/Library/pnpm')
+    where json_valid(allowed_read) and json_type(allowed_read) = 'array'
+      and not exists (select 1 from json_each(case when json_valid(project.allowed_read) then project.allowed_read else '[]' end)
+                      where value = '~/Library/pnpm');
+    update project set allowed_read = json_insert(allowed_read, '$[#]', '~/.cargo/bin')
+    where json_valid(allowed_read) and json_type(allowed_read) = 'array'
+      and not exists (select 1 from json_each(case when json_valid(project.allowed_read) then project.allowed_read else '[]' end)
+                      where value = '~/.cargo/bin');
+    update project set allowed_read = json_insert(allowed_read, '$[#]', '~/.rustup')
+    where json_valid(allowed_read) and json_type(allowed_read) = 'array'
+      and not exists (select 1 from json_each(case when json_valid(project.allowed_read) then project.allowed_read else '[]' end)
+                      where value = '~/.rustup');
+    alter table run add column extra_read text not null default '[]';
+"#,
 ];
 
 /// Whether the card a query calls `card` can start as far as other cards go: it waits for none,
@@ -513,6 +533,10 @@ pub struct Run {
     pub pr_checked_at: Option<String>,
     /// The commit its pull request had, as of `pr_checked_at`. None until Keel knows.
     pub pr_head: Option<String>,
+    /// Folders its steps may read besides the project's: what a person was trying, before saving
+    /// it. Empty for any other run.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub extra_read: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -530,7 +554,7 @@ pub struct NewRun {
     pub started_by: Option<String>,
 }
 
-const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by, workflow_id, workflow_name, pr_state, pr_state_at, pr_checked_at, pr_head";
+const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by, workflow_id, workflow_name, pr_state, pr_state_at, pr_checked_at, pr_head, extra_read";
 
 fn pr_state_from(text: Option<String>) -> Option<PrState> {
     text.as_deref().and_then(PrState::parse)
@@ -561,6 +585,7 @@ fn run_from(r: &Row) -> rusqlite::Result<Run> {
         pr_state_at: r.get(18)?,
         pr_checked_at: r.get(19)?,
         pr_head: r.get(20)?,
+        extra_read: serde_json::from_str(&r.get::<_, String>(21)?).unwrap_or_default(),
     })
 }
 
@@ -1498,6 +1523,22 @@ impl Store {
 
     pub fn add_run(&self, run: &NewRun) -> Result<()> {
         Ok(insert_run(&self.lock(), run)?)
+    }
+
+    /// A run whose steps may also read these folders, in one go, so no step starts without them.
+    pub fn add_run_reading(&self, run: &NewRun, read: &[String]) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        insert_run(&tx, run)?;
+        tx.execute(
+            "update run set extra_read = ?2 where id = ?1",
+            params![
+                run.id,
+                serde_json::to_string(read).unwrap_or_else(|_| "[]".into())
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Adds the run of a card that was just taken from Todo, and links them in one go. If the app
@@ -2821,6 +2862,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 alter table run drop column extra_read;
                  alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;
                  drop table joint_check;
@@ -3099,6 +3141,106 @@ mod tests {
         assert_eq!(project.allowed_read, ["~/.cargo"]);
         assert_eq!(project.services[0].name(), "db");
         assert_eq!(project.env[0].name, "DB");
+    }
+
+    fn project_reading(store: &Store, id: &str, read: &[&str]) {
+        store
+            .add_project(&Project {
+                id: id.into(),
+                name: id.into(),
+                path: format!("/{id}"),
+                created_at: now(),
+                github_account: None,
+                github_repo: None,
+                setup_command: None,
+                check_command: None,
+                allowed_domains: vec![],
+                allowed_read: read.iter().map(|path| (*path).to_owned()).collect(),
+                services: vec![],
+                env: vec![],
+                default_workflow: None,
+                sensitive_paths: vec![],
+            })
+            .unwrap();
+    }
+
+    /// #120: every project could read these until Keel found each one's own toolchains. A project
+    /// from before keeps them in its own list, where the person sees them, so nothing it ran stops
+    /// working. Once, and a project added later gets none.
+    #[test]
+    fn projects_from_before_keep_the_toolchain_folders_every_project_had() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        {
+            let store = Store::open(&path).unwrap();
+            seeded(&store);
+            project_reading(&store, "q", &["~/.nvm", "~/.cargo/bin"]);
+            project_reading(&store, "gone", &[]);
+            store.remove_project("gone").unwrap();
+            project_reading(&store, "bad", &[]);
+        }
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "pragma user_version = 15;
+                 alter table run drop column extra_read;
+                 update project set allowed_read = 'not a list' where id = 'bad';",
+            )
+            .unwrap();
+        }
+        let every = ["~/Library/pnpm", "~/.cargo/bin", "~/.rustup"];
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.project("p").unwrap().allowed_read, every);
+        assert_eq!(
+            store.project("q").unwrap().allowed_read,
+            ["~/.nvm", "~/.cargo/bin", "~/Library/pnpm", "~/.rustup"]
+        );
+        assert_eq!(store.project("gone").unwrap().allowed_read, every);
+        let bad: String = store
+            .lock()
+            .query_row(
+                "select allowed_read from project where id = 'bad'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(bad, "not a list");
+        assert!(store.run("r").unwrap().extra_read.is_empty());
+
+        project_reading(&store, "new", &[]);
+        drop(store);
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.project("p").unwrap().allowed_read, every);
+        assert!(store.project("new").unwrap().allowed_read.is_empty());
+    }
+
+    /// Trying commands before saving them, a person can let them read more than the project does.
+    /// Only that run gets it.
+    #[test]
+    fn a_run_can_read_folders_of_its_own_and_the_project_is_left_as_it_was() {
+        let (_dir, store) = store();
+        seeded(&store);
+        assert!(store.run("r").unwrap().extra_read.is_empty());
+        store
+            .add_run_reading(
+                &NewRun {
+                    id: "t".into(),
+                    project_id: "p".into(),
+                    title: "try".into(),
+                    request: "try".into(),
+                    workflow: "[]".into(),
+                    language: "en".into(),
+                    source_issue: None,
+                    workflow_id: None,
+                    workflow_name: None,
+                    started_by: None,
+                },
+                &["~/.nvm".to_owned()],
+            )
+            .unwrap();
+        assert_eq!(store.run("t").unwrap().extra_read, ["~/.nvm"]);
+        assert!(store.project("p").unwrap().allowed_read.is_empty());
+        assert!(store.run("r").unwrap().extra_read.is_empty());
     }
 
     fn card(store: &Store, id: &str) -> String {
@@ -4571,6 +4713,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table run drop column extra_read;
                  alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;
                  drop index card_by_joint_change;

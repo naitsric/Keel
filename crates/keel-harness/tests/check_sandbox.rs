@@ -10,6 +10,7 @@ use std::process::Command;
 use keel_harness::clean_env;
 use keel_harness::home;
 use keel_harness::settings::{check_profile, setup_profile, with_own_output};
+use keel_harness::toolchains;
 
 struct Sandbox {
     canary_dir: tempfile::TempDir,
@@ -283,24 +284,201 @@ fn a_command_can_ask_about_its_own_output_files() {
     );
 }
 
+/// #120: every project gets Claude Code's own folders and no toolchain. Those are found for each
+/// project, and a person lets them be read.
 #[test]
-fn toolchains_can_be_read_and_cargo_credentials_cannot() {
-    keel_harness::needs!(sandbox);
-    let home = PathBuf::from(std::env::var("HOME").unwrap());
-    let s = sandbox();
-    // `~/.cargo/bin` opens up, and the file right next to it doesn't.
-    let credentials = home.join(".cargo/credentials.toml");
-    if credentials.exists() {
-        assert!(!s.allowed(&format!("cat {}", quoted(&credentials))));
-    }
-    let profile = check_profile(s.workspace.path(), &home, &[], &[]);
-    for dir in ["Library/pnpm", ".cargo/bin", ".rustup"] {
+fn only_claude_codes_own_folders_are_readable_in_every_project() {
+    let home = Path::new("/Users/me");
+    let profile = check_profile(Path::new("/Users/me/w"), home, &[], &[]);
+    for dir in [".local", ".claude/local"] {
         assert!(
             profile.contains(&format!("(subpath \"{}\")", home.join(dir).display())),
             "{dir}"
         );
     }
-    assert!(!profile.contains(&format!("(subpath \"{}\")", home.join(".cargo").display())));
+    for dir in ["Library/pnpm", ".cargo/bin", ".rustup", ".cargo"] {
+        assert!(
+            !profile.contains(&format!("(subpath \"{}\")", home.join(dir).display())),
+            "{dir}"
+        );
+    }
+}
+
+/// A check in a workspace outside the home folder, as Keel runs one, with `path_env` for its PATH,
+/// `home` as the home folder and `read` as what the project lets it read.
+fn check_in(
+    home: &Path,
+    workspace: &Path,
+    read: &[String],
+    path_env: &str,
+    script: &str,
+) -> std::process::Output {
+    let own = workspace.join(".keel-cache").join(home::FOLDER);
+    home::create(&own).unwrap();
+    Command::new("/usr/bin/sandbox-exec")
+        .args([
+            "-p",
+            &check_profile(workspace, home, read, &[]),
+            "/bin/sh",
+            "-c",
+            script,
+        ])
+        .current_dir(workspace)
+        .env_clear()
+        .envs(clean_env(path_env))
+        .envs(home::env(&own, home))
+        .output()
+        .unwrap()
+}
+
+/// #120: `node` from nvm or from asdf, as each lays it out in a home folder of the test's own: a
+/// version's `bin` on the PATH, or a shim that has asdf run the version the repo names. `node` is a
+/// script that reads what was installed beside it. Keel finds the folder from the PATH alone, the
+/// check runs with it and nothing added by hand, and without it the sandbox stops it.
+#[test]
+fn a_check_runs_node_from_nvm_or_asdf_with_the_folder_keel_proposes() {
+    keel_harness::needs!(sandbox);
+    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let fake_home = root.path().canonicalize().unwrap().join("Users/me");
+    let (workspace, _) = install_in(&fake_home);
+    for name in CREDENTIALS {
+        let path = fake_home.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("secret in {name}")).unwrap();
+    }
+    std::fs::write(workspace.join(".tool-versions"), "nodejs 20.11.0\n").unwrap();
+    let script = |at: &Path, text: &str| {
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        keel_harness::testing::write_script(at, text).unwrap();
+    };
+    let node = "#!/bin/sh\ncat \"${0%/*}/../lib/node_modules/npm/installed\"\n";
+    let installed = |bin: &Path, by: &str| {
+        script(&bin.join("node"), node);
+        let lib = bin.join("../lib/node_modules/npm");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("installed"), format!("node from {by}\n")).unwrap();
+    };
+    let nvm_bin = fake_home.join(".nvm/versions/node/v20.11.0/bin");
+    installed(&nvm_bin, "nvm");
+    installed(&fake_home.join(".asdf/installs/nodejs/20.11.0/bin"), "asdf");
+    script(
+        &fake_home.join(".asdf/bin/asdf"),
+        "#!/bin/sh\n[ \"$1\" = exec ] || exit 2\nshift\nprogram=$1\nshift\n\
+         version=$(sed -n 's/^nodejs //p' .tool-versions)\n\
+         exec \"$ASDF_DATA_DIR/installs/nodejs/$version/bin/$program\" \"$@\"\n",
+    );
+    script(
+        &fake_home.join(".asdf/shims/node"),
+        "#!/bin/sh\n# asdf-plugin: nodejs 20.11.0\nexec asdf exec \"node\" \"$@\"\n",
+    );
+
+    for (manager, path, folder) in [
+        ("nvm", nvm_bin.display().to_string(), "~/.nvm"),
+        (
+            "asdf",
+            format!(
+                "{}:{}",
+                fake_home.join(".asdf/bin").display(),
+                fake_home.join(".asdf/shims").display()
+            ),
+            "~/.asdf",
+        ),
+    ] {
+        let path_env = format!("{path}:/usr/bin:/bin:/usr/sbin:/sbin");
+        let check = "node --test";
+        let found = toolchains::find(&[check], &path_env, &fake_home);
+        assert_eq!(
+            found,
+            [toolchains::Found {
+                folder: folder.to_owned(),
+                programs: vec!["node".to_owned()],
+            }],
+            "{manager}"
+        );
+        let read: Vec<String> = found.into_iter().map(|found| found.folder).collect();
+        let with = check_in(&fake_home, &workspace, &read, &path_env, check);
+        assert!(
+            with.status.success(),
+            "{manager}: {}",
+            String::from_utf8_lossy(&with.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&with.stdout),
+            format!("node from {manager}\n")
+        );
+        let without = check_in(&fake_home, &workspace, &[], &path_env, check);
+        assert!(
+            !without.status.success() && without.stdout.is_empty(),
+            "{manager}: if this passes, the test proves nothing"
+        );
+        for name in CREDENTIALS {
+            let cat = format!("cat {}", quoted(&fake_home.join(name)));
+            refused(
+                &check_in(&fake_home, &workspace, &read, &path_env, &cat),
+                &format!("{manager}: {name}"),
+            );
+        }
+    }
+}
+
+/// #120 on this Mac: cargo, rustup and pnpm where their own installers put them, in the home
+/// folder. Every project could read them before. Now Keel finds them, and a check runs them with
+/// what it found and nothing else.
+#[test]
+fn the_toolchains_on_this_mac_are_found_and_run_in_the_sandbox() {
+    keel_harness::needs!(sandbox);
+    let real_home = PathBuf::from(std::env::var("HOME").unwrap());
+    // The PATH the app gives commands, from the login shell.
+    let tools = keel_harness::Tools::detect();
+    // Outside the home folder, so the test writes nothing in it.
+    let root = tempfile::tempdir().unwrap();
+    let workspace = root.path().canonicalize().unwrap().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    for (check, wanted) in [
+        ("cargo --version", &["~/.cargo/bin", "~/.rustup"][..]),
+        ("pnpm --version", &["~/Library/pnpm"][..]),
+    ] {
+        let program = check.split(' ').next().unwrap();
+        match toolchains::locate(&[program.to_owned()], &tools.path_env).first() {
+            None => {
+                keel_harness::testing::skipped(&format!("{program} isn't installed"));
+                continue;
+            }
+            Some((_, at)) if !at.starts_with(&real_home) => {
+                keel_harness::testing::skipped(&format!("{program} isn't in the home folder"));
+                continue;
+            }
+            Some(_) => {}
+        }
+        let found = toolchains::find(&[check], &tools.path_env, &real_home);
+        let read: Vec<String> = found.iter().map(|found| found.folder.clone()).collect();
+        eprintln!("{check}: Keel proposes {found:?}");
+        for folder in wanted {
+            assert!(read.iter().any(|f| f == folder), "{folder} in {read:?}");
+        }
+        assert!(!read.iter().any(|f| f == "~/.cargo"), "{read:?}");
+        let with = check_in(&real_home, &workspace, &read, &tools.path_env, check);
+        assert!(
+            with.status.success(),
+            "{check}: {}",
+            String::from_utf8_lossy(&with.stderr)
+        );
+        let without = check_in(&real_home, &workspace, &[], &tools.path_env, check);
+        assert!(
+            !without.status.success(),
+            "{check}: if this passes, the test proves nothing"
+        );
+    }
+    // Cargo's credentials sit right beside what it needs, and stay out of reach.
+    let credentials = real_home.join(".cargo/credentials.toml");
+    if credentials.exists() {
+        let read = vec!["~/.cargo/bin".to_owned(), "~/.rustup".to_owned()];
+        let cat = format!("cat {}", quoted(&credentials));
+        refused(
+            &check_in(&real_home, &workspace, &read, &tools.path_env, &cat),
+            "cargo's credentials",
+        );
+    }
 }
 
 #[test]

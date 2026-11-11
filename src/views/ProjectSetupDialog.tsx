@@ -3,10 +3,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type Attempt, type AuditEvent, type GithubStatus, type MapStart, type ProjectSetup } from "../lib/api";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
-import { accountToSelect, checkOptionsLeft, commandNotFound, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withSetup, withSetupOption } from "../lib/projects";
+import { accountToSelect, checkOptionsLeft, commandNotFound, foldersToOffer, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withFolders, withSetup, withSetupOption } from "../lib/projects";
 import { errorText, needsSignIn, reasonText } from "../lib/reason";
 import { type ProjectSetupRequest, useApp } from "../lib/store";
 import { Button, cx, Field, inputClass, Modal } from "../ui/primitives";
+import { FolderChoices, useToolFolders } from "./ToolFolders";
 
 const NONE = "__none__";
 const POLL_MS = 1000;
@@ -182,6 +183,13 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
   const saved = info?.project.githubAccount ?? null;
   const known = info !== null;
 
+  // What the commands need from the home folder, ticked unless the person unticks it. Saving lets
+  // them read what's ticked, and trying it does for that run only.
+  const found = useToolFolders(projectId, setup, check, known);
+  const [skipped, setSkipped] = useState<string[]>([]);
+  const offered = foldersToOffer(found ?? [], info?.project.allowedRead ?? []);
+  const chosen = offered.map((f) => f.folder).filter((folder) => !skipped.includes(folder));
+
   const loadGithub = useCallback(async () => {
     const latest = ++latestRequest.current;
     setChecking(true);
@@ -252,13 +260,17 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
     setSetup(value);
     forgetTrial();
   };
+  const toggleFolder = (folder: string, tick: boolean) => {
+    setSkipped((list) => (tick ? list.filter((f) => f !== folder) : [...list, folder]));
+    forgetTrial();
+  };
 
   const tryIt = async () => {
     setError(null);
     forgetTrial();
     setTrying(true);
     try {
-      setRunId(await api.projectTryCheck(projectId, setup, check, i18n.language));
+      setRunId(await api.projectTryCheck(projectId, setup, check, chosen, i18n.language));
       void refreshOverview();
     } catch (e) {
       setTrying(false);
@@ -277,7 +289,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
     if (!project) return;
     setBusy(true);
     try {
-      await api.projectUpdate(projectId, withSetup(project, { githubAccount: showAccounts ? selected : project.githubAccount, setupCommand: setup, checkCommand: check }));
+      await api.projectUpdate(projectId, withSetup(project, { githubAccount: showAccounts ? selected : project.githubAccount, setupCommand: setup, checkCommand: check, allowedRead: withFolders(project.allowedRead, chosen) }));
       await refreshOverview();
       closeSetup();
     } catch (e) {
@@ -379,6 +391,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
         </Field>
         {guess && <OptionButtons options={setupOptionsLeft(setup, guess)} onAdd={(option) => changeSetup(withSetupOption(setup, guess, option))} />}
       </div>
+      <FolderChoices folders={offered} skipped={skipped} onToggle={toggleFolder} />
 
       <div className="space-y-0.5 text-[11.5px] leading-snug text-subtle">
         <p>

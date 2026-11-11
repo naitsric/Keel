@@ -3,12 +3,13 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next";
 import { api, type EnvVar, type GithubStatus, type Project, type Service, type Workflow } from "../lib/api";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
-import { needsSetup } from "../lib/projects";
+import { foldersToOffer, needsSetup, withFolders } from "../lib/projects";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass } from "../ui/primitives";
 import { AddProjectButton, useAddProject } from "./AddProject";
 import { RemoveProjectDialog } from "./RemoveProjectDialog";
+import { FolderOffers, useToolFolders } from "./ToolFolders";
 
 /** From this many projects, the list gets a filter. With fewer it only gets in the way. */
 const FILTER_FROM = 6;
@@ -67,9 +68,9 @@ function ServiceRow({ service, onChange, onRemove }: { service: Service; onChang
 
 /**
  * The card reads its values only as it mounts, so it has to start over when the setup dialog changes
- * them, or its next Save would put the old ones back.
+ * them, or its next Save would put the old ones back. That includes the folders the dialog adds.
  */
-export const projectCardKey = (project: Project) => [project.id, project.githubAccount, project.githubRepo, project.setupCommand, project.checkCommand].join("\0");
+export const projectCardKey = (project: Project) => [project.id, project.githubAccount, project.githubRepo, project.setupCommand, project.checkCommand, ...project.allowedRead].join("\0");
 
 function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boolean; onSaved: () => void }) {
   const { t, i18n } = useTranslation();
@@ -91,6 +92,9 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
   const latestRequest = useRef(0);
   const [removing, setRemoving] = useState(false);
   const selected = account === NONE ? null : account;
+  // Where the commands' programs are, for the person to add what isn't listed yet.
+  const found = useToolFolders(project.id, setup, check);
+  const offered = foldersToOffer(found ?? [], lines(paths));
 
   // Asks about the account that's selected, saved or not. An answer that comes late never wins.
   const load = useCallback(() => {
@@ -273,9 +277,12 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
             <Field label={t("settings.domains")} hint={t("settings.domainsHint")}>
               <textarea rows={3} value={domains} onChange={(e) => setDomains(e.target.value)} className={`${inputClass} resize-y font-mono`} />
             </Field>
-            <Field label={t("settings.readPaths")} hint={t("settings.readPathsHint")}>
-              <textarea rows={3} value={paths} onChange={(e) => setPaths(e.target.value)} className={`${inputClass} resize-y font-mono`} />
-            </Field>
+            <div>
+              <Field label={t("settings.readPaths")} hint={t("settings.readPathsHint")}>
+                <textarea rows={3} value={paths} onChange={(e) => setPaths(e.target.value)} className={`${inputClass} resize-y font-mono`} />
+              </Field>
+              <FolderOffers folders={offered} onAdd={(folder) => setPaths(withFolders(lines(paths), [folder]).join("\n"))} />
+            </div>
           </div>
           <Field label={t("settings.sensitive")} hint={t("settings.sensitiveHint")}>
             <textarea rows={3} value={sensitive} onChange={(e) => setSensitive(e.target.value)} className={`${inputClass} resize-y font-mono`} />
