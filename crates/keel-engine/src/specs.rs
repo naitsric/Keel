@@ -781,8 +781,10 @@ pub fn answered_prompt(given: &[GivenAnswer], language: &str) -> String {
     prompts::render(template, |name| (name == "answers").then(|| lines.clone()))
 }
 
-const CORRECTION_EN: &str = "Your answer doesn't fit what Keel can show the person. Fix exactly this and answer again in the same structure, without reading the repository again:\n{{problems}}\n\nKeep everything else as it was.";
-const CORRECTION_ES: &str = "Tu respuesta no cabe en lo que Keel le puede mostrar a la persona. Corrige exactamente esto y responde de nuevo con la misma estructura, sin volver a leer el repositorio:\n{{problems}}\n\nDeja todo lo demás como estaba. Responde en español.";
+// As in the specifier's prompt, a text that's too long is asked for below its limit: a fix that
+// misses it again by a character would leave the step stopped.
+const CORRECTION_EN: &str = "Your answer doesn't fit what Keel can show the person. Fix exactly this and answer again in the same structure, without reading the repository again:\n{{problems}}\n\nShorten a text that's too long to about 15% under its limit, since characters are easy to miscount. Keep everything else as it was.";
+const CORRECTION_ES: &str = "Tu respuesta no cabe en lo que Keel le puede mostrar a la persona. Corrige exactamente esto y responde de nuevo con la misma estructura, sin volver a leer el repositorio:\n{{problems}}\n\nAcorta un texto demasiado largo hasta un 15 % por debajo de su límite, porque es fácil contar mal los caracteres. Deja todo lo demás como estaba. Responde en español.";
 
 /// What a specifier is told when it broke a limit, saying exactly what to fix.
 pub fn correction_prompt(problems: &[SpecProblem], language: &str) -> String {
@@ -1174,6 +1176,15 @@ mod tests {
         assert!(
             correction_prompt(&problems, "en")
                 .contains("Item 1 of `decided` has 141 characters, and the limit is 140.")
+        );
+        // The fix is asked for below the limit too, or it may miss it again by one and stop.
+        assert!(
+            correction_prompt(&problems, "en").contains("to about 15% under its limit"),
+            "en"
+        );
+        assert!(
+            correction_prompt(&problems, "es").contains("hasta un 15 % por debajo de su límite"),
+            "es"
         );
     }
 
