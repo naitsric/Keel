@@ -748,23 +748,28 @@ mockIPC((command, args) => {
     case "run_attempts":
       return (args as { runId?: string } | undefined)?.runId === "try1" ? tryAttempts() : flowScene ? flowScene.attempts : attemptsList;
     case "github_status": {
-      if ((args as { projectId?: string } | undefined)?.projectId === freshProject.id) return setupAccounts((args as { account?: string | null }).account);
+      const projectId = (args as { projectId?: string } | undefined)?.projectId;
+      if (projectId === freshProject.id) return setupAccounts((args as { account?: string | null }).account);
+      // The repo of the project asked about, as the list shows it: each of projects=many has its own.
+      const asked = listedProjects.find((p) => p.id === projectId);
+      const repo = asked ? asked.githubRepo : "acme/app";
       const access = params.get("access");
       const accounts = [
         { login: "you-personal", active: true, ok: true, scopes: ["repo"] },
         { login: "you-work", active: false, ok: true, scopes: ["repo", "admin:org", "workflow"] },
       ];
+      if (!repo) return { repo, accounts, info: null, excessScopes: [], error: null };
       if (access === "none") {
         return {
-          repo: "acme/app",
+          repo,
           accounts,
           info: null,
           excessScopes: [],
-          error: { code: "deliveryFailed", kind: "noPermission", detail: "GraphQL: Could not resolve to a Repository with the name 'acme/app'. (repository)" },
+          error: { code: "deliveryFailed", kind: "noPermission", detail: `GraphQL: Could not resolve to a Repository with the name '${repo}'. (repository)` },
         };
       }
       return {
-        repo: "acme/app",
+        repo,
         accounts,
         info: { defaultBranch: "main", permission: access === "read" ? "READ" : "ADMIN", private: true, defaultBranchProtected: false },
         excessScopes: (args as { account?: string | null } | undefined)?.account === "you-work" ? ["admin:org", "workflow"] : [],
@@ -869,8 +874,9 @@ void useApp.getState().refreshMcp();
 useApp.setState({ preflight: params.get("session") === "checking" ? null : preflight });
 // from=board or from=brain shows a run opened on that page: it stays the current one in the top bar.
 const from = params.get("from");
-// What view= opens. It has one entry for each page the app has, so a new page doesn't compile until
-// the preview can show it.
+// What view= opens. It needs one entry for each page in View, so a new page doesn't compile until
+// view= can open it. That's all it checks: a command the mock above doesn't know answers null, so
+// a page that reads something new opens without it until the mock answers it too.
 const PAGES: { [Name in View["name"]]: Extract<View, { name: Name }> } = {
   home: { name: "home" },
   run: { name: "run", runId: "r1", backTo: from === "board" ? { name: "board", projectId: "p1" } : from === "brain" ? { name: "brain" } : undefined },
