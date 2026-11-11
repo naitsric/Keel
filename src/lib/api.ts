@@ -295,6 +295,8 @@ export interface SpecDecided {
   /** Who settled it, if it was once a question: a person, or Keel when the rounds of them ran out. Or the person in the request, which `quote` has word for word. */
   taken?: "person" | "roundsLimit" | "request";
   quote?: string;
+  /** The assistant that wrote that request for the person, when one did. */
+  assistant?: string;
 }
 
 /** An answer to a question, as the engine keeps it. */

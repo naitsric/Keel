@@ -16,7 +16,7 @@ import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } fro
 import { ProposalRow } from "./BrainPage";
 import { FlowDiagram } from "./FlowDiagram";
 import { JointChangeDialog } from "./JointChangeDialog";
-import { SpecView } from "./SpecView";
+import { SpecView, fromRequest } from "./SpecView";
 
 type Tab = "understood" | "found" | "activity" | "commands" | "changes" | "prompt" | "details" | "output";
 
@@ -505,7 +505,7 @@ function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, o
             )}
           </div>
           {item.taken === "person" && <p className="text-[11.5px] text-subtle">{t("run.decidedYouChose")}</p>}
-          {item.taken === "request" && <p className="text-[11.5px] text-subtle">{t("run.decidedFromRequest")}</p>}
+          {item.taken === "request" && <p className="selectable text-[11.5px] break-words text-subtle">{fromRequest(t, item)}</p>}
           {item.taken === "roundsLimit" && <p className="text-[11.5px] text-warning">{t("run.decidedKeelTook")}</p>}
           {questioned
             .filter((_, at) => lines[at].includes(index))

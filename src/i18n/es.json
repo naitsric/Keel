@@ -397,7 +397,8 @@
     "decidedChange": "Cambiar",
     "decidedChangeThis": "Cambiar: {{text}}",
     "decidedYouChose": "Esto lo elegiste tú.",
-    "decidedFromRequest": "Del pedido",
+    "decidedFromRequest": "Del pedido: “{{quote}}”",
+    "decidedFromRequestBy": "Del pedido que escribió {{client}}: “{{quote}}”",
     "decidedKeelTook": "Se acabaron las rondas de preguntas, así que Keel dejó de preguntar y tomó la opción recomendada.",
     "decidedQuestioned": "Una revisión cuestiona esto, y te toca decidirlo: {{why}}",
     "decidedQuestionedElsewhere": "Una revisión cuestiona “{{decided}}”, y te toca decidirlo: {{why}}",
@@ -1115,7 +1116,8 @@
     "tooManyParts": "cambia {{count}} proyectos, y el máximo es {{limit}}",
     "unknownProject": "nombra {{project}}, que no es ninguno de los proyectos que elegiste",
     "repeatedPart": "pone {{project}} dos veces",
-    "tooManyTogether": "pone {{count}} cosas para probar juntas, y el máximo es {{limit}}"
+    "tooManyTogether": "pone {{count}} cosas para probar juntas, y el máximo es {{limit}}",
+    "tooManyFromRequest": "lista {{count}} cosas que el pedido ya decidió y el límite es {{limit}}"
   },
   "invalidAnswers": {
     "unknownQuestion": "Esa respuesta es para una pregunta que este paso no hizo.",

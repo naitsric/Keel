@@ -24,6 +24,9 @@ const AGREE_STEP: &str = "spec";
 /// Where what was agreed keeps the request it was agreed from, which each part reads in full.
 const ASKED: &str = "request";
 
+/// And the assistant that wrote that request, when one did.
+const ASKED_BY: &str = "requestBy";
+
 /// Where a project's mirror keeps what Keel last read of its default branch for a run in another
 /// project. Apart from `keel-base`, which a run of this project starts from.
 const READ_BRANCH: &str = "keel-read";
@@ -411,6 +414,13 @@ impl Inner {
             .and_then(|agreed| agreed.get(ASKED))
             .and_then(Value::as_str)
             .map(str::to_owned))
+    }
+
+    /// The assistant that wrote the request a part's change was agreed from, when one did. None for
+    /// a person, and for a change agreed before Keel kept who wrote it.
+    pub(crate) fn asked_by(&self, run_id: &str) -> Option<String> {
+        let (_, change) = self.joint_card(run_id).ok()??;
+        change.agreed?.get(ASKED_BY)?.as_str().map(str::to_owned)
     }
 
     /// Whether a run does one part of a change across projects.
@@ -974,12 +984,11 @@ impl Inner {
         }
         // So does the request, word for word as it was agreed from: what was agreed only sums it
         // up. It's kept here, since the card where it was agreed may be deleted before a part starts.
-        let request = self
-            .store
-            .run(run_id)
-            .map_err(|error| error.to_string())?
-            .request;
-        agreed[ASKED] = json!(request);
+        let run = self.store.run(run_id).map_err(|error| error.to_string())?;
+        agreed[ASKED] = json!(run.request);
+        if let Some(by) = run.started_by {
+            agreed[ASKED_BY] = json!(by);
+        }
         self.store
             .open_joint_parts(&agreement.change.id, &agreed, &parts, &spec.together)
             .map_err(|error| error.to_string())

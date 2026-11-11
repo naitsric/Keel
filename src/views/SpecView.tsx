@@ -1,5 +1,12 @@
+import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import type { SpecOutput } from "../lib/api";
+import type { SpecDecided, SpecOutput } from "../lib/api";
+
+/** What the request said about a line it decided, in its words, so the person can check it, and who wrote it when an assistant did. */
+export function fromRequest(t: TFunction, decided: SpecDecided): string {
+  const quote = decided.quote ?? "";
+  return decided.assistant ? t("run.decidedFromRequestBy", { client: decided.assistant, quote }) : t("run.decidedFromRequest", { quote });
+}
 
 function SpecList({ title, items }: { title: string; items: React.ReactNode[] }) {
   if (items.length === 0) return null;
@@ -48,7 +55,7 @@ export function SpecView({ spec }: { spec: SpecOutput }) {
           <>
             {decided.text}
             {decided.taken === "person" && <span className="block text-[11.5px] text-subtle">{t("run.decidedYouChose")}</span>}
-            {decided.taken === "request" && <span className="block text-[11.5px] text-subtle">{t("run.decidedFromRequest")}</span>}
+            {decided.taken === "request" && <span className="block text-[11.5px] break-words text-subtle">{fromRequest(t, decided)}</span>}
             {decided.taken === "roundsLimit" && <span className="block text-[11.5px] text-warning">{t("run.decidedKeelTook")}</span>}
           </>
         ))}

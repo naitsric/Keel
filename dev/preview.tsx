@@ -189,11 +189,13 @@ const previewSpec = {
   decided: [
     { text: say("Keeps the rounding as it is today, because nothing asked to change it.", "Deja el redondeo como está hoy, porque nada pidió cambiarlo.") },
     { text: say("If `whole` is 0, what should happen? Show an error, as today", "Si `whole` es 0, ¿qué debe pasar? Mostrar error, como hoy"), taken: "person" },
-    // taken=1 adds one Keel took when the rounds of questions ran out, and one the request already decided.
+    // taken=1 adds one Keel took when the rounds of questions ran out, and two the request already
+    // decided: one the person wrote, and one an assistant wrote for them.
     ...(params.get("taken") === "1"
       ? [
           { text: say("Should the total round up? Leave it as it is", "¿El total debe redondear hacia arriba? Dejarlo como está"), taken: "roundsLimit" },
           { text: say("A critical thread its author resolves counts as fixed, for now", "Un hilo critical que resuelve su autor cuenta como arreglado, por ahora"), taken: "request", quote: say("If the author resolves their own critical thread, it counts for now.", "Si el autor resuelve su propio hilo critical, por ahora cuenta.") },
+          { text: say("Old invoices keep their totals", "Las facturas viejas conservan sus totales"), taken: "request", quote: say("Invoices already sent keep the total they had.", "Las facturas ya enviadas conservan el total que tenían."), assistant: "Claude Code" },
         ]
       : []),
     ...(questionedShown ? [{ text: say("Sorts the invoices by date, as the list does today.", "Ordena las facturas por fecha, como la lista de hoy.") }] : []),

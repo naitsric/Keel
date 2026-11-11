@@ -817,13 +817,18 @@ describe("the approval card", () => {
         expect(page()).toContain("The rounds of questions ran out, so Keel stopped asking and took the recommended option.");
       });
 
-      it("says which ones the request already decided", () => {
-        const fromRequest = [...decided, { text: "A critical thread its author resolves counts", taken: "request" as const, quote: "If the author resolves their own critical thread, it counts for now." }];
+      it("says which ones the request already decided, in its words, and who wrote it", () => {
+        const fromRequest = [
+          ...decided,
+          { text: "A critical thread its author resolves counts", taken: "request" as const, quote: "If the author resolves their own critical thread, it counts for now." },
+          { text: "Old threads stay", taken: "request" as const, quote: "Old threads stay as they are.", assistant: "Claude Code" },
+        ];
         show([specifier({ decided: fromRequest }), builder(["calc.py"]), human], ["calc.py"], building);
         const line = (text: string) => [...document.querySelectorAll("li")].find((li) => li.textContent?.startsWith(text))?.textContent ?? "";
-        expect(line("A critical thread its author resolves counts")).toContain("From the request");
+        expect(line("A critical thread its author resolves counts")).toContain("From the request: “If the author resolves their own critical thread, it counts for now.”");
+        expect(line("Old threads stay")).toContain("From the request Claude Code wrote: “Old threads stay as they are.”");
         expect(line("Keeps the rounding as it is")).not.toContain("From the request");
-        expect(page().match(/From the request/g)).toHaveLength(1);
+        expect(page().match(/From the request/g)).toHaveLength(2);
       });
 
       it("says on its line what a review questions, for the person to decide, and quotes one that matches no line", () => {

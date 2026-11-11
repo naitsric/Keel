@@ -1331,22 +1331,47 @@ impl Inner {
             })
             .count();
         let output = this.and_then(|attempt| attempt.output.as_ref());
-        // With no request to read, nothing quoted from it counts as the person's.
-        let request = self
-            .store
-            .run(&m.run_id)
-            .map(|run| run.request)
-            .unwrap_or_default();
+        let written = self.written_in_request(&m.run_id);
         match self.agreement(&m.run_id).ok().flatten() {
             Some(agreement) => specs::judge_agreement(
                 output,
-                &request,
+                &written,
                 fixing_a_limit,
                 rounds_answered,
                 &agreement.names(),
             ),
-            None => specs::judge(output, &request, fixing_a_limit, rounds_answered),
+            None => specs::judge(output, &written, fixing_a_limit, rounds_answered),
         }
+    }
+
+    /// What the person wrote in a run's request, or an assistant they allowed to start it, which is
+    /// all a decision can quote to count as theirs. With nothing to tell by, nothing counts.
+    fn written_in_request(&self, run_id: &str) -> Vec<specs::Written> {
+        let (Ok(run), Ok(part)) = (self.store.run(run_id), self.is_part(run_id)) else {
+            return Vec::new();
+        };
+        let account = self
+            .store
+            .project(&run.project_id)
+            .ok()
+            .and_then(|project| project.github_account);
+        // A part's request was written for the whole change, by whoever asked for that.
+        let starter = if part {
+            self.asked_by(run_id)
+        } else {
+            run.started_by.clone()
+        };
+        let typed = run.source_issue.is_none() && !part;
+        prompts::written_by_the_person(&run.request, typed, account.as_deref())
+            .into_iter()
+            .map(|(text, wrote)| specs::Written {
+                text: text.to_owned(),
+                assistant: match wrote {
+                    prompts::Wrote::Starter => starter.clone(),
+                    prompts::Wrote::IssueAuthor => None,
+                },
+            })
+            .collect()
     }
 
     /// What it answered, without anything an agent added beyond the structure. The whole answer as
