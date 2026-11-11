@@ -486,6 +486,7 @@ fn until(what: &str, done: impl Fn() -> bool) {
 
 #[test]
 fn a_failed_try_frees_what_a_retry_rebuilds_and_keeps_what_setup_installed() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     std::fs::write(
         w.repo.join(".gitignore"),

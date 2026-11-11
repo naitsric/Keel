@@ -2223,6 +2223,7 @@ async fn a_run_that_went_round_again_reads_in_one_go_and_says_each_thing_once() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn following_a_run_does_not_repeat_its_request_or_a_reviewer_s_prompt() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let workflow = w.saved(
         "Build and review",

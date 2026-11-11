@@ -1039,6 +1039,7 @@ fn each_part_reads_what_was_agreed_and_the_branch_of_the_part_before() {
 
 #[test]
 fn each_part_reads_the_whole_request_and_not_only_its_own_line() {
+    keel_harness::needs!(sandbox);
     // Only the request says what the field is called: what was agreed sums it up without it.
     let asked = "Log in through Valora\n\nThe token travels in the field `x_valora_token`.";
     for from_a_card in [true, false] {

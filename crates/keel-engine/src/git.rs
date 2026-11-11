@@ -860,6 +860,7 @@ mod tests {
 
     #[test]
     fn the_screenshots_folder_stays_out_of_a_commit_as_a_link_or_a_file_too() {
+        keel_harness::needs!(sandbox);
         let p = poisoned("");
         let folder = p.workspace.join(crate::screenshots::FOLDER);
         std::os::unix::fs::symlink(&p.canary, &folder).unwrap();
