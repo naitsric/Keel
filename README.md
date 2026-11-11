@@ -63,9 +63,10 @@ most about 4 KB, so when it's full, adding something means retiring something.
   them, and commands reach them only through a Unix socket.
 - A setup command installs dependencies once per run, before any agent. It's the one step with
   internet access, and it still can't reach your home folder or anything else on your Mac.
-- Setup and the check run in a home folder of the project's own. Setup fills it with whatever its
-  tools download, and each run works in a copy of it, so no step can change what the next run gets.
-  Toolchains such as rustup's stay in your home folder, where they can only be read.
+- Setup, the check and the agents' commands run in a home folder of the project's own. Setup fills
+  it with whatever its tools download, and each run works in a copy of it, so no step can change
+  what the next run gets. Toolchains such as rustup's stay in your home folder, where they can only
+  be read. Claude Code itself keeps your home folder, where your login is.
 
 ## Secrets in what it shows
 

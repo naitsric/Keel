@@ -1,9 +1,9 @@
-//! A home folder of the project's own, for the commands Keel runs itself. Tools keep what they
-//! download in the home folder, and read their settings there: `~/.m2`, `~/.gradle`, `~/.cache`,
-//! `~/.config/git/ignore`. The sandbox hides the real one, so setup fills one in the project's cache,
-//! with the network, and each run gets a copy, where its steps work. What a step writes there reaches
-//! neither the project's home nor the next run. Toolchains stay in the real home folder, only to be
-//! read, and a few variables say where.
+//! A home folder of the project's own, for the commands Keel runs and those an agent runs in Bash.
+//! Tools keep what they download in the home folder, and read their settings there: `~/.m2`,
+//! `~/.gradle`, `~/.cache`, `~/.config/git/ignore`. The sandbox hides the real one, so setup fills one
+//! in the project's cache, with the network, and each run gets a copy, where its steps work. What a
+//! step writes there reaches neither the project's home nor the next run. Toolchains stay in the real
+//! home folder, only to be read, and a few variables say where.
 
 use std::io;
 use std::path::Path;
@@ -54,26 +54,13 @@ pub fn env(home: &Path, real_home: &Path) -> Vec<(String, String)> {
     env
 }
 
-/// Where some tools keep what they download inside `home`, for a process that has to keep the real
-/// home folder: the builder's `claude`, whose Bash doesn't get the run's home yet (#119).
-pub fn tool_env(home: &Path) -> Vec<(String, String)> {
-    [
-        ("XDG_CACHE_HOME", ".cache"),
-        ("UV_CACHE_DIR", ".cache/uv"),
-        ("PIP_CACHE_DIR", "Library/Caches/pip"),
-        ("npm_config_cache", ".npm"),
-        ("CARGO_HOME", ".cargo"),
-        ("GOPATH", "go"),
-        ("GOCACHE", "Library/Caches/go-build"),
-    ]
-    .iter()
-    .map(|(name, folder)| {
-        (
-            (*name).to_owned(),
-            home.join(folder).to_string_lossy().into_owned(),
-        )
-    })
-    .collect()
+/// `env` as a script, one `export` a line, for a process that has to keep the real home folder and
+/// runs it ahead of each command it starts: an agent's `claude`, whose login and sessions are there.
+pub fn script(home: &Path, real_home: &Path) -> String {
+    env(home, real_home)
+        .iter()
+        .map(|(name, value)| format!("export {name}='{}'\n", value.replace('\'', r"'\''")))
+        .collect()
 }
 
 /// Makes a home, with git's settings in it, unless it's there. Settings a command changed stay.
@@ -164,12 +151,27 @@ mod tests {
     }
 
     #[test]
-    fn the_builders_tools_find_what_setup_left_where_they_would_have_left_it() {
-        let env = tool_env(Path::new("/h"));
-        assert_eq!(var(&env, "CARGO_HOME"), Some("/h/.cargo"));
-        assert_eq!(var(&env, "GOPATH"), Some("/h/go"));
-        assert_eq!(var(&env, "UV_CACHE_DIR"), Some("/h/.cache/uv"));
-        assert_eq!(var(&env, "HOME"), None, "claude needs the real one");
+    fn the_script_sets_what_env_does_in_any_shell_whatever_the_path() {
+        // As old runs have it, and with what would end a quote.
+        let home = Path::new("/Users/me/Library/Application Support/it's $HOME/.keel-cache/home");
+        let real_home = Path::new("/Users/me");
+        let env = env(home, real_home);
+        let print: String = env
+            .iter()
+            .map(|(name, _)| format!("printf '%s\\n' \"${name}\"\n"))
+            .collect();
+        for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
+            let output = std::process::Command::new(shell)
+                .arg("-c")
+                .arg(format!("{}{print}", script(home, real_home)))
+                .env_clear()
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{shell}");
+            let said = String::from_utf8(output.stdout).unwrap();
+            let values: Vec<&str> = env.iter().map(|(_, value)| value.as_str()).collect();
+            assert_eq!(said.lines().collect::<Vec<_>>(), values, "{shell}");
+        }
     }
 
     #[test]
