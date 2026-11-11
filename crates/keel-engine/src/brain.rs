@@ -6,8 +6,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use keel_core::{AttemptState, Reason, StepRole, StepSpec, ToolProfile, WorkflowStep};
-use keel_store::{Attempt, BrainNote, Decision, NewBrainNote};
+use keel_core::{
+    AttemptState, Reason, StepRole, StepSpec, ToolProfile, WorkflowStep, mask_secrets,
+};
+use keel_store::{Attempt, BrainNote, Decision, Event, NewBrainNote};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -25,6 +27,11 @@ const MAX_MAP_LINES: usize = 12;
 const MAX_PROPOSALS: usize = 3;
 const MAX_TEXT: usize = 240;
 const MAX_EVIDENCE: usize = 500;
+/// How much of what the builder said and what failed on the way reaches the learner. The request,
+/// the reviews and the change have their own places and never count against it.
+pub const TRAIL_LIMIT: usize = 8 * 1024;
+/// How much of the end of a failed check's output goes in.
+const CHECK_TAIL: usize = 2 * 1024;
 
 pub const MAP_SCHEMA: &str = r#"{"type":"object","properties":{"lines":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"paths":{"type":"array","items":{"type":"string"}}},"required":["text","paths"],"additionalProperties":false}}},"required":["lines"],"additionalProperties":false}"#;
 pub const LEARNINGS_SCHEMA: &str = r#"{"type":"object","properties":{"learnings":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"evidence":{"type":"string"},"paths":{"type":"array","items":{"type":"string"}}},"required":["text","evidence","paths"],"additionalProperties":false}}},"required":["learnings"],"additionalProperties":false}"#;
@@ -62,11 +69,11 @@ pub fn learner_step(id: &str, language: &str, model: &str, reviewers: &[&str]) -
         .collect();
     let prompt = if language.starts_with("es") {
         format!(
-            "Esta ejecución terminó, y no editas nada. Propón como máximo {MAX_PROPOSALS} cosas que alguien que trabaje en este repo debería saber, que no sean obvias leyendo el código y que esta ejecución haya demostrado. Cada una con su evidencia (qué pasó, en qué archivo o con qué comando) y las rutas que cubre, sin comodines. No repitas lo que ya está en lo que Keel sabe del proyecto. Nada de opiniones ni de detalles de este cambio en particular. Si no hay nada que valga la pena, devuelve la lista vacía: es la respuesta normal. Cada una en menos de 200 caracteres, en español.\n\nPedido:\n{{{{request}}}}\n\nRevisiones:\n{reviews}\nCambio:\n{{{{diff}}}}"
+            "Esta ejecución terminó, y no editas nada. Propón como máximo {MAX_PROPOSALS} cosas que alguien que trabaje en este repo debería saber, que no sean obvias leyendo el código y que esta ejecución haya demostrado. Cada una con su evidencia (qué pasó, en qué archivo o con qué comando) y las rutas que cubre, sin comodines. No repitas lo que ya está en lo que Keel sabe del proyecto. Nada de opiniones ni de detalles de este cambio en particular. Busca sobre todo lo que el builder tuvo que esquivar del entorno o del repo (algo que falló, que tardó o que no funcionó como se esperaba) en lo que dijo y en los checks que fallaron: eso no se ve en el código. Si no hay nada que valga la pena, devuelve la lista vacía: es la respuesta normal. Cada una en menos de 200 caracteres, en español.\n\nPedido:\n{{{{request}}}}\n\nRevisiones:\n{reviews}\n{{{{trail}}}}\n\nCambio:\n{{{{diff}}}}"
         )
     } else {
         format!(
-            "This run has ended, and you edit nothing. Propose at most {MAX_PROPOSALS} things someone working on this repo should know, that aren't obvious from reading the code and that this run proved. Each with its evidence (what happened, in which file or with which command) and the paths it covers, with no wildcards. Don't repeat what's already in what Keel knows about the project. No opinions, and no details of this particular change. If nothing is worth it, return an empty list: that's the normal answer. Each under 200 characters.\n\nRequest:\n{{{{request}}}}\n\nReviews:\n{reviews}\nChange:\n{{{{diff}}}}"
+            "This run has ended, and you edit nothing. Propose at most {MAX_PROPOSALS} things someone working on this repo should know, that aren't obvious from reading the code and that this run proved. Each with its evidence (what happened, in which file or with which command) and the paths it covers, with no wildcards. Don't repeat what's already in what Keel knows about the project. No opinions, and no details of this particular change. Look above all for what the builder had to work around in the environment or the repo (something that failed, was slow, or didn't work as expected), in what it said and in the checks that failed: the code doesn't show that. If nothing is worth it, return an empty list: that's the normal answer. Each under 200 characters.\n\nRequest:\n{{{{request}}}}\n\nReviews:\n{reviews}\n{{{{trail}}}}\n\nChange:\n{{{{diff}}}}"
         )
     };
     StepSpec {
@@ -81,6 +88,168 @@ pub fn learner_step(id: &str, language: &str, model: &str, reviewers: &[&str]) -
         when: None,
         role: StepRole::Learner,
     }
+}
+
+/// One thing that happened on the way, for the learner.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrailEntry {
+    /// What the builder said at the end of a round, or a check that failed.
+    pub check: Option<String>,
+    /// How a failed check ended.
+    pub exit_code: Option<i64>,
+    pub round: i64,
+    pub text: String,
+}
+
+/// The tail of `text`, at most `limit` bytes, on a character boundary.
+fn tail_of(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_owned();
+    }
+    let mut start = text.len() - limit;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("…{}", text[start..].trim_start())
+}
+
+/// What the builder said and which checks failed, oldest first. A builder is any agent step that can
+/// edit code, whatever its name. A check that failed counts even if a later one passed. Secrets are
+/// hidden, and a check keeps only the end of its output.
+pub fn trail_entries(attempts: &[Attempt], check_results: &[Event]) -> Vec<TrailEntry> {
+    let mut entries = Vec::new();
+    for attempt in attempts {
+        let skipped = attempt.state == AttemptState::Skipped.as_str();
+        if attempt.kind == "agent" && attempt.tools == ToolProfile::Build.as_str() && !skipped {
+            let said = attempt.result_text.as_deref().unwrap_or_default().trim();
+            if !said.is_empty() {
+                entries.push(TrailEntry {
+                    check: None,
+                    exit_code: None,
+                    round: attempt.round,
+                    text: mask_secrets(said),
+                });
+            }
+        } else if attempt.kind == "check" && attempt.state == AttemptState::Failed.as_str() {
+            let data = check_results
+                .iter()
+                .rev()
+                .find(|e| e.attempt_id == attempt.id)
+                .map(|e| &e.data);
+            let part = |key: &str| {
+                data.and_then(|d| d[key].as_str())
+                    .unwrap_or_default()
+                    .trim_end()
+                    .to_owned()
+            };
+            let output = [part("stdout"), part("stderr")]
+                .into_iter()
+                .filter(|p| !p.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            entries.push(TrailEntry {
+                check: Some(mask_secrets(&crate::specs::one_line(&attempt.prompt))),
+                exit_code: attempt.exit_code,
+                round: attempt.round,
+                text: tail_of(&mask_secrets(&output), CHECK_TAIL),
+            });
+        }
+    }
+    entries
+}
+
+fn entry_text(entry: &TrailEntry, language: &str) -> String {
+    let es = language.starts_with("es");
+    let exit = match (entry.exit_code, es) {
+        (Some(code), true) => format!(" (código de salida {code})"),
+        (Some(code), false) => format!(" (exit code {code})"),
+        (None, _) => String::new(),
+    };
+    let round = entry.round + 1;
+    match (&entry.check, es) {
+        (None, true) => format!("Ronda {round}:\n{}\n", entry.text),
+        (None, false) => format!("Round {round}:\n{}\n", entry.text),
+        (Some(command), true) => format!(
+            "Ronda {round}: falló `{command}`{exit}. Final de su salida:\n{}\n",
+            entry.text
+        ),
+        (Some(command), false) => format!(
+            "Round {round}: `{command}` failed{exit}. End of its output:\n{}\n",
+            entry.text
+        ),
+    }
+}
+
+/// What `{{trail}}` becomes. Over the limit the oldest goes first, and the last entry stays, cut if
+/// it must be. It says so when anything was left out.
+pub fn trail_text(entries: &[TrailEntry], language: &str, limit: usize) -> String {
+    let es = language.starts_with("es");
+    if entries.is_empty() {
+        return if es {
+            "Nada que reportar: ninguna verificación falló y el builder no dejó respuesta.\n"
+                .to_owned()
+        } else {
+            "Nothing to report: no check failed and the builder left no answer.\n".to_owned()
+        };
+    }
+    let mut room = limit;
+    let mut kept: Vec<TrailEntry> = Vec::new();
+    let mut cut = false;
+    for entry in entries.iter().rev() {
+        let size = entry.text.len();
+        if size <= room {
+            room -= size;
+            kept.push(entry.clone());
+        } else {
+            if kept.is_empty() {
+                kept.push(TrailEntry {
+                    text: tail_of(&entry.text, room),
+                    ..entry.clone()
+                });
+            }
+            cut = true;
+            break;
+        }
+    }
+    kept.reverse();
+    let mut text = String::new();
+    let sections = [
+        (
+            false,
+            if es {
+                "Lo que dijo el builder al terminar cada ronda:\n"
+            } else {
+                "What the builder said at the end of each round:\n"
+            },
+        ),
+        (
+            true,
+            if es {
+                "Checks que fallaron en el camino:\n"
+            } else {
+                "Checks that failed along the way:\n"
+            },
+        ),
+    ];
+    for (is_check, title) in sections {
+        let mut part = String::new();
+        for entry in kept.iter().filter(|e| e.check.is_some() == is_check) {
+            part.push_str(&entry_text(entry, language));
+        }
+        if !part.is_empty() {
+            text.push_str(title);
+            text.push_str(&part);
+            text.push('\n');
+        }
+    }
+    if cut {
+        text.push_str(if es {
+            "(Se cortó: lo más antiguo no cabía y se dejó fuera.)\n"
+        } else {
+            "(Cut: the oldest didn't fit and was left out.)\n"
+        });
+    }
+    text
 }
 
 /// What the agents get, and exactly what went in and what didn't fit.
@@ -781,6 +950,165 @@ mod tests {
         ] {
             assert_eq!(real(bad), None, "{bad}");
         }
+    }
+
+    fn said(round: i64, text: &str) -> TrailEntry {
+        TrailEntry {
+            check: None,
+            exit_code: None,
+            round,
+            text: text.into(),
+        }
+    }
+
+    fn failed(round: i64, command: &str, output: &str) -> TrailEntry {
+        TrailEntry {
+            check: Some(command.into()),
+            exit_code: Some(2),
+            round,
+            text: output.into(),
+        }
+    }
+
+    #[test]
+    fn the_learner_gets_each_round_of_the_builder_and_each_failed_check() {
+        let entries = [
+            said(0, "I copied the repo to $TMPDIR to run it."),
+            failed(0, "pnpm check:i18n", "no such file"),
+            said(1, "Second round done."),
+        ];
+        let text = trail_text(&entries, "en", TRAIL_LIMIT);
+        assert!(text.contains("What the builder said at the end of each round:"));
+        assert!(text.contains("Round 1:\nI copied the repo to $TMPDIR to run it."));
+        assert!(text.contains("Round 2:\nSecond round done."));
+        assert!(text.contains("Checks that failed along the way:"));
+        assert!(text.contains(
+            "Round 1: `pnpm check:i18n` failed (exit code 2). End of its output:\nno such file"
+        ));
+        assert!(!text.contains("Cut"));
+    }
+
+    #[test]
+    fn the_titles_follow_the_language_of_the_run() {
+        let text = trail_text(&[said(0, "x"), failed(0, "make", "y")], "es", TRAIL_LIMIT);
+        assert!(text.contains("Lo que dijo el builder al terminar cada ronda:"));
+        assert!(text.contains("Checks que fallaron en el camino:"));
+        assert!(text.contains("Ronda 1: falló `make` (código de salida 2)"));
+        assert!(trail_text(&[], "es", TRAIL_LIMIT).contains("Nada que reportar"));
+        assert!(trail_text(&[], "en", TRAIL_LIMIT).contains("Nothing to report"));
+    }
+
+    #[test]
+    fn over_the_limit_the_oldest_goes_first_and_it_says_so() {
+        let entries = [
+            said(0, &"a".repeat(60)),
+            said(1, &"b".repeat(60)),
+            said(2, &"c".repeat(60)),
+        ];
+        let text = trail_text(&entries, "en", 130);
+        assert!(!text.contains('a'.to_string().repeat(60).as_str()));
+        assert!(text.contains(&"b".repeat(60)) && text.contains(&"c".repeat(60)));
+        assert!(text.contains("Cut"));
+    }
+
+    #[test]
+    fn a_last_entry_bigger_than_the_limit_is_kept_cut_from_its_start() {
+        let text = trail_text(
+            &[said(0, "old"), said(1, &format!("{}END", "z".repeat(500)))],
+            "en",
+            50,
+        );
+        assert!(text.contains("Round 2:\n…"), "{text}");
+        assert!(text.contains("zEND"));
+        assert!(!text.contains("Round 1"));
+        assert!(text.contains("Cut"));
+        assert!(text.len() < 300);
+    }
+
+    #[test]
+    fn what_the_builder_and_the_checks_said_is_gathered_without_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = keel_store::Store::open(&dir.path().join("keel.db")).unwrap();
+        let rows = [
+            ("builder", "agent", "build", 0, AttemptState::Succeeded),
+            ("check", "check", "check", 0, AttemptState::Failed),
+            ("check", "check", "check", 0, AttemptState::Succeeded),
+            ("review", "agent", "readOnly", 0, AttemptState::Succeeded),
+            ("fixer", "agent", "build", 1, AttemptState::Succeeded),
+        ];
+        for (index, (step, kind, tools, round, state)) in rows.iter().enumerate() {
+            let id = format!("a{index}");
+            store
+                .add_attempt(&keel_store::NewAttempt {
+                    id: id.clone(),
+                    run_id: "r".into(),
+                    step_id: (*step).into(),
+                    kind: (*kind).into(),
+                    role: "worker".into(),
+                    round: *round,
+                    number: index as i64 + 1,
+                    state: *state,
+                    model_requested: "fake".into(),
+                    effort: None,
+                    tools: (*tools).into(),
+                    max_turns: None,
+                    max_budget_usd: None,
+                    language: "en".into(),
+                    prompt: "make test".into(),
+                    system_prompt_sources: "[]".into(),
+                    settings: "{}".into(),
+                    session_id: id.clone(),
+                    resumed_from: None,
+                    workspace: String::new(),
+                    raw_path: String::new(),
+                    started_at: keel_store::now(),
+                })
+                .unwrap();
+            store
+                .patch_attempt(
+                    &id,
+                    &[(
+                        "result_text",
+                        keel_store::rusqlite_value::Value::Text(format!(
+                            "said {step} API_KEY=sk-abcdefghijklmnopqrstuvwxyz0123"
+                        )),
+                    )],
+                )
+                .unwrap();
+        }
+        store
+            .append_event(
+                "a1",
+                "checkResult",
+                &json!({ "stdout": "boom", "stderr": "bad thing" }),
+            )
+            .unwrap();
+        let attempts = store.attempts_of_run("r").unwrap();
+        let results = store.run_events("r", "checkResult").unwrap();
+        let entries = trail_entries(&attempts, &results);
+
+        assert_eq!(entries.len(), 3, "{entries:?}");
+        assert!(entries[0].text.starts_with("said builder"));
+        assert_eq!(entries[1].check.as_deref(), Some("make test"));
+        assert_eq!(entries[1].text, "boom\nbad thing");
+        assert!(entries[2].text.starts_with("said fixer") && entries[2].round == 1);
+        assert!(entries.iter().all(|e| !e.text.contains("sk-abcdef")));
+    }
+
+    #[test]
+    fn the_learner_prompt_asks_for_the_trail_and_what_was_worked_around() {
+        for language in ["en", "es"] {
+            let learner = learner_step("learnings", language, "sonnet", &[]);
+            assert!(learner.prompt.contains("{{trail}}"));
+            assert!(learner.prompt.contains("{{request}}") && learner.prompt.contains("{{diff}}"));
+        }
+        let es = learner_step("l", "es", "sonnet", &[]).prompt;
+        assert!(es.contains("tuvo que esquivar"));
+        assert!(
+            learner_step("l", "en", "sonnet", &[])
+                .prompt
+                .contains("work around")
+        );
     }
 
     #[test]

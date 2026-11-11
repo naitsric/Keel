@@ -347,8 +347,8 @@ pub struct DraftAgent {
     pub id: String,
     /// `fable`, `opus`, `sonnet`, `haiku` or a full model id.
     pub model: String,
-    /// What it's told to do. It can use {{request}}, {{diff}}, {{rework}}, {{answers}}, {{check}} and
-    /// {{steps.<id>.output}}.
+    /// What it's told to do. It can use {{request}}, {{diff}}, {{rework}}, {{answers}}, {{check}}, {{trail}} and
+    /// {{steps.<id>.output}}. {{trail}} is what the builder said each round and the checks that failed.
     pub prompt: String,
     /// What it may do. Read-only unless you say otherwise.
     #[serde(default)]

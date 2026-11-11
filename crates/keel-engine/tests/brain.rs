@@ -625,3 +625,26 @@ fn a_read_only_map_does_not_run_the_projects_setup() {
     assert_eq!(w.store.attempts_of_run(&run).unwrap().len(), 1);
     assert_eq!(w.engine.brain(&w.project_id).unwrap().map.len(), 2);
 }
+
+#[test]
+fn the_learner_prompt_carries_what_the_builder_said() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let mut build = agent("builder", StepRole::Worker, "BUILD");
+    if let WorkflowStep::Agent(spec) = &mut build {
+        spec.tools = ToolProfile::Build;
+    }
+    let run = w.run(vec![
+        build,
+        agent("learnings", StepRole::Learner, "LEARN\n{{trail}}"),
+    ]);
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    let learner = attempts.iter().find(|a| a.step_id == "learnings").unwrap();
+    assert!(
+        learner
+            .prompt
+            .contains("What the builder said at the end of each round:\nRound 1:\nDone."),
+        "{}",
+        learner.prompt
+    );
+}
