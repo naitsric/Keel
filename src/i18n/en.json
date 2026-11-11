@@ -136,6 +136,7 @@
     "stalledModel": "No progress for {{minutes}} min, and no command is running. It may be waiting on the model.",
     "waitingForProject": "Waiting for its turn. Each run works in its own copy, but a project runs one step with commands at a time.",
     "waitingForProjectStep": "Waiting for the “{{step}}” step of “{{title}}” to finish. Each run works in its own copy, but a project runs one step with commands at a time.",
+    "waitingForProjectStepUntitled": "Waiting for the “{{step}}” step of another run to finish. Each run works in its own copy, but a project runs one step with commands at a time.",
     "waitingForCapacity": "Waiting for a free agent slot.",
     "resultError": "The agent ended with an error ({{subtype}}): {{detail}}",
     "exitedWithoutResult": "Claude Code exited with code {{exitCode}} without reporting a result.",

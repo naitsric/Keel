@@ -136,6 +136,7 @@
     "stalledModel": "Sin avances desde hace {{minutes}} min y sin comandos corriendo. Puede estar esperando al modelo.",
     "waitingForProject": "Espera su turno. Cada corrida trabaja en su propia copia, pero un proyecto corre un solo paso con comandos a la vez.",
     "waitingForProjectStep": "Espera a que termine el paso «{{step}}» de «{{title}}». Cada corrida trabaja en su propia copia, pero un proyecto corre un solo paso con comandos a la vez.",
+    "waitingForProjectStepUntitled": "Espera a que termine el paso «{{step}}» de otra corrida. Cada corrida trabaja en su propia copia, pero un proyecto corre un solo paso con comandos a la vez.",
     "waitingForCapacity": "Espera a que se libere un agente.",
     "resultError": "El agente terminó con un error ({{subtype}}): {{detail}}",
     "exitedWithoutResult": "Claude Code salió con el código {{exitCode}} sin reportar un resultado.",

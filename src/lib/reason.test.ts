@@ -36,6 +36,14 @@ describe("a step waiting for its project's turn", () => {
   it("still says why when it doesn't know who has the turn", () => {
     expect(reasonText(t("es"), { code: "waitingForProject" })).toBe("Espera su turno. Cada corrida trabaja en su propia copia, pero un proyecto corre un solo paso con comandos a la vez.");
     expect(reasonText(t("en"), { code: "waitingForProject" })).toBe("Waiting for its turn. Each run works in its own copy, but a project runs one step with commands at a time.");
+    // What Rust reads back from a reason saved before it said who has the turn.
+    expect(reasonText(t("en"), { code: "waitingForProject", step: "", runId: "", title: "" })).toBe("Waiting for its turn. Each run works in its own copy, but a project runs one step with commands at a time.");
+  });
+
+  it("still names the step when it can't name the run", () => {
+    const reason = { code: "waitingForProject", step: "builder", runId: "r44", title: "" };
+    expect(reasonText(t("es"), reason)).toBe("Espera a que termine el paso «builder» de otra corrida. Cada corrida trabaja en su propia copia, pero un proyecto corre un solo paso con comandos a la vez.");
+    expect(reasonText(t("en"), reason)).toBe("Waiting for the “builder” step of another run to finish. Each run works in its own copy, but a project runs one step with commands at a time.");
   });
 });
 

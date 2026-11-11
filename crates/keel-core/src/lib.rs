@@ -338,10 +338,14 @@ pub enum Reason {
         cpu_percent: f32,
     },
     /// A project runs one step with commands at a time, and another one has the turn: `step`, in
-    /// the run `run_id`, whose title is `title`. Each run still works in its own copy.
+    /// the run `run_id`, whose title is `title`. Each run still works in its own copy. A reason
+    /// saved before Keel said who has the turn has none of them, and reads back with them empty.
     WaitingForProject {
+        #[serde(default)]
         step: String,
+        #[serde(default)]
         run_id: String,
+        #[serde(default)]
         title: String,
     },
     WaitingForCapacity,
@@ -1107,6 +1111,20 @@ mod tests {
                 "runId": "r44",
                 "title": "Fix the calendar",
             })
+        );
+    }
+
+    /// A reason saved before Keel said who has the turn still reads, so its card says why it waits.
+    #[test]
+    fn waiting_for_the_project_saved_without_who_has_the_turn_still_reads() {
+        let saved: Reason = serde_json::from_str(r#"{"code":"waitingForProject"}"#).unwrap();
+        assert_eq!(
+            saved,
+            Reason::WaitingForProject {
+                step: String::new(),
+                run_id: String::new(),
+                title: String::new(),
+            }
         );
     }
 
