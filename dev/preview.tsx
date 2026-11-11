@@ -12,7 +12,7 @@ import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
 import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
-import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, JointChange, JointCheck, PartOf, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunJoint, RunRow, SpecOutput, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
+import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, CiState, Issue, JointChange, JointCheck, PartOf, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunJoint, RunRow, SpecOutput, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
 import { useApp, type View } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -121,7 +121,8 @@ const waiting = params.get("flow") === "approval" || params.get("flow") === "lim
 // (text that would push the buttons away, what was asked included), gate=build (asks before building,
 // where what was asked is already what the card shows), gate=end (never delivers). asked=none has no
 // step that says what was asked. With flow=delivered, pr=draft|open|merged|closed is what became of the
-// pull request, and pr=unknown is one Keel hasn't looked at yet. specifier=1 has what was asked come
+// pull request, and pr=unknown is one Keel hasn't looked at yet. ci=failed|pending|passed|noCi is what
+// its CI says, and view=board has a card whose CI failed. specifier=1 has what was asked come
 // from a specifier's structured answer, with what it decided alone and a "Change" on each line, and
 // with gate=build there's nothing yet to say about what it did. flow=questions is the card that asks,
 // in the language of lang=, with long=1 for text at its limits, many=1 for three questions, none=1 for
@@ -413,6 +414,7 @@ const mapNotes = [
 const proposals: BrainNote[] = [{ ...note(7, "Migrations must be added in order: the app refuses to start if one is missing.", ["db/migrations"]), kind: "learning", state: "proposed", evidence: "The check failed with 'migration 12 missing' until the builder renamed the file." }];
 const prShown = params.get("pr") ?? "draft";
 const prState: PrState | null = delivered && prShown !== "unknown" ? (prShown as PrState) : null;
+const prCi = prState ? ((params.get("ci") as CiState | null) ?? null) : null;
 const run: Run = {
   id: "r1",
   startedBy: params.get("mcp") === "on" || params.get("task") === "1" ? "Claude Code" : null,
@@ -431,6 +433,8 @@ const run: Run = {
   prState,
   prStateAt: prState ? at(30) : null,
   prCheckedAt: prState ? at(2) : null,
+  prCi,
+  prCiFailed: prCi === "failed" ? ["lint", "pyright"] : [],
   round: flowScene?.round ?? (params.get("round") === "2" ? 1 : 0),
   createdAt: at(4),
   finishedAt: delivered ? at(0) : null,
@@ -611,7 +615,7 @@ const setupAccounts = (account: string | null | undefined) => {
 
 const PR = "https://github.com/acme/app/pull/12";
 const issueOf = (number: number, title: string) => ({ number, title, author: "someone", url: `https://github.com/acme/app/issues/${number}` });
-const boardCard = (id: string, title: string, column: BoardColumn, extra: Partial<BoardCard> = {}): BoardCard => ({ id, projectId: "p1", title, body: "", issue: null, column, position: 0, runId: null, runState: null, reason: null, prUrl: null, prState: null, prStateAt: null, rejection: null, startBlocked: null, createdAt: at(100), jointChangeId: null, alsoTouches: [], part: null, ...extra });
+const boardCard = (id: string, title: string, column: BoardColumn, extra: Partial<BoardCard> = {}): BoardCard => ({ id, projectId: "p1", title, body: "", issue: null, column, position: 0, runId: null, runState: null, reason: null, prUrl: null, prState: null, prStateAt: null, prCi: null, prCiFailed: [], rejection: null, startBlocked: null, createdAt: at(100), jointChangeId: null, alsoTouches: [], part: null, ...extra });
 const inRun = (runState: AttemptState, reason: Reason | null = null) => ({ runId: "r1", runState, reason });
 let boardCards: BoardCard[] =
   params.get("cards") === "none"
@@ -641,6 +645,7 @@ let boardCards: BoardCard[] =
         boardCard("c23", "Add a filter to the orders list", "done", { ...inRun("succeeded"), prUrl: PR, prState: "closed", prStateAt: at(2000) }),
         boardCard("c24", "Show the plan name in the header", "done", { ...inRun("succeeded"), prUrl: PR, prState: "open", prStateAt: at(90) }),
         boardCard("c25", "Trim the weekly email", "done", { ...inRun("succeeded"), prUrl: PR, prState: "draft", prStateAt: at(20) }),
+        boardCard("c28", "Type the settings form", "done", { ...inRun("succeeded"), prUrl: PR, prState: "draft", prStateAt: at(15), prCi: "failed", prCiFailed: ["lint", "pyright"] }),
         boardCard("c26", "A pull request Keel hasn't looked at yet", "done", { ...inRun("succeeded"), prUrl: PR }),
         boardCard("c21", "Write the map of the project", "done", inRun("succeeded")),
         boardCard("c22", "Rotate the payments key", "done", { ...inRun("succeeded"), projectId: "p2", prUrl: PR }),

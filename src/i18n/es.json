@@ -281,6 +281,11 @@
       "mergedAt": "Pull request mergeado el {{when}}",
       "closedAt": "Pull request cerrado sin mergear el {{when}}"
     },
+    "ci": {
+      "failed": "CI en rojo: {{checks}}",
+      "pending": "CI corriendo",
+      "passed": "CI en verde"
+    },
     "fromIssue": "Del issue #{{number}}",
     "base": "Basado en {{base}}",
     "decideApproval": "Aprueba o rechaza arriba.",
@@ -899,6 +904,7 @@
       "merged": "Mergeado",
       "closed": "Cerrado sin mergear"
     },
+    "ciFailed": "CI en rojo: {{checks}}",
     "needed": {
       "waitingApproval": "Ábrela para aprobar o rechazar.",
       "waitingAnswers": "Ábrela para responder.",

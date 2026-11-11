@@ -153,6 +153,8 @@ export function cardLabel(t: TFunction, card: BoardCard): CardLabel | null {
       return { state, label: t(`board.labels.${state}`, { defaultValue: t(`states.${state}`) }), detail: reason ?? t(`board.needed.${state}`, { defaultValue: "" }) };
     case "done":
       if (!card.prState) return null;
+      // Only while it can still be merged: a red CI is what's in the way.
+      if (card.prCi === "failed" && (card.prState === "open" || card.prState === "draft")) return { state: "failed", label: t(`board.pr.${card.prState}`), detail: t("board.ciFailed", { checks: card.prCiFailed.join(", ") }) };
       return { state: PR_BADGES[card.prState], label: t(`board.pr.${card.prState}`), detail: card.prStateAt && (card.prState === "merged" || card.prState === "closed") ? formatDateTime(card.prStateAt) : null };
     default:
       return null;

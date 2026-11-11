@@ -15,8 +15,8 @@ use keel_engine::{
 };
 use keel_harness::Tools;
 use keel_mcp::{MAX_DRAFTS, MAX_OPEN_RUNS, MCP_PATH, McpServer, StartError};
-use keel_store::Store;
 use keel_store::rusqlite_value::Value;
+use keel_store::{ProjectSettings, Store};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::RunningService;
@@ -448,6 +448,72 @@ async fn get_run_says_which_workflow_it_used_and_what_became_of_its_pull_request
     assert_eq!(view["prState"], "merged");
     assert_eq!(view["prStateAt"], "2026-11-06T10:00:00Z");
     assert_eq!(view["prCheckedAt"], "2026-11-06T10:05:00Z");
+    client.cancel().await.unwrap();
+}
+
+/// A `gh` whose pull request has a check that failed and one that passed.
+const GH_WITH_RED_CI: &str = r#"#!/bin/bash
+case "$1 $2" in
+"auth token") echo "tok"; exit 0;;
+"pr view") echo '{"state":"OPEN","isDraft":true,"updatedAt":"2026-11-06T09:00:00Z","statusCheckRollup":[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}]}'; exit 0;;
+esac
+exit 1
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_run_and_wait_for_run_say_what_the_pull_requests_ci_says() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    let bin = w._dir.path().join("bin");
+    keel_harness::testing::write_script(&bin.join("gh"), GH_WITH_RED_CI).unwrap();
+    w.engine.set_tools(Tools::from_dirs(&[
+        bin,
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ]));
+    w.engine
+        .update_project(
+            &w.project_id,
+            &ProjectSettings {
+                github_account: Some("alice".into()),
+                ..ProjectSettings::default()
+            },
+        )
+        .unwrap();
+    let client = w.client(&w.token(false)).await;
+    let run = w.person_run("Fix the bug");
+    let waited = settled(&client, &run).await;
+    assert_eq!(waited["prCi"], Json::Null, "no pull request yet");
+    assert_eq!(waited["report"]["prCi"], Json::Null);
+
+    w.store
+        .patch_run(
+            &run,
+            &[
+                (
+                    "pr_url",
+                    Value::Text("https://github.com/acme/app/pull/12".into()),
+                ),
+                ("pr_state", Value::Text("draft".into())),
+            ],
+        )
+        .unwrap();
+    // Asking is what makes Keel look, as a person opening the run does.
+    ok(&call(&client, "get_run", json!({ "run": run })).await);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while w.store.run(&run).unwrap().pr_ci.is_none() {
+        assert!(std::time::Instant::now() < deadline, "Keel never looked");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let got = ok(&call(&client, "get_run", json!({ "run": run })).await);
+    let waited = ok(&call(&client, "wait_for_run", json!({ "run": run, "seconds": 1 })).await);
+    for view in [got, waited] {
+        assert_eq!(view["prCi"], "failed", "{view}");
+        assert_eq!(view["prCiFailed"], json!(["lint"]));
+        assert_eq!(view["report"]["prCi"], "failed");
+        assert_eq!(view["report"]["prCiFailed"], json!(["lint"]));
+    }
     client.cancel().await.unwrap();
 }
 
@@ -1510,6 +1576,8 @@ async fn a_run_reports_what_it_did_and_brings_what_the_person_has_to_decide() {
             "skipped": [],
             "prUrl": null,
             "prState": null,
+            "prCi": null,
+            "prCiFailed": [],
         })
     );
     client.cancel().await.unwrap();

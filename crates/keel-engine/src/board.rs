@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
-use keel_core::{AttemptState, BoardColumn, CardLane, PrState, Reason};
+use keel_core::{AttemptState, BoardColumn, CardLane, CiState, PrState, Reason};
 use keel_harness::github::Issue;
 use keel_store::{Card, NewCard, Project, Store};
 
@@ -93,6 +93,9 @@ pub struct BoardCard {
     /// depend on it: a card is done when its run is, whatever happens on GitHub later.
     pub pr_state: Option<PrState>,
     pub pr_state_at: Option<String>,
+    /// What its CI said then, and the checks that failed.
+    pub pr_ci: Option<CiState>,
+    pub pr_ci_failed: Vec<String>,
     #[serde(serialize_with = "keel_core::serialize_masked")]
     pub rejection: Option<String>,
     #[serde(serialize_with = "keel_core::serialize_masked")]
@@ -130,6 +133,8 @@ impl From<Card> for BoardCard {
             pr_url: card.pr_url,
             pr_state: card.pr_state,
             pr_state_at: card.pr_state_at,
+            pr_ci: card.pr_ci,
+            pr_ci_failed: card.pr_ci_failed,
             rejection: card.rejection,
             created_at: card.created_at,
             joint_change_id: card.joint_change_id,

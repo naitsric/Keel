@@ -1,6 +1,6 @@
-//! Finds out what became of the pull requests Keel opened. It only reads: after opening one, Keel
-//! writes nothing to it. It runs outside any sandbox with the person's token, like delivering does,
-//! and no agent gets anywhere near it.
+//! Finds out what became of the pull requests Keel opened, and what their CI says. It only reads:
+//! after opening one, Keel writes nothing to it. It runs outside any sandbox with the person's token,
+//! like delivering does, and no agent gets anywhere near it.
 //!
 //! Nothing here is worth stopping for. If GitHub can't be asked, what Keel last knew stays, nobody
 //! is told, and it asks again when its turn comes round.
@@ -126,18 +126,34 @@ impl Inner {
         else {
             return;
         };
-        // An answer that doesn't say which commit leaves what Keel knew of it.
+        // An answer that doesn't say which commit, or what the CI says, leaves what Keel knew of it.
         let head = status.head.or_else(|| run.pr_head.clone());
-        if run.pr_state == Some(status.state) && run.pr_state_at == status.at && run.pr_head == head
+        let (ci, failed) = match status.ci {
+            Some(checks) => (Some(checks.state), checks.failed),
+            None => (run.pr_ci, run.pr_ci_failed.clone()),
+        };
+        if run.pr_state == Some(status.state)
+            && run.pr_state_at == status.at
+            && run.pr_head == head
+            && run.pr_ci == ci
+            && run.pr_ci_failed == failed
         {
             return;
         }
+        let failed = (!failed.is_empty())
+            .then(|| serde_json::to_string(&failed).ok())
+            .flatten();
         let saved = self.store.patch_run(
             &run.id,
             &[
                 ("pr_state", Value::Text(status.state.as_str().to_owned())),
                 ("pr_state_at", status.at.map_or(Value::Null, Value::Text)),
                 ("pr_head", head.map_or(Value::Null, Value::Text)),
+                (
+                    "pr_ci",
+                    ci.map_or(Value::Null, |ci| Value::Text(ci.as_str().to_owned())),
+                ),
+                ("pr_ci_failed", failed.map_or(Value::Null, Value::Text)),
             ],
         );
         if saved.is_ok() {

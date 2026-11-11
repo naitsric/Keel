@@ -157,6 +157,33 @@ describe("the run page's flow", () => {
       expect(page()).toContain("Pull request still a draft");
       expect(page()).toContain("Review and merge the draft on GitHub");
     });
+
+    it("says when its CI fails, and which checks", async () => {
+      delivered({ prState: "draft", prStateAt: "2026-11-06T10:00:00Z", prCi: "failed", prCiFailed: ["lint", "pyright"] });
+      await open();
+      expect(page()).toContain("CI failed: lint, pyright");
+      delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z", prCi: "pending", prCiFailed: [] });
+      await update();
+      expect(page()).toContain("CI running");
+      expect(page()).not.toContain("CI failed");
+      delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z", prCi: "passed", prCiFailed: [] });
+      await update();
+      expect(page()).toContain("CI passed");
+    });
+
+    it("says nothing about CI it doesn't know, a repo without it, or a pull request that's over", async () => {
+      // A run from before Keel followed the CI has nothing about it.
+      delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z" });
+      await open();
+      expect(page()).toContain("Pull request open");
+      expect(page()).not.toMatch(/CI (failed|running|passed)/);
+      for (const fields of [{ prCi: null }, { prCi: "noCi" }, { prState: "merged", prCi: "failed", prCiFailed: ["lint"] }] as Partial<Run>[]) {
+        delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z", prCiFailed: [], ...fields });
+        await update();
+        expect(page()).toContain(fields.prState === "merged" ? "Pull request merged" : "Pull request open");
+        expect(page()).not.toMatch(/CI (failed|running|passed)/);
+      }
+    });
   });
 
   describe("a workflow that fits the change", () => {

@@ -46,7 +46,10 @@ const GET_RUN: &str = "Get a run: its overall state (working, waitingForPerson o
                        started it (startedByYou), and `report`, what it did in short: the last worker's \
                        `answer`, filesChanged (up to 100, and moreFilesChanged says how many more), whether \
                        the `check` passed and what it printed if not, what no test proves (`notProven`), the \
-                       `reviews`, steps `skipped` for being a small change, and its pull request. `waitingFor` \
+                       `reviews`, steps `skipped` for being a small change, and its pull request with what \
+                       its CI says: `prCi` is pending, passed, failed or noCi, and `prCiFailed` names the \
+                       checks that failed. Asking makes Keel look at GitHub again, at most once a \
+                       minute, and the answer shows on your next call. `waitingFor` \
                        says what it waits for: the `questions` the person has to answer, or whether an \
                        approval canSendBack, and `youCan`, the tools this client may use on it now. Answering \
                        and approving are the person's, in Keel. `steps` lists each attempt with its state, \

@@ -61,6 +61,16 @@ function PrStatus({ state, at }: { state: PrState; at: string | null }) {
   return <span className={PR_TONES[state]}>{dated ? t(`run.pr.${state}At`, { when: formatDateTime(at) }) : t(`run.pr.${state}`)}</span>;
 }
 
+/** What the pull request's CI says, beside it, while it can still be merged. */
+function CiStatus({ run }: { run: Run }) {
+  const { t } = useTranslation();
+  if (run.prState !== "open" && run.prState !== "draft") return null;
+  if (run.prCi === "failed") return <span className="font-medium text-danger">{t("run.ci.failed", { checks: run.prCiFailed.join(", ") })}</span>;
+  if (run.prCi === "pending") return <span>{t("run.ci.pending")}</span>;
+  if (run.prCi === "passed") return <span className="text-success">{t("run.ci.passed")}</span>;
+  return null;
+}
+
 function SummaryBlock({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
   return (
     <div>
@@ -1682,6 +1692,7 @@ export function RunDetail({ runId }: { runId: string }) {
             <h1 className="selectable text-[17px] leading-snug font-semibold">{run?.title}</h1>
             <p className="mt-0.5 flex flex-wrap gap-x-3 text-[12px] text-subtle">
               {run?.prUrl && run.prState && <PrStatus state={run.prState} at={run.prStateAt} />}
+              {run?.prUrl && <CiStatus run={run} />}
               {isReadOnlyTask(run) && <span className="rounded border border-border px-1 text-[11px] text-muted">{t("run.readOnly")}</span>}
               {joint && (
                 <button type="button" className="inline-flex items-center gap-1 text-accent hover:underline" onClick={() => setJointOpen(true)}>

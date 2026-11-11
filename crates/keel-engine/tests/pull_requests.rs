@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use keel_core::{
-    AttemptState, BoardColumn, CardLane, PrState, StepRole, StepSpec, ToolProfile, WorkflowStep,
+    AttemptState, BoardColumn, CardLane, CiState, PrState, StepRole, StepSpec, ToolProfile,
+    WorkflowStep,
 };
 use keel_engine::{Config, Engine, StartRun, Workflow};
 use keel_harness::Tools;
@@ -1005,6 +1006,77 @@ fn a_card_shows_what_became_of_its_pull_request_and_stays_done_either_way() {
     let as_sent = serde_json::to_value(card()).unwrap();
     assert_eq!(as_sent["prState"], "merged");
     assert_eq!(as_sent["prStateAt"], "2026-11-06T10:00:00Z");
+}
+
+/// An open pull request whose CI says this, as `gh pr view --json …,statusCheckRollup` does.
+fn pr_view_with_checks(checks: &str) -> String {
+    format!(
+        r#"{{"state":"OPEN","isDraft":false,"mergedAt":null,"closedAt":null,"updatedAt":"2026-11-06T09:00:00Z","statusCheckRollup":[{checks}]}}"#
+    )
+}
+
+const LINT_FAILED: &str = r#"{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}"#;
+
+#[test]
+fn a_pull_request_whose_ci_fails_says_so_on_its_run_and_its_card() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let workflow = w.saved(delivering_steps());
+    let run = w
+        .engine
+        .start_run_on_board(StartRun {
+            project_id: w.project_id.clone(),
+            title: None,
+            request: "Fix the bug".into(),
+            workflow: workflow.steps.clone(),
+            saved_workflow: Some(workflow.reference()),
+            language: "en".into(),
+            source_issue: None,
+            started_by: None,
+        })
+        .unwrap();
+    let human = w.wait_step(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&human.id, true, "").unwrap();
+    w.until("the run finishing", || {
+        w.store.run(&run).unwrap().finished_at.is_some()
+    });
+    assert_eq!(w.store.run(&run).unwrap().pr_ci, None, "nobody has looked");
+    let ci = || {
+        let found = w.store.run(&run).unwrap();
+        (found.pr_ci, found.pr_ci_failed)
+    };
+
+    std::fs::write(w.flags.join("pr-view"), pr_view_with_checks(LINT_FAILED)).unwrap();
+    w.forget_looking(&run);
+    let told = w.changes.lock().unwrap().len();
+    w.engine.look_at_pr(&run);
+    w.until("the CI reading failed", || ci().0 == Some(CiState::Failed));
+    assert_eq!(ci().1, ["lint"]);
+    w.until("the app hearing of it", || {
+        w.changes.lock().unwrap()[told..].contains(&run)
+    });
+    let card = w.engine.board(&w.project_id).unwrap().cards.remove(0);
+    assert_eq!(card.pr_ci, Some(CiState::Failed));
+    let as_sent = serde_json::to_value(card).unwrap();
+    assert_eq!(as_sent["prCi"], "failed");
+    assert_eq!(as_sent["prCiFailed"], serde_json::json!(["lint"]));
+
+    // Fixed and pushed: the next look says so.
+    let passed = LINT_FAILED.replace("FAILURE", "SUCCESS");
+    std::fs::write(w.flags.join("pr-view"), pr_view_with_checks(&passed)).unwrap();
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.until("the CI reading passed", || ci().0 == Some(CiState::Passed));
+    assert!(ci().1.is_empty());
+
+    // A gh that doesn't say leaves what Keel knew.
+    w.set_pr_view("OPEN", false, "2026-11-06T09:30:00Z");
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.until("the new time arriving", || {
+        w.store.run(&run).unwrap().pr_state_at.as_deref() == Some("2026-11-06T09:30:00Z")
+    });
+    assert_eq!(ci().0, Some(CiState::Passed));
 }
 
 #[test]

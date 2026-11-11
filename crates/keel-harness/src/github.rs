@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use keel_core::PrState;
+use keel_core::{CiState, PrState};
 use serde::{Deserialize, Serialize};
 
 use crate::command::clean_env;
@@ -77,6 +77,18 @@ pub struct PrStatus {
     pub at: Option<String>,
     /// The commit its branch is at. Someone can push to it after Keel opened it.
     pub head: Option<String>,
+    /// What its CI says about that commit. None when the answer didn't say.
+    pub ci: Option<PrChecks>,
+}
+
+/// A repo decides how many checks fail at once, and a person reads their names.
+pub const MOST_FAILED_NAMED: usize = 10;
+
+/// What a pull request's CI says, and the checks that failed, by name, when some did.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrChecks {
+    pub state: CiState,
+    pub failed: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -385,7 +397,8 @@ impl Gh {
         })
     }
 
-    /// What became of a pull request. Only reads: after opening one, Keel writes nothing to it.
+    /// What became of a pull request, and what its CI says, in one question. Only reads: after
+    /// opening one, Keel writes nothing to it.
     pub fn pr_status(&self, token: &Token, repo: &str, number: i64) -> Result<PrStatus, GhError> {
         self.pr_status_within(token, repo, number, LOOK_LIMIT)
     }
@@ -407,7 +420,7 @@ impl Gh {
                 "--repo",
                 repo,
                 "--json",
-                "state,isDraft,mergedAt,closedAt,updatedAt,headRefOid",
+                "state,isDraft,mergedAt,closedAt,updatedAt,headRefOid,statusCheckRollup",
             ],
             limit,
         )?;
@@ -501,7 +514,61 @@ fn parse_pr_status(value: &serde_json::Value) -> Option<PrStatus> {
         .and_then(|v| v.as_str())
         .filter(|head| !head.is_empty())
         .map(str::to_owned);
-    Some(PrStatus { state, at, head })
+    Some(PrStatus {
+        state,
+        at,
+        head,
+        ci: value.get("statusCheckRollup").and_then(parse_checks),
+    })
+}
+
+/// Each check is a check run, with a status and, once it's done, a conclusion, or a commit status,
+/// with a state. They count the way `gh pr checks` counts them: cancelled is a failure, skipped and
+/// neutral are not, and anything unfinished is pending.
+fn parse_checks(rollup: &serde_json::Value) -> Option<PrChecks> {
+    let checks = rollup.as_array()?;
+    let text = |check: &serde_json::Value, key: &str| {
+        check
+            .get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let mut failed: Vec<String> = Vec::new();
+    let mut pending = false;
+    for check in checks {
+        let status = text(check, "status");
+        let outcome = if !status.is_empty() && status != "COMPLETED" {
+            status
+        } else if check.get("conclusion").is_some() {
+            text(check, "conclusion")
+        } else {
+            text(check, "state")
+        };
+        match outcome.as_str() {
+            "SUCCESS" | "NEUTRAL" | "SKIPPED" => {}
+            "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
+            | "STARTUP_FAILURE" => {
+                let name = Some(text(check, "name"))
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or_else(|| text(check, "context"));
+                if failed.len() < MOST_FAILED_NAMED && !failed.contains(&name) {
+                    failed.push(name);
+                }
+            }
+            _ => pending = true,
+        }
+    }
+    let state = if !failed.is_empty() {
+        CiState::Failed
+    } else if pending {
+        CiState::Pending
+    } else if checks.is_empty() {
+        CiState::NoCi
+    } else {
+        CiState::Passed
+    };
+    Some(PrChecks { state, failed })
 }
 
 /// The arguments that make `git` authenticate through `gh`, with nothing written to any config.
@@ -663,6 +730,7 @@ mod tests {
                 state,
                 at: Some(at.to_owned()),
                 head: None,
+                ci: None,
             })
         };
         assert_eq!(
@@ -696,6 +764,7 @@ mod tests {
                 state: PrState::Merged,
                 at: None,
                 head: None,
+                ci: None,
             })
         );
         assert_eq!(
@@ -708,6 +777,65 @@ mod tests {
             None
         );
         assert_eq!(status(serde_json::json!({})), None);
+    }
+
+    #[test]
+    fn reads_what_a_pull_requests_ci_says() {
+        let ci = |checks: serde_json::Value| {
+            parse_pr_status(&serde_json::json!({ "state": "OPEN", "statusCheckRollup": checks }))
+                .and_then(|status| status.ci)
+        };
+        let run = |name: &str, status: &str, conclusion: &str| serde_json::json!({ "__typename": "CheckRun", "name": name, "workflowName": "CI", "status": status, "conclusion": conclusion });
+        let context = |name: &str, state: &str| serde_json::json!({ "__typename": "StatusContext", "context": name, "state": state });
+        let says = |state, failed: &[&str]| {
+            Some(PrChecks {
+                state,
+                failed: failed.iter().map(|name| (*name).to_owned()).collect(),
+            })
+        };
+        assert_eq!(ci(serde_json::json!([])), says(CiState::NoCi, &[]));
+        assert_eq!(
+            ci(serde_json::json!([
+                run("test", "COMPLETED", "SUCCESS"),
+                run("docs", "COMPLETED", "SKIPPED"),
+                context("ci/circleci", "SUCCESS"),
+            ])),
+            says(CiState::Passed, &[])
+        );
+        assert_eq!(
+            ci(serde_json::json!([
+                run("test", "IN_PROGRESS", ""),
+                context("ci/circleci", "SUCCESS")
+            ])),
+            says(CiState::Pending, &[])
+        );
+        assert_eq!(
+            ci(serde_json::json!([context("deploy/preview", "PENDING")])),
+            says(CiState::Pending, &[])
+        );
+        // A failure is what matters, even while the rest still runs, and each is named once.
+        assert_eq!(
+            ci(serde_json::json!([
+                run("lint", "COMPLETED", "FAILURE"),
+                run("test", "QUEUED", ""),
+                run("lint", "COMPLETED", "FAILURE"),
+                run("e2e", "COMPLETED", "TIMED_OUT"),
+                context("ci/circleci", "ERROR"),
+            ])),
+            says(CiState::Failed, &["lint", "e2e", "ci/circleci"])
+        );
+        // An answer that doesn't say leaves what Keel knew.
+        assert_eq!(
+            parse_pr_status(&serde_json::json!({ "state": "OPEN" })).and_then(|s| s.ci),
+            None
+        );
+        // A repo decides how many there are.
+        let many: Vec<serde_json::Value> = (0..40)
+            .map(|n| run(&format!("job {n}"), "COMPLETED", "FAILURE"))
+            .collect();
+        let failed = ci(serde_json::json!(many)).unwrap().failed;
+        assert_eq!(failed.len(), MOST_FAILED_NAMED);
+        assert_eq!(failed[0], "job 0");
     }
 
     /// A `gh` that writes down how it was called, then answers with what's in `reply`.
@@ -740,7 +868,7 @@ mod tests {
         let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
         assert_eq!(
             calls.trim(),
-            "pr view 12 --repo acme/app --json state,isDraft,mergedAt,closedAt,updatedAt,headRefOid [token:gho_secret]"
+            "pr view 12 --repo acme/app --json state,isDraft,mergedAt,closedAt,updatedAt,headRefOid,statusCheckRollup [token:gho_secret]"
         );
     }
 

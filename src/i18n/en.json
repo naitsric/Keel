@@ -281,6 +281,11 @@
       "mergedAt": "Pull request merged on {{when}}",
       "closedAt": "Pull request closed without merging on {{when}}"
     },
+    "ci": {
+      "failed": "CI failed: {{checks}}",
+      "pending": "CI running",
+      "passed": "CI passed"
+    },
     "fromIssue": "From issue #{{number}}",
     "base": "Based on {{base}}",
     "decideApproval": "Approve or reject above.",
@@ -899,6 +904,7 @@
       "merged": "Merged",
       "closed": "Closed without merging"
     },
+    "ciFailed": "CI failed: {{checks}}",
     "needed": {
       "waitingApproval": "Open it to approve or reject.",
       "waitingAnswers": "Open it to answer.",

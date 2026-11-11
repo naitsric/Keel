@@ -27,6 +27,9 @@ export type ToolProfile = "readOnly" | "build";
 /** What became of a pull request after Keel opened it, as of the last time it looked. */
 export type PrState = "open" | "draft" | "merged" | "closed";
 
+/** What a pull request's CI said about its latest commit, as of the last time Keel looked. */
+export type CiState = "pending" | "passed" | "failed" | "noCi";
+
 /** A code with its data. The backend sends no sentences; `reasonText` writes them. */
 export type Reason = { code: string } & Record<string, unknown>;
 
@@ -427,6 +430,10 @@ export interface Run {
   /** When that happened, going by GitHub. */
   prStateAt: string | null;
   prCheckedAt: string | null;
+  /** Null until Keel knows. */
+  prCi: CiState | null;
+  /** The checks that failed, by name. */
+  prCiFailed: string[];
 }
 
 /** How a workflow's runs in a project have gone. */
@@ -592,6 +599,8 @@ export interface BoardCard {
   prUrl: string | null;
   prState: PrState | null;
   prStateAt: string | null;
+  prCi: CiState | null;
+  prCiFailed: string[];
   /** What the person wrote when rejecting. It may be empty. */
   rejection: string | null;
   startBlocked: Reason | null;

@@ -1391,6 +1391,10 @@ impl McpServer {
         attempts: &[Attempt],
         just_started: bool,
     ) -> Result<Json, ToolError> {
+        // What became of its pull request and its CI comes later, as when a person opens the run.
+        if !just_started {
+            self.0.engine.look_at_pr(&run.id);
+        }
         let store = &self.0.store;
         let mine = just_started
             || store
@@ -1438,6 +1442,8 @@ impl McpServer {
             "prState": run.pr_state,
             "prStateAt": run.pr_state_at,
             "prCheckedAt": run.pr_checked_at,
+            "prCi": run.pr_ci,
+            "prCiFailed": run.pr_ci_failed,
             "workflowId": run.workflow_id,
             "workflowName": run.workflow_name,
             "round": run.round,
@@ -1530,6 +1536,8 @@ impl McpServer {
             "skipped": skipped_steps(attempts),
             "prUrl": run.pr_url,
             "prState": run.pr_state,
+            "prCi": run.pr_ci,
+            "prCiFailed": run.pr_ci_failed,
         });
         if more_files > 0 {
             report["moreFilesChanged"] = json!(more_files);

@@ -2243,6 +2243,8 @@ fn the_board_has_the_shape_the_contract_says() {
             "jointChangeId",
             "part",
             "position",
+            "prCi",
+            "prCiFailed",
             "prState",
             "prStateAt",
             "prUrl",

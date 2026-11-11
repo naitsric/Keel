@@ -734,6 +734,36 @@ impl PrState {
     }
 }
 
+/// What a pull request's CI says about its latest commit, as GitHub tells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CiState {
+    /// Something hasn't finished, and nothing has failed yet.
+    Pending,
+    Passed,
+    /// At least one check failed.
+    Failed,
+    /// The pull request has no checks.
+    NoCi,
+}
+
+impl CiState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::NoCi => "noCi",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        [Self::Pending, Self::Passed, Self::Failed, Self::NoCi]
+            .into_iter()
+            .find(|state| state.as_str() == value)
+    }
+}
+
 /// Where a card is kept. A started card's column comes from its run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1142,6 +1172,20 @@ mod tests {
             assert_eq!(serde_json::to_value(state).unwrap(), state.as_str());
         }
         assert_eq!(PrState::parse("MERGED"), None);
+    }
+
+    #[test]
+    fn a_ci_state_reads_back_as_itself() {
+        for state in [
+            CiState::Pending,
+            CiState::Passed,
+            CiState::Failed,
+            CiState::NoCi,
+        ] {
+            assert_eq!(CiState::parse(state.as_str()), Some(state));
+            assert_eq!(serde_json::to_value(state).unwrap(), state.as_str());
+        }
+        assert_eq!(CiState::parse("FAILURE"), None);
     }
 
     #[test]
