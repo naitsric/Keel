@@ -599,6 +599,22 @@ fn run_adds_secret(state: State<'_, AppState>, run_id: String) -> CommandResult<
     ))
 }
 
+/// Masking works on text, so it would only break a picture. Their names are text, and are masked.
+#[tauri::command(async)]
+fn run_screenshots(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> CommandResult<keel_engine::Screenshots> {
+    let mut shots = state.engine.run_screenshots(&run_id)?;
+    for shot in &mut shots.shown {
+        shot.name = mask_secrets(&shot.name);
+    }
+    for name in &mut shots.left_out {
+        *name = mask_secrets(name);
+    }
+    Ok(shots)
+}
+
 #[tauri::command(async)]
 fn rework_limit_answer(
     state: State<'_, AppState>,
@@ -973,6 +989,7 @@ pub fn run() {
             brain_retire,
             run_diff,
             run_adds_secret,
+            run_screenshots,
             board_get,
             card_create,
             card_import_issue,

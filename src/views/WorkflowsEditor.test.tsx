@@ -339,6 +339,14 @@ describe("the workflow editor", () => {
       expect(promptField()).toBeUndefined();
     });
 
+    it("says where a check saves screenshots for the approval", async () => {
+      await open();
+      await click(node("check"));
+      expect(page()).toContain("save them in $KEEL_SCREENSHOTS");
+      await click(node("builder"));
+      expect(page()).not.toContain("$KEEL_SCREENSHOTS");
+    });
+
     it("explains the steps with nothing to fill in, as it did", async () => {
       await open();
       await click(node("human"));

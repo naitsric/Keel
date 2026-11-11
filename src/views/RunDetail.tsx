@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Run, type RunJoint, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
 import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
@@ -310,6 +310,33 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
 
 const SHOWN_FILES = 5;
 
+const pictureOf = (shot: Screenshot) => `data:${shot.mime};base64,${shot.data}`;
+
+/** What a step saved of how the change looks, small, with what it left out. Keel doesn't take them. */
+function ScreenshotsRow({ shots, onOpen }: { shots: Screenshots; onOpen: (shot: Screenshot) => void }) {
+  const { t } = useTranslation();
+  return (
+    <ApprovalRow label={t("run.screenshots")}>
+      {shots.shown.length > 0 && (
+        <ul className="flex flex-wrap gap-2">
+          {shots.shown.map((shot) => (
+            <li key={shot.name} className="w-32 min-w-0">
+              <button type="button" aria-label={t("run.screenshotOpen", { name: shot.name })} onClick={() => onOpen(shot)} className="block w-full overflow-hidden rounded border border-border bg-inset hover:border-border-strong focus-visible:border-accent focus-visible:outline-none">
+                <img src={pictureOf(shot)} alt={shot.name} className="h-20 w-full object-cover object-top" />
+              </button>
+              <p className="selectable mt-0.5 truncate font-mono text-[11px] text-muted" title={shot.name}>
+                {shot.name}
+              </p>
+              {shot.beforeLastChange && <p className="text-[11px] leading-4 text-warning">{t("run.screenshotBeforeChange")}</p>}
+            </li>
+          ))}
+        </ul>
+      )}
+      {shots.leftOut.length > 0 && <p className={cx("selectable text-[11.5px] break-words text-muted", shots.shown.length > 0 && "mt-1")}>{t("run.screenshotsLeftOut", { names: shots.leftOut.join(", ") })}</p>}
+    </ApprovalRow>
+  );
+}
+
 /** What the engine skipped because the change was small, and why, with a way to ask for it anyway. */
 function SkippedForSize({ skipped, onRunNow, disabled }: { skipped: Attempt[]; onRunNow?: () => void; disabled: boolean }) {
   const { t } = useTranslation();
@@ -459,6 +486,20 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
       current = false;
     };
   }, [run.id, changesSomething]);
+  const [shots, setShots] = useState<Screenshots | null>(null);
+  const [looking, setLooking] = useState<Screenshot | null>(null);
+  // Each approval looks again: a later round may have new ones, or have changed the code since.
+  useEffect(() => {
+    let current = true;
+    api
+      .runScreenshots(run.id)
+      .then((found) => current && setShots(found))
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [run.id, attempt.id]);
+  const anyShots = shots != null && (shots.shown.length > 0 || shots.leftOut.length > 0);
   const answer = (approve: boolean) => {
     setBusy(true);
     setSent(note);
@@ -622,6 +663,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             )}
           </ApprovalRow>
         )}
+        {anyShots && <ScreenshotsRow shots={shots} onOpen={setLooking} />}
         <ApprovalRow label={t("run.whatProves")}>
           <ApprovalProof attempts={attempts} round={run.round} commands={commands} rawCheck={rawCheck} reviewed={reviewed} />
         </ApprovalRow>
@@ -715,6 +757,14 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
           <div className="text-[13px] leading-relaxed">
             <Explanations attempts={explaining} />
           </div>
+        )}
+      </Modal>
+      <Modal open={looking !== null} onOpenChange={(open) => !open && setLooking(null)} title={looking?.name ?? ""} className="w-[960px]">
+        {looking && (
+          <>
+            {looking.beforeLastChange && <p className="mb-2 text-[12.5px] text-warning">{t("run.screenshotBeforeChange")}</p>}
+            <img src={pictureOf(looking)} alt={looking.name} className="max-w-full rounded border border-border" />
+          </>
         )}
       </Modal>
     </Card>

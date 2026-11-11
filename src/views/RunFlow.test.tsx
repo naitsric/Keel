@@ -28,7 +28,7 @@ const built = () => [attempt("spec", "succeeded"), attempt("builder", "succeeded
 const human = () => attempt("human", "waitingApproval", { kind: "approval", tools: "none", modelRequested: "" });
 
 /** What's allowed to be called by looking around a run. Anything else would be doing something. */
-const READS = ["run_get", "run_look_at_pr", "run_joint", "run_attempts", "attempt_events", "attempt_raw_check", "run_adds_secret", "run_proposals", "attempt_diff"];
+const READS = ["run_get", "run_look_at_pr", "run_joint", "run_attempts", "attempt_events", "attempt_raw_check", "run_adds_secret", "run_screenshots", "run_proposals", "attempt_diff"];
 
 describe("the run page's flow", () => {
   let root: Root;

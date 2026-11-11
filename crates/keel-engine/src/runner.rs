@@ -18,7 +18,10 @@ use serde_json::json;
 use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
 use crate::specs::{self, Verdict};
-use crate::{Error, Inner, Result, Resume, brain, joint, locked, prompts, verification, workflows};
+use crate::{
+    Error, Inner, Result, Resume, brain, joint, locked, prompts, screenshots, verification,
+    workflows,
+};
 
 /// Tool output kept in the database. The raw file always has all of it.
 const EVENT_TEXT_LIMIT: usize = 64 * 1024;
@@ -357,6 +360,8 @@ impl Inner {
             let short: String = attempt.run_id.chars().take(8).collect();
             let branch = format!("keel/{short}");
             git.create_workspace(&mirror, &workspace, &branch, &identity)?;
+            // Ready before any step runs, so a command can save to it straight away.
+            std::fs::create_dir_all(screenshots::folder(&workspace))?;
             self.store.patch_run(
                 &attempt.run_id,
                 &[
@@ -527,6 +532,7 @@ impl Inner {
                 &run_cache,
                 Some(&project.allowed_domains),
             ));
+            process_command.env(screenshots::VARIABLE, screenshots::folder(&workspace));
         }
         process_command.envs(service_env);
         let child = process::spawn_step(process_command, &prompt_file, &raw_path, &stderr_path)?;
@@ -608,7 +614,10 @@ impl Inner {
             copy_tool_caches(&shared_cache, &cache)?;
             cache_env(&cache, &cache, Some(&project.allowed_domains))
         };
-        command.envs(cache_vars).envs(service_env);
+        command
+            .envs(cache_vars)
+            .envs(service_env)
+            .env(screenshots::VARIABLE, screenshots::folder(&workspace));
         let child = process::spawn_step(command, &prompt_file, &raw_path, &stderr_path)?;
         let mut monitor = self.track_process(attempt, child, project_id)?;
         monitor.services = service_set;

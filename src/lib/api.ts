@@ -626,6 +626,24 @@ export interface RunJoint {
   part: PartOf | null;
 }
 
+/** A picture a step saved of how the change looks. */
+export interface Screenshot {
+  name: string;
+  /** What its bytes say it is: PNG, JPEG, GIF or WebP. */
+  mime: string;
+  /** Base64. */
+  data: string;
+  takenAt: string;
+  /** A step changed the code after it was saved, so it may not show what's being approved. */
+  beforeLastChange: boolean;
+}
+
+export interface Screenshots {
+  shown: Screenshot[];
+  /** What else is in the folder, and isn't shown: not one of those pictures, too big, or past the limit. */
+  leftOut: string[];
+}
+
 export interface Board {
   /** Ordered by position within each column. */
   cards: BoardCard[];
@@ -663,6 +681,8 @@ export const api = {
   runLookAtPr: (runId: string) => invoke<void>("run_look_at_pr", { runId }),
   runDiff: (runId: string) => invoke<string>("run_diff", { runId }),
   runAddsSecret: (runId: string) => invoke<boolean>("run_adds_secret", { runId }),
+  /** What a step saved of how the change looks, in `$KEEL_SCREENSHOTS`. Keel doesn't take them. */
+  runScreenshots: (runId: string) => invoke<Screenshots>("run_screenshots", { runId }),
   workflowsList: (projectId: string, language: string) => invoke<Workflow[]>("workflows_list", { projectId, language }),
   workflowSave: (projectId: string, workflow: Workflow) => invoke<Workflow>("workflow_save", { projectId, workflow }),
   workflowResults: (projectId: string) => invoke<WorkflowResults[]>("workflow_results", { projectId }),

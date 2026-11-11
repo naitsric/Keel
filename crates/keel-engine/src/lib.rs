@@ -12,6 +12,7 @@ mod project_proposals;
 mod prompts;
 mod pull_requests;
 mod runner;
+mod screenshots;
 mod services;
 mod sizing;
 mod specs;
@@ -40,6 +41,7 @@ use keel_store::{
 };
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
 pub use prompts::full_workflow;
+pub use screenshots::{Screenshot, Screenshots};
 use serde_json::json;
 // What a reader outside the engine needs to tell what a run did and what it waits for, read the way
 // the engine reads it.
@@ -1325,6 +1327,16 @@ impl Engine {
             return Ok(String::new());
         }
         Ok(self.git()?.diff_since(&workspace, &base)?)
+    }
+
+    /// The pictures a step left of how the change looks, for its approval, each saying whether the
+    /// code changed after it.
+    pub fn run_screenshots(&self, run_id: &str) -> Result<Screenshots> {
+        let attempts = self.inner.store.attempts_of_run(run_id)?;
+        Ok(screenshots::read(
+            &self.inner.workspace(run_id),
+            screenshots::last_change(&attempts),
+        ))
     }
 
     /// A person's answer when the approver hit its limit: another round, or on to their approval.

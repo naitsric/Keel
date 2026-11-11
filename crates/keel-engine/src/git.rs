@@ -403,13 +403,16 @@ impl Git {
         // command an agent runs warns about it.
         self.run(workspace, &["config", "core.excludesFile", "/dev/null"])?;
         self.run(workspace, &["config", "core.attributesFile", "/dev/null"])?;
-        // The run's own cache must never end up in a commit.
+        // The run's own cache must never end up in a commit, nor the screenshots its steps save.
         let exclude = workspace.join(".git/info/exclude");
         if let Some(parent) = exclude.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let mut excluded = std::fs::read_to_string(&exclude).unwrap_or_default();
-        excluded.push_str(&format!("\n/{RUN_CACHE}/\n"));
+        excluded.push_str(&format!(
+            "\n/{RUN_CACHE}/\n/{}/\n",
+            crate::screenshots::FOLDER
+        ));
         std::fs::write(&exclude, excluded)?;
         self.head(workspace)
     }
