@@ -117,7 +117,8 @@
     "rejected": "Rechazado",
     "returned": "Devuelto",
     "postponed": "Se pidió más",
-    "skipped": "Omitido"
+    "skipped": "Omitido",
+    "corrected": "Keel pidió corregirlo"
   },
   "reasons": {
     "claudeMissing": "Claude Code no está instalado, o Keel no lo encuentra.",
@@ -476,7 +477,7 @@
     "answers": "Respondiste",
     "answersLine": "{{asked}} {{answer}}",
     "questionsTaken": "Después de {{rounds}} rondas de preguntas, Keel dejó de preguntar y tomó las opciones recomendadas",
-    "specCorrected": "Lo que escribió no cabía en lo que Keel te puede mostrar, así que Keel le pidió corregirlo",
+    "specCorrected": "Lo que escribió no cabía en lo que Keel te puede mostrar, así que Keel le pidió corregir esto:",
     "reviewIncomplete": "No pudo leer parte del cambio, así que Keel no lo cuenta como aprobación: {{files}}",
     "specAnswer": "Escribió lo que entendió",
     "verifyAnswer": "Escribió lo que encontró",
@@ -1073,7 +1074,7 @@
     "criterionNeedsId": "el punto {{position}} de lo que tiene que cumplirse no tiene nombre",
     "repeatedCriterion": "dos cosas que tienen que cumplirse se llaman {{id}}",
     "tooManyDecided": "lista {{count}} cosas que decidió por su cuenta y el límite es {{limit}}",
-    "decidedTooLong": "algo que decidió por su cuenta tiene {{chars}} caracteres y el límite es {{limit}}",
+    "decidedTooLong": "el punto {{position}} de lo que decidió por su cuenta tiene {{chars}} caracteres y el límite es {{limit}}",
     "tooManyQuestions": "tiene {{count}} preguntas para ti y el límite es {{limit}}",
     "questionTooLong": "la pregunta {{id}} tiene {{chars}} caracteres y el límite es {{limit}}",
     "questionNeedsId": "la pregunta {{position}} no tiene nombre",

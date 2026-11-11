@@ -1258,3 +1258,47 @@ describe("the commands a step ran", () => {
     expect(page()).toContain("falló con código 101");
   });
 });
+
+describe("an answer Keel asked to fix", () => {
+  let root: Root;
+  const page = () => document.body.textContent ?? "";
+  const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "spec", at: "2026-01-01T00:00:00Z", kind, data });
+  // What run #47 wrote first: a criterion and a decision past their limits.
+  const problems = [
+    { code: "criterionTooLong", id: "C2", chars: 209, limit: 200 },
+    { code: "decidedTooLong", position: 1, chars: 141, limit: 140 },
+  ];
+  const events = [event(1, "result", {}), event(2, "finished", { state: "failed", reason: { code: "specNotUsable", problems } }), event(3, "specCorrected", { problems })];
+  const inActivity = (corrected: boolean) => act(() => root.render(<ActivityTab events={events} role="specifier" corrected={corrected} />));
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    mockIPC(() => null);
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("doesn't say it failed, and says what went past its limit, by how much", () => {
+    inActivity(true);
+    expect(page()).not.toContain("Failed");
+    expect(page()).toContain("Final state: Keel asked for a fix");
+    expect(page()).toContain("C2 has 209 characters, and the limit is 200");
+    expect(page()).toContain("item 1 of what it decided alone has 141 characters, and the limit is 140");
+  });
+
+  it("says it failed while nothing went on to fix it", () => {
+    inActivity(false);
+    expect(page()).toContain("Final state: Failed");
+  });
+
+  it("is all in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    inActivity(true);
+    expect(page()).not.toContain("Falló");
+    expect(page()).toContain("Estado final: Keel pidió corregirlo");
+    expect(page()).toContain("el punto 1 de lo que decidió por su cuenta tiene 141 caracteres y el límite es 140");
+  });
+});

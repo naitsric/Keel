@@ -1,5 +1,5 @@
 import type { TFunction } from "i18next";
-import type { AuditEvent, GivenAnswer, SpecOutput, VerificationOutput } from "./api";
+import type { Attempt, AuditEvent, GivenAnswer, ShownState, SpecOutput, VerificationOutput } from "./api";
 
 export interface CommandEnd {
   /** `unclear` is a command that finished with code 0, but where that 0 may hide a failure. */
@@ -295,4 +295,14 @@ export function focusAttempt<T extends { stepId: string; state: string; role?: s
   }
   // Proposals are a bonus: if they failed, the run is still about what came before them.
   return [...attempts].reverse().find((a) => a.role !== "learner") ?? attempts[attempts.length - 1];
+}
+
+/**
+ * What an attempt's state reads as. An answer that didn't fit within the limits is recorded as
+ * failed, but Keel went straight on with the same session to have it fixed: for the person that's
+ * not a failure. Until that next attempt exists, nothing is fixing it, and it did fail.
+ */
+export function shownState(attempt: Pick<Attempt, "id" | "state" | "reason">, attempts: Pick<Attempt, "resumedFrom">[]): ShownState {
+  const fixed = attempt.state === "failed" && attempt.reason?.code === "specNotUsable" && attempts.some((a) => a.resumedFrom === attempt.id);
+  return fixed ? "corrected" : attempt.state;
 }

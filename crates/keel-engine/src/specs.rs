@@ -1105,6 +1105,78 @@ mod tests {
         );
     }
 
+    /// Models count characters loosely: asked for 140, one wrote a decision of 141. So the prompt
+    /// asks for less than Keel takes, and a near miss still fits.
+    #[test]
+    fn the_prompt_asks_for_less_than_keel_takes() {
+        let asked = [
+            (
+                "what will change, up to",
+                "qué va a cambiar, hasta",
+                170,
+                MAX_SUMMARY,
+            ),
+            (
+                "together take up to",
+                "juntos llegan hasta",
+                170,
+                MAX_CRITERION,
+            ),
+            ("each up to", "cada uno hasta", 120, MAX_DECIDED_TEXT),
+            (
+                "one line of up to",
+                "una línea de hasta",
+                120,
+                MAX_QUESTION_TEXT,
+            ),
+            (
+                "options of up to",
+                "opciones de hasta",
+                50,
+                MAX_OPTION_LABEL,
+            ),
+        ];
+        let en = prompts::spec_prompt_with_size("en");
+        let es = prompts::spec_prompt_with_size("es");
+        for (in_en, in_es, number, limit) in asked {
+            assert!(
+                en.contains(&format!("{in_en} {number} characters")),
+                "{in_en}"
+            );
+            assert!(
+                es.contains(&format!("{in_es} {number} caracteres")),
+                "{in_es}"
+            );
+            assert!(
+                number < limit && number * 100 >= limit * 80,
+                "a margin: {number} of {limit}"
+            );
+        }
+
+        // Written past the 120 it was asked for, a decision still fits. Past the 140 Keel takes,
+        // it goes back once, saying which one and by how much.
+        let decided = |chars: usize| with("decided", json!([{ "text": "x".repeat(chars) }]));
+        assert!(matches!(
+            judge(Some(&decided(140)), false, 0),
+            Verdict::Ready(_)
+        ));
+        let Verdict::Correct(problems) = judge(Some(&decided(141)), false, 0) else {
+            panic!()
+        };
+        assert_eq!(
+            problems,
+            [SpecProblem::DecidedTooLong {
+                position: 1,
+                chars: 141,
+                limit: 140
+            }]
+        );
+        assert!(
+            correction_prompt(&problems, "en")
+                .contains("Item 1 of `decided` has 141 characters, and the limit is 140.")
+        );
+    }
+
     #[test]
     fn questions_have_their_limits_and_at_most_one_recommended_option() {
         let good = [("Yes", true), ("No", false)];

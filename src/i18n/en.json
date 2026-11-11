@@ -117,7 +117,8 @@
     "rejected": "Rejected",
     "returned": "Sent back",
     "postponed": "Asked for more",
-    "skipped": "Skipped"
+    "skipped": "Skipped",
+    "corrected": "Keel asked for a fix"
   },
   "reasons": {
     "claudeMissing": "Claude Code isn't installed, or Keel can't find it.",
@@ -476,7 +477,7 @@
     "answers": "You answered",
     "answersLine": "{{asked}} {{answer}}",
     "questionsTaken": "After {{rounds}} rounds of questions, Keel stopped asking and took the recommended options",
-    "specCorrected": "What it wrote didn't fit what Keel can show you, so Keel asked it to fix that",
+    "specCorrected": "What it wrote didn't fit what Keel can show you, so Keel asked it to fix this:",
     "reviewIncomplete": "It couldn't read part of the change, so Keel doesn't count it as an approval: {{files}}",
     "specAnswer": "It wrote down what it understood",
     "verifyAnswer": "It wrote down what it found",
@@ -1073,7 +1074,7 @@
     "criterionNeedsId": "item {{position}} of what has to be true has no name",
     "repeatedCriterion": "two things that have to be true are both called {{id}}",
     "tooManyDecided": "it lists {{count}} things it decided alone, and the limit is {{limit}}",
-    "decidedTooLong": "something it decided alone has {{chars}} characters, and the limit is {{limit}}",
+    "decidedTooLong": "item {{position}} of what it decided alone has {{chars}} characters, and the limit is {{limit}}",
     "tooManyQuestions": "it has {{count}} questions for you, and the limit is {{limit}}",
     "questionTooLong": "question {{id}} has {{chars}} characters, and the limit is {{limit}}",
     "questionNeedsId": "question {{position}} has no name",

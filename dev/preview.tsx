@@ -58,6 +58,7 @@ const attempt: Attempt = {
   prompt: "The add function in calc.py is wrong. Fix it, then run the tests.",
   settings: { sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, filesystem: { denyRead: ["~"], allowRead: ["<workspace>"] }, network: { allowedDomains: [] } } },
   sessionId: "5e882d0f-0000-4000-8000-000000000000",
+  resumedFrom: null,
   workspace: "/Users/you/Library/Application Support/io.github.naitsric.keel/runs/r1/workspace",
   rawPath: "/Users/you/Library/Application Support/io.github.naitsric.keel/runs/r1/builder-1.jsonl",
   rawSha256: finished ? "9f2c4e1ab7d04c55e6a1f0b3c28d7e6fa1b2c3d4e5f60718293a4b5c6d7e8f90" : null,
@@ -118,7 +119,8 @@ const waiting = params.get("flow") === "approval" || params.get("flow") === "lim
 // with gate=build there's nothing yet to say about what it did. flow=questions is the card that asks,
 // in the language of lang=, with long=1 for text at its limits, many=1 for three questions, none=1 for
 // one with no recommended option, last=1 for the last round and extra=1 for the round after it.
-// flow=corrected is a run stopped because it couldn't keep to the limits.
+// flow=corrected is a run stopped because it couldn't keep to the limits. With fixed=1 the second
+// answer fit and the run went on: node=spec, then its attempt 1, shows what Keel asked it to fix.
 const noCheck = params.get("check") === "none";
 const noReviews = params.get("reviews") === "none";
 const noChanges = params.get("changes") === "none";
@@ -173,9 +175,24 @@ const questionAttempts: Attempt[] = [
   ...Array.from({ length: answeredRounds }, (_, index) => specRound({ id: `q0-${index}`, number: index + 1, state: "succeeded" }, { ...previewSpec, questions: previewQuestions.slice(0, 1), answered: [{ question: "Q1", asked: previewQuestions[0].text, answer: previewQuestions[0].options[1].label, recommended: false, remember: false }] })),
   specRound({ number: answeredRounds + 1, state: "waitingAnswers" }, { ...previewSpec, decided: previewSpec.decided.slice(0, 1), questions: previewQuestions }),
 ];
+const fixedAtOnce = params.get("fixed") === "1";
+// What run #47 wrote first: a criterion and a decision past their limits.
+const didNotFit: Reason[] = fixedAtOnce
+  ? [
+      { code: "criterionTooLong", id: "C2", chars: 209, limit: 200 },
+      { code: "decidedTooLong", position: 1, chars: 141, limit: 140 },
+    ]
+  : [{ code: "summaryTooLong", chars: 240, limit: 200 }];
 const correctedAttempts: Attempt[] = [
-  specRound({ id: "c1", number: 1, state: "failed", reason: { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 240, limit: 200 }] } }, previewSpec),
-  specRound({ id: "c2", number: 2, state: "blocked", reason: { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 231, limit: 200 }, { code: "tooManyRecommended", id: "Q2", count: 2 }] } }, previewSpec),
+  specRound({ id: "c1", number: 1, state: "failed", reason: { code: "specNotUsable", problems: didNotFit } }, previewSpec),
+  fixedAtOnce
+    ? specRound({ id: "c2", number: 2, state: "succeeded", resumedFrom: "c1" }, previewSpec)
+    : specRound({ id: "c2", number: 2, state: "blocked", resumedFrom: "c1", reason: { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 231, limit: 200 }, { code: "tooManyRecommended", id: "Q2", count: 2 }] } }, previewSpec),
+];
+const correctedEvents: AuditEvent[] = [
+  { seq: 100, attemptId: "c1", at: at(2), kind: "result", data: {} },
+  { seq: 101, attemptId: "c1", at: at(2), kind: "finished", data: { state: "failed", reason: { code: "specNotUsable", problems: didNotFit } } },
+  { seq: 102, attemptId: "c1", at: at(2), kind: "specCorrected", data: { problems: didNotFit } },
 ];
 const builtAttempt: Attempt = { ...attempt, state: "succeeded", reason: null, shaAfter: "28c696fd11223344556677889900aabbccddeeff", finishedAt: at(1), rawSha256: "9f2c", resultText: builtText, filesChanged: builtFiles, runFiles: builtFiles };
 const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", round, state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12" };
@@ -323,7 +340,7 @@ const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Atte
   // The answer wasn't in the structure it was asked for, so it stops here for a person.
   verifyUnreadable: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), verifierAttempt("failed", { reason: { code: "noStructuredOutput" }, output: { verdict: "approved" } as unknown as Attempt["output"] })] },
   questions: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...questionAttempts] },
-  corrected: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...correctedAttempts] },
+  corrected: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...correctedAttempts, ...(fixedAtOnce ? [builderRan({ state: "running", finishedAt: null })] : [])] },
   // A person sent it back: the approval they answered says so, and the run is on its next round.
   returned: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), returnedApproval, builderRan({ round: 1, number: 2, state: "running", finishedAt: null })] },
   sentBack: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), returnedApproval, ...[builderRan({ resultText: "I made add return 0 for an empty list." }), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), humanWaits].map(nextRound)] },
@@ -829,6 +846,7 @@ mockIPC((command, args) => {
         if (params.get("flow") === "small" || params.get("flow") === "asked") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "skipped", data: { reason: asSmall.reason } }, { seq: 101, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: true, lines: 12, files: 2, round: 0 } }];
         if (params.get("flow") === "movedUp") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: false, because: WHY_MOVED_UP, round: 0 } }];
       }
+      if ((args as { attemptId?: string } | undefined)?.attemptId === "c1" && params.get("flow") === "corrected") return correctedEvents;
       if ((args as { attemptId?: string } | undefined)?.attemptId === returnedApproval.id && (params.get("flow") === "returned" || params.get("flow") === "sentBack")) {
         return [{ seq: 100, attemptId: returnedApproval.id, at: at(5), kind: "returned", data: { instructions: sentBackWith, round: 1, ...(assistantBy ? { by: assistantBy } : {}) } }];
       }
