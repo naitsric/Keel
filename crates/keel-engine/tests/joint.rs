@@ -146,6 +146,7 @@ fn world_with(on_github: bool) -> World {
     let claude = bin.join("claude");
     std::fs::write(&claude, fake(&log, &queue)).unwrap();
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    keel_harness::testing::warm_up(&claude, &["--version"]);
     if on_github {
         let gh = bin.join("gh");
         std::fs::write(&gh, fake_gh(&log, &flags)).unwrap();

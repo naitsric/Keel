@@ -205,6 +205,7 @@ fn world_with(tune: impl FnOnce(&mut Config)) -> World {
             .replace("@FLAGS@", &flags.to_string_lossy())
     };
     write_script(&bin.join("claude"), &fill(FAKE_CLAUDE));
+    keel_harness::testing::warm_up(&bin.join("claude"), &["--version"]);
     write_script(&bin.join("gh"), &fill(FAKE_GH));
 
     let remote = root.join("remotes/acme/app.git");

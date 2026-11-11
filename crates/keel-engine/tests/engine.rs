@@ -30,6 +30,7 @@ fn write_fake(bin: &Path, body: &str, auth: &str, version: &str) {
     let path = bin.join("claude");
     std::fs::write(&path, script).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    keel_harness::testing::warm_up(&path, &["--version"]);
 }
 
 fn init(tools: &str, source: &str) -> String {

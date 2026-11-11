@@ -650,6 +650,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Done.","nu
         std::fs::write(bin.join("claude"), FAKE_CLAUDE).unwrap();
         std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
+        keel_harness::testing::warm_up(&bin.join("claude"), &["--version"]);
         let repo = dir.path().join("demo");
         std::fs::create_dir(&repo).unwrap();
         git(&repo, &["init", "-q", "-b", "main"]);

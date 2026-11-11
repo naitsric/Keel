@@ -132,6 +132,7 @@ fn world_with(tune: impl FnOnce(&mut Config)) -> World {
         std::fs::create_dir(path).unwrap();
     }
     write_script(&bin.join("claude"), &fake_claude(&flags));
+    keel_harness::testing::warm_up(&bin.join("claude"), &["--version"]);
     write_script(&bin.join("gh"), &fake_gh(&log, &flags));
     std::fs::write(flags.join("spec-text"), "add returns the sum").unwrap();
 

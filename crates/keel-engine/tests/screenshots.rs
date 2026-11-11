@@ -60,6 +60,7 @@ echo '{{"type":"result","subtype":"success","is_error":false,"result":"Fixed it.
     let path = bin.join("claude");
     std::fs::write(&path, fake).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    keel_harness::testing::warm_up(&path, &["--version"]);
 
     let repo = dir.join("app");
     std::fs::create_dir_all(&repo).unwrap();

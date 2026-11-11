@@ -112,6 +112,7 @@ fn world() -> World {
     let claude = bin.join("claude");
     std::fs::write(&claude, fake(&queue)).unwrap();
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    keel_harness::testing::warm_up(&claude, &["--version"]);
     let repo = dir.path().join("app");
     std::fs::create_dir(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);

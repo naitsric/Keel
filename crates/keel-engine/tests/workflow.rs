@@ -125,6 +125,7 @@ fn world() -> World {
         std::fs::create_dir(path).unwrap();
     }
     write_script(&bin.join("claude"), &fake_claude(&log, &flags));
+    keel_harness::testing::warm_up(&bin.join("claude"), &["--version"]);
     write_script(&bin.join("gh"), &fake_gh(&log, &flags));
 
     let remotes = dir.path().join("remotes");

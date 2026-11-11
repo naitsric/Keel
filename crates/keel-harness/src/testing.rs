@@ -2,11 +2,15 @@
 //! a step's sandbox, and there macOS refuses to start another sandbox, to open local sockets and
 //! to run setuid programs such as `ps`. Those tests say so and stop, instead of failing for a
 //! reason that has nothing to do with the change. Anywhere else they run in full.
+//!
+//! Also for tests that time a program they just wrote, such as a fake `claude`: `warm_up` runs it
+//! once first, so the wait while macOS looks it over isn't part of what they time.
 
 use std::io::{ErrorKind, Write};
 use std::net::TcpListener;
 use std::os::unix::net::UnixListener;
-use std::process::Command;
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 /// What `sandbox-exec` says when macOS won't start a sandbox inside another one.
@@ -77,6 +81,22 @@ pub fn ps_refused() -> Option<&'static str> {
         })
     })
     .as_deref()
+}
+
+/// Runs a program a test has just written once, with `args`, and waits for it however long that
+/// takes. macOS looks a new program over the first time it runs, which on a busy machine took from
+/// seconds to minutes, longer than Keel waits for `claude` to answer. Once looked over, it starts
+/// in milliseconds, so what the test times afterwards is the program itself. `args` must get a
+/// quick answer that changes nothing, such as `--version` from a fake `claude`.
+pub fn warm_up(program: &Path, args: &[&str]) {
+    let status = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap_or_else(|error| panic!("{} didn't start: {error}", program.display()));
+    assert!(status.success(), "{} {args:?}: {status}", program.display());
 }
 
 /// Says which test stopped and why. Straight to stderr, which the test harness doesn't capture, so

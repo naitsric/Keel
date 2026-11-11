@@ -200,11 +200,15 @@ mod tests {
         assert_eq!(check_version("garbage"), VersionCheck::Unknown);
     }
 
+    /// A `claude` that runs `script`, already run once so the tests time only the script. It
+    /// answers `--warm-up` before the script, since some scripts here never answer at all.
     fn fake_claude(dir: &Path, script: &str) -> std::path::PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("claude");
-        std::fs::write(&path, format!("#!/bin/bash\n{script}\n")).unwrap();
+        let text = format!("#!/bin/bash\n[ \"$1\" = --warm-up ] && exit 0\n{script}\n");
+        std::fs::write(&path, text).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::warm_up(&path, &["--warm-up"]);
         path
     }
 
@@ -241,7 +245,7 @@ mod tests {
             dir.path(),
             r#"[ "$1" = "--version" ] && { echo '2.1.318 (Claude Code)'; exit 0; }; exec sleep 60"#,
         );
-        // Long enough for the first question to get its answer on a busy machine.
+        // Plenty for the first answer, now that the script has run once, even on a busy machine.
         let check = check_session(&claude, "/usr/bin:/bin", Duration::from_secs(2));
         assert_eq!(check.version.as_deref(), Some("2.1.318 (Claude Code)"));
         assert!(check.auth.is_none());
