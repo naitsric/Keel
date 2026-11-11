@@ -31,6 +31,27 @@ pub struct Guess {
     pub check_options: Vec<String>,
     /// It's what the project's CI runs, since nothing else here says how it installs and tests.
     pub from_ci: bool,
+    /// What the check runs because the project's CI does, though nothing else here names it.
+    pub ci_checks: Vec<String>,
+}
+
+/// What a project's CI checks and its saved check doesn't run.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CiGap {
+    /// As the CI runs them.
+    pub commands: Vec<String>,
+    /// The CI's files they're in.
+    pub from: Vec<String>,
+}
+
+/// Only reads the CI's files, like `guess`.
+pub fn ci_gap(root: &Path, check: &str) -> CiGap {
+    let missing = ci::missing_from(root, check);
+    CiGap {
+        commands: missing.check,
+        from: missing.from,
+    }
 }
 
 /// What one kind of project gives away. A check is left out when nothing says how it tests itself,
@@ -675,9 +696,9 @@ fn elixir(root: &Path) -> Option<Stack> {
 }
 
 /// A Makefile's `test` target is what the project itself calls testing, so it wins. Every stack found
-/// adds its setup and its check, chained so that each one has to pass. When nothing here is known,
-/// what the project's CI runs is the guess. Without that either, an unknown stack gets nothing rather
-/// than something plausible.
+/// adds its setup and its check, chained so that each one has to pass, and then what else the CI
+/// checks, like a linter, goes after them. When nothing here is known, what the project's CI runs is
+/// the guess. Without that either, an unknown stack gets nothing rather than something plausible.
 pub fn guess(root: &Path) -> Guess {
     let mut guess = Guess::default();
     let makefile = ["Makefile", "GNUmakefile", "makefile"]
@@ -712,6 +733,12 @@ pub fn guess(root: &Path) -> Guess {
     if guess.check.is_none() {
         guess.check = check;
     }
+    let ci = ci::missing_from(root, guess.check.as_deref().unwrap_or_default());
+    if !ci.check.is_empty() {
+        let own = guess.check.take().into_iter();
+        guess.check = chained(own.chain(ci.check.iter().cloned()).collect());
+        guess.ci_checks = ci.check;
+    }
     for stack in stacks {
         guess.from.extend(stack.from);
         guess.setup_options.extend(stack.setup_options);
@@ -722,6 +749,7 @@ pub fn guess(root: &Path) -> Guess {
             }
         }
     }
+    guess.from.extend(ci.from);
     guess
 }
 

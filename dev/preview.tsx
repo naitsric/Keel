@@ -546,7 +546,8 @@ const otherProject: Project = { ...demoProject, id: "p2", name: "payments", path
 const projects = view === "board" || palette || params.get("drafts") === "1" ? [demoProject, otherProject] : [demoProject];
 
 // Adding a project. dialog=setup opens its dialog right away, and click=Add project… gets there the
-// long way. setup=pnpm|npm|yarn|uv|cargo|go|make|unknown is what the folder gives away.
+// long way. setup=pnpm|npm|yarn|uv|uvci|cargo|go|make|ci|unknown is what the folder gives away, and
+// uvci is uv with the linters its CI runs. view=projects&cigap=1 has a check that misses what CI runs.
 // accounts=one|several|readonly|none, gh=missing and repo=none are what GitHub has to say.
 // added=new|existing|restored says how it got here (with session=out or map=failed for a map that
 // didn't start), and leaving it out is reopening it from "Finish setup".
@@ -559,11 +560,12 @@ const freshProject: Project = { ...otherProject, id: "p3", name: "shop", path: "
 const manyProjects = params.get("projects") === "many";
 const moreProjects: Project[] = manyProjects ? ["mobile", "billing-api", "docs", "infra", "website", "analytics"].map((name, i) => ({ ...otherProject, id: `p${i + 4}`, name, path: `/Users/you/www/${name}`, githubRepo: `acme/${name}` })) : [];
 let listedProjects: Project[] = params.get("empty") === "1" ? [] : [...projects, ...(params.get("projects") === "mixed" || manyProjects || params.get("dialog") === "setup" ? [freshProject] : []), ...moreProjects];
-const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[]; setupOptions: string[]; checkOptions: string[]; fromCi?: boolean }> = {
+const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[]; setupOptions: string[]; checkOptions: string[]; fromCi?: boolean; ciChecks?: string[] }> = {
   pnpm: { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run check:i18n", "pnpm run lint", "pnpm test", "pnpm run typecheck"] },
   npm: { check: "npm test", setup: "npm ci", from: ["package.json", "package-lock.json"], setupOptions: [], checkOptions: [] },
   yarn: { check: "yarn test", setup: "yarn install --frozen-lockfile", from: ["package.json", "yarn.lock"], setupOptions: [], checkOptions: [] },
   uv: { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: ["uv.lock", "pyproject.toml"], setupOptions: ["--group notebook", "--group stubs", "--group test", "--group test-uv"], checkOptions: [] },
+  uvci: { check: "uv run --frozen pytest && uv run ruff check . && uv run pyright", setup: "uv sync --frozen", from: ["uv.lock", ".github/workflows/ci.yml"], setupOptions: [], checkOptions: [], ciChecks: ["uv run ruff check .", "uv run pyright"] },
   cargo: { check: "cargo test", setup: "cargo fetch", from: ["Cargo.toml"], setupOptions: [], checkOptions: [] },
   go: { check: "go test ./...", setup: "go mod download", from: ["go.mod"], setupOptions: [], checkOptions: [] },
   make: { check: "make test", setup: null, from: ["Makefile"], setupOptions: [], checkOptions: [] },
@@ -750,7 +752,9 @@ mockIPC((command, args) => {
       if (!listedProjects.some((p) => p.id === freshProject.id)) listedProjects = [...listedProjects, freshProject];
       return addedAnswer();
     case "project_setup":
-      return { project: listedProjects.find((p) => p.id === (args as { projectId: string }).projectId) ?? freshProject, guess: { fromCi: false, ...(GUESSES[params.get("setup") ?? "pnpm"] ?? GUESSES.unknown) } };
+      return { project: listedProjects.find((p) => p.id === (args as { projectId: string }).projectId) ?? freshProject, guess: { fromCi: false, ciChecks: [], ...(GUESSES[params.get("setup") ?? "pnpm"] ?? GUESSES.unknown) } };
+    case "project_ci_gap":
+      return params.get("cigap") === "1" && (args as { projectId: string }).projectId === "p1" ? { commands: ["uv run ruff check .", "uv run pyright"], from: [".github/workflows/ci.yml"] } : { commands: [], from: [] };
     // folders=none: the commands need nothing from the home folder.
     case "project_tool_folders":
       return params.get("folders") === "none"

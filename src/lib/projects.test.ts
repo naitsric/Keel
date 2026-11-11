@@ -117,8 +117,8 @@ describe("a path as a person says it", () => {
 });
 
 describe("what the repo offers to add to a command", () => {
-  const uv: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: [], setupOptions: ["--group stubs", "--group test", "--group test-uv"], checkOptions: [], fromCi: false };
-  const pnpm: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: [], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false };
+  const uv: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: [], setupOptions: ["--group stubs", "--group test", "--group test-uv"], checkOptions: [], fromCi: false, ciChecks: [] };
+  const pnpm: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: [], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false, ciChecks: [] };
 
   it("leaves out what the command already has, as whole words", () => {
     expect(setupOptionsLeft("uv sync --frozen --group test", uv)).toEqual(["--group stubs", "--group test-uv"]);

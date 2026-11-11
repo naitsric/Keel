@@ -330,6 +330,43 @@ fn opening_the_dialog_guesses_and_saves_no_command() {
 }
 
 #[test]
+fn a_saved_check_that_misses_what_ci_runs_is_told_and_left_as_it_is() {
+    let w = world(true);
+    std::fs::create_dir_all(w.repo.join(".github/workflows")).unwrap();
+    std::fs::write(
+        w.repo.join(".github/workflows/ci.yml"),
+        "jobs:\n  t:\n    steps:\n      - run: uv run pyright\n      - run: uv run pytest\n",
+    )
+    .unwrap();
+    let id = w.add();
+    // Nothing saved yet: finishing the setup is what that needs.
+    assert!(w.engine.project_ci_gap(&id).unwrap().commands.is_empty());
+
+    let saved = |check: &str| {
+        w.engine
+            .update_project(
+                &id,
+                &ProjectSettings {
+                    check_command: Some(check.to_owned()),
+                    ..ProjectSettings::default()
+                },
+            )
+            .unwrap();
+    };
+    saved("uv run --frozen pytest");
+    let gap = w.engine.project_ci_gap(&id).unwrap();
+    assert_eq!(gap.commands, ["uv run pyright"]);
+    assert_eq!(gap.from, [".github/workflows/ci.yml"]);
+    assert_eq!(
+        w.store.project(&id).unwrap().check_command.as_deref(),
+        Some("uv run --frozen pytest")
+    );
+
+    saved("uv run --frozen pytest && uv run --frozen pyright");
+    assert!(w.engine.project_ci_gap(&id).unwrap().commands.is_empty());
+}
+
+#[test]
 fn trying_a_check_runs_setup_first_in_the_sandbox_and_spends_nothing() {
     keel_harness::needs!(sandbox);
     let w = world(true);

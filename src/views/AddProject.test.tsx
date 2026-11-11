@@ -86,7 +86,7 @@ describe("adding a project", () => {
         case "overview":
           return { ...useApp.getState().overview, projects: listed };
         case "project_setup":
-          return { project: listed.find((p) => p.id === args.projectId) ?? NEW, guess: { check: null, setup: null, from: [], setupOptions: [], checkOptions: [], fromCi: false } };
+          return { project: listed.find((p) => p.id === args.projectId) ?? NEW, guess: { check: null, setup: null, from: [], setupOptions: [], checkOptions: [], fromCi: false, ciChecks: [] } };
         case "github_status":
           return { repo: null, accounts: [], info: null, excessScopes: [], error: null };
         case "workflow_drafts_list":

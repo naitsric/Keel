@@ -113,6 +113,15 @@ export interface Guess {
   checkOptions: string[];
   /** It's what the project's CI runs, since nothing else here says how it installs and tests. */
   fromCi: boolean;
+  /** What the check runs because the project's CI does, though nothing else here names it. */
+  ciChecks: string[];
+}
+
+/** What a project's CI checks and its saved check doesn't run. Keel never adds them by itself. */
+export interface CiGap {
+  commands: string[];
+  /** The CI's files they're in. */
+  from: string[];
 }
 
 export interface ProjectSetup {
@@ -698,6 +707,8 @@ export const api = {
   projectProposalAccept: (proposalId: string, language: string) => invoke<ProjectAdded>("project_proposal_accept", { proposalId, language }),
   projectProposalDiscard: (proposalId: string) => invoke<void>("project_proposal_discard", { proposalId }),
   projectSetup: (projectId: string) => invoke<ProjectSetup>("project_setup", { projectId }),
+  /** Only reads the repo. */
+  projectCiGap: (projectId: string) => invoke<CiGap>("project_ci_gap", { projectId }),
   projectToolFolders: (projectId: string, setup: string, check: string) => invoke<ToolFolder[]>("project_tool_folders", { projectId, setup, check }),
   /** `read` is the folders the commands may read on top of the project's, for this run only. */
   projectTryCheck: (projectId: string, setup: string, check: string, read: string[], language: string) => invoke<string>("project_try_check", { projectId, setup, check, read, language }),

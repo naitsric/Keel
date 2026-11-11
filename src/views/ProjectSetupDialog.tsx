@@ -237,6 +237,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
   const guess = info?.guess;
   const fromGuess = (guess?.check != null && check === guess.check && !info?.project.checkCommand) || (guess?.setup != null && setup === guess.setup && !info?.project.setupCommand);
   const nothingToGo = known && !guess?.check && !guess?.setup && !info?.project.checkCommand && !info?.project.setupCommand;
+  const fromCiChecks = guess && guess.ciChecks.length > 0 && check === guess.check ? guess.ciChecks : [];
 
   const openOnGithub = (url: string) => {
     setError(null);
@@ -396,6 +397,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
       <div className="space-y-0.5 text-[11.5px] leading-snug text-subtle">
         <p>
           {fromGuess && `${t(guess?.fromCi ? "setup.fromCi" : "setup.guessed", { files: guess?.from.join(", ") })} `}
+          {fromCiChecks.length > 0 && `${t("setup.fromCiChecks", { commands: fromCiChecks.join(", ") })} `}
           {nothingToGo && `${t("setup.noGuess")} `}
           {t("setup.tryNote")}
         </p>

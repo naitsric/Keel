@@ -1,6 +1,7 @@
 //! For a project whose files say nothing Keel recognizes: what its CI already runs to install and to
-//! test. A workflow is the project's own script, so this only reads it, and what's taken from it is
-//! for a person to confirm like any other guess.
+//! test. For one whose files do: what else its CI checks, like a linter or a type checker. A workflow
+//! is the project's own script, so this only reads it, and what's taken from it is for a person to
+//! confirm like any other guess.
 
 use std::path::Path;
 
@@ -13,10 +14,12 @@ const MOST_WORKFLOWS: usize = 12;
 /// More than a person reads at a glance before saving it.
 const LONGEST_COMMAND: usize = 200;
 /// Runners and linters whose names don't say they check something.
-const RUNNERS: [&str; 15] = [
+const RUNNERS: [&str; 16] = [
     "pytest", "rspec", "phpunit", "jest", "vitest", "mocha", "tox", "nox", "ctest", "unittest",
-    "mypy", "pyright", "flake8", "eslint", "clippy",
+    "mypy", "pyright", "flake8", "eslint", "clippy", "ruff",
 ];
+/// `ruff format --check` checks, and `ruff format` rewrites the code. Neither is `ruff check`.
+const FORMATS: [&str; 2] = ["fmt", "format"];
 /// `uv sync`, `go mod download` or `pip install pytest` install, even when they name a runner.
 const INSTALLS: [&str; 7] = [
     "install", "sync", "restore", "fetch", "download", "get", "resolve",
@@ -73,6 +76,59 @@ impl Found {
         }
         true
     }
+}
+
+/// What the CI checks that `check` doesn't run yet, in the order it runs it, and the files that say
+/// so. Two that run the same tool are one.
+pub(super) fn missing_from(root: &Path, check: &str) -> Found {
+    let found = commands(root);
+    let mut so_far = check.to_owned();
+    let mut missing = Vec::new();
+    for command in found.check {
+        if !covers(&so_far, &command) {
+            so_far = format!("{so_far} && {command}");
+            missing.push(command);
+        }
+    }
+    Found {
+        from: if missing.is_empty() {
+            Vec::new()
+        } else {
+            found.from
+        },
+        check: missing,
+        setup: Vec::new(),
+    }
+}
+
+/// A command's words, split the way `kind` finds a check in them.
+fn parts(command: &str) -> impl Iterator<Item = String> + '_ {
+    command
+        .split(|c: char| c.is_whitespace() || ":-_./=()".contains(c))
+        .map(str::to_ascii_lowercase)
+}
+
+/// Whether `check` runs what `command` does: the same tool, like `pyright` in `uv run pyright`, or
+/// when it names none, what it calls checking, like `lint` in `pnpm lint`. Its arguments don't
+/// count, so `pytest -x tests/` is `pytest`.
+fn covers(check: &str, command: &str) -> bool {
+    let words: Vec<String> = parts(command).collect();
+    let has = |list: &[&str]| -> Vec<&String> {
+        words
+            .iter()
+            .filter(|word| list.contains(&word.as_str()))
+            .collect()
+    };
+    let mut wanted = has(&RUNNERS);
+    if wanted.is_empty() {
+        wanted = has(&CHECKS);
+    }
+    wanted.extend(has(&FORMATS));
+    if wanted.is_empty() {
+        return check.contains(command);
+    }
+    let checked: Vec<String> = parts(check).collect();
+    wanted.iter().all(|word| checked.contains(word))
 }
 
 /// GitHub's workflows, then GitLab's pipeline. A command that several jobs run is there once.
@@ -257,12 +313,15 @@ fn kind(command: &str) -> Kind {
         .collect();
     let installs = words.iter().any(|word| INSTALLS.contains(&word.as_str()))
         || words.windows(2).any(|pair| pair == ["npm", "ci"]);
+    // A formatter rewrites the code, unless it's told only to check it.
+    let rewrites = words.iter().any(|word| FORMATS.contains(&word.as_str()))
+        && !words.iter().any(|word| word == "check");
     // `run-tests.sh` or `vendor/bin/phpunit`.
     let checks = command
         .split(|c: char| c.is_whitespace() || ":-_./=()".contains(c))
         .map(str::to_ascii_lowercase)
         .any(|part| CHECKS.contains(&part.as_str()) || RUNNERS.contains(&part.as_str()));
-    if words.iter().any(|word| NOT_CHECKS.contains(&word.as_str())) {
+    if rewrites || words.iter().any(|word| NOT_CHECKS.contains(&word.as_str())) {
         Kind::Neither
     } else if checks && !installs {
         Kind::Checks
@@ -274,7 +333,7 @@ fn kind(command: &str) -> Kind {
 #[cfg(test)]
 mod tests {
     use crate::detect::tests::{both, found, repo};
-    use crate::detect::{Guess, LARGEST_FILE, MOST_OPTIONS, guess};
+    use crate::detect::{CiGap, Guess, LARGEST_FILE, MOST_OPTIONS, ci_gap, guess};
 
     const WORKFLOW: &str = "\
 name: CI
@@ -534,6 +593,103 @@ pages:
         let workflow = format!("jobs:\n  t:\n    steps:\n{steps}");
         let check = found(&[(".github/workflows/ci.yml", &workflow)]).0.unwrap();
         assert_eq!(check.split(" && ").count(), MOST_OPTIONS);
+    }
+
+    const PYTHON_CI: &str = "\
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pyright
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: uv sync --frozen
+      - run: uv run ruff format .
+      - run: uv run pytest -x tests/
+";
+
+    #[test]
+    fn a_known_stack_also_gets_the_linters_and_type_checks_its_ci_runs() {
+        let guess = guess(
+            repo(&[
+                ("uv.lock", "name = \"pytest\""),
+                (".github/workflows/ci.yml", PYTHON_CI),
+            ])
+            .path(),
+        );
+        assert_eq!(
+            guess,
+            Guess {
+                setup: Some("uv sync --frozen".to_owned()),
+                // Its own check first. pytest is already there, and a formatter that rewrites files
+                // checks nothing.
+                check: Some(
+                    "uv run --frozen pytest && uv run ruff check . && uv run ruff format --check . \
+                     && uv run pyright"
+                        .to_owned()
+                ),
+                from: vec!["uv.lock".to_owned(), ".github/workflows/ci.yml".to_owned()],
+                ci_checks: vec![
+                    "uv run ruff check .".to_owned(),
+                    "uv run ruff format --check .".to_owned(),
+                    "uv run pyright".to_owned(),
+                ],
+                ..Guess::default()
+            }
+        );
+    }
+
+    #[test]
+    fn what_the_check_already_runs_is_not_added_from_ci() {
+        let workflow = "jobs:\n  t:\n    steps:\n      - run: cargo test --all\n      - run: cargo clippy --all-targets -- -D warnings\n      - run: cargo fmt --all --check\n";
+        let rust =
+            guess(repo(&[("Cargo.toml", ""), (".github/workflows/ci.yml", workflow)]).path());
+        assert_eq!(
+            rust.check.as_deref(),
+            Some(
+                "cargo test && cargo clippy --all-targets -- -D warnings && cargo fmt --all --check"
+            )
+        );
+        assert!(!rust.from_ci);
+        // Two jobs that run the same tool are one.
+        let workflow = "jobs:\n  a:\n    steps:\n      - run: uv run mypy src\n  b:\n    steps:\n      - run: mypy .\n";
+        let python = guess(repo(&[("uv.lock", ""), (".github/workflows/ci.yml", workflow)]).path());
+        assert_eq!(python.check.as_deref(), Some("uv run mypy src"));
+        assert_eq!(python.ci_checks, ["uv run mypy src"]);
+    }
+
+    #[test]
+    fn a_known_stack_without_ci_is_guessed_as_before() {
+        let guess = guess(repo(&[("uv.lock", "name = \"pytest\"")]).path());
+        assert_eq!(guess.check.as_deref(), Some("uv run --frozen pytest"));
+        assert_eq!(guess.from, ["uv.lock"]);
+        assert!(guess.ci_checks.is_empty());
+    }
+
+    #[test]
+    fn a_saved_check_that_misses_what_ci_runs_is_told_what() {
+        let dir = repo(&[(".github/workflows/ci.yml", PYTHON_CI)]);
+        assert_eq!(
+            ci_gap(dir.path(), "uv run --frozen pytest"),
+            CiGap {
+                commands: vec![
+                    "uv run ruff check .".to_owned(),
+                    "uv run ruff format --check .".to_owned(),
+                    "uv run pyright".to_owned(),
+                ],
+                from: vec![".github/workflows/ci.yml".to_owned()],
+            }
+        );
+        let whole = "uv run --frozen pytest && uv run --frozen ruff check src && uv run ruff format --check && pyright";
+        assert_eq!(ci_gap(dir.path(), whole), CiGap::default());
+        assert_eq!(
+            ci_gap(repo(&[("uv.lock", "")]).path(), "uv run --frozen pytest"),
+            CiGap::default()
+        );
     }
 
     #[test]

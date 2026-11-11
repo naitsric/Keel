@@ -12,9 +12,9 @@ use keel_core::{
     serialize_masked,
 };
 use keel_engine::{
-    AddedProject, Answer, Board, BrainView, Config, Engine, Error as EngineError, GithubStatus,
-    JointChangeView, Preflight, ProjectProposalReview, ProjectSetup, RawCheck, RunJoint, StartRun,
-    Workflow, WorkflowDraft, request_from_issue, title_from_issue,
+    AddedProject, Answer, Board, BrainView, CiGap, Config, Engine, Error as EngineError,
+    GithubStatus, JointChangeView, Preflight, ProjectProposalReview, ProjectSetup, RawCheck,
+    RunJoint, StartRun, Workflow, WorkflowDraft, request_from_issue, title_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
@@ -204,6 +204,12 @@ fn project_proposal_discard(state: State<'_, AppState>, proposal_id: String) -> 
 fn project_setup(state: State<'_, AppState>, project_id: String) -> CommandResult<ProjectSetup> {
     state.ready.wait();
     Ok(state.engine.project_setup(&project_id)?)
+}
+
+/// Not masked either: what it lists can be added to the check, which is saved back.
+#[tauri::command(async)]
+fn project_ci_gap(state: State<'_, AppState>, project_id: String) -> CommandResult<CiGap> {
+    Ok(state.engine.project_ci_gap(&project_id)?)
 }
 
 /// Where in the home folder the programs these commands use are, for the person to let them be
@@ -994,6 +1000,7 @@ pub fn run() {
             overview,
             project_add,
             project_setup,
+            project_ci_gap,
             project_tool_folders,
             project_try_check,
             project_remove,

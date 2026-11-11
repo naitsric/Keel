@@ -1,6 +1,6 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { callsTo, hideApp, paletteRow, pressKey, pressMod, row, setToolFolders, settle, showApp, view } from "../commands/testApp";
+import { callsTo, hideApp, paletteRow, pressKey, pressMod, row, setCiGap, setToolFolders, settle, showApp, view } from "../commands/testApp";
 import i18next from "../i18n";
 import type { Project } from "../lib/api";
 import { useApp } from "../lib/store";
@@ -143,6 +143,28 @@ describe("the Projects page", () => {
     expect(main().textContent).toContain(i18next.t("settings.saved"));
   });
 
+  it("says what the project's CI runs that its check doesn't, and only adds it when asked", async () => {
+    setCiGap("alpha", { commands: ["uv run ruff check .", "uv run pyright"], from: [".github/workflows/ci.yml"] });
+    await showApp(RUNS, { name: "projects" }, THREE);
+    const checkBox = () => document.querySelector(`input[placeholder="${i18next.t("settings.checkCommandPlaceholder")}"]`) as HTMLInputElement;
+    expect(callsTo("project_ci_gap").map((call) => call.args)).toEqual([{ projectId: "alpha" }]);
+    expect(main().textContent).toContain(i18next.t("projects.ciMissing"));
+    expect(main().textContent).toContain("uv run ruff check .");
+    expect(main().textContent).toContain("uv run pyright");
+    expect(checkBox().value).toBe("make test");
+
+    await typeInto(checkBox(), "make test && uv run pyright");
+    expect(main().textContent).toContain("uv run ruff check .");
+    expect(main().textContent).not.toContain("uv run pyright");
+    await click(button(i18next.t("projects.ciMissingAdd")));
+    expect(checkBox().value).toBe("make test && uv run pyright && uv run ruff check .");
+    expect(main().textContent).not.toContain(i18next.t("projects.ciMissing"));
+    expect(callsTo("project_update")).toEqual([]);
+
+    await click(projectButton("beta"));
+    expect(main().textContent).not.toContain(i18next.t("projects.ciMissing"));
+  });
+
   describe("the hint under a service's socket file", () => {
     const postgres = () => i18next.t("settings.serviceSocketHintPostgres");
     const general = () => i18next.t("settings.serviceSocketHint");
@@ -241,6 +263,8 @@ describe("what sends a person to fix a project", () => {
         return 2;
       case "github_status":
         return { repo: null, accounts: [], info: null, excessScopes: [], error: null };
+      case "project_ci_gap":
+        return { commands: [], from: [] };
       case "attempt_raw_check":
         return "intact";
       case "run_adds_secret":

@@ -1,4 +1,4 @@
-import { type Attempt, type Guess, isActive, type Project, type ProjectSettings, type ToolFolder } from "./api";
+import { type Attempt, type CiGap, type Guess, isActive, type Project, type ProjectSettings, type ToolFolder } from "./api";
 
 /**
  * Whether a project still has setup to finish, worked out from the project so it clears itself
@@ -89,4 +89,9 @@ export function checkOptionsLeft(check: string, guess: Guess): string[] {
 /** Each one has to pass, so a failure anywhere fails the check. */
 export function withCheckOption(check: string, option: string): string {
   return check.trim() ? `${check.trim()} && ${option}` : option;
+}
+
+/** What the CI runs that isn't in this check yet, as it's being typed. */
+export function ciCommandsLeft(check: string, gap: CiGap): string[] {
+  return gap.commands.filter((command) => !hasOption(check, command));
 }
