@@ -144,25 +144,31 @@ describe("the Projects page", () => {
   });
 
   it("says what the project's CI runs that its check doesn't, and only adds it when asked", async () => {
-    setCiGap("alpha", { commands: ["uv run ruff check .", "uv run pyright"], from: [".github/workflows/ci.yml"] });
+    setCiGap("alpha", { commands: ["uv run --frozen ruff check .", "uv run --frozen pyright"], leftOut: ["semgrep ci"], from: [".github/workflows/ci.yml"] });
     await showApp(RUNS, { name: "projects" }, THREE);
     const checkBox = () => document.querySelector(`input[placeholder="${i18next.t("settings.checkCommandPlaceholder")}"]`) as HTMLInputElement;
     expect(callsTo("project_ci_gap").map((call) => call.args)).toEqual([{ projectId: "alpha" }]);
     expect(main().textContent).toContain(i18next.t("projects.ciMissing"));
-    expect(main().textContent).toContain("uv run ruff check .");
-    expect(main().textContent).toContain("uv run pyright");
+    expect(main().textContent).toContain("uv run --frozen ruff check .");
+    expect(main().textContent).toContain("uv run --frozen pyright");
+    expect(main().textContent).toContain(i18next.t("projects.ciLeftOut"));
+    expect(main().textContent).toContain("semgrep ci");
     expect(checkBox().value).toBe("make test");
 
-    await typeInto(checkBox(), "make test && uv run pyright");
-    expect(main().textContent).toContain("uv run ruff check .");
-    expect(main().textContent).not.toContain("uv run pyright");
+    await typeInto(checkBox(), "make test && uv run --frozen pyright");
+    expect(main().textContent).toContain("uv run --frozen ruff check .");
+    expect(main().textContent).not.toContain("uv run --frozen pyright");
     await click(button(i18next.t("projects.ciMissingAdd")));
-    expect(checkBox().value).toBe("make test && uv run pyright && uv run ruff check .");
+    // Only what Keel can run: what it can't stays a note.
+    expect(checkBox().value).toBe("make test && uv run --frozen pyright && uv run --frozen ruff check .");
     expect(main().textContent).not.toContain(i18next.t("projects.ciMissing"));
+    expect(button(i18next.t("projects.ciMissingAdd"))).toBeUndefined();
+    expect(main().textContent).toContain(i18next.t("projects.ciLeftOut"));
     expect(callsTo("project_update")).toEqual([]);
 
     await click(projectButton("beta"));
     expect(main().textContent).not.toContain(i18next.t("projects.ciMissing"));
+    expect(main().textContent).not.toContain(i18next.t("projects.ciLeftOut"));
   });
 
   describe("the hint under a service's socket file", () => {
@@ -264,7 +270,7 @@ describe("what sends a person to fix a project", () => {
       case "github_status":
         return { repo: null, accounts: [], info: null, excessScopes: [], error: null };
       case "project_ci_gap":
-        return { commands: [], from: [] };
+        return { commands: [], leftOut: [], from: [] };
       case "attempt_raw_check":
         return "intact";
       case "run_adds_secret":

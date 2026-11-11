@@ -335,7 +335,12 @@ fn a_saved_check_that_misses_what_ci_runs_is_told_and_left_as_it_is() {
     std::fs::create_dir_all(w.repo.join(".github/workflows")).unwrap();
     std::fs::write(
         w.repo.join(".github/workflows/ci.yml"),
-        "jobs:\n  t:\n    steps:\n      - run: uv run pyright\n      - run: uv run pytest\n",
+        "jobs:\n  t:\n    steps:\n      - run: uv run pyright\n      - run: semgrep ci\n      - run: uv run pytest\n",
+    )
+    .unwrap();
+    std::fs::write(
+        w.repo.join("uv.lock"),
+        "[[package]]\nname = \"pyright\"\n\n[[package]]\nname = \"pytest\"\n",
     )
     .unwrap();
     let id = w.add();
@@ -355,7 +360,8 @@ fn a_saved_check_that_misses_what_ci_runs_is_told_and_left_as_it_is() {
     };
     saved("uv run --frozen pytest");
     let gap = w.engine.project_ci_gap(&id).unwrap();
-    assert_eq!(gap.commands, ["uv run pyright"]);
+    assert_eq!(gap.commands, ["uv run --frozen pyright"]);
+    assert_eq!(gap.left_out, ["semgrep ci"], "it needs the network");
     assert_eq!(gap.from, [".github/workflows/ci.yml"]);
     assert_eq!(
         w.store.project(&id).unwrap().check_command.as_deref(),

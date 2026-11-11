@@ -91,8 +91,8 @@ echo "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\
     )
 }
 
-/// `pr view` answers with what's in `pr-view`, and fails without it. `pr create` refuses a
-/// description GitHub would refuse.
+/// `pr view` answers with what's in `pr-view`, and fails without it, or when asked about the checks
+/// with `no-checks` there. `pr create` refuses a description GitHub would refuse.
 fn fake_gh(log: &Path, flags: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -110,6 +110,9 @@ case "$1 $2" in
   if [ "$(wc -m < "{log}/pr-body.md")" -gt 65536 ]; then echo "Body is too long (maximum is 65536 characters)" >&2; exit 1; fi
   echo "https://github.com/acme/app/pull/12"; exit 0;;
 "pr view")
+  case "$*" in *statusCheckRollup*)
+    if [ -f "{flags}/no-checks" ]; then echo "GraphQL: Resource not accessible by personal access token" >&2; exit 1; fi;;
+  esac
   if [ -f "{flags}/pr-view" ]; then cat "{flags}/pr-view"; exit 0; fi
   echo "HTTP 502: Bad Gateway (https://api.github.com/graphql)" >&2; exit 1;;
 esac
@@ -222,8 +225,12 @@ impl World {
         std::fs::read_to_string(self.log.join("gh.log")).unwrap_or_default()
     }
 
+    /// Each look asks once with the checks, and again without them only if that fails.
     fn asked_about_prs(&self) -> usize {
-        self.gh_log().matches("gh pr view").count()
+        self.gh_log()
+            .lines()
+            .filter(|line| line.starts_with("gh pr view") && line.contains("statusCheckRollup"))
+            .count()
     }
 
     fn body(&self) -> String {
@@ -1077,6 +1084,29 @@ fn a_pull_request_whose_ci_fails_says_so_on_its_run_and_its_card() {
         w.store.run(&run).unwrap().pr_state_at.as_deref() == Some("2026-11-06T09:30:00Z")
     });
     assert_eq!(ci().0, Some(CiState::Passed));
+}
+
+#[test]
+fn a_token_that_cannot_read_the_checks_still_follows_the_pull_request() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.delivered();
+    std::fs::write(w.flags.join("no-checks"), "").unwrap();
+    w.set_pr_view("MERGED", false, "2026-11-06T10:00:00Z");
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.wait_pr_state(&run, PrState::Merged);
+    let found = w.store.run(&run).unwrap();
+    assert_eq!(found.pr_state_at.as_deref(), Some("2026-11-06T10:00:00Z"));
+    assert_eq!(found.pr_ci, None, "what its CI says stays unknown");
+    let asked: Vec<String> = w
+        .gh_log()
+        .lines()
+        .filter(|line| line.starts_with("gh pr view"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert!(!asked[1].contains("statusCheckRollup"), "{asked:?}");
 }
 
 #[test]

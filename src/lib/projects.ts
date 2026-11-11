@@ -92,6 +92,6 @@ export function withCheckOption(check: string, option: string): string {
 }
 
 /** What the CI runs that isn't in this check yet, as it's being typed. */
-export function ciCommandsLeft(check: string, gap: CiGap): string[] {
-  return gap.commands.filter((command) => !hasOption(check, command));
+export function ciCommandsLeft(check: string, commands: CiGap["commands"]): string[] {
+  return commands.filter((command) => !hasOption(check, command));
 }

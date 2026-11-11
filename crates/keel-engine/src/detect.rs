@@ -8,6 +8,7 @@ use std::path::Path;
 use serde::Serialize;
 use toml::Value;
 
+mod calls;
 mod ci;
 
 /// Far more than a manifest takes. Something this large isn't one.
@@ -31,25 +32,31 @@ pub struct Guess {
     pub check_options: Vec<String>,
     /// It's what the project's CI runs, since nothing else here says how it installs and tests.
     pub from_ci: bool,
-    /// What the check runs because the project's CI does, though nothing else here names it.
+    /// What the check runs because the project's CI does, though nothing else here names it, as
+    /// Keel runs it with no network.
     pub ci_checks: Vec<String>,
+    /// What else the CI checks, as it runs it, that Keel doesn't know how to run with no network.
+    pub ci_left_out: Vec<String>,
 }
 
 /// What a project's CI checks and its saved check doesn't run.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CiGap {
-    /// As the CI runs them.
+    /// As Keel runs them, with no network, for a person to add.
     pub commands: Vec<String>,
+    /// As the CI runs them, since Keel doesn't know how to run them with no network.
+    pub left_out: Vec<String>,
     /// The CI's files they're in.
     pub from: Vec<String>,
 }
 
-/// Only reads the CI's files, like `guess`.
+/// Only reads the repo, like `guess`.
 pub fn ci_gap(root: &Path, check: &str) -> CiGap {
     let missing = ci::missing_from(root, check);
     CiGap {
-        commands: missing.check,
+        commands: missing.add,
+        left_out: missing.left_out,
         from: missing.from,
     }
 }
@@ -231,29 +238,39 @@ fn script_stack(scripts: &Scripts, run: impl Fn(&str) -> String) -> (Option<Stri
     (check, options)
 }
 
-/// Yarn 2 and later need a global folder that's in the home folder. Nobody has tried them in the
-/// sandbox, so a repo with a `.yarnrc.yml` gets no guess.
-fn javascript(root: &Path) -> Option<Stack> {
-    let package = read(root, "package.json")?;
-    let (tool, setup, lock) = if is_file(root, "pnpm-lock.yaml") {
-        ("pnpm", "pnpm install --frozen-lockfile", "pnpm-lock.yaml")
+/// The tool a JavaScript project installs with, how, and the lock that says so. Yarn 2 and later
+/// need a global folder that's in the home folder. Nobody has tried them in the sandbox, so a repo
+/// with a `.yarnrc.yml` gets no guess.
+fn node_tool(root: &Path) -> Option<(&'static str, &'static str, &'static str)> {
+    if is_file(root, "pnpm-lock.yaml") {
+        Some(("pnpm", "pnpm install --frozen-lockfile", "pnpm-lock.yaml"))
     } else if is_file(root, "yarn.lock") && !is_file(root, ".yarnrc.yml") {
-        ("yarn", "yarn install --frozen-lockfile", "yarn.lock")
+        Some(("yarn", "yarn install --frozen-lockfile", "yarn.lock"))
     } else if is_file(root, "package-lock.json") {
-        ("npm", "npm ci", "package-lock.json")
+        Some(("npm", "npm ci", "package-lock.json"))
     } else {
         let lock = ["bun.lock", "bun.lockb"]
             .into_iter()
             .find(|name| is_file(root, name))?;
-        ("bun", "bun install --frozen-lockfile", lock)
-    };
+        Some(("bun", "bun install --frozen-lockfile", lock))
+    }
+}
+
+/// How that tool runs one of the project's scripts.
+fn run_script(tool: &str, name: &str) -> String {
+    match (tool, name) {
+        // `bun test` is Bun's own runner, which doesn't run the script.
+        ("bun", _) => format!("bun run {name}"),
+        (_, "test") => format!("{tool} test"),
+        _ => format!("{tool} run {name}"),
+    }
+}
+
+fn javascript(root: &Path) -> Option<Stack> {
+    let package = read(root, "package.json")?;
+    let (tool, setup, lock) = node_tool(root)?;
     let (check, check_options) =
-        script_stack(&scripts(&package, "scripts"), |name| match (tool, name) {
-            // `bun test` is Bun's own runner, which doesn't run the script.
-            ("bun", _) => format!("bun run {name}"),
-            (_, "test") => format!("{tool} test"),
-            _ => format!("{tool} run {name}"),
-        });
+        script_stack(&scripts(&package, "scripts"), |name| run_script(tool, name));
     Some(Stack {
         setup: Some(setup.to_owned()),
         check,
@@ -292,14 +309,19 @@ fn normalized(name: &str) -> String {
     name.to_ascii_lowercase().replace(['_', '.'], "-")
 }
 
-/// `pytest~=9.1`, `pytest[psutil]` or `pytest ; python_version < "3.13"`, but not `pytest-cov`.
-fn is_pytest(requirement: &str) -> bool {
+/// `pytest` in `pytest~=9.1`, `pytest[psutil]` or `pytest ; python_version < "3.13"`.
+fn requirement_name(requirement: &str) -> String {
     let name = requirement
         .trim_start()
         .split(|c: char| !c.is_ascii_alphanumeric() && !"-_.".contains(c))
         .next()
         .unwrap_or_default();
-    normalized(name) == "pytest"
+    normalized(name)
+}
+
+/// But not `pytest-cov`.
+fn is_pytest(requirement: &str) -> bool {
+    requirement_name(requirement) == "pytest"
 }
 
 fn names_pytest(requirements: &Value) -> bool {
@@ -734,11 +756,12 @@ pub fn guess(root: &Path) -> Guess {
         guess.check = check;
     }
     let ci = ci::missing_from(root, guess.check.as_deref().unwrap_or_default());
-    if !ci.check.is_empty() {
+    if !ci.add.is_empty() {
         let own = guess.check.take().into_iter();
-        guess.check = chained(own.chain(ci.check.iter().cloned()).collect());
-        guess.ci_checks = ci.check;
+        guess.check = chained(own.chain(ci.add.iter().cloned()).collect());
     }
+    guess.ci_checks = ci.add;
+    guess.ci_left_out = ci.left_out;
     for stack in stacks {
         guess.from.extend(stack.from);
         guess.setup_options.extend(stack.setup_options);
@@ -749,7 +772,10 @@ pub fn guess(root: &Path) -> Guess {
             }
         }
     }
-    guess.from.extend(ci.from);
+    // Only what the commands came from: what's left out is only mentioned.
+    if !guess.ci_checks.is_empty() {
+        guess.from.extend(ci.from);
+    }
     guess
 }
 

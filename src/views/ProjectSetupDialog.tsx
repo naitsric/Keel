@@ -398,6 +398,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
         <p>
           {fromGuess && `${t(guess?.fromCi ? "setup.fromCi" : "setup.guessed", { files: guess?.from.join(", ") })} `}
           {fromCiChecks.length > 0 && `${t("setup.fromCiChecks", { commands: fromCiChecks.join(", ") })} `}
+          {guess && guess.ciLeftOut.length > 0 && `${t("setup.ciLeftOut", { commands: guess.ciLeftOut.join(", ") })} `}
           {nothingToGo && `${t("setup.noGuess")} `}
           {t("setup.tryNote")}
         </p>

@@ -185,7 +185,8 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
   const access = githubAccess(status);
   const needsAccess = selected !== null && (access === "none" || access === "readOnly");
   const workflowGone = workflows !== null && !workflows.some((w) => w.id === workflow);
-  const ciMissing = ciGap ? ciCommandsLeft(check, ciGap) : [];
+  const ciMissing = ciGap ? ciCommandsLeft(check, ciGap.commands) : [];
+  const ciLeftOut = ciGap ? ciCommandsLeft(check, ciGap.leftOut) : [];
   const removeProject = () => setRemoving(true);
   return (
     <div className="space-y-4">
@@ -221,22 +222,26 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
           <Field label={t("settings.checkCommand")} hint={t("settings.checkCommandHint")}>
             <input value={check} onChange={(e) => setCheck(e.target.value)} placeholder={t("settings.checkCommandPlaceholder")} className={`${inputClass} font-mono`} />
           </Field>
-          {ciMissing.length > 0 && (
-            <div className="rounded-md border border-border-strong bg-inset px-3 py-2.5">
-              <p className="flex gap-1.5 text-[12.5px] text-warning">
-                <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-                {t("projects.ciMissing")}
-              </p>
-              <ul className="mt-1 space-y-0.5 pl-5 font-mono text-[11.5px] text-muted">
-                {ciMissing.map((command) => (
-                  <li key={command} className="selectable break-all">
-                    {command}
-                  </li>
-                ))}
-              </ul>
-              <Button className="mt-2" onClick={() => setCheck(ciMissing.reduce(withCheckOption, check))}>
-                {t("projects.ciMissingAdd")}
-              </Button>
+          {(ciMissing.length > 0 || ciLeftOut.length > 0) && (
+            <div className="space-y-2 rounded-md border border-border-strong bg-inset px-3 py-2.5">
+              {ciMissing.length > 0 && (
+                <div>
+                  <p className="flex gap-1.5 text-[12.5px] text-warning">
+                    <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                    {t("projects.ciMissing")}
+                  </p>
+                  <CommandList commands={ciMissing} />
+                  <Button className="mt-2" onClick={() => setCheck(ciMissing.reduce(withCheckOption, check))}>
+                    {t("projects.ciMissingAdd")}
+                  </Button>
+                </div>
+              )}
+              {ciLeftOut.length > 0 && (
+                <div>
+                  <p className="text-[12px] text-muted">{t("projects.ciLeftOut")}</p>
+                  <CommandList commands={ciLeftOut} />
+                </div>
+              )}
             </div>
           )}
         </Section>
@@ -371,6 +376,18 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
       </Card>
       <RemoveProjectDialog project={project} open={removing} onOpenChange={setRemoving} />
     </div>
+  );
+}
+
+function CommandList({ commands }: { commands: string[] }) {
+  return (
+    <ul className="mt-1 space-y-0.5 pl-5 font-mono text-[11.5px] text-muted">
+      {commands.map((command) => (
+        <li key={command} className="selectable break-all">
+          {command}
+        </li>
+      ))}
+    </ul>
   );
 }
 

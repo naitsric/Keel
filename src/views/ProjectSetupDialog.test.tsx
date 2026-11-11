@@ -24,11 +24,11 @@ const PROJECT: Project = {
   defaultWorkflow: "mine",
   sensitivePaths: ["billing/"],
 };
-const NO_GUESS: Guess = { check: null, setup: null, from: [], setupOptions: [], checkOptions: [], fromCi: false, ciChecks: [] };
-const PNPM: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false, ciChecks: [] };
-const UV: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: ["uv.lock", "pyproject.toml"], setupOptions: ["--group stubs", "--group test"], checkOptions: [], fromCi: false, ciChecks: [] };
-const CI: Guess = { check: "zig build test", setup: "zig fetch && zig build", from: [".github/workflows/ci.yml"], setupOptions: [], checkOptions: [], fromCi: true, ciChecks: [] };
-const UV_AND_CI: Guess = { ...UV, check: "uv run --frozen pytest && uv run ruff check . && uv run pyright", from: ["uv.lock", ".github/workflows/ci.yml"], ciChecks: ["uv run ruff check .", "uv run pyright"] };
+const NO_GUESS: Guess = { check: null, setup: null, from: [], setupOptions: [], checkOptions: [], fromCi: false, ciChecks: [], ciLeftOut: [] };
+const PNPM: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false, ciChecks: [], ciLeftOut: [] };
+const UV: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: ["uv.lock", "pyproject.toml"], setupOptions: ["--group stubs", "--group test"], checkOptions: [], fromCi: false, ciChecks: [], ciLeftOut: [] };
+const CI: Guess = { check: "zig build test", setup: "zig fetch && zig build", from: [".github/workflows/ci.yml"], setupOptions: [], checkOptions: [], fromCi: true, ciChecks: [], ciLeftOut: [] };
+const UV_AND_CI: Guess = { ...UV, check: "uv run --frozen pytest && uv run --frozen ruff check . && uv run --frozen pyright", from: ["uv.lock", ".github/workflows/ci.yml"], ciChecks: ["uv run --frozen ruff check .", "uv run --frozen pyright"], ciLeftOut: ["semgrep ci"] };
 const ACCOUNT = (login: string) => ({ login, active: false, ok: true, scopes: ["repo"] });
 
 interface Scene {
@@ -236,19 +236,20 @@ describe("the setup dialog", () => {
 
     it("says which commands of the check come from the project's CI", async () => {
       await show({ guess: UV_AND_CI, accounts: { "you-work": "WRITE" } });
-      expect(inputs()[0].value).toBe("uv run --frozen pytest && uv run ruff check . && uv run pyright");
+      expect(inputs()[0].value).toBe("uv run --frozen pytest && uv run --frozen ruff check . && uv run --frozen pyright");
       expect(page()).toContain("Guessed from uv.lock, .github/workflows/ci.yml.");
-      expect(page()).toContain("From your CI: uv run ruff check ., uv run pyright.");
+      expect(page()).toContain("From your CI: uv run --frozen ruff check ., uv run --frozen pyright.");
+      expect(page()).toContain("Your CI also runs semgrep ci, which Keel can't run offline.");
       expect(called("project_update")).toEqual([]);
       await type(inputs()[0], "uv run --frozen pytest");
-      expect(page()).not.toContain("From your CI");
-      await show({ guess: UV, accounts: { "you-work": "WRITE" } });
       expect(page()).not.toContain("From your CI");
     });
 
     it("stops calling it a guess once it's been changed", async () => {
       await show({ guess: { ...PNPM, setup: null } });
       expect(page()).toContain("Guessed from");
+      expect(page()).not.toContain("From your CI");
+      expect(page()).not.toContain("Your CI also runs");
       await type(inputs()[0], "pnpm test:unit");
       expect(page()).not.toContain("Guessed from");
     });
