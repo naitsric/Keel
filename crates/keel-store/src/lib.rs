@@ -306,6 +306,11 @@ const MIGRATIONS: &[&str] = &[
     r#"
     alter table attempt add column skipped_tests integer;
 "#,
+    // 16: Which MCP client put a card back in Todo, so the run it starts is that client's. Null when
+    // the person did, and on cards from before.
+    r#"
+    alter table card add column queued_by_client text;
+"#,
 ];
 
 /// Whether the card a query calls `card` can start as far as other cards go: it waits for none,
@@ -349,10 +354,11 @@ pub struct McpClient {
     pub name: String,
     /// The token's first characters, to tell tokens apart.
     pub token_prefix: String,
-    /// May start and stop runs, close the ones it started, and not only read.
+    /// May start and stop runs, close the ones it started and put their cards back in Todo, and
+    /// not only read.
     pub can_run: bool,
-    /// May send work back and retry on the runs it started, besides `can_run`. Off unless the
-    /// person turns it on.
+    /// May send work back and retry on the runs it started, and add a note to their cards while
+    /// they wait, besides `can_run`. Off unless the person turns it on.
     pub can_steer: bool,
     /// How many of its runs may be open at once, counting those that wait for the person.
     pub max_open_runs: i64,
@@ -406,9 +412,10 @@ fn mcp_client_from(r: &Row) -> rusqlite::Result<McpClient> {
 /// The tools that start a run, which is how a client's runs are told from everyone else's.
 const MCP_STARTS_A_RUN: &str = "('start_run', 'start_task', 'propose_change')";
 
-/// Whether the run `{run}` is the client `{client}`'s: it started it, or the run is a part of a
-/// change across projects whose agreement it started. The parts open later, from the board, with
-/// no call of the client's, and are still the client's to follow.
+/// Whether the run `{run}` is the client `{client}`'s: it started it, the run is a part of a
+/// change across projects whose agreement it started, or the run started from a card the client
+/// put back in Todo. The parts open later, from the board, with no call of the client's, and are
+/// still the client's to follow.
 fn run_of_client(run: &str, client: &str) -> String {
     format!(
         "(exists (select 1 from mcp_call c
@@ -418,7 +425,9 @@ fn run_of_client(run: &str, client: &str) -> String {
                      join card agreeing on agreeing.id = part.joint_change_id
                      join mcp_call c on c.run_id = agreeing.run_id
                      where part.run_id = {run} and part.joint_position is not null
-                       and c.client_id = {client} and c.tool = 'propose_change' and c.ok = 1))"
+                       and c.client_id = {client} and c.tool = 'propose_change' and c.ok = 1)
+          or exists (select 1 from card queued
+                     where queued.run_id = {run} and queued.queued_by_client = {client}))"
     )
 }
 
@@ -846,6 +855,9 @@ pub struct Card {
     pub waiting: bool,
     /// Which commit it read of each earlier part, by that part's run.
     pub basis: BTreeMap<String, String>,
+    /// The MCP client that put it back in Todo, by id, so the run it starts is that client's. None
+    /// when the person did.
+    pub queued_by_client: Option<String>,
 }
 
 impl Card {
@@ -938,6 +950,7 @@ fn card_from(r: &Row) -> rusqlite::Result<Card> {
         waits_for_card: r.get("waits_for_card")?,
         waiting: !r.get::<_, bool>("is_ready")?,
         basis: serde_json::from_str(&basis).unwrap_or_default(),
+        queued_by_client: r.get("queued_by_client")?,
     })
 }
 
@@ -1338,16 +1351,43 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Runs this client started that haven't finished.
+    /// Runs this client started that haven't finished, counting the cards it put back in Todo: one
+    /// that hasn't started its run yet, and then that run until it finishes.
     pub fn open_runs_of_mcp_client(&self, client_id: &str) -> Result<i64> {
         Ok(self.lock().query_row(
             &format!(
-                "select count(distinct r.id) from run r
-                 join mcp_call c on c.run_id = r.id
-                 where c.client_id = ?1 and c.tool in {MCP_STARTS_A_RUN} and c.ok = 1
-                   and r.finished_at is null"
+                "select count(*) from (
+                     select r.id from run r
+                     join mcp_call c on c.run_id = r.id
+                     where c.client_id = ?1 and c.tool in {MCP_STARTS_A_RUN} and c.ok = 1
+                       and r.finished_at is null
+                     union
+                     select coalesce(k.run_id, k.id) from card k
+                     left join run r on r.id = k.run_id
+                     where k.queued_by_client = ?1 and k.lane <> 'backlog' and r.finished_at is null)"
             ),
             [client_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Whether this client may act on that card: it's on a run the client started, it's a part of
+    /// a change the client proposed, or the client put it back in Todo. A client only acts on what
+    /// it started.
+    pub fn card_of_mcp_client(&self, card_id: &str, client_id: &str) -> Result<bool> {
+        Ok(self.lock().query_row(
+            &format!(
+                "select exists (select 1 from card k where k.id = ?1 and (
+                     k.queued_by_client = ?2
+                     or (k.run_id is not null and {})
+                     or (k.joint_position is not null and exists (
+                         select 1 from card agreeing
+                         join mcp_call c on c.run_id = agreeing.run_id
+                         where agreeing.id = k.joint_change_id and c.client_id = ?2
+                           and c.tool = 'propose_change' and c.ok = 1))))",
+                run_of_client("k.run_id", "?2")
+            ),
+            [card_id, client_id],
             |r| r.get(0),
         )?)
     }
@@ -2166,6 +2206,23 @@ impl Store {
         Ok(true)
     }
 
+    /// Adds `text` at the end of what a card says, after a blank line, if a person could still
+    /// change it. What's there stays as it is. `false` if not.
+    pub fn append_to_card(&self, id: &str, text: &str) -> Result<bool> {
+        let conn = self.lock();
+        let card = read_card(&conn, id)?;
+        if !card.is_waiting() {
+            return Ok(false);
+        }
+        let body = if card.body.is_empty() {
+            text.to_owned()
+        } else {
+            format!("{}\n\n{text}", card.body)
+        };
+        conn.execute("update card set body = ?2 where id = ?1", params![id, body])?;
+        Ok(true)
+    }
+
     /// Removes a card, unless Keel or a person still has work to do on it. `false` if so. Its run
     /// stays in history. A part that waited for it waits for what it waited for instead. A change
     /// not agreed yet goes with the card where it would be. An agreed one stays for its parts.
@@ -2359,6 +2416,20 @@ impl Store {
         index: usize,
         language: &str,
     ) -> Result<bool> {
+        self.move_card_as(id, lane, index, language, None)
+    }
+
+    /// `move_card` by an MCP client, `by` its id, or by the person when None. Whoever brings a card
+    /// into Todo is who the run it starts belongs to, and taking it out of Todo is the person's. A
+    /// client only brings a card in: `false`, with nothing changed, for one already in Todo.
+    pub fn move_card_as(
+        &self,
+        id: &str,
+        lane: CardLane,
+        index: usize,
+        language: &str,
+        by: Option<&str>,
+    ) -> Result<bool> {
         let to = match lane {
             CardLane::Backlog => BoardColumn::Backlog,
             CardLane::Todo => BoardColumn::Todo,
@@ -2371,6 +2442,9 @@ impl Store {
             return Ok(false);
         }
         let from = card.column();
+        if by.is_some() && (from == to || to != BoardColumn::Todo) {
+            return Ok(false);
+        }
         let others = read_cards(
             &tx,
             "c.project_id = ?1 and c.id != ?2",
@@ -2387,12 +2461,12 @@ impl Store {
             if to == BoardColumn::Todo {
                 // A new run replaces the old one, which stays in history.
                 tx.execute(
-                    "update card set lane = 'todo', language = ?2, todo_at = ?3, run_id = null, start_blocked = null where id = ?1",
-                    params![id, language, now()],
+                    "update card set lane = 'todo', language = ?2, todo_at = ?3, run_id = null, start_blocked = null, queued_by_client = ?4 where id = ?1",
+                    params![id, language, now(), by],
                 )?;
             } else {
                 tx.execute(
-                    "update card set lane = 'backlog', language = null, todo_at = null where id = ?1",
+                    "update card set lane = 'backlog', language = null, todo_at = null, queued_by_client = null where id = ?1",
                     [id],
                 )?;
             }
@@ -2504,7 +2578,8 @@ impl Store {
             }
             Some(existing) => {
                 tx.execute(
-                    "update card set lane = 'started', run_id = null, language = ?2, start_blocked = null
+                    "update card set lane = 'started', run_id = null, language = ?2, start_blocked = null,
+                                     queued_by_client = null
                      where id = ?1",
                     params![existing.id, language],
                 )?;
@@ -4571,6 +4646,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table card drop column queued_by_client;
                  alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;
                  drop index card_by_joint_change;
@@ -4853,6 +4929,211 @@ mod tests {
             .unwrap();
         assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
         assert_eq!(ids("c1"), ["task", "r"], "finished ones stay theirs");
+    }
+
+    #[test]
+    fn a_note_goes_at_the_end_of_a_card_that_waits_and_never_on_one_keel_has() {
+        let (_dir, store) = store();
+        seeded(&store);
+        card(&store, "c");
+        assert!(store.append_to_card("c", "Add the field").unwrap());
+        assert_eq!(store.card("c").unwrap().body, "Add the field");
+        assert!(store.update_card("c", "c", "Fix it").unwrap());
+        assert!(store.append_to_card("c", "And its test").unwrap());
+        assert_eq!(store.card("c").unwrap().body, "Fix it\n\nAnd its test");
+        assert!(store.move_card("c", CardLane::Todo, 0, "en").unwrap());
+        assert!(store.append_to_card("c", "Last").unwrap());
+        let noted = "Fix it\n\nAnd its test\n\nLast";
+        assert_eq!(store.card("c").unwrap().body, noted);
+
+        // Once Keel has taken it, nothing changes.
+        assert_eq!(claim(&store).as_deref(), Some("c"));
+        assert!(!store.append_to_card("c", "Too late").unwrap());
+        assert_eq!(store.card("c").unwrap().body, noted);
+    }
+
+    #[test]
+    fn a_card_a_client_puts_in_todo_is_its_own_and_so_is_the_run_it_starts() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        store
+            .add_mcp_client("c2", "Other", &[8u8; 32], "keel_def", true)
+            .unwrap();
+        card(&store, "c");
+        assert!(
+            !store.card_of_mcp_client("c", "c1").unwrap(),
+            "the person's"
+        );
+
+        // Waiting in Todo, it counts as a run the client has open.
+        assert!(
+            store
+                .move_card_as("c", CardLane::Todo, usize::MAX, "en", Some("c1"))
+                .unwrap()
+        );
+        assert_eq!(
+            store.card("c").unwrap().queued_by_client.as_deref(),
+            Some("c1")
+        );
+        assert!(store.card_of_mcp_client("c", "c1").unwrap());
+        assert!(!store.card_of_mcp_client("c", "c2").unwrap());
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
+        assert_eq!(store.open_runs_of_mcp_client("c2").unwrap(), 0);
+        // A client only brings a card into Todo. It doesn't reorder it there.
+        assert!(
+            !store
+                .move_card_as("c", CardLane::Todo, 0, "en", Some("c2"))
+                .unwrap()
+        );
+        assert_eq!(
+            store.card("c").unwrap().queued_by_client.as_deref(),
+            Some("c1")
+        );
+
+        // The run it starts is the client's, and still counts once.
+        assert_eq!(claim(&store).as_deref(), Some("c"));
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
+        store
+            .lock()
+            .execute("update card set run_id = 'r' where id = 'c'", [])
+            .unwrap();
+        assert!(store.run_started_by_mcp_client("r", "c1").unwrap());
+        assert!(!store.run_started_by_mcp_client("r", "c2").unwrap());
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
+        let mine: Vec<String> = store
+            .runs_started_by_mcp_client("c1", 10)
+            .unwrap()
+            .into_iter()
+            .map(|run| run.id)
+            .collect();
+        assert_eq!(mine, ["r"]);
+
+        // Closed, it waits in the Backlog, still the client's and no longer open.
+        store.set_state("a", AttemptState::Abandoned, None).unwrap();
+        store
+            .patch_run("r", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        assert_eq!(store.card("c").unwrap().column(), BoardColumn::Backlog);
+        assert!(store.card_of_mcp_client("c", "c1").unwrap());
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
+
+        // The person putting it in Todo makes it theirs again.
+        assert!(store.move_card("c", CardLane::Todo, 0, "en").unwrap());
+        assert_eq!(store.card("c").unwrap().queued_by_client, None);
+        assert!(!store.card_of_mcp_client("c", "c1").unwrap());
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
+        // And so does sending one the client put there back to the Backlog.
+        card(&store, "d");
+        assert!(
+            store
+                .move_card_as("d", CardLane::Todo, 0, "en", Some("c1"))
+                .unwrap()
+        );
+        assert!(store.move_card("d", CardLane::Backlog, 0, "en").unwrap());
+        assert!(!store.card_of_mcp_client("d", "c1").unwrap());
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
+    }
+
+    #[test]
+    fn a_run_started_on_a_card_a_client_put_in_todo_belongs_to_whoever_started_it() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        let issue = r#"{"number":7,"title":"Log in","body":"","url":"https://github.com/acme/app/issues/7"}"#;
+        let card = NewCard {
+            id: "c".into(),
+            project_id: "p".into(),
+            title: "Log in".into(),
+            body: String::new(),
+            issue: Some(issue.into()),
+            issue_number: Some(7),
+        };
+        store.add_card(&card).unwrap();
+        assert!(
+            store
+                .move_card_as("c", CardLane::Todo, 0, "en", Some("c1"))
+                .unwrap()
+        );
+        // A run started from outside the board takes the issue's card over.
+        let started = store.add_started_card(&card, "en", &[]).unwrap();
+        assert_eq!(started.as_deref(), Some("c"));
+        assert_eq!(store.card("c").unwrap().queued_by_client, None);
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
+    }
+
+    #[test]
+    fn a_part_is_a_card_of_the_client_that_proposed_the_change() {
+        let (_dir, store) = store();
+        seeded(&store);
+        agreed(&store, &[("first", "q"), ("second", "s")]);
+        let mine = store
+            .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        store
+            .add_mcp_client("c2", "Other", &[8u8; 32], "keel_def", true)
+            .unwrap();
+        store
+            .lock()
+            .execute(
+                "update card set lane = 'started', run_id = 'r' where id = 'plan'",
+                [],
+            )
+            .unwrap();
+        assert!(!store.card_of_mcp_client("second", "c1").unwrap());
+        store
+            .add_mcp_call(&NewMcpCall {
+                client: &mine,
+                tool: "propose_change",
+                args: "{}",
+                error: None,
+                run_id: Some("r"),
+                duration_ms: 1,
+            })
+            .unwrap();
+        for card in ["plan", "first", "second"] {
+            assert!(store.card_of_mcp_client(card, "c1").unwrap(), "{card}");
+            assert!(!store.card_of_mcp_client(card, "c2").unwrap(), "{card}");
+        }
+        // Parts waiting for their turn aren't runs it has open: only the agreement is.
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
+    }
+
+    #[test]
+    fn cards_from_before_were_all_put_in_todo_by_the_person() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        // What the version before left, with a card waiting in Todo and a client.
+        let before = 15;
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..before] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.pragma_update(None, "user_version", before as i64)
+                .unwrap();
+            conn.execute_batch(
+                "insert into project (id, name, path, created_at) values ('p', 'demo', '/demo', 'then');
+                 insert into card (id, project_id, title, lane, position, language, todo_at, created_at)
+                     values ('next', 'p', 'next', 'todo', 0, 'en', 'then', 'then');",
+            )
+            .unwrap();
+            conn.execute(
+                "insert into mcp_client (id, name, token_hash, token_prefix, can_run, created_at)
+                 values ('c1', 'Claude Code', ?1, 'keel_abc', 1, 'then')",
+                [&[7u8; 32][..]],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.card("next").unwrap().queued_by_client, None);
+        assert!(!store.card_of_mcp_client("next", "c1").unwrap());
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
+        assert_eq!(claim(&store).as_deref(), Some("next"));
     }
 
     /// A project next to the seeded one.

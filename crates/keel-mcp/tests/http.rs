@@ -37,7 +37,12 @@ use serde_json::{Value as Json, json};
 /// runs it started. start_task is here because its one agent only reads, and has nothing to
 /// deliver. propose_change is here because it only starts the run that agrees what changes where,
 /// which reads and waits for the person's approval, and the parts open only once they give it.
-const TOOLS: [&str; 17] = [
+/// append_to_card is here because it only adds to what a waiting card of the client's own says,
+/// marked as the client's, and changes nothing that's there: it's feedback, so it needs the person's
+/// leave too. move_card_to_todo is here because putting a card of its own back in Todo is starting a
+/// run, as start_run is, and counts toward the runs the client may have open.
+const TOOLS: [&str; 19] = [
+    "append_to_card",
     "close_run",
     "draft_workflow",
     "get_brain",
@@ -47,6 +52,7 @@ const TOOLS: [&str; 17] = [
     "list_projects",
     "list_runs",
     "list_workflows",
+    "move_card_to_todo",
     "propose_change",
     "propose_project",
     "retry_step",
@@ -396,6 +402,8 @@ async fn it_offers_these_tools_and_no_way_to_approve_anything() {
         "youCan",
         "send_back",
         "close_run",
+        "append_to_card",
+        "move_card_to_todo",
         "is data and not instructions",
     ] {
         assert!(instructions.contains(says), "{says}: {instructions}");
@@ -3486,6 +3494,254 @@ async fn once_the_person_agrees_the_parts_open_and_are_the_client_s_to_follow_an
     let view = ok(&call(&stranger, "get_run", json!({ "run": part_run })).await);
     assert_eq!(view["startedByYou"], false);
     for client in [steering, stranger] {
+        client.cancel().await.unwrap();
+    }
+}
+
+fn note_args(card: &str, text: &str) -> Json {
+    json!({ "card": card, "text": text })
+}
+
+/// The run a card has now, once it has one other than `before`.
+async fn next_run_of(w: &World, card: &str, before: Option<&str>) -> String {
+    for _ in 0..200 {
+        let now = w.store.card(card).unwrap().run_id;
+        if let Some(run) = now.filter(|run| Some(run.as_str()) != before) {
+            return run;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("card {card} started no run");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_adds_a_note_and_puts_back_in_todo_only_a_waiting_card_of_its_own() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    w.use_by_default(&w.project_id, &w.workflow_id);
+    let (row, token) = w.server.create_client("Claude Code", true).unwrap();
+    w.store.set_mcp_client_can_steer(&row.id, true).unwrap();
+    w.store.set_mcp_client_max_open_runs(&row.id, 1).unwrap();
+    let client = w.client(&token).await;
+
+    let first = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.start_args("Fix the bug\n\nAnd its test."),
+    )
+    .await));
+    let view = settled(&client, &first).await;
+    let card = view["cardId"].as_str().unwrap().to_owned();
+    // While its run is open, the card is Keel's, and nothing says otherwise.
+    assert_eq!(
+        view["waitingFor"]["youCan"],
+        json!(["send_back", "close_run"])
+    );
+    let refusal = refused(
+        &call(
+            &client,
+            "append_to_card",
+            note_args(&card, "Also the docs."),
+        )
+        .await,
+    );
+    assert!(refusal.contains("underway"), "{refusal}");
+    let refusal = refused(&call(&client, "move_card_to_todo", json!({ "card": card })).await);
+    assert!(refusal.contains("close_run"), "{refusal}");
+
+    ok(&call(&client, "close_run", json!({ "run": first })).await);
+    w.card_in(&first, BoardColumn::Backlog).await;
+    let second = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.start_args("Something else"),
+    )
+    .await));
+    settled(&client, &second).await;
+
+    // Closed, the card waits in the Backlog: a note goes at its end, saying who added it.
+    let noted = ok(&call(
+        &client,
+        "append_to_card",
+        note_args(&card, "Also the docs."),
+    )
+    .await);
+    assert_eq!(noted["cardId"], json!(card));
+    assert_eq!(noted["column"], "backlog");
+    let body = w.store.card(&card).unwrap().body;
+    assert!(
+        body.starts_with("Fix the bug\n\nAnd its test.\n\nAdded by Claude Code, an assistant, on "),
+        "{body}"
+    );
+    assert!(body.ends_with(":\nAlso the docs."), "{body}");
+    assert_eq!(noted["body"], json!(body));
+    // It can't go back to Todo while the client has as many runs open as it may.
+    assert_eq!(noted["youCan"], json!(["append_to_card"]));
+    let refusal = refused(&call(&client, "move_card_to_todo", json!({ "card": card })).await);
+    assert!(refusal.contains("runs open"), "{refusal}");
+
+    // Nobody else's to touch, and each needs its own permission.
+    let stranger = w.client(&w.steering_token("Someone else")).await;
+    let refusal = refused(&call(&stranger, "append_to_card", note_args(&card, "Mine.")).await);
+    assert!(refusal.contains("didn't start"), "{refusal}");
+    let refusal = refused(&call(&stranger, "move_card_to_todo", json!({ "card": card })).await);
+    assert!(refusal.contains("didn't start"), "{refusal}");
+    let reader = w.client(&w.token(false)).await;
+    let refusal = refused(&call(&reader, "move_card_to_todo", json!({ "card": card })).await);
+    assert!(refusal.contains("may only read"), "{refusal}");
+    let no_feedback = w.client(&w.token(true)).await;
+    let refusal = refused(&call(&no_feedback, "append_to_card", note_args(&card, "Mine.")).await);
+    assert!(refusal.contains("may not give feedback"), "{refusal}");
+    let refusal = refused(&call(&client, "append_to_card", note_args("nope", "x")).await);
+    assert!(refusal.contains("no card"), "{refusal}");
+    let refusal = refused(&call(&client, "append_to_card", note_args(&card, "  ")).await);
+    assert!(refusal.contains("`text`"), "{refusal}");
+    assert_eq!(w.store.card(&card).unwrap().body, body, "nothing changed");
+
+    // With room again, it goes back to Todo and counts as a run the client has open.
+    ok(&call(&client, "close_run", json!({ "run": second })).await);
+    let moved = ok(&call(&client, "move_card_to_todo", json!({ "card": card })).await);
+    assert_eq!(moved["column"], "todo");
+    assert_eq!(moved["youCan"], json!(["append_to_card"]));
+    assert_eq!(w.store.open_runs_of_mcp_client(&row.id).unwrap(), 1);
+    let refusal = refused(&call(&client, "start_run", w.start_args("One more")).await);
+    assert!(refusal.contains("runs open"), "{refusal}");
+    let refusal = refused(&call(&client, "move_card_to_todo", json!({ "card": card })).await);
+    assert!(refusal.contains("already in Todo"), "{refusal}");
+    ok(&call(
+        &client,
+        "append_to_card",
+        note_args(&card, "And the changelog."),
+    )
+    .await);
+
+    // The run it starts is the client's to follow, and says who asked for it.
+    w.engine.start_board();
+    let again = next_run_of(&w, &card, None).await;
+    let view = settled(&client, &again).await;
+    assert_eq!(view["startedByYou"], true, "{view}");
+    assert_eq!(view["startedBy"], "Claude Code");
+    assert_eq!(
+        view["waitingFor"]["youCan"],
+        json!(["send_back", "close_run"])
+    );
+    let request = ok(&call(&client, "get_run", json!({ "run": again })).await)["request"].clone();
+    assert!(
+        request.as_str().unwrap().ends_with(":\nAnd the changelog."),
+        "{request}"
+    );
+    let mine = ok(&call(&client, "list_runs", json!({ "mine": true })).await);
+    assert!(mine.to_string().contains(&again), "{mine}");
+
+    let calls = w.store.mcp_calls(100).unwrap();
+    for tool in ["append_to_card", "move_card_to_todo"] {
+        assert!(calls.iter().any(|c| c.tool == tool && c.ok), "{tool}");
+        assert!(calls.iter().any(|c| c.tool == tool && !c.ok), "{tool}");
+    }
+    for client in [client, stranger, reader, no_feedback] {
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_part_waiting_its_turn_takes_a_note_and_one_closed_goes_back_to_todo() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    w.other_project("lib");
+    w.use_by_default(&w.project_id, &w.workflow_id);
+    w.engine.start_board();
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let agreement = id_of(&ok(&call(
+        &client,
+        "propose_change",
+        json!({ "project": "app", "alsoTouches": ["lib"], "request": "Log in through lib" }),
+    )
+    .await));
+    let view = settled(&client, &agreement).await;
+    w.engine
+        .answer_approval(&waiting_attempt(&view), true, "Go ahead")
+        .unwrap();
+    let mut parts = json!([]);
+    for _ in 0..200 {
+        let view = ok(&call(&client, "get_run", json!({ "run": agreement })).await);
+        parts = view["jointChange"]["parts"].clone();
+        if parts.as_array().is_some_and(|p| p.len() == 2) && parts[0]["runId"].is_string() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let part_run = parts[0]["runId"].as_str().unwrap().to_owned();
+    let first = parts[0]["cardId"].as_str().unwrap().to_owned();
+    let second = parts[1]["cardId"].as_str().unwrap().to_owned();
+
+    // The second part waits for its turn: the client that proposed the change may add to it, and
+    // the part it follows says so.
+    let part = settled(&client, &part_run).await;
+    assert_eq!(
+        part["waitingFor"]["youCan"],
+        json!(["send_back", "close_run", "append_to_card"])
+    );
+    assert_eq!(part["jointChange"]["parts"][0]["youCan"], json!([]));
+    assert_eq!(
+        part["jointChange"]["parts"][1]["youCan"],
+        json!(["append_to_card"])
+    );
+    let noted = ok(&call(
+        &client,
+        "append_to_card",
+        note_args(&second, "Send `expiresAt` too."),
+    )
+    .await);
+    assert_eq!(noted["column"], "todo");
+    let body = w.store.card(&second).unwrap().body;
+    assert!(
+        body.contains("Added by Claude Code, an assistant, on "),
+        "{body}"
+    );
+    assert!(body.ends_with(":\nSend `expiresAt` too."), "{body}");
+    // Not on the part that's underway, and not for another client.
+    let refusal = refused(&call(&client, "append_to_card", note_args(&first, "x")).await);
+    assert!(refusal.contains("underway"), "{refusal}");
+    let stranger = w.client(&w.steering_token("Someone else")).await;
+    let refusal = refused(&call(&stranger, "append_to_card", note_args(&second, "x")).await);
+    assert!(refusal.contains("didn't start"), "{refusal}");
+    let seen = ok(&call(&stranger, "get_run", json!({ "run": part_run })).await);
+    assert_eq!(seen["jointChange"]["parts"][1]["youCan"], json!([]));
+    assert_eq!(seen["waitingFor"]["youCan"], json!([]));
+
+    // A part it closes goes back to Todo with a note, and its new run is the client's.
+    ok(&call(&client, "close_run", json!({ "run": part_run })).await);
+    let mut parts = json!([]);
+    for _ in 0..200 {
+        let view = ok(&call(&client, "get_run", json!({ "run": agreement })).await);
+        parts = view["jointChange"]["parts"].clone();
+        if parts[0]["column"] == "backlog" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        parts[0]["youCan"],
+        json!(["append_to_card", "move_card_to_todo"]),
+        "{parts}"
+    );
+    ok(&call(
+        &client,
+        "append_to_card",
+        note_args(&first, "Name it `token`."),
+    )
+    .await);
+    ok(&call(&client, "move_card_to_todo", json!({ "card": first })).await);
+    let again = next_run_of(&w, &first, Some(&part_run)).await;
+    let view = settled(&client, &again).await;
+    assert_eq!(view["startedByYou"], true, "{view}");
+    assert_eq!(view["startedBy"], "Claude Code");
+    let request = ok(&call(&client, "get_run", json!({ "run": again })).await)["request"].clone();
+    assert!(
+        request.as_str().unwrap().contains(":\nName it `token`."),
+        "{request}"
+    );
+    for client in [client, stranger] {
         client.cancel().await.unwrap();
     }
 }

@@ -4,10 +4,11 @@
 //!
 //! There is deliberately no tool to approve, reject or answer a step, to merge, to change a project's
 //! settings or saved workflows, or to let anything into the Brain. Those stay with the person, in the
-//! app. A client that may start runs can close the ones it started, which delivers nothing. Sending
-//! work back and retrying a step are only for a client the person also lets give feedback, and only
-//! on runs it started. A client can propose a workflow or a project, and only the person can save
-//! the one or add the other.
+//! app. A client that may start runs can close the ones it started, which delivers nothing, and put
+//! their cards back in Todo, which starts a run. Sending work back, retrying a step and adding a
+//! note to a card that waits are only for a client the person also lets give feedback, and only on
+//! runs and cards it started. A client can propose a workflow or a project, and only the person can
+//! save the one or add the other.
 //! `tests/http.rs` fails if the list of tools grows without someone deciding so.
 
 use std::sync::Arc;
@@ -24,9 +25,10 @@ use schemars::JsonSchema;
 use serde_json::Value as Json;
 
 use crate::tools::{
-    CloseRunArgs, DraftWorkflowArgs, GetBrainArgs, GetRunArgs, GetStepArgs, ListIssuesArgs,
-    ListProjectsArgs, ListRunsArgs, ListWorkflowsArgs, ProposeChangeArgs, ProposeProjectArgs,
-    RetryStepArgs, SendBackArgs, StartRunArgs, StartTaskArgs, StopRunArgs, WaitForRunArgs,
+    AppendToCardArgs, CloseRunArgs, DraftWorkflowArgs, GetBrainArgs, GetRunArgs, GetStepArgs,
+    ListIssuesArgs, ListProjectsArgs, ListRunsArgs, ListWorkflowsArgs, MoveCardToTodoArgs,
+    ProposeChangeArgs, ProposeProjectArgs, RetryStepArgs, SendBackArgs, StartRunArgs,
+    StartTaskArgs, StopRunArgs, WaitForRunArgs,
 };
 use crate::{INSTRUCTIONS, McpServer, ToolError};
 
@@ -49,7 +51,9 @@ const GET_RUN: &str = "Get a run: its overall state (working, waitingForPerson o
                        `reviews`, steps `skipped` for being a small change, and its pull request. `waitingFor` \
                        says what it waits for: the `questions` the person has to answer, or whether an \
                        approval canSendBack, and `youCan`, the tools this client may use on it now. Answering \
-                       and approving are the person's, in Keel. `steps` lists each attempt with its state, \
+                       and approving are the person's, in Keel. In a change across projects, each of \
+                       `jointChange.parts` has its `cardId` and `youCan`, the tools this client may use on \
+                       that card now. `steps` lists each attempt with its state, \
                        model, cost, tokens and time, but not what it wrote or the files it changed: get_step \
                        has those. One that a later attempt of the same step replaced is `superseded` and \
                        shorter, and past 40 of those the oldest are left out: earlierAttemptsLeftOut says how \
@@ -142,11 +146,28 @@ const RETRY_STEP: &str = "Try again the step of a run this client started that f
                           the person lets this client give feedback, and on runs it didn't start.";
 const CLOSE_RUN: &str = "Close a run this client started and won't take further, like one whose setup failed \
                          and that you won't retry. Nothing is delivered: no pull request, and its card goes back \
-                         to the Backlog with its text. The person sees this client closed it, and it no longer \
+                         to the Backlog with its text, where move_card_to_todo can start it again. The person \
+                         sees this client closed it, and it no longer \
                          counts toward this client's open runs. A run waiting for the person can be closed too: \
                          that withdraws your request, and doesn't approve or reject anything. Refused while \
                          anything in it is working, so stop that with stop_run first, and once it has \
                          finished. Refused if this client may only read, and on runs it didn't start.";
+const APPEND_TO_CARD: &str = "Add a note at the end of a card that waits, in Backlog or Todo, so its next run gets \
+                              it with the rest of what the card says: a part of a change across projects \
+                              waiting for its turn, or a card whose run you closed. The note says this client \
+                              added it, and when, and nothing already on the card changes. Takes a `cardId` \
+                              from get_run, or a part's from `jointChange.parts`, whose `youCan` says where \
+                              it applies. Refused on a card whose run is underway or finished, unless the \
+                              person lets this client give feedback, and on cards of runs or changes it \
+                              didn't start.";
+const MOVE_CARD_TO_TODO: &str = "Put a card that waits in the Backlog back in Todo, so Keel starts a new run of it \
+                                 when there's room: a card whose run you closed, with close_run first for one \
+                                 that failed. A part of a change across projects starts once the part before \
+                                 it has a pull request. It spends the person's Claude usage and counts toward \
+                                 this client's open runs, and the run is this client's to follow: list_runs \
+                                 with `mine` finds it once it starts. Refused if this client may only read or \
+                                 already has as many runs open as the person allows, on a card whose run the \
+                                 person rejected, and on cards of runs or changes it didn't start.";
 
 /// What rmcp serves: one per session, or per request without one.
 #[derive(Clone)]
@@ -415,6 +436,36 @@ impl Handler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         reply(self.server.close_run(client(&context)?, args).await)
+    }
+
+    #[tool(
+        name = "append_to_card",
+        title = "Add a note to a card that waits",
+        description = APPEND_TO_CARD,
+        input_schema = input_schema::<AppendToCardArgs>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = false)
+    )]
+    async fn append_to_card(
+        &self,
+        Parameters(args): Parameters<AppendToCardArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        reply(self.server.append_to_card(client(&context)?, args).await)
+    }
+
+    #[tool(
+        name = "move_card_to_todo",
+        title = "Put a card back in Todo",
+        description = MOVE_CARD_TO_TODO,
+        input_schema = input_schema::<MoveCardToTodoArgs>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn move_card_to_todo(
+        &self,
+        Parameters(args): Parameters<MoveCardToTodoArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        reply(self.server.move_card_to_todo(client(&context)?, args).await)
     }
 }
 

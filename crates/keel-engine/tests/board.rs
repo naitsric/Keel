@@ -898,6 +898,73 @@ fn a_run_from_outside_that_its_client_closes_keeps_what_its_card_says() {
     assert!(w.github_writes().is_empty(), "{:?}", w.github_writes());
 }
 
+#[test]
+fn a_client_adds_a_note_to_a_card_it_closed_and_puts_it_back_in_todo_as_its_own() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let workflow = answer_step(&w.engine, &w.project_id);
+    w.set_default(&workflow);
+    w.engine.start_board();
+    let client = w
+        .store
+        .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
+        .unwrap();
+    let run = w
+        .engine
+        .start_run_on_board(outside_run(
+            &w,
+            steps_of(&w, &workflow),
+            "Add a triple function\n\nWith its test.",
+        ))
+        .unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    let approval = w.wait_approval(&run);
+
+    // While its run is open, the card is Keel's.
+    let note = w
+        .engine
+        .card_append_by(&card, "And a double one.", "Claude Code", "en");
+    assert!(matches!(note, Err(Error::InvalidState)), "{note:?}");
+    let moved = w.engine.card_queue_by(&card, "en", &client.id);
+    assert!(matches!(moved, Err(Error::InvalidState)), "{moved:?}");
+
+    w.engine.abandon_by(&approval, "Claude Code").unwrap();
+    w.wait_column(&card, BoardColumn::Backlog);
+    w.engine
+        .card_append_by(&card, "  And a double one.\n", "Claude Code", "en")
+        .unwrap();
+    let body = w.card(&card).body;
+    let (before, note) = body.rsplit_once("\n\n").unwrap();
+    assert_eq!(before, "Add a triple function\n\nWith its test.");
+    assert!(
+        note.starts_with("Added by Claude Code, an assistant, on "),
+        "{note}"
+    );
+    assert!(note.ends_with(":\nAnd a double one."), "{note}");
+
+    // Back in Todo, it starts a new run that says which client asked for it.
+    w.engine.card_queue_by(&card, "es", &client.id).unwrap();
+    let again = w.wait_column(&card, BoardColumn::HumanReview);
+    let again = w.store.run(again.run_id.as_ref().unwrap()).unwrap();
+    assert_ne!(again.id, run);
+    assert_eq!(again.started_by.as_deref(), Some("Claude Code"));
+    assert_eq!(again.language, "es");
+    assert!(
+        again.request.ends_with("And a double one."),
+        "{}",
+        again.request
+    );
+    assert!(w.store.run_started_by_mcp_client(&again.id, "c1").unwrap());
+
+    // A card already in Todo, or one the person put there, isn't moved again by a client.
+    let queued = w.new_card("Something else");
+    w.engine
+        .card_move(&queued, CardLane::Todo, usize::MAX, "en")
+        .unwrap();
+    let refused = w.engine.card_queue_by(&queued, "en", &client.id);
+    assert!(matches!(refused, Err(Error::InvalidState)), "{refused:?}");
+}
+
 // Criterion 3: only as many as the limit work at once, and the rest enter in order.
 
 #[test]

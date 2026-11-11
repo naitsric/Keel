@@ -158,6 +158,17 @@ fn issue_of(card: &Card) -> Option<Issue> {
     serde_json::from_value(card.issue.clone()?).ok()
 }
 
+/// A client's note as it goes on a card: who added it, that it's an assistant and not the person,
+/// and when, so neither the person nor an agent takes it for the person's own words.
+fn note_by(text: &str, by: &str, language: &str, at: chrono::NaiveDateTime) -> String {
+    let (date, time) = (at.format("%Y-%m-%d"), at.format("%H:%M"));
+    if language.starts_with("es") {
+        format!("Agregado por {by}, un asistente, el {date} a las {time}:\n{text}")
+    } else {
+        format!("Added by {by}, an assistant, on {date} at {time}:\n{text}")
+    }
+}
+
 impl Engine {
     pub fn board(&self, project_id: &str) -> Result<Board> {
         let store = &self.inner.store;
@@ -235,6 +246,44 @@ impl Engine {
         Ok(())
     }
 
+    /// Adds a note from a client over MCP at the end of a card that waits, saying which client and
+    /// when, in the person's language. What the card says stays as it is. `InvalidState` once Keel
+    /// has the card, or for a note with nothing in it.
+    pub fn card_append_by(
+        &self,
+        card_id: &str,
+        text: &str,
+        by: &str,
+        language: &str,
+    ) -> Result<()> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(Error::InvalidState);
+        }
+        let note = note_by(text, by, language, chrono::Local::now().naive_local());
+        if !self.inner.store.append_to_card(card_id, &note)? {
+            return Err(Error::InvalidState);
+        }
+        self.inner.changed("");
+        Ok(())
+    }
+
+    /// A client over MCP, by its id, puts a card that waits in the Backlog at the bottom of Todo,
+    /// as a person would. The run it starts is that client's, and says so. `InvalidState` for a
+    /// card anywhere else, Todo included.
+    pub fn card_queue_by(&self, card_id: &str, language: &str, client_id: &str) -> Result<()> {
+        if self.inner.store.card(card_id)?.column() != BoardColumn::Backlog {
+            return Err(Error::InvalidState);
+        }
+        self.card_move_as(
+            card_id,
+            CardLane::Todo,
+            usize::MAX,
+            language,
+            Some(client_id),
+        )
+    }
+
     /// Moves a card within Backlog and Todo. Entering Todo is what asks for it to start, so that's
     /// when a project that could never run it says so, with the card still where it was. A session
     /// that can't work isn't a reason to refuse: the card waits in Todo for it.
@@ -244,6 +293,17 @@ impl Engine {
         lane: CardLane,
         index: usize,
         language: &str,
+    ) -> Result<()> {
+        self.card_move_as(card_id, lane, index, language, None)
+    }
+
+    fn card_move_as(
+        &self,
+        card_id: &str,
+        lane: CardLane,
+        index: usize,
+        language: &str,
+        by: Option<&str>,
     ) -> Result<()> {
         let store = &self.inner.store;
         let card = store.card(card_id)?;
@@ -260,7 +320,7 @@ impl Engine {
             };
             self.check_can_run(&project, &workflow)?;
         }
-        if !store.move_card(card_id, lane, index, language)? {
+        if !store.move_card_as(card_id, lane, index, language, by)? {
             return Err(Error::InvalidState);
         }
         self.inner.changed("");
@@ -581,6 +641,12 @@ impl Engine {
                 format!("{}\n\n{}", card.title, card.body),
             ),
         };
+        // A client over MCP that put the card in Todo is who the run says started it, as when it
+        // starts one itself.
+        let started_by = match &card.queued_by_client {
+            Some(client) => Some(self.inner.store.mcp_client(client)?.name),
+            None => None,
+        };
         Ok(StartRun {
             project_id: project.id,
             title: Some(title),
@@ -589,7 +655,7 @@ impl Engine {
             workflow,
             language,
             source_issue: issue,
-            started_by: None,
+            started_by,
         })
     }
 
@@ -643,6 +709,22 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Done.","nu
         }
         assert!(wake.wait(Duration::from_millis(1)));
         assert!(!wake.wait(Duration::from_millis(1)), "that was all of them");
+    }
+
+    #[test]
+    fn a_note_says_which_assistant_added_it_and_when_in_the_person_s_language() {
+        let at = chrono::NaiveDate::from_ymd_opt(2026, 11, 11)
+            .unwrap()
+            .and_hms_opt(9, 3, 0)
+            .unwrap();
+        assert_eq!(
+            note_by("Add the field.", "Claude Code", "en", at),
+            "Added by Claude Code, an assistant, on 2026-11-11 at 09:03:\nAdd the field."
+        );
+        assert_eq!(
+            note_by("Agrega el campo.", "Claude Code", "es", at),
+            "Agregado por Claude Code, un asistente, el 2026-11-11 a las 09:03:\nAgrega el campo."
+        );
     }
 
     #[test]
