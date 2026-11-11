@@ -154,7 +154,7 @@ const SPEC_PROMPT_EN: &str = r#"Work out what this request will change, without 
 - criteria: up to 7, with ids C1, C2 and so on. Each says when something happens and what must then be true, so that a test could prove it. Its `when` and `then` together take up to 170 characters. If the request is about how something looks, at least one says what a person sees on screen, such as that in a wide window the content stays centered, even if only a person can check it.
 - changes: what this adds, changes or removes in what people can see today.
 - limits: what must not change.
-- decided: up to 5, each up to 120 characters: what you decided on your own because it wasn't worth asking.
+- decided: up to 5, each up to 120 characters: what you decided on your own because it wasn't worth asking. If the request itself decides one in so many words, add `quote` with those words, copied exactly.
 - questions: up to 3, with ids Q1, Q2 and so on. Usually none.
 
 Ask only when all three hold: the answer changes what gets built, it can't be found in the code, in what Keel knows about this project or in earlier decisions, and being wrong costs more than asking. Otherwise decide, and put it in `decided`. Technical uncertainty is yours to investigate, not something to ask a person.
@@ -179,7 +179,7 @@ const SPEC_PROMPT_ES: &str = r#"Averigua qué va a cambiar este pedido, sin edit
 - criteria: hasta 7, con ids C1, C2 y así. Cada uno dice cuándo pasa algo y qué debe ser cierto entonces, de modo que una prueba lo pueda demostrar. Su `when` y su `then` juntos llegan hasta 170 caracteres. Si el pedido habla de cómo se ve algo, al menos uno dice lo que una persona ve en pantalla, como que en una ventana ancha el contenido queda centrado, aunque solo una persona pueda comprobarlo.
 - changes: lo que esto agrega, cambia o quita en lo que la gente puede ver hoy.
 - limits: lo que no debe cambiar.
-- decided: hasta 5, cada uno hasta 120 caracteres: lo que decidiste por tu cuenta porque no valía la pena preguntarlo.
+- decided: hasta 5, cada uno hasta 120 caracteres: lo que decidiste por tu cuenta porque no valía la pena preguntarlo. Si el pedido mismo decide uno de forma explícita, agrega `quote` con esas palabras, copiadas tal cual.
 - questions: hasta 3, con ids Q1, Q2 y así. Normalmente ninguna.
 
 Pregunta solo cuando se cumplan las tres cosas: la respuesta cambia lo que se construye, no se puede averiguar en el código, en lo que Keel sabe de este proyecto ni en decisiones anteriores, y equivocarse cuesta más que preguntar. Si no, decide y ponlo en `decided`. La incertidumbre técnica te toca investigarla a ti, no preguntársela a una persona.
@@ -587,6 +587,7 @@ mod tests {
                     "recommend none: never make up a value",
                     "Bad:",
                     "Good: \"If `whole` is 0, what should happen?\"",
+                    "If the request itself decides one in so many words, add `quote` with those words, copied exactly.",
                     "{{request}}",
                 ],
             ),
@@ -599,6 +600,7 @@ mod tests {
                     "no recomiendes ninguna: nunca inventes un valor",
                     "Mal:",
                     "Bien: \"Si `whole` es 0, ¿qué debe pasar?\" con \"Mostrar error, como hoy\"",
+                    "Si el pedido mismo decide uno de forma explícita, agrega `quote` con esas palabras, copiadas tal cual.",
                     "{{request}}",
                 ],
             ),

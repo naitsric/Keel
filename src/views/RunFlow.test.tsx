@@ -711,6 +711,16 @@ describe("the run page's flow", () => {
       expect(page()).not.toContain('"criteria"');
     });
 
+    it("says what the request already decided", async () => {
+      const decided = [{ text: "Keeps the rounding" }, { text: "Counts a thread its author resolves", taken: "request", quote: "it counts for now" }];
+      attempts = [specifier("succeeded", { output: { ...output, decided } as unknown as Attempt["output"] }), attempt("builder", "running")];
+      await open();
+      await choose(node("spec"));
+      await choose(radio("What it understood"));
+      expect(page()).toContain("Counts a thread its author resolvesFrom the request");
+      expect(page().match(/From the request/g)).toHaveLength(1);
+    });
+
     it("says it gave its answer in the activity, instead of printing it", async () => {
       const spec = specifier("succeeded");
       attempts = [spec, attempt("builder", "running")];

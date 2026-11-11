@@ -397,6 +397,7 @@
     "decidedChange": "Change",
     "decidedChangeThis": "Change: {{text}}",
     "decidedYouChose": "You chose this.",
+    "decidedFromRequest": "From the request",
     "decidedKeelTook": "The rounds of questions ran out, so Keel stopped asking and took the recommended option.",
     "decidedQuestioned": "A review questions this, and it's yours to decide: {{why}}",
     "decidedQuestionedElsewhere": "A review questions “{{decided}}”, and it's yours to decide: {{why}}",

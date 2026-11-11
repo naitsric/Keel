@@ -48,6 +48,7 @@ export function SpecView({ spec }: { spec: SpecOutput }) {
           <>
             {decided.text}
             {decided.taken === "person" && <span className="block text-[11.5px] text-subtle">{t("run.decidedYouChose")}</span>}
+            {decided.taken === "request" && <span className="block text-[11.5px] text-subtle">{t("run.decidedFromRequest")}</span>}
             {decided.taken === "roundsLimit" && <span className="block text-[11.5px] text-warning">{t("run.decidedKeelTook")}</span>}
           </>
         ))}

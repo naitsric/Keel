@@ -33,7 +33,7 @@ pub const MAX_QUESTION_ROUNDS: usize = 2;
 /// `size` and `risks` are a prediction, for a workflow with steps that depend on the change. The schema
 /// says what small means as well as the prompt, since any specifier gets asked for it, whatever its
 /// prompt says. Its words keep clear of those the test fakes tell schemas apart by.
-pub const SPEC_SCHEMA: &str = r#"{"type":"object","properties":{"size":{"type":"string","enum":["small","normal"],"description":"small only if it is understood with nothing left to ask, its risk is contained, and someone could pick the work up from just the request and the change. How much code it touches does not decide this: one changed line in permissions is not small. If in doubt, normal."},"risks":{"type":"array","items":{"type":"string","enum":["security","money","personalData","irreversibleData","sharedContracts","concurrency","environment","noRegressionTest"]}},"summary":{"type":"string"},"criteria":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"when":{"type":"string"},"then":{"type":"string"}},"required":["id","when","then"],"additionalProperties":false}},"changes":{"type":"array","items":{"type":"object","properties":{"kind":{"type":"string","enum":["adds","changes","removes"]},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}},"limits":{"type":"array","items":{"type":"string"}},"decided":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}},"questions":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"recommended":{"type":"boolean","description":"true for one option at most, and only when the code or the request backs it up. When only the person can know, such as an amount, a date or a business rule, none is: never make up a value."}},"required":["label","recommended"],"additionalProperties":false}}},"required":["id","text","options"],"additionalProperties":false}}},"required":["size","risks","summary","criteria","changes","limits","decided","questions"],"additionalProperties":false}"#;
+pub const SPEC_SCHEMA: &str = r#"{"type":"object","properties":{"size":{"type":"string","enum":["small","normal"],"description":"small only if it is understood with nothing left to ask, its risk is contained, and someone could pick the work up from just the request and the change. How much code it touches does not decide this: one changed line in permissions is not small. If in doubt, normal."},"risks":{"type":"array","items":{"type":"string","enum":["security","money","personalData","irreversibleData","sharedContracts","concurrency","environment","noRegressionTest"]}},"summary":{"type":"string"},"criteria":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"when":{"type":"string"},"then":{"type":"string"}},"required":["id","when","then"],"additionalProperties":false}},"changes":{"type":"array","items":{"type":"object","properties":{"kind":{"type":"string","enum":["adds","changes","removes"]},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}},"limits":{"type":"array","items":{"type":"string"}},"decided":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"quote":{"type":"string","description":"Only if the request itself settles it in so many words: those words, copied exactly."}},"required":["text"],"additionalProperties":false}},"questions":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"recommended":{"type":"boolean","description":"true for one option at most, and only when the code or the request backs it up. When only the person can know, such as an amount, a date or a business rule, none is: never make up a value."}},"required":["label","recommended"],"additionalProperties":false}}},"required":["id","text","options"],"additionalProperties":false}}},"required":["size","risks","summary","criteria","changes","limits","decided","questions"],"additionalProperties":false}"#;
 
 /// How big a specifier expects a change to be. Only ever a claim: it can stop a run from counting as
 /// small, and never makes one so by itself.
@@ -120,7 +120,8 @@ pub struct Change {
     pub text: String,
 }
 
-/// Who settled something that was once a question. Only the engine writes this.
+/// Who settled something that was once a question, or that the request settled. Only the engine
+/// writes this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Taken {
@@ -128,6 +129,8 @@ pub enum Taken {
     Person,
     /// It would have asked a third time, so Keel took the recommended option.
     RoundsLimit,
+    /// The person wrote it in the request: its `quote` is there, word for word.
+    Request,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -135,6 +138,10 @@ pub struct Decided {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taken: Option<Taken>,
+    /// The words of the request that settle it, as the specifier quoted them. Kept only if the
+    /// request has them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -234,6 +241,11 @@ impl Spec {
             tidy(&mut decided.text);
             // Only the engine says who settled something.
             decided.taken = None;
+            decided.quote = decided
+                .quote
+                .as_deref()
+                .map(one_line)
+                .filter(|quote| !quote.is_empty());
         }
         for question in &mut self.questions {
             tidy(&mut question.id);
@@ -437,6 +449,21 @@ impl Spec {
         serde_json::to_value(self).is_ok_and(|value| any_string(&value))
     }
 
+    /// What the specifier quoted from the request is the person's, if the request says it word for
+    /// word, however it's spaced or broken into lines. A quote it doesn't have goes, and what it
+    /// quoted for stays the specification's own.
+    fn take_from_request(&mut self, request: &str) {
+        let request = one_line(request);
+        for decided in &mut self.decided {
+            match &decided.quote {
+                Some(quote) if request.contains(quote.as_str()) => {
+                    decided.taken = Some(Taken::Request);
+                }
+                _ => decided.quote = None,
+            }
+        }
+    }
+
     /// Whether every question recommends an option, so that Keel could take them all.
     fn all_recommend(&self) -> bool {
         self.questions
@@ -456,6 +483,7 @@ impl Spec {
             self.decided.push(Decided {
                 text: decided_line(&question.text, &option.label),
                 taken: Some(taken),
+                quote: None,
             });
             settled.push(json!({
                 "question": question.id,
@@ -643,34 +671,50 @@ pub enum Verdict {
 /// Once the rounds run out, Keel only answers for the person when every question recommends an
 /// option. A question with none goes to the person once more, and asking past that stops the step,
 /// so it can't go on asking forever and Keel never makes up an answer.
-pub fn judge(output: Option<&Value>, after_correction: bool, rounds_answered: usize) -> Verdict {
-    judge_for(output, after_correction, rounds_answered, None)
+///
+/// `request` is the run's, which is what a decision can quote to count as the person's.
+pub fn judge(
+    output: Option<&Value>,
+    request: &str,
+    after_correction: bool,
+    rounds_answered: usize,
+) -> Verdict {
+    judge_for(output, request, after_correction, rounds_answered, None)
 }
 
 /// [`judge`] where a change across these projects is agreed. Its parts are checked before anything
 /// is asked: once a person answers with every recommended option, nothing judges it again.
 pub fn judge_agreement(
     output: Option<&Value>,
+    request: &str,
     after_correction: bool,
     rounds_answered: usize,
     projects: &[String],
 ) -> Verdict {
-    judge_for(output, after_correction, rounds_answered, Some(projects))
+    judge_for(
+        output,
+        request,
+        after_correction,
+        rounds_answered,
+        Some(projects),
+    )
 }
 
 fn judge_for(
     output: Option<&Value>,
+    request: &str,
     after_correction: bool,
     rounds_answered: usize,
     projects: Option<&[String]>,
 ) -> Verdict {
-    let spec = match output.map(|output| validate_spec_for(output, projects)) {
+    let mut spec = match output.map(|output| validate_spec_for(output, projects)) {
         Some(Ok(spec)) => spec,
         Some(Err(problems)) if after_correction => return Verdict::Stop(problems),
         Some(Err(problems)) => return Verdict::Correct(problems),
         None if after_correction => return Verdict::Stop(vec![SpecProblem::Unreadable]),
         None => return Verdict::Correct(vec![SpecProblem::Unreadable]),
     };
+    spec.take_from_request(request);
     if spec.questions.is_empty() {
         return Verdict::Ready(json!(spec));
     }
@@ -689,7 +733,6 @@ fn judge_for(
             rounds: rounds_answered,
         };
     }
-    let mut spec = spec;
     let settled = spec.take_recommended(Taken::RoundsLimit);
     Verdict::TookRecommended {
         output: json!(spec),
@@ -970,6 +1013,11 @@ mod tests {
 
     fn validate_spec(output: &Value) -> Result<Spec, Vec<SpecProblem>> {
         validate_spec_for(output, None)
+    }
+
+    /// [`super::judge`] for a request with nothing in it a spec could quote.
+    fn judge(output: Option<&Value>, after_correction: bool, rounds_answered: usize) -> Verdict {
+        super::judge(output, "", after_correction, rounds_answered)
     }
 
     fn valid() -> Value {
@@ -1331,6 +1379,63 @@ mod tests {
         assert_eq!(kept.get("answered"), None);
     }
 
+    const ASKED: &str = "Count the threads that got fixed.\n\nDecisions already made (don't ask them):\n6. If the author resolves their own\n   critical thread, it counts for now.";
+
+    fn quoting(decided: Value) -> Spec {
+        let Verdict::Ready(kept) = super::judge(Some(&with("decided", decided)), ASKED, false, 0)
+        else {
+            panic!()
+        };
+        serde_json::from_value(kept).unwrap()
+    }
+
+    #[test]
+    fn what_the_request_already_decided_is_the_persons_when_quoted_word_for_word() {
+        let spec = quoting(json!([
+            // Spaced and broken into lines otherwise than in the request, they're still its words.
+            { "text": "A critical thread its author resolves counts", "quote": "If the author resolves their own critical thread,\n it counts  for now." },
+            { "text": "Keeps the rounding as it is" },
+        ]));
+        assert_eq!(spec.decided[0].taken, Some(Taken::Request));
+        assert_eq!(
+            spec.decided[0].quote.as_deref(),
+            Some("If the author resolves their own critical thread, it counts for now.")
+        );
+        assert_eq!(spec.decided[1].taken, None, "the spec's own");
+        let kept = json!(spec);
+        assert_eq!(kept["decided"][0]["taken"], "request");
+        assert_eq!(kept["decided"][1].get("quote"), None);
+    }
+
+    #[test]
+    fn a_quote_that_is_not_in_the_request_word_for_word_is_dropped() {
+        let spec = quoting(json!([
+            // Close, but not what the request says.
+            { "text": "a", "quote": "If the author resolves their own critical thread, it always counts." },
+            { "text": "b", "quote": "if the author resolves their own critical thread" },
+            // Nothing quoted is in every request.
+            { "text": "c", "quote": " \n " },
+            // And an agent can't say so without quoting it.
+            { "text": "d", "taken": "request" },
+        ]));
+        for decided in &spec.decided {
+            assert_eq!(
+                (decided.taken, decided.quote.as_deref()),
+                (None, None),
+                "{}",
+                decided.text
+            );
+        }
+    }
+
+    #[test]
+    fn a_spec_kept_before_quotes_reads_and_is_kept_as_it_was() {
+        let decided = json!([{ "text": "Keeps the rounding" }, { "text": "If 0? Show an error", "taken": "person" }]);
+        let spec: Spec = serde_json::from_value(with("decided", decided.clone())).unwrap();
+        assert_eq!(spec.decided[1].taken, Some(Taken::Person));
+        assert_eq!(json!(spec)["decided"], decided);
+    }
+
     #[test]
     fn the_verdict_goes_by_the_limits_and_the_rounds_and_these_are_separate() {
         let asks = with(
@@ -1578,6 +1683,10 @@ mod tests {
                 "noRegressionTest"
             ])
         );
+        // A quote of the request is only there when it decides something.
+        let decided = &schema["properties"]["decided"]["items"];
+        assert_eq!(decided["required"], json!(["text"]));
+        assert_eq!(decided["properties"]["quote"]["type"], "string");
     }
 
     #[test]
@@ -1637,7 +1746,7 @@ mod tests {
 
     fn judged(output: &Value) -> Verdict {
         let projects = PROJECTS.map(String::from);
-        judge_agreement(Some(output), false, 0, &projects)
+        judge_agreement(Some(output), "", false, 0, &projects)
     }
 
     #[test]

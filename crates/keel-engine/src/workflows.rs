@@ -569,11 +569,11 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
             "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{{{{answers}}}}\n\n{{{{rework}}}}\n\n{}\n{{{{diff}}}}",
             if es {
                 format!(
-                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque. No cuestiones lo que eligió una persona: una decisión cuyo `taken` es `person`, o lo que la persona respondió. Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Una decisión que no se sostenga con el cambio ya hecho también lo es: cítala como la dice `decided`, con el archivo y la línea donde se ve, si los hay. Si no hay, el veredicto es approved. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
+                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque. No cuestiones lo que eligió una persona: una decisión cuyo `taken` es `person`, o lo que la persona respondió. Tampoco una cuyo `taken` es `request`, que ya decidió el pedido. Sí puedes decir que el cambio no las cumple. Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Una decisión que no se sostenga con el cambio ya hecho también lo es: cítala como la dice `decided`, con el archivo y la línea donde se ve, si los hay. Si no hay, el veredicto es approved. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
                 )
             } else {
                 format!(
-                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Also question what the specification decided on its own, in `decided`, where it touches your focus. Don't question what a person chose: a decision whose `taken` is `person`, or what the person answered. Report only real problems in this change, each with its file and line. A decision that doesn't hold up now that the change is made is one too: quote it as `decided` says it, with the file and line where it shows, if any. If there are none, the verdict is approved. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
+                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Also question what the specification decided on its own, in `decided`, where it touches your focus. Don't question what a person chose: a decision whose `taken` is `person`, or what the person answered. Nor one whose `taken` is `request`, which the request already decided. You can still say the change doesn't follow them. Report only real problems in this change, each with its file and line. A decision that doesn't hold up now that the change is made is one too: quote it as `decided` says it, with the file and line where it shows, if any. If there are none, the verdict is approved. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
                 )
             },
             text("Specification:", "Especificación:"),
@@ -594,8 +594,8 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
         text("Specification:", "Especificación:"),
         // What the specification decided on its own is the person's to settle, not the builder's.
         text(
-            "A finding that questions what the specification decided on its own, in `decided`, is not a reason for rework, even if it's right: a person decides that, and can change it at the approval. Put each one in `questioned`, quoting the decision as `decided` says it, with the `number` it has there, and saying why it doesn't hold, mention them in reasons, and leave them out of instructions.",
-            "Un hallazgo que cuestiona lo que la especificación decidió por su cuenta, en `decided`, no es motivo de rework, aunque tenga razón: eso lo decide una persona, que puede cambiarlo en la aprobación. Pon cada uno en `questioned`, citando la decisión como la dice `decided`, con el `number` que tiene ahí, y diciendo por qué no se sostiene, menciónalos en reasons y déjalos fuera de instructions.",
+            "A finding that questions what the specification decided on its own, in `decided`, is not a reason for rework, even if it's right: a person decides that, and can change it at the approval. Put each one in `questioned`, quoting the decision as `decided` says it, with the `number` it has there, and saying why it doesn't hold, mention them in reasons, and leave them out of instructions. Don't question a decision whose `taken` is `person` or `request`: the person made it. Discard a finding that questions it, but not one that says the change doesn't follow it.",
+            "Un hallazgo que cuestiona lo que la especificación decidió por su cuenta, en `decided`, no es motivo de rework, aunque tenga razón: eso lo decide una persona, que puede cambiarlo en la aprobación. Pon cada uno en `questioned`, citando la decisión como la dice `decided`, con el `number` que tiene ahí, y diciendo por qué no se sostiene, menciónalos en reasons y déjalos fuera de instructions. No cuestiones una decisión cuyo `taken` es `person` o `request`: la tomó la persona. Descarta un hallazgo que la cuestione, pero no uno que diga que el cambio no la cumple.",
         ),
     );
 
@@ -1115,6 +1115,49 @@ mod tests {
                 .unwrap()
                 .contains("A person decides these at the approval")
         );
+    }
+
+    #[test]
+    fn what_the_request_already_decided_is_left_alone_like_what_a_person_chose() {
+        for (language, reviewer, approver) in [
+            (
+                "en",
+                "Nor one whose `taken` is `request`, which the request already decided. You can still say the change doesn't follow them.",
+                "Don't question a decision whose `taken` is `person` or `request`: the person made it. Discard a finding that questions it, but not one that says the change doesn't follow it.",
+            ),
+            (
+                "es",
+                "Tampoco una cuyo `taken` es `request`, que ya decidió el pedido. Sí puedes decir que el cambio no las cumple.",
+                "No cuestiones una decisión cuyo `taken` es `person` o `request`: la tomó la persona. Descarta un hallazgo que la cuestione, pero no uno que diga que el cambio no la cumple.",
+            ),
+        ] {
+            let (mut reviewers, mut approvers) = (0, 0);
+            for step in builtin(language, None)
+                .iter()
+                .flat_map(|workflow| workflow.steps.iter())
+            {
+                let specs: Vec<&StepSpec> = match step {
+                    WorkflowStep::Agent(spec) => vec![spec],
+                    WorkflowStep::Parallel { steps, .. } => steps.iter().collect(),
+                    _ => Vec::new(),
+                };
+                for spec in specs {
+                    let told = match spec.role {
+                        StepRole::Reviewer => {
+                            reviewers += 1;
+                            reviewer
+                        }
+                        StepRole::Approver { .. } => {
+                            approvers += 1;
+                            approver
+                        }
+                        _ => continue,
+                    };
+                    assert!(spec.prompt.contains(told), "{language} {}", spec.id);
+                }
+            }
+            assert_eq!((reviewers, approvers), (8, 2), "{language}");
+        }
     }
 
     #[test]

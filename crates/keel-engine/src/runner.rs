@@ -1331,11 +1331,21 @@ impl Inner {
             })
             .count();
         let output = this.and_then(|attempt| attempt.output.as_ref());
+        // With no request to read, nothing quoted from it counts as the person's.
+        let request = self
+            .store
+            .run(&m.run_id)
+            .map(|run| run.request)
+            .unwrap_or_default();
         match self.agreement(&m.run_id).ok().flatten() {
-            Some(agreement) => {
-                specs::judge_agreement(output, fixing_a_limit, rounds_answered, &agreement.names())
-            }
-            None => specs::judge(output, fixing_a_limit, rounds_answered),
+            Some(agreement) => specs::judge_agreement(
+                output,
+                &request,
+                fixing_a_limit,
+                rounds_answered,
+                &agreement.names(),
+            ),
+            None => specs::judge(output, &request, fixing_a_limit, rounds_answered),
         }
     }
 

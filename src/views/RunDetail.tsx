@@ -505,6 +505,7 @@ function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, o
             )}
           </div>
           {item.taken === "person" && <p className="text-[11.5px] text-subtle">{t("run.decidedYouChose")}</p>}
+          {item.taken === "request" && <p className="text-[11.5px] text-subtle">{t("run.decidedFromRequest")}</p>}
           {item.taken === "roundsLimit" && <p className="text-[11.5px] text-warning">{t("run.decidedKeelTook")}</p>}
           {questioned
             .filter((_, at) => lines[at].includes(index))

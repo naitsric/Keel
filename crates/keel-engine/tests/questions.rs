@@ -290,11 +290,15 @@ fn remembered(mut answer: Answer) -> Answer {
 
 impl World {
     fn start(&self, steps: Vec<WorkflowStep>) -> String {
+        self.start_asking("THE-REQUEST", steps)
+    }
+
+    fn start_asking(&self, request: &str, steps: Vec<WorkflowStep>) -> String {
         self.engine
             .start_run(StartRun {
                 project_id: self.project_id.clone(),
                 title: None,
-                request: "THE-REQUEST".into(),
+                request: request.into(),
                 workflow: steps,
                 language: "en".into(),
                 source_issue: None,
@@ -513,6 +517,58 @@ fn using_the_recommended_options_runs_no_agent_and_keeps_what_it_wrote() {
     assert!(
         built.contains("- If `whole` is 0, what should happen? Show an error"),
         "{built}"
+    );
+}
+
+/// The prompt a built-in reviewer gets, as the step of a worker that reads only.
+fn built_in_review(w: &World) -> WorkflowStep {
+    let full = w
+        .engine
+        .workflows(&w.project_id, "en")
+        .unwrap()
+        .into_iter()
+        .find(|workflow| workflow.id == "builtin:full")
+        .unwrap();
+    let prompt = full
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            WorkflowStep::Parallel { steps, .. } => steps
+                .iter()
+                .find(|spec| spec.role == StepRole::Reviewer)
+                .map(|spec| spec.prompt.clone()),
+            _ => None,
+        })
+        .unwrap();
+    agent("review", ToolProfile::ReadOnly, StepRole::Worker, &prompt)
+}
+
+#[test]
+fn what_the_request_already_decided_reaches_the_reviewers_as_the_persons() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let mut output = good();
+    output["decided"] = json!([
+        { "text": "A critical thread its author resolves counts", "quote": "If the author resolves their own critical thread, it counts for now." },
+        { "text": "Logs nothing new", "quote": "Log nothing new." },
+    ]);
+    w.answers(&[output]);
+    let review = built_in_review(&w);
+    let run = w.start_asking(
+        "Count the threads that got fixed.\n\nDecisions already made (don't ask them):\n6. If the author resolves their own\n   critical thread, it counts for now.",
+        vec![specifier(), builder(), check(), review, human()],
+    );
+    w.wait_for(&run, "human", AttemptState::WaitingApproval);
+
+    let decided = &w.step(&run, "spec").output.unwrap()["decided"];
+    assert_eq!(decided[0]["taken"], "request");
+    assert_eq!(decided[1].get("taken"), None, "the request doesn't say it");
+    assert_eq!(decided[1].get("quote"), None);
+    let reviewed = w.step(&run, "review").prompt;
+    assert!(reviewed.contains(r#""taken":"request""#), "{reviewed}");
+    assert!(
+        reviewed.contains("Nor one whose `taken` is `request`"),
+        "{reviewed}"
     );
 }
 

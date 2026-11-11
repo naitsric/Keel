@@ -397,6 +397,7 @@
     "decidedChange": "Cambiar",
     "decidedChangeThis": "Cambiar: {{text}}",
     "decidedYouChose": "Esto lo elegiste tú.",
+    "decidedFromRequest": "Del pedido",
     "decidedKeelTook": "Se acabaron las rondas de preguntas, así que Keel dejó de preguntar y tomó la opción recomendada.",
     "decidedQuestioned": "Una revisión cuestiona esto, y te toca decidirlo: {{why}}",
     "decidedQuestionedElsewhere": "Una revisión cuestiona “{{decided}}”, y te toca decidirlo: {{why}}",
