@@ -201,10 +201,8 @@ mod tests {
     }
 
     fn fake_claude(dir: &Path, script: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let path = dir.join("claude");
-        std::fs::write(&path, format!("#!/bin/bash\n{script}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testing::write_script(&path, &format!("#!/bin/bash\n{script}\n")).unwrap();
         path
     }
 

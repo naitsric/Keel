@@ -1,7 +1,6 @@
 //! Parallel reviews, the approver, and rounds of rework, against a fake `claude` that answers as
 //! each step's prompt asks. The structured answers have the shape M0 captured from the real one.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -103,8 +102,7 @@ fn world() -> World {
     std::fs::create_dir(&bin).unwrap();
     std::fs::create_dir(&log).unwrap();
     let path = bin.join("claude");
-    std::fs::write(&path, fake(&log, &dir.path().join("answers"))).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    keel_harness::testing::write_script(&path, &fake(&log, &dir.path().join("answers"))).unwrap();
     let repo = dir.path().join("app");
     std::fs::create_dir(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
