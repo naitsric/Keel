@@ -139,7 +139,7 @@ pub struct GetStepArgs {
     pub attempt: String,
     /// One part to read whole, in pieces, instead of the attempt: `diff`, `files`, every file it
     /// changed, `prompt`, `answer`, or what a setup or check printed, `stdout` or `stderr`.
-    /// `leftOut` names the ones too long to come with the attempt.
+    /// `leftOut` names the ones that don't come with the attempt.
     #[serde(default)]
     pub part: Option<StepPart>,
     /// Only this file's diff: a `path` from filesChanged. It goes with `part` diff, or alone.
@@ -643,7 +643,7 @@ impl McpServer {
                 loop {
                     let (row, attempts) = server.run_with_attempts(&run)?;
                     if run_state(&row, &attempts).0 != "working" || Instant::now() >= deadline {
-                        let view = server.view_of(client, &row, &attempts, false)?;
+                        let view = server.waited_view(client, &row, &attempts)?;
                         return Ok((view, Some(run)));
                     }
                     std::thread::sleep(WAIT_TICK);
@@ -684,7 +684,7 @@ impl McpServer {
                         .iter()
                         .map(|(run, attempts)| match ready.first() {
                             Some(&first) if first == run.id => {
-                                server.view_of(client, run, attempts, false)
+                                server.waited_view(client, run, attempts)
                             }
                             _ => Ok(brief_view(run, attempts)),
                         })
@@ -1366,6 +1366,21 @@ impl McpServer {
         self.view_of(client, &run, &attempts, true)
     }
 
+    /// A run as wait_for_run returns it: as get_run does, without the request. A client waits on a
+    /// run many times, and the request would come back whole each time. get_run has it.
+    fn waited_view(
+        &self,
+        client: &McpClient,
+        run: &Run,
+        attempts: &[Attempt],
+    ) -> Result<Json, ToolError> {
+        let mut view = self.view_of(client, run, attempts, false)?;
+        if let Some(view) = view.as_object_mut() {
+            view.remove("request");
+        }
+        Ok(view)
+    }
+
     /// A run as get_run returns it. What it waits for and the report are whole, and each attempt
     /// is listed without what it wrote, which get_step has, so it reads in one go however long the
     /// run went on.
@@ -1858,9 +1873,9 @@ struct Printed {
 }
 
 /// What get_step says when it leaves something out.
-const TO_READ: &str = "leftOut names what's too long to come whole here, with its size in bytes. \
-                       get_step with `part` set to one of them reads it in pieces: each says how much \
-                       is `left` and gives the arguments for the `next`. `file` reads one file's diff.";
+const TO_READ: &str = "leftOut names what isn't here, with its size in bytes. get_step with `part` \
+                       set to one of them reads it in pieces: each says how much is `left` and gives \
+                       the arguments for the `next`. `file` reads one file's diff.";
 /// Kept for `leftOut` and TO_READ while the rest of the overview is fitted.
 const LEFT_OUT_ROOM: usize = 512;
 /// Kept for what a cut says about itself.
@@ -1868,9 +1883,9 @@ const CUT_NOTE_ROOM: usize = 100;
 
 /// One attempt as get_step returns it without `part`: what it is and how it went, what it
 /// answered, once, the files it changed with the lines each adds and removes, and the end of what
-/// a command printed. Its diff and prompt come whole when there's room. Whatever is cut or left out
-/// is in `leftOut` with its size, to read with `part`, so it stays about MAX_STEP long however much
-/// the attempt wrote.
+/// a command printed. Its diff, and a setup's or check's command, come whole when there's room. An
+/// agent's prompt doesn't come. Whatever is cut or left out is in `leftOut` with its size, to read
+/// with `part`, so it stays about MAX_STEP long however much the attempt wrote.
 fn step_overview(attempt: &Attempt, long: &LongParts) -> Json {
     let mut view = step_view(attempt);
     view["account"] = json!(attempt.account);
@@ -1930,7 +1945,13 @@ fn step_overview(attempt: &Attempt, long: &LongParts) -> Json {
         Some(diff) => whole("diff", diff, &mut view),
         None => view["diff"] = Json::Null,
     }
-    whole("prompt", &long.prompt, &mut view);
+    // An agent's prompt repeats the request and what earlier steps wrote, so it only comes when
+    // asked for, with `part`. A setup's or check's is the command it ran, which is short.
+    if attempt.kind != "agent" {
+        whole("prompt", &long.prompt, &mut view);
+    } else if !long.prompt.is_empty() {
+        left_out.insert("prompt".into(), json!(long.prompt.len()));
+    }
     if !left_out.is_empty() {
         view["leftOut"] = Json::Object(left_out);
         view["toRead"] = json!(TO_READ);
