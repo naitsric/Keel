@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18next from "../i18n";
-import type { Attempt, AuditEvent, Run, SpecOutput } from "../lib/api";
+import type { Attempt, AuditEvent, Run, Screenshot, Screenshots, SpecOutput } from "../lib/api";
 import { type CommandRun, commandsFrom } from "../lib/audit";
 import { useApp } from "../lib/store";
 import type { SizeDecision } from "../lib/size";
@@ -38,6 +38,7 @@ describe("the approval card", () => {
   let askedToRun: unknown[];
   let runFails: boolean;
   let errors: string[];
+  let screenshots: Screenshots | null;
 
   const show = (attempts: Attempt[], files: string[], workflow: unknown[] = deliverNext, commands: CommandRun[] = [], asked: Attempt = human, sizeDecision: SizeDecision | null = null) => {
     act(() => root.render(<ApprovalCard attempt={asked} run={runWith(workflow)} attempts={attempts} files={files} commands={commands} rawCheck="intact" sizeDecision={sizeDecision} onShowChanges={() => {}} onError={(message) => errors.push(message)} />));
@@ -65,7 +66,9 @@ describe("the approval card", () => {
     askedToRun = [];
     runFails = false;
     errors = [];
+    screenshots = { shown: [], leftOut: [], moreLeftOut: 0 };
     mockIPC((command, args) => {
+      if (command === "run_screenshots") return screenshots;
       if (command === "approval_run_skipped") {
         if (runFails) throw { code: "blocked", reason: { code: "nothingSkippedToRun" }, detail: null };
         askedToRun.push(args);
@@ -147,6 +150,68 @@ describe("the approval card", () => {
       await vi.advanceTimersByTimeAsync(800);
     });
     expect(page()).not.toContain("might hold a secret");
+  });
+
+  describe("screenshots a step left", () => {
+    const shot = (name: string, step = "screens", beforeLastChange = false): Screenshot => ({ name, mime: "image/png", data: "iVBORw0KGgo=", step, beforeLastChange });
+    const picture = (name: string) => document.querySelector<HTMLImageElement>(`img[alt="${name}"]`);
+    const shown = async () => {
+      show([builder(["src/views/RunDetail.tsx"]), human], ["src/views/RunDetail.tsx"]);
+      await settle();
+    };
+
+    it("shows them with the change and the step that saved each, and one bigger on a click", async () => {
+      screenshots = { shown: [shot("run.light.png"), shot("run.dark.png", "builder")], leftOut: [], moreLeftOut: 0 };
+      await shown();
+      expect(page()).toContain("Screenshots");
+      expect(picture("run.light.png")?.src).toBe("data:image/png;base64,iVBORw0KGgo=");
+      expect(picture("run.dark.png")).not.toBeNull();
+      expect(page()).toContain("Saved by screens");
+      expect(page()).toContain("Saved by builder");
+      expect(page()).not.toContain("may have changed");
+
+      act(() => document.querySelector<HTMLButtonElement>('button[aria-label="See run.dark.png larger"]')?.click());
+      const dialog = document.querySelector('[role="dialog"]');
+      expect(dialog?.textContent).toContain("run.dark.png");
+      expect(dialog?.textContent).toContain("Saved by builder");
+      expect(dialog?.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,iVBORw0KGgo=");
+    });
+
+    it("shows two with the same name from different steps", async () => {
+      screenshots = { shown: [shot("screen.png"), shot("screen.png", "builder")], leftOut: [], moreLeftOut: 0 };
+      await shown();
+      expect(document.querySelectorAll('img[alt="screen.png"]')).toHaveLength(2);
+    });
+
+    it("says which the code may have changed after", async () => {
+      screenshots = { shown: [shot("old.png", "builder", true), shot("new.png")], leftOut: [], moreLeftOut: 0 };
+      await shown();
+      expect(page().match(/The code may have changed after it was saved/g)).toHaveLength(1);
+    });
+
+    it("says what it left out and why", async () => {
+      screenshots = { shown: [], leftOut: ["notes.txt", "view.svg"], moreLeftOut: 0 };
+      await shown();
+      expect(page()).toContain("Not shown: notes.txt, view.svg.");
+      expect(page()).toContain("PNG, JPEG, GIF or WebP");
+    });
+
+    it("counts what it left out past the names it lists", async () => {
+      screenshots = { shown: [], leftOut: ["notes.txt"], moreLeftOut: 12 };
+      await shown();
+      expect(page()).toContain("Not shown: notes.txt and 12 more.");
+    });
+
+    it("has no row when a step left none", async () => {
+      await shown();
+      expect(page()).not.toContain("Screenshots");
+    });
+
+    it("has no row when there's no answer", async () => {
+      screenshots = null;
+      await shown();
+      expect(page()).not.toContain("Screenshots");
+    });
   });
 
   it("won't reject without a reason, and blank doesn't count as one", () => {

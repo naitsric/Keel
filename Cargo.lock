@@ -2043,11 +2043,13 @@ dependencies = [
 name = "keel-engine"
 version = "0.2.1"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "globset",
  "keel-core",
  "keel-harness",
  "keel-store",
+ "libc",
  "serde",
  "serde_json",
  "serde_yaml_ng",

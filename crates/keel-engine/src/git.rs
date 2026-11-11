@@ -403,13 +403,17 @@ impl Git {
         // command an agent runs warns about it.
         self.run(workspace, &["config", "core.excludesFile", "/dev/null"])?;
         self.run(workspace, &["config", "core.attributesFile", "/dev/null"])?;
-        // The run's own cache must never end up in a commit.
+        // The run's own cache must never end up in a commit, nor the screenshots its steps save.
+        // Without a closing slash, so that a link or a file with the folder's name stays out too.
         let exclude = workspace.join(".git/info/exclude");
         if let Some(parent) = exclude.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let mut excluded = std::fs::read_to_string(&exclude).unwrap_or_default();
-        excluded.push_str(&format!("\n/{RUN_CACHE}/\n"));
+        excluded.push_str(&format!(
+            "\n/{RUN_CACHE}/\n/{}\n",
+            crate::screenshots::FOLDER
+        ));
         std::fs::write(&exclude, excluded)?;
         self.head(workspace)
     }
@@ -848,6 +852,18 @@ mod tests {
         assert!(!p.canary.exists());
         assert_eq!(size.files, [".gitattributes", "a.txt"]);
         assert_eq!(size.lines, 3, "one new line, and one that changed");
+    }
+
+    #[test]
+    fn the_screenshots_folder_stays_out_of_a_commit_as_a_link_or_a_file_too() {
+        let p = poisoned("");
+        let folder = p.workspace.join(crate::screenshots::FOLDER);
+        std::os::unix::fs::symlink(&p.canary, &folder).unwrap();
+        let snapshot = p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        assert_eq!(snapshot.files, [".gitattributes", "a.txt"]);
+        std::fs::remove_file(&folder).unwrap();
+        std::fs::write(&folder, "not a folder").unwrap();
+        assert!(!p.git.is_dirty(&p.workspace));
     }
 
     /// What a step committed, as `change_size` counts it.

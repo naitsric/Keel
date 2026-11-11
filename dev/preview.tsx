@@ -121,6 +121,42 @@ const waiting = params.get("flow") === "approval" || params.get("flow") === "lim
 // one with no recommended option, last=1 for the last round and extra=1 for the round after it.
 // flow=corrected is a run stopped because it couldn't keep to the limits. With fixed=1 the second
 // answer fit and the run went on: node=spec, then its attempt 1, shows what Keel asked it to fix.
+// shots=1 has screenshots a check saved, in dark and light, shots=old one of them saved by the builder, so
+// the code may have changed after it, and shots=many more than fit in a line, with what Keel left out and
+// a count of more. They show with flow=approval: view=run&flow=approval&shots=1, and a click on one opens it
+// bigger.
+const shotsMode = params.get("shots");
+const fakeScreenshot = (name: string, dark: boolean, step = "screens", beforeLastChange = false) => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1280;
+  canvas.height = 800;
+  const g = canvas.getContext("2d");
+  if (g) {
+    g.fillStyle = dark ? "#16181d" : "#f4f4f5";
+    g.fillRect(0, 0, 1280, 800);
+    g.fillStyle = dark ? "#22252c" : "#ffffff";
+    g.fillRect(0, 0, 1280, 38);
+    g.fillRect(40, 70, 1200, 300);
+    g.fillRect(40, 400, 580, 340);
+    g.fillRect(660, 400, 580, 340);
+    g.fillStyle = "#d4a017";
+    g.fillRect(40, 70, 4, 300);
+    g.fillStyle = dark ? "#e7e7ea" : "#18181b";
+    g.font = "600 30px sans-serif";
+    g.fillText(name, 70, 120);
+    g.fillStyle = dark ? "#71717a" : "#a1a1aa";
+    for (let line = 0; line < 5; line++) g.fillRect(70, 160 + line * 36, 900 - line * 120, 14);
+  }
+  return { name, mime: "image/png", data: canvas.toDataURL("image/png").split(",")[1], step, beforeLastChange };
+};
+const previewScreenshots = () => {
+  if (!shotsMode) return { shown: [], leftOut: [], moreLeftOut: 0 };
+  const old = shotsMode === "old";
+  const shown = [fakeScreenshot("run-detail.dark.png", true), fakeScreenshot("run-detail.light.png", false, old ? "builder" : "screens", old)];
+  if (shotsMode !== "many") return { shown, leftOut: [], moreLeftOut: 0 };
+  const more = Array.from({ length: 6 }, (_, index) => fakeScreenshot(`board-${index + 1}.${index % 2 ? "light" : "dark"}.png`, index % 2 === 0));
+  return { shown: [...more, ...shown], leftOut: ["flow.svg", "notes.txt", "settings.full-page.png"], moreLeftOut: 4 };
+};
 const noCheck = params.get("check") === "none";
 const noReviews = params.get("reviews") === "none";
 const noChanges = params.get("changes") === "none";
@@ -708,6 +744,8 @@ mockIPC((command, args) => {
       return DIFF;
     case "run_adds_secret":
       return params.get("secret") === "1";
+    case "run_screenshots":
+      return previewScreenshots();
     case "github_accounts":
       return params.get("gh") === "out" ? [] : [{ login: "you-personal", active: true, ok: true, scopes: ["repo"] }];
     case "run_proposals":

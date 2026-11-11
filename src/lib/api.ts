@@ -633,6 +633,29 @@ export interface RunJoint {
   part: PartOf | null;
 }
 
+/** A picture a step saved of how the change looks. */
+export interface Screenshot {
+  name: string;
+  /** What its bytes say it is: PNG, JPEG, GIF or WebP. */
+  mime: string;
+  /** Base64. */
+  data: string;
+  /** The step it was saved during. Keel took it from the folder when that step ended. */
+  step: string;
+  /** A step that changed the code ended with that one or after it, so it may not show what's being approved. */
+  beforeLastChange: boolean;
+}
+
+/** This round's pictures. An earlier round's were for its own approval. */
+export interface Screenshots {
+  /** The latest step's first. */
+  shown: Screenshot[];
+  /** What else this round's steps saved and isn't shown: not one of those pictures, too big, a link, or past the limit. */
+  leftOut: string[];
+  /** How many more were left out than `leftOut` names. */
+  moreLeftOut: number;
+}
+
 export interface Board {
   /** Ordered by position within each column. */
   cards: BoardCard[];
@@ -670,6 +693,8 @@ export const api = {
   runLookAtPr: (runId: string) => invoke<void>("run_look_at_pr", { runId }),
   runDiff: (runId: string) => invoke<string>("run_diff", { runId }),
   runAddsSecret: (runId: string) => invoke<boolean>("run_adds_secret", { runId }),
+  /** What a step saved of how the change looks, in `$KEEL_SCREENSHOTS`. Keel doesn't take them. */
+  runScreenshots: (runId: string) => invoke<Screenshots>("run_screenshots", { runId }),
   workflowsList: (projectId: string, language: string) => invoke<Workflow[]>("workflows_list", { projectId, language }),
   workflowSave: (projectId: string, workflow: Workflow) => invoke<Workflow>("workflow_save", { projectId, workflow }),
   workflowResults: (projectId: string) => invoke<WorkflowResults[]>("workflow_results", { projectId }),

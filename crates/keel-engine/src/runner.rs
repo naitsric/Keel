@@ -18,7 +18,10 @@ use serde_json::json;
 use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
 use crate::specs::{self, Verdict};
-use crate::{Error, Inner, Result, Resume, brain, joint, locked, prompts, verification, workflows};
+use crate::{
+    Error, Inner, Result, Resume, brain, joint, locked, prompts, screenshots, verification,
+    workflows,
+};
 
 /// Tool output kept in the database. The raw file always has all of it.
 const EVENT_TEXT_LIMIT: usize = 64 * 1024;
@@ -520,8 +523,11 @@ impl Inner {
 
         let raw_path = PathBuf::from(&attempt.raw_path);
         let stderr_path = dir.join(format!("{stem}.stderr.txt"));
-        // Only steps that can run commands get services. A read-only step has no way to use them.
-        let (service_set, service_env, project) = if spec.tools == ToolProfile::Build {
+        // Only steps that can run commands get services, or a folder for screenshots. A read-only
+        // step has no way to use them.
+        let can_write = spec.tools == ToolProfile::Build;
+        let (service_set, service_env, project) = if can_write {
+            screenshots::empty(&workspace, &dir)?;
             let project = store.project(project_id)?;
             let (set, env) = self.start_services(attempt, &project, &tools.path_env)?;
             (set, env, Some(project))
@@ -539,6 +545,10 @@ impl Inner {
             ));
         }
         process_command.envs(service_env);
+        // After the project's own variables, as for a check, so the folder is always Keel's.
+        if can_write {
+            process_command.env(screenshots::VARIABLE, screenshots::folder(&workspace));
+        }
         let child = process::spawn_step(process_command, &prompt_file, &raw_path, &stderr_path)?;
         let mut monitor = self.track_process(attempt, child, project_id)?;
         monitor.services = service_set;
@@ -610,6 +620,7 @@ impl Inner {
                     .into_iter()
                     .filter(|(name, _)| !name.starts_with("CLAUDE_") && !name.starts_with("BASH_")),
             );
+        screenshots::empty(&workspace, &dir)?;
         let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
         // Setup writes to the project's cache. Any other step works on the run's own copy of it.
         let cache_vars = if is_setup {
@@ -618,7 +629,11 @@ impl Inner {
             copy_tool_caches(&shared_cache, &cache)?;
             cache_env(&cache, &cache, Some(&project.allowed_domains))
         };
-        command.envs(cache_vars).envs(service_env);
+        // After the project's own variables, as for an agent, so the folder is always Keel's.
+        command
+            .envs(cache_vars)
+            .envs(service_env)
+            .env(screenshots::VARIABLE, screenshots::folder(&workspace));
         let child = process::spawn_step(command, &prompt_file, &raw_path, &stderr_path)?;
         let mut monitor = self.track_process(attempt, child, project_id)?;
         monitor.services = service_set;
@@ -749,11 +764,26 @@ impl Inner {
             }
 
             let exit = match m.child.as_mut() {
-                Some(child) => match child.try_wait() {
-                    Ok(Some(status)) => Some(status.code()),
-                    Ok(None) => None,
-                    Err(_) => Some(None),
-                },
+                Some(child) => {
+                    let pid = child.id() as i32;
+                    match process::has_ended(pid) {
+                        // Until it's collected its group is only the step's, so whatever the step
+                        // left running ends with it, and can't change the copy once it's over.
+                        // Services have groups of their own, and so does every other step.
+                        Ok(true) => {
+                            process::signal_group(pid, process::SIGKILL);
+                            Some(child.wait().ok().and_then(|status| status.code()))
+                        }
+                        Ok(false) => None,
+                        Err(_) => match child.try_wait() {
+                            Ok(Some(status)) => Some(status.code()),
+                            Ok(None) => None,
+                            Err(_) => Some(None),
+                        },
+                    }
+                }
+                // Not Keel's child: after a restart, its pid may already be someone else's, so
+                // its group is left alone.
                 None => {
                     let alive = m
                         .root_pid
@@ -1019,6 +1049,9 @@ impl Inner {
         }
         let store = &self.store;
         let stop_requested = self.stop_requested(&m.attempt_id);
+        if m.holds_project {
+            self.take_screenshots(&m);
+        }
 
         let mut fields: Vec<(&'static str, Value)> = vec![("finished_at", Value::Text(now()))];
         let raw_sha = process::sha256_file(&m.raw_path).ok();
@@ -1233,6 +1266,18 @@ impl Inner {
         if state == AttemptState::Succeeded || m.role == "learner" {
             let _ = self.advance(&m.run_id);
         }
+    }
+
+    /// Keeps what the step saved for its approval, and says so in its events, which is what tells
+    /// later which step each picture came from.
+    fn take_screenshots(&self, m: &Monitor) {
+        let run_dir = self.run_dir(&m.run_id);
+        let (kind, data) = match screenshots::take(&m.workspace, &run_dir, &m.attempt_id) {
+            Ok(None) => return,
+            Ok(Some(taken)) => (screenshots::EVENT, json!(taken)),
+            Err(error) => ("screenshotsFailed", json!({ "error": error.to_string() })),
+        };
+        let _ = self.store.append_event(&m.attempt_id, kind, &data);
     }
 
     /// The attempts before this one in its session, nearest first.

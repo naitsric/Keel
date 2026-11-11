@@ -261,7 +261,7 @@ function StepEditor({ step, formKey, earlier, onChange, onEarlier, onLater, onRe
             <Field label={t("workflows.stepId")}>
               <input value={step.id} onChange={(e) => onChange({ ...step, id: e.target.value.replace(/[^\w-]/g, "") })} className={`${inputClass} font-mono`} />
             </Field>
-            <Field label={t("workflows.command")}>
+            <Field label={t("workflows.command")} hint={step.type === "check" ? t("workflows.commandScreenshotsHint") : undefined}>
               <input value={step.run} onChange={(e) => onChange({ ...step, run: e.target.value })} className={`${inputClass} font-mono`} />
             </Field>
           </div>
