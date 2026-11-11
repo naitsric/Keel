@@ -652,12 +652,18 @@ mod tests {
 
     #[test]
     fn a_command_service_that_dies_reports_its_output() {
-        let dir = tempfile::tempdir_in("/tmp").unwrap();
         let service = Service::Command {
             name: "db".into(),
             start: "echo cannot-start-db; exit 3".into(),
             socket: None,
         };
+        // The temporary folder a sandbox lets tests write to. `/tmp` only if the socket path
+        // wouldn't fit there, since that's refused before the command even starts.
+        let mut dir = tempfile::tempdir().unwrap();
+        let socket = socket_path(&dir.path().join("r"), &service);
+        if socket.as_os_str().len() > SOCKET_PATH_LIMIT {
+            dir = tempfile::tempdir_in("/tmp").unwrap();
+        }
         let Err(Reason::ServiceFailed { detail, .. }) = ServiceSet::start(
             &[service],
             &dir.path().join("r"),
