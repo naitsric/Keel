@@ -67,6 +67,10 @@ most about 4 KB, so when it's full, adding something means retiring something.
   it with whatever its tools download, and each run works in a copy of it, so no step can change
   what the next run gets. Toolchains such as rustup's stay in your home folder, where they can only
   be read. Claude Code itself keeps your home folder, where your login is.
+- A project's commands can read only the folders of your home folder it lists. When you set up a
+  project, Keel asks your shell where the programs its commands use are, such as `~/.nvm` or
+  `~/.cargo/bin`, and proposes those folders for you to confirm. It runs nothing from the repo to
+  find them, and never proposes a folder with credentials in it.
 
 ## Secrets in what it shows
 

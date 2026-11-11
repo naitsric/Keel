@@ -137,9 +137,20 @@ impl World {
         self.engine.add_project(&self.repo).unwrap().id
     }
 
-    /// Setup and then the check, as the setup dialog tries them. Both of them, as they ended.
+    /// Setup and then the check, as the setup dialog tries them: with the folders Keel finds for
+    /// them, which the dialog lets them read unless the person says otherwise. Both, as they ended.
     fn try_check(&self, id: &str, setup: &str, check: &str) -> (Attempt, Attempt) {
-        let run = self.engine.try_check(id, setup, check, "en").unwrap();
+        let read: Vec<String> = self
+            .engine
+            .tool_folders(id, setup, check)
+            .unwrap()
+            .into_iter()
+            .map(|found| found.folder)
+            .collect();
+        let run = self
+            .engine
+            .try_check_reading(id, setup, check, &read, "en")
+            .unwrap();
         let deadline = Instant::now() + Duration::from_secs(300);
         while self.store.run(&run).unwrap().finished_at.is_none() {
             assert!(Instant::now() < deadline, "the run never finished");

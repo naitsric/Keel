@@ -135,8 +135,20 @@ fn run_home(workspace: &std::path::Path) -> PathBuf {
 }
 
 /// The home folder Keel itself runs with, where toolchains are.
-fn real_home() -> PathBuf {
+pub(crate) fn real_home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+}
+
+/// What a run's steps may read in the home folder: the project's folders, and any the run was
+/// given of its own to try.
+pub(crate) fn readable(project: &keel_store::Project, run: &keel_store::Run) -> Vec<String> {
+    let mut read = project.allowed_read.clone();
+    for folder in &run.extra_read {
+        if !read.contains(folder) {
+            read.push(folder.clone());
+        }
+    }
+    read
 }
 
 fn runs_commands(kind: &str, tools: Option<ToolProfile>) -> bool {
@@ -562,6 +574,7 @@ impl Inner {
         self.changed(&attempt.run_id);
         let (_git, sha_before) = self.prepare_workspace(attempt, project_id)?;
         let project = store.project(project_id)?;
+        let read = readable(&project, &store.run(&attempt.run_id)?);
         let tools = locked(&self.tools).clone();
         let workspace = PathBuf::from(&attempt.workspace);
         let dir = self.run_dir(&attempt.run_id);
@@ -574,18 +587,12 @@ impl Inner {
         let (profile, home) = if is_setup {
             std::fs::create_dir_all(&shared_cache)?;
             (
-                settings::setup_profile(
-                    &workspace,
-                    &real_home,
-                    &project.allowed_read,
-                    &sockets,
-                    &shared_cache,
-                ),
+                settings::setup_profile(&workspace, &real_home, &read, &sockets, &shared_cache),
                 self.project_home(project_id),
             )
         } else {
             (
-                settings::check_profile(&workspace, &real_home, &project.allowed_read, &sockets),
+                settings::check_profile(&workspace, &real_home, &read, &sockets),
                 run_home(&workspace),
             )
         };

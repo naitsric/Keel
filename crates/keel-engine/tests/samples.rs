@@ -1,6 +1,7 @@
 //! Sample repos, one for each stack, through what Keel does with a new project: it guesses the
-//! commands, and then tries them as the setup dialog does, setup with the network and the check
-//! without it, in the real sandbox, with Keel's own variables. The repos are in `tests/samples`.
+//! commands, finds where their programs are in the home folder, and then tries them as the setup
+//! dialog does, setup with the network and the check without it, in the real sandbox, with Keel's
+//! own variables and only the folders it found. The repos are in `tests/samples`.
 //!
 //! They download dependencies and take minutes, so they only run when asked:
 //! `KEEL_SAMPLE_REPOS=all cargo test -p keel-engine --test samples -- --nocapture`, or a list such
@@ -67,6 +68,9 @@ struct Sample {
     name: &'static str,
     /// What it can't do without, looked for where Keel looks.
     programs: &'static [&'static str],
+    /// The folder Keel has to find for a program, when that program is in the home folder. Every
+    /// project could read these before #120, so a check that passes here shows it doesn't need to.
+    finds: &'static [(&'static str, &'static str)],
     commands: Commands,
     /// Whether Keel has to guess exactly these, or is given them.
     guessed: bool,
@@ -121,6 +125,7 @@ fn try_sample(sample: Sample) {
     let store = Arc::new(Store::open(&dir.path().join("keel.db")).unwrap());
     let mut config = Config::new(dir.path().join("data"));
     config.keep_awake = false;
+    let path_env = tools.path_env.clone();
     let engine = Engine::new(store.clone(), config, tools, |_| {});
     let id = engine.add_project(&repo).unwrap().id;
     let Commands { setup, check } = sample.commands;
@@ -145,8 +150,25 @@ fn try_sample(sample: Sample) {
             .unwrap();
     }
 
+    // As the setup dialog does: Keel finds where in the home folder the programs are, and lets the
+    // commands read that, with nothing else from the home folder.
+    let found = engine.tool_folders(&id, setup, check).unwrap();
+    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    for (program, folder) in sample.finds {
+        let located = keel_harness::toolchains::locate(&[(*program).to_owned()], &path_env);
+        if located.first().is_some_and(|(_, at)| at.starts_with(&home)) {
+            assert!(
+                found.iter().any(|found| found.folder == *folder),
+                "{program} needs {folder}: {found:?}"
+            );
+        }
+    }
+    let read: Vec<String> = found.iter().map(|found| found.folder.clone()).collect();
+
     let started = Instant::now();
-    let run = engine.try_check(&id, setup, check, "en").unwrap();
+    let run = engine
+        .try_check_reading(&id, setup, check, &read, "en")
+        .unwrap();
     let mut setup_took = None;
     let deadline = Duration::from_secs(if sample.name == "keel" { 3600 } else { 1200 });
     while store.run(&run).unwrap().finished_at.is_none() {
@@ -224,7 +246,8 @@ fn try_sample(sample: Sample) {
         sample.downloads
     );
     eprintln!(
-        "sample {}: setup `{setup}` took {:.1}s, check `{check}` took {:.1}s\n\
+        "sample {}: Keel found {found:?}\n\
+         setup `{setup}` took {:.1}s, check `{check}` took {:.1}s\n\
          setup left in the project's home: {left:?}\n{}",
         sample.name,
         setup_took.as_secs_f64(),
@@ -263,6 +286,7 @@ fn pnpm() {
     try_sample(Sample {
         name: "pnpm",
         programs: &["pnpm", "node"],
+        finds: &[("pnpm", "~/Library/pnpm")],
         commands: Commands {
             setup: "pnpm install --frozen-lockfile",
             check: "pnpm test",
@@ -277,6 +301,7 @@ fn pip() {
     try_sample(Sample {
         name: "pip",
         programs: &["python3"],
+        finds: &[],
         commands: Commands {
             setup: "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt",
             check: ".venv/bin/python -m pytest",
@@ -291,6 +316,7 @@ fn uv() {
     try_sample(Sample {
         name: "uv",
         programs: &["uv"],
+        finds: &[],
         commands: Commands {
             setup: "uv sync --frozen",
             check: "uv run --frozen pytest",
@@ -305,6 +331,7 @@ fn rust() {
     try_sample(Sample {
         name: "rust",
         programs: &["cargo"],
+        finds: &[("cargo", "~/.cargo/bin"), ("cargo", "~/.rustup")],
         commands: Commands {
             setup: "cargo fetch",
             check: "cargo test --workspace",
@@ -321,6 +348,11 @@ fn keel() {
     try_sample(Sample {
         name: "keel",
         programs: &["pnpm", "node", "cargo"],
+        finds: &[
+            ("pnpm", "~/Library/pnpm"),
+            ("cargo", "~/.cargo/bin"),
+            ("cargo", "~/.rustup"),
+        ],
         commands: Commands {
             setup: "pnpm install --frozen-lockfile && cargo fetch",
             check: "test ! -e target && pnpm build && cargo test --workspace",

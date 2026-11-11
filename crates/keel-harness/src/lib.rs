@@ -11,6 +11,7 @@ pub mod process;
 pub mod settings;
 pub mod stream;
 pub mod testing;
+pub mod toolchains;
 
 pub use auth::{AuthStatus, VersionCheck, check_version};
 pub use command::{StepCommand, clean_env};

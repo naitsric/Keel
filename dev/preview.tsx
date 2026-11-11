@@ -751,6 +751,16 @@ mockIPC((command, args) => {
       return addedAnswer();
     case "project_setup":
       return { project: listedProjects.find((p) => p.id === (args as { projectId: string }).projectId) ?? freshProject, guess: { fromCi: false, ...(GUESSES[params.get("setup") ?? "pnpm"] ?? GUESSES.unknown) } };
+    // folders=none: the commands need nothing from the home folder.
+    case "project_tool_folders":
+      return params.get("folders") === "none"
+        ? []
+        : [
+            { folder: "~/.nvm", programs: ["node", "npm"] },
+            { folder: "~/Library/pnpm", programs: ["pnpm"] },
+            { folder: "~/.cargo/bin", programs: ["cargo", "rustc"] },
+            { folder: "~/.rustup", programs: ["cargo", "rustc"] },
+          ];
     case "project_try_check":
       return "try1";
     case "project_remove":
