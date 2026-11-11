@@ -1,9 +1,30 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
-import type { AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, stillGoing, toolSummary, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
+import type { Attempt, AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
+import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
+
+describe("what an attempt's state reads as", () => {
+  const didNotFit = { code: "specNotUsable", problems: [{ code: "decidedTooLong", position: 1, chars: 141, limit: 140 }] };
+  const first = (fields: Partial<Attempt> = {}) => ({ id: "s1", state: "failed", reason: didNotFit, resumedFrom: null, ...fields }) as Attempt;
+  const fix = { id: "s2", state: "succeeded", reason: null, resumedFrom: "s1" } as Attempt;
+
+  it("doesn't call an answer Keel had fixed in the same session a failure", () => {
+    expect(shownState(first(), [first(), fix])).toBe("corrected");
+  });
+
+  it("still says failed while nothing went on to fix it", () => {
+    expect(shownState(first(), [first()])).toBe("failed");
+  });
+
+  it("only means an answer that didn't fit, and only once", () => {
+    expect(shownState(first({ reason: { code: "noStructuredOutput" } }), [first(), fix])).toBe("failed");
+    // The fix that didn't fit either stops the step for a person.
+    expect(shownState(first({ state: "blocked" }), [first(), fix])).toBe("blocked");
+    expect(shownState(fix, [first(), fix])).toBe("succeeded");
+  });
+});
 
 describe("what a verifier found", () => {
   const item = (result: CheckedCriterion["result"], fields: Partial<CheckedCriterion> = {}): CheckedCriterion => ({ id: "C1", when: "add(1, 2)", then: "it returns 3", result, evidence: result === "met" ? "test_calc.py:1" : "", ...fields });

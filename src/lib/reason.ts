@@ -25,7 +25,7 @@ export function reasonText(t: TFunction, reason: Reason): string {
     case "invalidWorkflow":
       return t(`invalidWorkflow.${data.problem}`, { step: data.step, defaultValue: data.problem });
     case "specNotUsable":
-      return t("reasons.specNotUsable", { problems: (data.problems ?? []).map((problem: Reason) => t(`specProblems.${problem.code}`, { ...problem, defaultValue: problem.code })).join("; ") });
+      return t("reasons.specNotUsable", { problems: (data.problems ?? []).map((problem: Reason) => specProblemText(t, problem)).join("; ") });
     case "invalidAnswer":
       return t(`invalidAnswers.${data.problem}`, { question: data.question, defaultValue: t("reasons.invalidAnswer") });
     case "noMatchingPaths":
@@ -44,6 +44,11 @@ export function reasonText(t: TFunction, reason: Reason): string {
     default:
       return t(`reasons.${reason.code}`, { ...data, defaultValue: reason.code });
   }
+}
+
+/** What a specifier's answer got wrong, as the engine found it: what it is, and by how much it went past its limit. */
+export function specProblemText(t: TFunction, problem: Reason): string {
+  return t(`specProblems.${problem.code}`, { ...problem, defaultValue: problem.code });
 }
 
 export function errorText(t: TFunction, error: unknown): string {

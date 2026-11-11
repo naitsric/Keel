@@ -3,12 +3,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Run, type RunJoint, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Reason, type Run, type RunJoint, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
-import { errorText, needsProjectSettings, needsSignIn, reasonText } from "../lib/reason";
+import { errorText, needsProjectSettings, needsSignIn, reasonText, specProblemText } from "../lib/reason";
 import { allRecommend, answerFrom, differsFromRecommended, isAnswered, needsText, type QuestionPick, recommendedAnswers, recommendedOption, startingPick } from "../lib/questions";
 import { latestSizeDecision, type SizeDecision, skippedAsSmall, skippedSteps, whyNotSmallText } from "../lib/size";
 import { useApp } from "../lib/store";
@@ -939,7 +939,7 @@ function CommandNotes({ end }: { end: CommandEnd }) {
   );
 }
 
-function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role"] }) {
+function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: Attempt["role"]; corrected: boolean }) {
   const { t } = useTranslation();
   const { event, result } = item;
   const data = event.data;
@@ -1014,7 +1014,17 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
     case "questionsTaken":
       return line(t("activity.questionsTaken", { rounds: data.rounds }), "text-warning");
     case "specCorrected":
-      return line(t("activity.specCorrected"), "text-warning");
+      return (
+        <div>
+          {line(t("activity.specCorrected"), "text-warning")}
+          <ul className="selectable mt-0.5 list-disc space-y-0.5 pl-4 text-[12.5px] break-words text-muted">
+            {(data.problems ?? []).map((problem: Reason, index: number) => (
+              // The engine's list, in its order: two problems can say the same.
+              <li key={index}>{specProblemText(t, problem)}</li>
+            ))}
+          </ul>
+        </div>
+      );
     case "reviewIncomplete":
       return line(t("activity.reviewIncomplete", { files: (data.unread ?? []).join(", ") }), "text-warning");
     case "verificationCorrected":
@@ -1069,7 +1079,7 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
     case "result":
       return line(t("activity.result"), "text-subtle");
     case "finished":
-      return line(t("activity.finished", { state: t(`states.${data.state}`) }), "font-medium");
+      return line(t("activity.finished", { state: t(`states.${corrected && data.state === "failed" ? "corrected" : data.state}`) }), "font-medium");
     case "stalled":
       return line(t("activity.stalled"), "text-warning");
     case "stallCleared":
@@ -1102,7 +1112,8 @@ function ActivityEntry({ item, role }: { item: ActivityItem; role: Attempt["role
   }
 }
 
-export function ActivityTab({ events, role }: { events: AuditEvent[]; role: Attempt["role"] }) {
+/** `corrected` is an attempt that ended failed, and Keel went straight on to have it fixed: see `shownState`. */
+export function ActivityTab({ events, role, corrected = false }: { events: AuditEvent[]; role: Attempt["role"]; corrected?: boolean }) {
   const { t } = useTranslation();
   const items = useMemo(() => activityFrom(events), [events]);
   if (items.length === 0) return <p className="text-[12.5px] text-subtle">{t("activity.empty")}</p>;
@@ -1110,7 +1121,7 @@ export function ActivityTab({ events, role }: { events: AuditEvent[]; role: Atte
     <ol className="space-y-3">
       {items.map((item) => (
         <li key={item.key}>
-          <ActivityEntry item={item} role={role} />
+          <ActivityEntry item={item} role={role} corrected={corrected} />
         </li>
       ))}
     </ol>
@@ -1398,8 +1409,8 @@ function AttemptChoice({ node, attempt, onChoose }: { node: FlowNode; attempt: A
         label: (
           <span className="flex items-center gap-1.5">
             {[choice.round !== null && t("run.round", { number: choice.round }), choice.number !== null && t("run.attemptTitle", { number: choice.number })].filter(Boolean).join(" · ")}
-            <StateBadge state={choice.attempt.state} label="" />
-            <span className="sr-only">{t(`states.${choice.attempt.state}`)}</span>
+            <StateBadge state={shownState(choice.attempt, node.attempts)} label="" />
+            <span className="sr-only">{t(`states.${shownState(choice.attempt, node.attempts)}`)}</span>
           </span>
         ),
       }))}
@@ -1575,7 +1586,7 @@ export function RunDetail({ runId }: { runId: string }) {
             <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-2">
               <h2 className="min-w-0 truncate text-[13px] font-semibold">{shownNode.id}</h2>
               {shownModel && <span className="min-w-0 truncate font-mono text-[11.5px] text-subtle">{shownModel}</span>}
-              {attempt && <StateBadge state={attempt.state} label={t(`states.${attempt.state}`)} />}
+              {attempt && <StateBadge state={shownState(attempt, attempts)} label={t(`states.${shownState(attempt, attempts)}`)} />}
               {attempt && (
                 <div className="ml-auto max-w-full overflow-x-auto">
                   <AttemptChoice
@@ -1596,7 +1607,7 @@ export function RunDetail({ runId }: { runId: string }) {
               <div className="mt-4">
                 {shownTab === "understood" && understood && <SpecView spec={understood} />}
                 {shownTab === "found" && found && <VerificationView verification={found} />}
-                {shownTab === "activity" && <ActivityTab events={events} role={attempt.role} />}
+                {shownTab === "activity" && <ActivityTab events={events} role={attempt.role} corrected={shownState(attempt, attempts) === "corrected"} />}
                 {shownTab === "commands" && <CommandsTab commands={commands} />}
                 {shownTab === "changes" && <ChangesTab attempt={attempt} revision={revision} />}
                 {shownTab === "output" && <OutputTab events={events} attempt={attempt} />}

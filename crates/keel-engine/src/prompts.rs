@@ -139,20 +139,22 @@ pub fn part_request(title: &str, part: &str, asked: Option<&str>, issue: Option<
     }
 }
 
+// The lengths asked for here are below what `specs` takes, so an answer that misses them by a few
+// characters still fits: models count characters loosely.
 const SPEC_PROMPT_EN: &str = r#"Work out what this request will change, without editing anything, and answer in the structure you were given. Read the code involved first. Whoever reads your answer asked for the change and may not know the code, so say what happens, in plain words, and not how it's built.
 
-- summary: one sentence saying what will change, up to 200 characters.
-- criteria: up to 7, with ids C1, C2 and so on. Each says when something happens and what must then be true, so that a test could prove it. Its `when` and `then` together take up to 200 characters.
+- summary: one sentence saying what will change, up to 170 characters.
+- criteria: up to 7, with ids C1, C2 and so on. Each says when something happens and what must then be true, so that a test could prove it. Its `when` and `then` together take up to 170 characters.
 - changes: what this adds, changes or removes in what people can see today.
 - limits: what must not change.
-- decided: up to 5, each up to 140 characters: what you decided on your own because it wasn't worth asking.
+- decided: up to 5, each up to 120 characters: what you decided on your own because it wasn't worth asking.
 - questions: up to 3, with ids Q1, Q2 and so on. Usually none.
 
 Ask only when all three hold: the answer changes what gets built, it can't be found in the code, in what Keel knows about this project or in earlier decisions, and being wrong costs more than asking. Otherwise decide, and put it in `decided`. Technical uncertainty is yours to investigate, not something to ask a person.
 
 Write `criteria` as if the person picks the recommended option. Where none is recommended, write only the ones that don't depend on the answer.
 
-Each question is one decision, in one line of up to 140 characters, about what happens rather than how it's built. It has 2 to 4 options of up to 60 characters each. Recommend one only if the code or the request backs it up. When only the person can know, such as an amount, a date or a business rule, recommend none: never make up a value.
+Each question is one decision, in one line of up to 120 characters, about what happens rather than how it's built. It has 2 to 4 options of up to 50 characters each. Recommend one only if the code or the request backs it up. When only the person can know, such as an amount, a date or a business rule, recommend none: never make up a value.
 Bad: "Should this go in a helper, or should the view check it?" That's how it's built, and it's yours to decide.
 Good: "If `whole` is 0, what should happen?" with "Show an error, as today" (recommended) and "Return 0".
 Good, with none recommended: "What discount do frequent customers get?" with "5 %", "10 %" and "15 %", when nothing in the code or the request says.
@@ -166,18 +168,18 @@ Request:
 
 const SPEC_PROMPT_ES: &str = r#"Averigua qué va a cambiar este pedido, sin editar nada, y responde con la estructura que te dieron. Lee primero el código involucrado. Quien lea tu respuesta pidió el cambio y puede no conocer el código, así que di qué pasa, en palabras simples, y no cómo se construye. Responde en español.
 
-- summary: una frase que diga qué va a cambiar, hasta 200 caracteres.
-- criteria: hasta 7, con ids C1, C2 y así. Cada uno dice cuándo pasa algo y qué debe ser cierto entonces, de modo que una prueba lo pueda demostrar. Su `when` y su `then` juntos llegan hasta 200 caracteres.
+- summary: una frase que diga qué va a cambiar, hasta 170 caracteres.
+- criteria: hasta 7, con ids C1, C2 y así. Cada uno dice cuándo pasa algo y qué debe ser cierto entonces, de modo que una prueba lo pueda demostrar. Su `when` y su `then` juntos llegan hasta 170 caracteres.
 - changes: lo que esto agrega, cambia o quita en lo que la gente puede ver hoy.
 - limits: lo que no debe cambiar.
-- decided: hasta 5, cada uno hasta 140 caracteres: lo que decidiste por tu cuenta porque no valía la pena preguntarlo.
+- decided: hasta 5, cada uno hasta 120 caracteres: lo que decidiste por tu cuenta porque no valía la pena preguntarlo.
 - questions: hasta 3, con ids Q1, Q2 y así. Normalmente ninguna.
 
 Pregunta solo cuando se cumplan las tres cosas: la respuesta cambia lo que se construye, no se puede averiguar en el código, en lo que Keel sabe de este proyecto ni en decisiones anteriores, y equivocarse cuesta más que preguntar. Si no, decide y ponlo en `decided`. La incertidumbre técnica te toca investigarla a ti, no preguntársela a una persona.
 
 Escribe `criteria` como si la persona eligiera la opción recomendada. Donde no recomiendes ninguna, escribe solo los que no dependen de la respuesta.
 
-Cada pregunta es una sola decisión, en una línea de hasta 140 caracteres, sobre qué pasa y no sobre cómo se construye. Tiene de 2 a 4 opciones de hasta 60 caracteres cada una. Recomienda una solo si el código o el pedido la respaldan. Cuando solo la persona puede saberlo, como un monto, una fecha o una regla del negocio, no recomiendes ninguna: nunca inventes un valor.
+Cada pregunta es una sola decisión, en una línea de hasta 120 caracteres, sobre qué pasa y no sobre cómo se construye. Tiene de 2 a 4 opciones de hasta 50 caracteres cada una. Recomienda una solo si el código o el pedido la respaldan. Cuando solo la persona puede saberlo, como un monto, una fecha o una regla del negocio, no recomiendes ninguna: nunca inventes un valor.
 Mal: "¿Esto va en un helper, o lo valida la vista?" Eso es cómo se construye, y te toca decidirlo a ti.
 Bien: "Si `whole` es 0, ¿qué debe pasar?" con "Mostrar error, como hoy" (recomendada) y "Devolver 0".
 Bien, sin recomendada: "¿Qué descuento reciben los clientes frecuentes?" con "5 %", "10 %" y "15 %", cuando ni el código ni el pedido lo dicen.
