@@ -66,9 +66,9 @@ pub enum WhyNotProven {
     NoCheckPassed,
     NoEvidence,
     LeftOut,
-    /// It pointed at something, but didn't say why that doesn't prove it. Only answers from before
-    /// it said why, or that left it empty.
-    NotSaid,
+    /// It didn't say why apart, but pointed at something, which may say it: answers from before it
+    /// said why put it there. Keel claims no reason of its own.
+    SeeEvidence,
 }
 
 /// One thing that has to be true, in the spec's words, and what became of it.
@@ -321,7 +321,7 @@ impl Checked {
             (None, Some(Unproven::NoTest)) => WhyNotProven::NoTest,
             // Pointing at nothing, it found nothing that proves it.
             (None, None) if self.evidence.is_empty() => WhyNotProven::NoTest,
-            (None, None) => WhyNotProven::NotSaid,
+            (None, None) => WhyNotProven::SeeEvidence,
         })
     }
 
@@ -348,7 +348,8 @@ impl Checked {
                 "it found nothing that proves it",
                 "no encontró nada que lo demuestre",
             )),
-            Some(WhyNotProven::NotSaid) | None => None,
+            // What it pointed at goes on its own.
+            Some(WhyNotProven::SeeEvidence) | None => None,
         };
         match why {
             Some(why) if self.evidence.is_empty() => why.to_owned(),
@@ -789,15 +790,41 @@ mod tests {
         }
         // An answer that didn't say: nothing it pointed at means it found nothing that proves it.
         assert_eq!(why(Unverified, "", None, None), Some(W::NoTest));
+        // What it pointed at may well say why, as the prompt from before asked: Keel claims nothing.
         assert_eq!(
-            why(Unverified, "tests/a.rs:1", None, None),
-            Some(W::NotSaid)
+            why(Unverified, "needs Postgres, so it's skipped", None, None),
+            Some(W::SeeEvidence)
         );
         // What was proven either way isn't unproven.
         assert_eq!(why(Met, "a", None, None), None);
         assert_eq!(why(Unmet, "b", None, Some(Unproven::NoTest)), None);
         assert_eq!(json!(W::NotRun), json!("notRun"));
-        assert_eq!(json!(W::NotSaid), json!("notSaid"));
+        assert_eq!(json!(W::SeeEvidence), json!("seeEvidence"));
+    }
+
+    #[test]
+    fn an_empty_why_beside_what_it_pointed_at_claims_no_reason() {
+        let items = json!([
+            { "id": "C1", "result": "unverified", "evidence": "tests/db.rs:12 exists, but didn't run", "why": "" },
+            { "id": "C2", "result": "unverified", "evidence": "", "why": "" },
+        ]);
+        let corrected = correct(&answer(items), &spec(&["C1", "C2"]), true).unwrap();
+        let whys: Vec<_> = corrected
+            .verification
+            .criteria
+            .iter()
+            .map(Checked::why_not_proven)
+            .collect();
+        assert_eq!(
+            whys,
+            [Some(WhyNotProven::SeeEvidence), Some(WhyNotProven::NoTest)]
+        );
+        // The pull request shows what it pointed at, and nothing Keel made up.
+        let section = corrected.verification.pr_section(false);
+        assert!(
+            section.contains("(tests/db.rs:12 exists, but didn't run)\n"),
+            "{section}"
+        );
     }
 
     #[test]

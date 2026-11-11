@@ -349,8 +349,8 @@
       "noEvidence_other": "{{count}}: se dijo que se cumplen, pero no qué lo demuestra",
       "leftOut_one": "{{count}}: no se dijo nada sobre ella",
       "leftOut_other": "{{count}}: no se dijo nada sobre ellas",
-      "notSaid_one": "{{count}}: nadie dijo por qué",
-      "notSaid_other": "{{count}}: nadie dijo por qué"
+      "seeEvidence_one": "{{count}}: mira qué se dijo de ella en «{{where}}»",
+      "seeEvidence_other": "{{count}}: mira qué se dijo de cada una en «{{where}}»"
     },
     "approvalSkipped": "{{names}}: omitidas, no cambió nada de lo que cubren",
     "workflowWarning": "Este cambio edita `.github/workflows`. Esos archivos pueden correr con los secretos del repo en cuanto se suba la rama. Léelos primero.",

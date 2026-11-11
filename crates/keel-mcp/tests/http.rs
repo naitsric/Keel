@@ -101,7 +101,7 @@ echo "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake\",\"tool
 while [ -f "$(dirname "$0")/hold" ]; do sleep 0.02; done
 if [ -n "$schema" ]; then
   case "$schema" in
-  *verdict*) out='{"verdict":"changes","findings":["Line 3 divides by zero"],"summary":"One problem"}';;
+  *verdict*) out='{"verdict":"changes","findings":["Line 3 divides by zero"],"summary":"One problem","unchecked":["How it looks on screen"]}';;
   *decision*) out='{"decision":"approve","risk":"low","reasons":"It does what was asked","instructions":"Only a note"}';;
   *unverified*) out='{"criteria":[{"id":"C1","result":"met","evidence":""}],"summary":"It works"}';;
   *parts*) out='{"size":"normal","risks":[],"summary":"Log in through lib","criteria":[{"id":"C1","when":"someone logs in","then":"app lets them in"}],"changes":[],"limits":[],"decided":[],"questions":[],"parts":[{"project":"lib","text":"Sends the token"},{"project":"app","text":"Reads the token"}],"together":["Log in and land in app"]}';;
@@ -1502,7 +1502,8 @@ async fn a_run_reports_what_it_did_and_brings_what_the_person_has_to_decide() {
                 "result": "unverified", "evidence": "", "corrected": "noEvidence",
                 "why": "noEvidence",
             }],
-            "notProvenWhy": { "noEvidence": 1 },
+            // What the review couldn't check by reading the code counts too, as in the app.
+            "notProvenWhy": { "byReviews": 1, "noEvidence": 1 },
             "reviews": [
                 { "step": "security", "verdict": "changes", "findings": ["Line 3 divides by zero"] },
                 // What an approver that approved only noted isn't something to do.

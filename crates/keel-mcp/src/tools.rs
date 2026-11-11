@@ -1526,7 +1526,7 @@ impl McpServer {
             "filesChanged": files,
             "check": self.check_report(run, attempts)?,
             "notProven": not_proven(attempts),
-            "notProvenWhy": not_proven_why(attempts),
+            "notProvenWhy": not_proven_why(attempts, run.round),
             "reviews": reviews(attempts),
             "skipped": skipped_steps(attempts),
             "prUrl": run.pr_url,
@@ -1758,20 +1758,50 @@ fn not_proven(attempts: &[Attempt]) -> Json {
     }
 }
 
-/// How many of those no test proves, by why. Null when no verifier has answered.
-fn not_proven_why(attempts: &[Attempt]) -> Json {
-    let Some(verification) = latest_verification(attempts) else {
+/// How many things weren't proven, by why, as the app counts them: those no test proves, and in
+/// `byReviews` what the round's reviews couldn't check by reading the code. Null when no verifier
+/// has answered and no review left anything unchecked.
+fn not_proven_why(attempts: &[Attempt], round: i64) -> Json {
+    let verification = latest_verification(attempts);
+    let by_reviews = unchecked_by_reviews(attempts, round);
+    if verification.is_none() && by_reviews == 0 {
         return Json::Null;
-    };
+    }
     let mut counts: BTreeMap<WhyNotProven, usize> = BTreeMap::new();
     for why in verification
-        .criteria
         .iter()
+        .flat_map(|verification| &verification.criteria)
         .filter_map(|checked| checked.why_not_proven())
     {
         *counts.entry(why).or_default() += 1;
     }
-    json!(counts)
+    let mut view = json!(counts);
+    if by_reviews > 0 {
+        view["byReviews"] = json!(by_reviews);
+    }
+    view
+}
+
+/// How many things the round's reviews said they couldn't check by reading the code, such as how it
+/// looks on screen. Only each review's latest answer counts, and one from before Keel asked has none.
+fn unchecked_by_reviews(attempts: &[Attempt], round: i64) -> usize {
+    let reviews: Vec<&Attempt> = attempts
+        .iter()
+        .filter(|a| a.round == round && a.role == "reviewer")
+        .collect();
+    reviews
+        .iter()
+        .enumerate()
+        .filter(|(index, review)| {
+            !reviews[index + 1..]
+                .iter()
+                .any(|later| later.step_id == review.step_id)
+        })
+        .filter_map(|(_, review)| review.output.as_ref()?.get("unchecked")?.as_array())
+        .flatten()
+        .filter_map(Json::as_str)
+        .filter(|text| !text.trim().is_empty())
+        .count()
 }
 
 /// Each reviewer's verdict and each approver's decision, from the latest of each. As in the
@@ -2944,9 +2974,14 @@ mod tests {
                 json!({ "corrected": "noCheckPassed" })
             ),
             item("C6", "unmet", "src/a.rs:9", json!({})),
-            // From before the verifier said why.
+            // From before the verifier said why, which may be in what it pointed at.
             item("C7", "unverified", "", json!({})),
-            item("C8", "unverified", "tests/b.rs:2", json!({})),
+            item(
+                "C8",
+                "unverified",
+                "tests/b.rs:2 needs Postgres, skipped",
+                json!({})
+            ),
         ]))];
         let listed = not_proven(&attempts);
         let whys: Vec<&Json> = listed
@@ -2965,19 +3000,19 @@ mod tests {
                 // Found not met, which isn't unproven.
                 &Json::Null,
                 &json!("noTest"),
-                &json!("notSaid"),
+                &json!("seeEvidence"),
             ]
         );
         assert_eq!(listed[3]["corrected"], "noCheckPassed");
         assert_eq!(
-            not_proven_why(&attempts),
-            json!({ "notRun": 2, "noTest": 2, "noCheckPassed": 1, "notSaid": 1 })
+            not_proven_why(&attempts, 0),
+            json!({ "notRun": 2, "noTest": 2, "noCheckPassed": 1, "seeEvidence": 1 })
         );
 
         // With no verifier, nothing says what was proven.
         let none = [attempt("review", 1)];
         assert_eq!(not_proven(&none), Json::Null);
-        assert_eq!(not_proven_why(&none), Json::Null);
+        assert_eq!(not_proven_why(&none, 0), Json::Null);
         // With everything proven, there's nothing to count.
         let all = [verifier(json!([item(
             "C1",
@@ -2985,6 +3020,47 @@ mod tests {
             "tests/a.rs:1",
             json!({})
         )]))];
-        assert_eq!(not_proven_why(&all), json!({}));
+        assert_eq!(not_proven_why(&all, 0), json!({}));
+    }
+
+    /// A review in a round that said it couldn't check these by reading the code.
+    fn review(step: &str, round: i64, unchecked: Json) -> Attempt {
+        let mut review = attempt(step, round + 1);
+        review.output =
+            Some(json!({ "verdict": "approved", "findings": [], "unchecked": unchecked }));
+        review
+    }
+
+    /// The app counts these too, so both say the same number.
+    #[test]
+    fn what_the_reviews_could_not_check_counts_as_not_proven_as_in_the_app() {
+        let verified = verifier(json!([
+            item("C1", "met", "tests/a.rs:1", json!({})),
+            item("C2", "unverified", "", json!({ "why": "noTest" })),
+        ]));
+        let mut tried_again = review("ux", 0, json!(["After it was tried again"]));
+        tried_again.id = "ux-again".into();
+        let attempts = [
+            verified,
+            review("ux", 0, json!(["Before it was tried again", "Also before"])),
+            tried_again,
+            review("code", 0, json!(["How the totals look on screen", "  "])),
+            // From before Keel asked, and from another round.
+            attempt("security", 1),
+            review("ui", 1, json!(["About code that changed since"])),
+        ];
+        assert_eq!(
+            not_proven_why(&attempts, 0),
+            json!({ "byReviews": 2, "noTest": 1 })
+        );
+        assert_eq!(
+            not_proven_why(&attempts, 1),
+            json!({ "byReviews": 1, "noTest": 1 })
+        );
+        // With no verifier, what the reviews couldn't check is still counted.
+        let reviews_only = [review("ux", 0, json!(["How it looks in dark mode"]))];
+        assert_eq!(not_proven_why(&reviews_only, 0), json!({ "byReviews": 1 }));
+        // The list of what no test proves is still only the verifier's.
+        assert_eq!(not_proven(&attempts).as_array().unwrap().len(), 1);
     }
 }

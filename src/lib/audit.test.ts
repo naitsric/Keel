@@ -83,7 +83,8 @@ describe("what a verifier found", () => {
     }
     // From before the verifier said why: pointing at nothing, it found nothing that proves it.
     expect(whyNotProven(item("unverified"))).toBe("noTest");
-    expect(whyNotProven(item("unverified", { evidence: "tests/a.rs:1" }))).toBe("notSaid");
+    // What it pointed at may well say why, as the prompt from before asked: Keel claims nothing.
+    expect(whyNotProven(item("unverified", { evidence: "requiere Postgres; se salta" }))).toBe("seeEvidence");
     // What was proven either way isn't unproven.
     expect(whyNotProven(item("met"))).toBeNull();
     expect(whyNotProven(item("unmet", { evidence: "calc.py:3" }))).toBeNull();

@@ -176,7 +176,7 @@ export function verificationCounts(verification: VerificationOutput) {
 }
 
 /** Why nothing proves one thing that had to be true, in the engine's words: the MCP's `why`. */
-export type WhyNotProven = "notRun" | "noTest" | "noCheckPassed" | "noEvidence" | "leftOut" | "notSaid";
+export type WhyNotProven = "notRun" | "noTest" | "noCheckPassed" | "noEvidence" | "leftOut" | "seeEvidence";
 
 /**
  * Why nothing proves it: what Keel corrected, or else what the verifier said. Null when it was met or
@@ -186,12 +186,13 @@ export function whyNotProven(item: CheckedCriterion): WhyNotProven | null {
   if (item.result !== "unverified") return null;
   if (item.corrected) return item.corrected;
   if (item.why === "notRun" || item.why === "noTest") return item.why;
-  // From before the verifier said why: pointing at nothing, it found nothing that proves it.
-  return item.evidence ? "notSaid" : "noTest";
+  // Without why apart: pointing at nothing, it found nothing that proves it. What it pointed at may say
+  // why, as the prompt from before asked, so Keel claims no reason of its own.
+  return item.evidence ? "seeEvidence" : "noTest";
 }
 
 /** What the reviews couldn't check by reading the code comes first, as in what proves it. */
-const NOT_PROVEN_ORDER = ["byReviews", "notRun", "noTest", "noCheckPassed", "noEvidence", "leftOut", "notSaid"] as const;
+const NOT_PROVEN_ORDER = ["byReviews", "notRun", "noTest", "noCheckPassed", "noEvidence", "leftOut", "seeEvidence"] as const;
 export type NotProvenGroup = { why: (typeof NOT_PROVEN_ORDER)[number]; count: number };
 
 /** How many things weren't proven in a round, by why. Nothing when everything was. */

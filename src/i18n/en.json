@@ -349,8 +349,8 @@
       "noEvidence_other": "{{count}}: they were said to be met, but not what proves them",
       "leftOut_one": "{{count}}: nothing was said about it",
       "leftOut_other": "{{count}}: nothing was said about them",
-      "notSaid_one": "{{count}}: nobody said why",
-      "notSaid_other": "{{count}}: nobody said why"
+      "seeEvidence_one": "{{count}}: see what was said about it in “{{where}}”",
+      "seeEvidence_other": "{{count}}: see what was said about each in “{{where}}”"
     },
     "approvalSkipped": "{{names}}: skipped, nothing they cover changed",
     "workflowWarning": "This change edits `.github/workflows`. Those files can run with the repo's secrets as soon as the branch is pushed. Read them first.",

@@ -609,6 +609,19 @@ describe("the approval card", () => {
       expect(why).toEqual(["1: su prueba existe, pero no corrió aquí", "1: ninguna prueba la demuestra"]);
     });
 
+    // The prompt from before asked to say it in what it pointed at, so Keel doesn't say nobody did.
+    it("points to what each one says when the verifier didn't give why apart", async () => {
+      const old = (id: string, evidence: string) => said(id, "unverified", evidence);
+      show([builder(["calc.py"]), check, verifier([old("C1", "tests/db.rs:12 needs Postgres, skipped"), old("C2", "tests/db.rs:30 exists, but didn't run"), { ...said("C3", "unverified", "tests/ui.spec.ts:4"), why: "" }]), human], ["calc.py"]);
+      const found = lines("3 things weren't proven");
+      expect(found).toHaveLength(1);
+      expect([...(found[0].parentElement?.querySelectorAll("li") ?? [])].map((li) => li.textContent)).toEqual(["3: see what was said about each in “What proves it”"]);
+      expect(page()).not.toMatch(/nobody said why/i);
+      await i18next.changeLanguage("es");
+      show([builder(["calc.py"]), check, verifier([old("C1", "requiere Postgres; se salta")]), human], ["calc.py"]);
+      expect(lines("1 cosa quedó sin probar")[0].parentElement?.querySelector("li")?.textContent).toBe("1: mira qué se dijo de ella en «Qué lo demuestra»");
+    });
+
     it("counts each one the verifier couldn't verify when it verified none", () => {
       show([builder(["calc.py"]), check, verifier([said("C1", "unverified"), said("C2", "unverified")]), human], ["calc.py"]);
       expect(lines("2 things weren't proven")).toHaveLength(1);

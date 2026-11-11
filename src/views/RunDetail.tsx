@@ -199,7 +199,7 @@ function VerificationItems({ verification }: { verification: VerificationOutput 
       {verification.criteria.map((item) => {
         // Without saying why, what it pointed at speaks for itself.
         const said = whyNotProven(item);
-        const why = said && said !== "notSaid" ? `run.verifyWhy.${said}` : null;
+        const why = said && said !== "seeEvidence" ? `run.verifyWhy.${said}` : null;
         return (
           <li key={item.id} className="min-w-0">
             <p className="selectable break-words">
@@ -804,7 +804,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             <p className="font-medium">{t("run.notProvenCount", { count: notProven })}</p>
             <ul className="text-muted">
               {notProvenWhy.map((group) => (
-                <li key={group.why}>{t(`run.notProvenWhy.${group.why}`, { count: group.count })}</li>
+                <li key={group.why}>{t(`run.notProvenWhy.${group.why}`, { count: group.count, where: t("run.whatProves") })}</li>
               ))}
             </ul>
           </div>

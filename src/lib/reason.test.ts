@@ -66,7 +66,7 @@ describe("what's said about a verifier", () => {
         say("run.verifyNone", { count: 4 }),
         ...["met", "unmet", "unverified"].map((result) => say(`run.verifyResult.${result}`)),
         ...["noEvidence", "noCheckPassed", "leftOut", "noTest", "notRun"].map((why) => say(`run.verifyWhy.${why}`)),
-        ...["byReviews", "notRun", "noTest", "noCheckPassed", "noEvidence", "leftOut", "notSaid"].flatMap((why) => [1, 2].map((count) => say(`run.notProvenWhy.${why}`, { count }))),
+        ...["byReviews", "notRun", "noTest", "noCheckPassed", "noEvidence", "leftOut", "seeEvidence"].flatMap((why) => [1, 2].map((count) => say(`run.notProvenWhy.${why}`, { count, where: say("run.whatProves") }))),
         say("activity.verifyAnswer"),
         say("activity.verificationCorrected", { count: 2 }),
         say("activity.verificationDropped", { count: 2 }),

@@ -81,8 +81,8 @@ const agentStep = (id: string, model: string, tools: "readOnly" | "build") => ({
 const reviewerStep = (id: string, paths: string[]) => ({ id, model: "sonnet", tools: "readOnly" as const, effort: null, prompt: "Review {{diff}}", maxTurns: null, maxBudgetUsd: null, paths, role: { kind: "reviewer" as const } });
 // What the verifier found: verify=all|some|none|unmet with flow=approval|delivered, flow=verifying and
 // flow=verifyUnreadable for the step itself, and verify=old to see one from an earlier round, which
-// says nothing. verify=notRun has tests that exist but didn't run here, beside one with no test, and
-// the approval says why for each. node=verify opens what it found. long=1 has text at its limits.
+// says nothing. verify=notRun has a test that exists but didn't run here, one from before the verifier
+// said why apart, and one with no test, and the approval says why for each. node=verify opens what it found. long=1 has text at its limits.
 const verifyMode = params.get("verify");
 const verifyShown = verifyMode !== null || params.get("flow") === "verifying" || params.get("flow") === "verifyUnreadable";
 const verifyStep: WorkflowStep = { ...agentStep("verify", "sonnet", "readOnly"), role: { kind: "verifier" } };
@@ -278,7 +278,8 @@ const verifiedItems = () => {
       return [
         item("C1", ...C1, "met", "test_calc.py::test_add"),
         item("C2", ...C2, "unverified", say("test_invoices.py:14 needs Postgres, which isn't here", "test_invoices.py:14 necesita Postgres, que no está aquí"), undefined, "notRun"),
-        item("C3", ...C3, "unverified", say("test_invoices.py:30 needs Postgres, which isn't here", "test_invoices.py:30 necesita Postgres, que no está aquí"), undefined, "notRun"),
+        // As from before the verifier said why apart: only what it pointed at says it.
+        item("C3", ...C3, "unverified", say("test_invoices.py:30 needs Postgres; skipped", "test_invoices.py:30 requiere Postgres; se salta")),
         item("C4", ...C4, "unverified", "", undefined, "noTest"),
       ];
     default:

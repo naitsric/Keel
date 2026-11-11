@@ -46,8 +46,9 @@ const GET_RUN: &str = "Get a run: its overall state (working, waitingForPerson o
                        started it (startedByYou), and `report`, what it did in short: the last worker's \
                        `answer`, filesChanged (up to 100, and moreFilesChanged says how many more), whether \
                        the `check` passed and what it printed if not, what no test proves (`notProven`, \
-                       each with `why`, and `notProvenWhy` counts them by why: `notRun` means its test \
-                       exists but didn't run here), the \
+                       where each unverified one has `why`: `notRun` means its test exists but didn't run \
+                       here, and `seeEvidence` that its `evidence` may say), how many things weren't proven by why (`notProvenWhy`, with `byReviews` for \
+                       what the reviews couldn't check by reading the code, as Keel counts them), the \
                        `reviews`, steps `skipped` for being a small change, and its pull request. `waitingFor` \
                        says what it waits for: the `questions` the person has to answer, or whether an \
                        approval canSendBack, and `youCan`, the tools this client may use on it now. Answering \
