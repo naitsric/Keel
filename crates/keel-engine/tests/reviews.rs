@@ -80,6 +80,10 @@ REVIEW*)
   while [ -f "$(dirname "$0")/hold" ]; do sleep 0.02; done
   sleep 0.4
   result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"total_cost_usd":0.01,"structured_output":{{"verdict":"changes","findings":["a.py:1 finding"],"summary":"one thing to fix"}}}}';;
+APPROVE-ADDED*)
+  decision=approve
+  if [ -s "{answers}" ]; then decision=$(head -1 "{answers}"); sed -i '' 1d "{answers}"; fi
+  result="{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"num_turns\":1,\"structured_output\":{{\"decision\":\"$decision\",\"risk\":\"low\",\"reasons\":\"because\",\"instructions\":\"FIX-THE-FINDING\",\"questioned\":[{{\"decided\":\"Fails the check on an unknown severity\",\"number\":null,\"round\":1,\"why\":\"Nothing asks for it\"}}]}}}}";;
 APPROVE*)
   decision=approve
   if [ -s "{answers}" ]; then decision=$(head -1 "{answers}"); sed -i '' 1d "{answers}"; fi
@@ -408,6 +412,44 @@ fn sending_work_back_fixes_it_and_reviews_everything_again() {
             .iter()
             .any(|e| e.kind == "rework")
     );
+}
+
+#[test]
+fn an_approver_knows_its_round_and_keeps_the_round_of_what_the_change_added() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.answers(&["rework"]);
+    let mut steps = workflow(2);
+    let Some(WorkflowStep::Agent(approver)) = steps.iter_mut().find(|s| s.id() == "approver")
+    else {
+        panic!()
+    };
+    // A prompt saved without a word about rounds still gets them.
+    approver.prompt = "APPROVE-ADDED\n{{rework}}".into();
+    let run = w.start(steps);
+    w.wait(&run, "human", AttemptState::WaitingApproval);
+
+    let approvers = w.all(&run, "approver");
+    assert_eq!(
+        approvers.iter().map(|a| a.round).collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert!(
+        approvers[0].prompt.ends_with("\n\nThis is round 1."),
+        "{}",
+        approvers[0].prompt
+    );
+    assert!(
+        approvers[1].prompt.ends_with(
+            "This is round 2.\n\nWhat the change added that an earlier round left to the person. If it's still there, keep its round:\n- Fails the check on an unknown severity (round 1)"
+        ),
+        "{}",
+        approvers[1].prompt
+    );
+    // Only an approver answers with rounds.
+    let builders = w.all(&run, "builder");
+    assert!(!builders[1].prompt.contains("This is round"));
+    assert!(!w.all(&run, "security")[1].prompt.contains("This is round"));
 }
 
 #[test]

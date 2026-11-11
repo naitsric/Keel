@@ -18,7 +18,7 @@ use crate::{brain, prompts, sizing, specs, verification};
 const MAX_ROUNDS: u32 = 5;
 
 pub const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"verdict":{"type":"string","enum":["approved","changes"]},"findings":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"},"unread":{"type":"array","items":{"type":"string"},"description":"Each file of the change you could not read, if any. A review that left one out is not an approval."},"unchecked":{"type":"array","items":{"type":"string"},"description":"Each thing in this change you could not check by reading the code, such as how it looks on screen, in one line, if any. Keel shows them to the person as not proven."}},"required":["verdict","findings","summary","unread","unchecked"],"additionalProperties":false}"#;
-pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"},"questioned":{"type":"array","items":{"type":"object","properties":{"decided":{"type":"string"},"number":{"type":"integer","description":"The `number` that decision has in `decided`."},"why":{"type":"string"}},"required":["decided","number","why"],"additionalProperties":false},"description":"Each thing the specification decided on its own that a finding questions, quoted as `decided` says it, with the `number` it has there, and why it does not hold. A person decides these at the approval, so none is a reason for rework."}},"required":["decision","risk","reasons","instructions","questioned"],"additionalProperties":false}"#;
+pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"},"questioned":{"type":"array","items":{"type":"object","properties":{"decided":{"type":"string"},"number":{"type":["integer","null"],"description":"The `number` that decision has in `decided`, or null for one the change added."},"round":{"type":["integer","null"],"description":"For one the change added, the round it appeared in. null for one in `decided`."},"why":{"type":"string"}},"required":["decided","number","round","why"],"additionalProperties":false},"description":"Each thing the specification decided on its own that a finding questions, quoted as `decided` says it, with the `number` it has there, and why it does not hold. Also each behavior the change added that no criterion, limit or decision asks for, in one line, with no `number` and with the `round` it appeared in. A person decides these at the approval, so none is a reason for rework."}},"required":["decision","risk","reasons","instructions","questioned"],"additionalProperties":false}"#;
 
 /// What a reviewer answered, as Keel keeps it. One that says it couldn't read part of the change
 /// didn't review all of it, so it's never an approval, whatever it says. `None` if it stands.
@@ -480,6 +480,52 @@ pub fn rework_text(attempts: &[Attempt], round: i64, language: &str) -> String {
         .join("\n\n")
 }
 
+/// What an approver is told about rounds: which one this is, counted from 1 as the person sees it,
+/// and what the change added that an earlier round left to the person. Reviewers read the whole
+/// change each round, so without this a later round would say it appeared then.
+pub fn round_text(attempts: &[Attempt], round: i64, language: &str) -> String {
+    let es = language.starts_with("es");
+    let this = if es {
+        format!("Esta es la ronda {}.", round + 1)
+    } else {
+        format!("This is round {}.", round + 1)
+    };
+    // What the latest earlier round left stands. One it no longer has isn't there any more.
+    let added: Vec<String> = attempts
+        .iter()
+        .rev()
+        .filter(|a| a.role == "approver" && a.round < round)
+        .find_map(|a| a.output.as_ref()?.get("questioned")?.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(added_by_the_change)
+        .map(|(text, appeared)| {
+            let label = if es { "ronda" } else { "round" };
+            format!("- {text} ({label} {appeared})")
+        })
+        .collect();
+    if added.is_empty() {
+        return this;
+    }
+    let intro = if es {
+        "Lo que agregó el cambio y una ronda anterior le dejó a la persona. Si sigue ahí, mantén su ronda:"
+    } else {
+        "What the change added that an earlier round left to the person. If it's still there, keep its round:"
+    };
+    format!("{this}\n\n{intro}\n{}", added.join("\n"))
+}
+
+/// A questioned decision that the change added, not the specification, with the round it appeared
+/// in. One from the specification has a `number`, and an answer from before this has no round.
+fn added_by_the_change(item: &Value) -> Option<(&str, i64)> {
+    if item.get("number").is_some_and(Value::is_number) {
+        return None;
+    }
+    let appeared = item.get("round")?.as_i64().filter(|round| *round >= 1)?;
+    let text = item.get("decided")?.as_str()?.trim();
+    (!text.is_empty()).then_some((text, appeared))
+}
+
 /// Whether a person sent the work back in any round before this one.
 pub fn returned_before(attempts: &[Attempt], round: i64) -> bool {
     attempts
@@ -569,11 +615,11 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
             "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{{{{answers}}}}\n\n{{{{rework}}}}\n\n{}\n{{{{diff}}}}",
             if es {
                 format!(
-                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque. No cuestiones lo que eligió una persona: una decisión cuyo `taken` es `person`, o lo que la persona respondió. Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Una decisión que no se sostenga con el cambio ya hecho también lo es: cítala como la dice `decided`, con el archivo y la línea donde se ve, si los hay. Si no hay, el veredicto es approved. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
+                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque. No cuestiones lo que eligió una persona: una decisión cuyo `taken` es `person`, o lo que la persona respondió. Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Una decisión que no se sostenga con el cambio ya hecho también lo es: cítala como la dice `decided`, con el archivo y la línea donde se ve, si los hay. Reporta como decisión que el cambio tomó por su cuenta el comportamiento nuevo que no pide ningún criterio, límite ni decisión, con archivo y línea. Si no hay, el veredicto es approved. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
                 )
             } else {
                 format!(
-                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Also question what the specification decided on its own, in `decided`, where it touches your focus. Don't question what a person chose: a decision whose `taken` is `person`, or what the person answered. Report only real problems in this change, each with its file and line. A decision that doesn't hold up now that the change is made is one too: quote it as `decided` says it, with the file and line where it shows, if any. If there are none, the verdict is approved. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
+                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Also question what the specification decided on its own, in `decided`, where it touches your focus. Don't question what a person chose: a decision whose `taken` is `person`, or what the person answered. Report only real problems in this change, each with its file and line. A decision that doesn't hold up now that the change is made is one too: quote it as `decided` says it, with the file and line where it shows, if any. Report new behavior that no criterion, limit or decision asks for as a decision the change took on its own, with its file and line. If there are none, the verdict is approved. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
                 )
             },
             text("Specification:", "Especificación:"),
@@ -594,8 +640,8 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
         text("Specification:", "Especificación:"),
         // What the specification decided on its own is the person's to settle, not the builder's.
         text(
-            "A finding that questions what the specification decided on its own, in `decided`, is not a reason for rework, even if it's right: a person decides that, and can change it at the approval. Put each one in `questioned`, quoting the decision as `decided` says it, with the `number` it has there, and saying why it doesn't hold, mention them in reasons, and leave them out of instructions.",
-            "Un hallazgo que cuestiona lo que la especificación decidió por su cuenta, en `decided`, no es motivo de rework, aunque tenga razón: eso lo decide una persona, que puede cambiarlo en la aprobación. Pon cada uno en `questioned`, citando la decisión como la dice `decided`, con el `number` que tiene ahí, y diciendo por qué no se sostiene, menciónalos en reasons y déjalos fuera de instructions.",
+            "A finding that questions what the specification decided on its own, in `decided`, is not a reason for rework, even if it's right: a person decides that, and can change it at the approval. Put each one in `questioned`, quoting the decision as `decided` says it, with the `number` it has there, and saying why it doesn't hold, mention them in reasons, and leave them out of instructions. Do the same with a finding about behavior the change added that no criterion, limit or decision asks for: put it in `questioned` as a decision of the change, said in one line, with `number` null and the `round` it appeared in.",
+            "Un hallazgo que cuestiona lo que la especificación decidió por su cuenta, en `decided`, no es motivo de rework, aunque tenga razón: eso lo decide una persona, que puede cambiarlo en la aprobación. Pon cada uno en `questioned`, citando la decisión como la dice `decided`, con el `number` que tiene ahí, y diciendo por qué no se sostiene, menciónalos en reasons y déjalos fuera de instructions. Haz lo mismo con un hallazgo sobre un comportamiento que agregó el cambio y que no pide ningún criterio, límite ni decisión: ponlo en `questioned` como una decisión del cambio, dicha en una línea, con `number` en null y el `round` en que apareció.",
         ),
     );
 
@@ -1107,7 +1153,7 @@ mod tests {
         let questioned = &schema["properties"]["questioned"];
         assert_eq!(
             questioned["items"]["required"],
-            serde_json::json!(["decided", "number", "why"])
+            serde_json::json!(["decided", "number", "round", "why"])
         );
         assert!(
             questioned["description"]
@@ -1122,10 +1168,13 @@ mod tests {
         // Every approver is asked for it, also one of a workflow saved before this.
         let schema: Value = serde_json::from_str(DECISION_SCHEMA).unwrap();
         let item = &schema["properties"]["questioned"]["items"];
-        assert_eq!(item["properties"]["number"]["type"], "integer");
+        assert_eq!(
+            item["properties"]["number"]["type"],
+            serde_json::json!(["integer", "null"])
+        );
         assert_eq!(
             item["required"],
-            serde_json::json!(["decided", "number", "why"])
+            serde_json::json!(["decided", "number", "round", "why"])
         );
         for (language, told) in [
             (
@@ -1152,6 +1201,123 @@ mod tests {
                 assert!(prompt.contains(told), "{language}: {prompt}");
             }
         }
+    }
+
+    #[test]
+    fn what_the_change_added_that_nothing_asks_for_reaches_the_person_as_a_decision() {
+        // One the change added has no `number`, and says the round it appeared in. Every approver
+        // can answer it, also one of a workflow saved before this.
+        let schema: Value = serde_json::from_str(DECISION_SCHEMA).unwrap();
+        let questioned = &schema["properties"]["questioned"];
+        assert_eq!(
+            questioned["items"]["properties"]["round"]["type"],
+            serde_json::json!(["integer", "null"])
+        );
+        assert!(
+            questioned["description"].as_str().unwrap().contains(
+                "behavior the change added that no criterion, limit or decision asks for"
+            )
+        );
+        for (language, reported, settled) in [
+            (
+                "en",
+                "Report new behavior that no criterion, limit or decision asks for as a decision the change took on its own, with its file and line.",
+                "Do the same with a finding about behavior the change added that no criterion, limit or decision asks for: put it in `questioned` as a decision of the change, said in one line, with `number` null and the `round` it appeared in.",
+            ),
+            (
+                "es",
+                "Reporta como decisión que el cambio tomó por su cuenta el comportamiento nuevo que no pide ningún criterio, límite ni decisión, con archivo y línea.",
+                "Haz lo mismo con un hallazgo sobre un comportamiento que agregó el cambio y que no pide ningún criterio, límite ni decisión: ponlo en `questioned` como una decisión del cambio, dicha en una línea, con `number` en null y el `round` en que apareció.",
+            ),
+        ] {
+            let (mut reviewers, mut approvers) = (0, 0);
+            for workflow in builtin(language, None) {
+                for step in &workflow.steps {
+                    let specs: Vec<&StepSpec> = match step {
+                        WorkflowStep::Agent(spec) => vec![spec],
+                        WorkflowStep::Parallel { steps, .. } => steps.iter().collect(),
+                        _ => Vec::new(),
+                    };
+                    for spec in specs {
+                        let told = match spec.role {
+                            StepRole::Reviewer => {
+                                reviewers += 1;
+                                reported
+                            }
+                            StepRole::Approver { .. } => {
+                                approvers += 1;
+                                settled
+                            }
+                            _ => continue,
+                        };
+                        assert!(
+                            spec.prompt.contains(told),
+                            "{language} {} {}",
+                            workflow.id,
+                            spec.id
+                        );
+                    }
+                }
+            }
+            assert_eq!((reviewers, approvers), (8, 2), "{language}");
+        }
+    }
+
+    /// An approver's answer in a round, with what it left to the person.
+    fn approver_in(round: i64, questioned: Value) -> Attempt {
+        let mut attempt = recorded(&[("approver", "agent", "approver", Succeeded, "")]).remove(0);
+        attempt.round = round;
+        attempt.output = Some(serde_json::json!({
+            "decision": "rework", "risk": "low", "reasons": "r", "instructions": "i",
+            "questioned": questioned,
+        }));
+        attempt
+    }
+
+    #[test]
+    fn an_approver_is_told_its_round_counted_as_the_person_sees_it() {
+        assert_eq!(round_text(&[], 0, "en"), "This is round 1.");
+        assert_eq!(round_text(&[], 2, "es"), "Esta es la ronda 3.");
+    }
+
+    #[test]
+    fn an_approver_keeps_the_round_of_what_an_earlier_round_left_as_added_by_the_change() {
+        let added = |text: &str, round: i64| serde_json::json!({ "decided": text, "number": null, "round": round, "why": "w" });
+        let attempts = vec![
+            approver_in(0, serde_json::json!([added("Gone since", 1)])),
+            approver_in(
+                1,
+                serde_json::json!([
+                    // One of what the specification decided isn't something the change added.
+                    { "decided": "Keeps the rounding", "number": 1, "round": null, "why": "w" },
+                    added("Fails the check on an unknown severity", 1),
+                    added("Retries a lost save", 2),
+                    // An answer from before it could say, which has neither, and one with no round.
+                    { "decided": "Sorts by date", "why": "w" },
+                    { "decided": "No round", "number": null, "round": 0, "why": "w" },
+                ]),
+            ),
+            // This round's own answer isn't earlier.
+            approver_in(2, serde_json::json!([added("Not yet", 3)])),
+        ];
+        // What the latest earlier round left stands, so one it no longer has is gone.
+        assert_eq!(
+            round_text(&attempts, 2, "en"),
+            "This is round 3.\n\nWhat the change added that an earlier round left to the person. If it's still there, keep its round:\n- Fails the check on an unknown severity (round 1)\n- Retries a lost save (round 2)"
+        );
+        assert_eq!(
+            round_text(&attempts, 2, "es"),
+            "Esta es la ronda 3.\n\nLo que agregó el cambio y una ronda anterior le dejó a la persona. Si sigue ahí, mantén su ronda:\n- Fails the check on an unknown severity (ronda 1)\n- Retries a lost save (ronda 2)"
+        );
+        // An earlier answer from before this, or with nothing left, adds nothing.
+        let old = vec![approver_in(
+            0,
+            serde_json::json!([{ "decided": "Sorts by date", "number": 1, "why": "w" }]),
+        )];
+        assert_eq!(round_text(&old, 1, "en"), "This is round 2.");
+        let mut none = approver_in(0, Value::Null);
+        none.output = Some(serde_json::json!({ "decision": "rework" }));
+        assert_eq!(round_text(&[none], 1, "en"), "This is round 2.");
     }
 
     #[test]

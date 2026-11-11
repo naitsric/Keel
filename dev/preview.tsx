@@ -197,10 +197,13 @@ const previewSpec = {
 // What questioned=1 has the approver question. The first names its line by its number and quotes it in
 // other words. The second quotes its line as it is, with no number, like an answer from before there
 // were numbers. The third quotes no line, and its number is past the end, so it goes after the list.
+// The fourth is something the change added that nothing asks for, with no number and the round it
+// appeared in: round=2 has it come with the rework.
 const previewQuestioned = [
   { decided: say("Rounding stays the same", "El redondeo sigue igual"), number: 1, why: say("Totals on invoices with a discount now drift by a cent.", "Los totales de las facturas con descuento ahora se corren un centavo.") },
   { decided: say("“sorts the invoices by date, as the list does today”", "“ordena las facturas por fecha, como la lista de hoy”"), why: say("The export sorts them by number, so the two no longer agree.", "La exportación las ordena por número, así que ya no coinciden.") },
   { decided: say("Sends the receipt by email", "Manda el recibo por correo"), number: previewSpec.decided.length + 1, why: say("Nothing in the request asks for an email.", "Nada en el pedido pide un correo.") },
+  { decided: say("The export fails when an invoice has no date", "La exportación falla si una factura no tiene fecha"), number: null, round: round + 1, why: say("Old invoices have no date, so the export would stop working for them.", "Las facturas viejas no tienen fecha, así que la exportación dejaría de funcionar para ellas.") },
 ];
 // unchecked=1: what the code review couldn't check by reading the code.
 const previewUnchecked = uncheckedShown ? [say("How the invoices page shows the new totals", "Cómo se ven los totales nuevos en la página de facturas"), say("That the export still opens in the accounting app", "Que la exportación siga abriendo en el programa de contabilidad")] : [];

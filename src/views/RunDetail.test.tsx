@@ -867,6 +867,49 @@ describe("the approval card", () => {
         });
       });
 
+      describe("what the change added that nothing asks for", () => {
+        const added = { decided: "Fails the check when a thread's severity is unknown", number: null, round: 1, why: "A lost save leaves the PR unreviewed for good." };
+        const questionedBy = (questioned: unknown[], fields: Partial<SpecOutput> = { decided }) => {
+          const approver = attempt({ id: "approver", stepId: "approver", role: "approver", output: { decision: "approve", risk: "low", reasons: "The code review found a rule nothing asks for.", instructions: "", questioned } as unknown as Attempt["output"] });
+          show([specifier(fields), builder(["calc.py"]), approver, human], ["calc.py"], building);
+        };
+        const line = (text: string) => [...document.querySelectorAll("li")].find((li) => li.textContent?.startsWith(text))?.textContent ?? "";
+
+        it("shows with the other questioned ones, saying in which round it appeared, with a way to change it", () => {
+          questionedBy([{ decided: "El redondeo sigue igual", number: 1, why: "Totals now drift by a cent." }, added]);
+          expect(line("Keeps the rounding as it is")).toContain("A review questions this, and it's yours to decide: Totals now drift by a cent.");
+          expect(line(added.decided)).toContain("The change added this in round 1, and nothing asked for it. It's yours to decide: A lost save leaves the PR unreviewed for good.");
+          expect(change(added.decided)).not.toBeNull();
+          expect(page()).not.toContain("A review questions “Fails the check");
+        });
+
+        it("sends the person's words about it, as with a line it decided alone", async () => {
+          questionedBy([added]);
+          act(() => change(added.decided)?.click());
+          act(() => vi.advanceTimersByTime(800));
+          write("Drop that rule");
+          press("Send it back");
+          await settle();
+          expect(sentBack).toEqual([{ attemptId: "human", instructions: "About “Fails the check when a thread's severity is unknown”: Drop that rule" }]);
+        });
+
+        it("shows even when the specification decided nothing alone", () => {
+          questionedBy([added], {});
+          expect(page()).toContain("What it decided alone");
+          expect(line(added.decided)).toContain("The change added this in round 1");
+        });
+
+        it("reads one without a round as before, quoted after the list", () => {
+          questionedBy([
+            { decided: "Sorts by name", number: null, why: "No round." },
+            { decided: "Sorts by size", number: null, round: 0, why: "Before the first round." },
+          ]);
+          expect(page()).toContain("A review questions “Sorts by name”, and it's yours to decide: No round.");
+          expect(page()).toContain("A review questions “Sorts by size”, and it's yours to decide: Before the first round.");
+          expect(page()).not.toContain("The change added this");
+        });
+      });
+
       it("questions nothing when the approver's answer is from before it could", () => {
         const approver = attempt({ id: "approver", stepId: "approver", role: "approver", output: { decision: "approve", risk: "low", reasons: "Fine.", instructions: "" } as unknown as Attempt["output"] });
         show([specifier({ decided }), builder(["calc.py"]), approver, human], ["calc.py"], building);
@@ -1060,6 +1103,17 @@ describe("the approval card", () => {
       showRound([builder(["calc.py"]), returned({ instructions: "Devuelve 0.", by: "Claude Code" }), again]);
       expect(page()).toContain("Por qué esta ronda");
       expect(page()).toContain("Claude Code lo devolvió:");
+    });
+
+    it("says in which round the change added what nothing asks for, which may be an earlier one", async () => {
+      const approver = (round: number, appeared: number) => attempt({ id: `approver-${round}`, stepId: "approver", role: "approver", round, output: { decision: "approve", risk: "low", reasons: "r", instructions: "", questioned: [{ decided: "Retries a lost save", number: null, round: appeared, why: "Nothing asks for it." }] } as unknown as Attempt["output"] });
+      showRound([specifier(), builder(["calc.py"]), approver(0, 1), { ...builder(["calc.py"]), id: "builder-1", round: 1 }, approver(1, 1), again]);
+      expect(page()).toContain("The change added this in round 1, and nothing asked for it. It's yours to decide: Nothing asks for it.");
+      // Only this round's approver speaks.
+      expect(page().match(/The change added this/g)).toHaveLength(1);
+      await i18next.changeLanguage("es");
+      showRound([specifier(), builder(["calc.py"]), approver(1, 2), again]);
+      expect(page()).toContain("El cambio agregó esto en la ronda 2, y nada lo pedía. Te toca decidirlo: Nothing asks for it.");
     });
   });
 });

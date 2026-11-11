@@ -313,9 +313,9 @@ pub fn full_workflow(
         SPEC_PROMPT_EN
     };
     let builder_prompt = if spanish {
-        "Implementa esta especificación. Escribe primero la prueba que falla, respeta sus límites y deja el trabajo en un commit. Si algo no queda claro mientras construyes, no te detengas a preguntar: elige la opción más conservadora y di cuál en tu mensaje final.\n\nPedido original:\n{{request}}\n\nEspecificación:\n{{steps.spec.output}}\n\n{{answers}}\n\n{{rework}}"
+        "Implementa esta especificación. Escribe primero la prueba que falla, respeta sus límites y deja el trabajo en un commit. Si algo no queda claro mientras construyes, no te detengas a preguntar: elige la opción más conservadora y di cuál en tu mensaje final. En tu mensaje final, lista aparte lo que agregaste sin que lo pida ningún criterio, límite ni decisión, o di que no hay nada.\n\nPedido original:\n{{request}}\n\nEspecificación:\n{{steps.spec.output}}\n\n{{answers}}\n\n{{rework}}"
     } else {
-        "Implement this specification. Write the failing test first, respect its limits, and leave your work in a commit. If something is unclear while you build, don't stop to ask: choose the most conservative option and say which in your final message.\n\nOriginal request:\n{{request}}\n\nSpecification:\n{{steps.spec.output}}\n\n{{answers}}\n\n{{rework}}"
+        "Implement this specification. Write the failing test first, respect its limits, and leave your work in a commit. If something is unclear while you build, don't stop to ask: choose the most conservative option and say which in your final message. In your final message, list apart what you added that no criterion, limit or decision asks for, or say there's nothing.\n\nOriginal request:\n{{request}}\n\nSpecification:\n{{steps.spec.output}}\n\n{{answers}}\n\n{{rework}}"
     };
     let agent = |id: &str, model: &str, tools, role, prompt: &str| {
         WorkflowStep::Agent(StepSpec {
@@ -738,6 +738,30 @@ mod tests {
             assert!(verify.contains(unverified), "{language}");
             assert!(
                 verify.find(unverified) < verify.find("{{check}}"),
+                "{language}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_builder_lists_apart_what_it_added_that_nothing_asks_for() {
+        for (language, told) in [
+            (
+                "en",
+                "In your final message, list apart what you added that no criterion, limit or decision asks for, or say there's nothing.",
+            ),
+            (
+                "es",
+                "En tu mensaje final, lista aparte lo que agregaste sin que lo pida ningún criterio, límite ni decisión, o di que no hay nada.",
+            ),
+        ] {
+            let steps = full_workflow(language, "o", "s", None);
+            let WorkflowStep::Agent(builder) = &steps[1] else {
+                panic!()
+            };
+            assert!(builder.prompt.contains(told), "{language}");
+            assert!(
+                builder.prompt.find(told) < builder.prompt.find("{{request}}"),
                 "{language}"
             );
         }

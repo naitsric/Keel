@@ -400,6 +400,7 @@
     "decidedKeelTook": "The rounds of questions ran out, so Keel stopped asking and took the recommended option.",
     "decidedQuestioned": "A review questions this, and it's yours to decide: {{why}}",
     "decidedQuestionedElsewhere": "A review questions “{{decided}}”, and it's yours to decide: {{why}}",
+    "decidedAdded": "The change added this in round {{round}}, and nothing asked for it. It's yours to decide: {{why}}",
     "sendBackLabel": "What should change?",
     "sendBackHint": "It goes back to the step that does the work, without starting over, and comes back to you here. Your words stay in this run.",
     "sendBackAction": "Send it back",

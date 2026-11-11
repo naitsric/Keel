@@ -366,12 +366,17 @@ export interface Verdict {
   unchecked?: string[];
 }
 
-/** A line of what the specification decided on its own that a review questions, and why. */
+/**
+ * A line of what the specification decided on its own that a review questions, and why. Or else
+ * something the change added that nothing asks for, which has no number and says its round.
+ */
 export interface Questioned {
   /** The line, quoted, maybe in other words. */
   decided: string;
   /** Its place in the list, from 1. Older answers don't have it, and an agent can get it wrong. */
-  number?: number;
+  number?: number | null;
+  /** For something the change added, the round it appeared in, from 1. Older answers don't have it. */
+  round?: number | null;
   why: string;
 }
 
@@ -381,7 +386,7 @@ export interface Decision_ {
   risk: "low" | "medium" | "high";
   reasons: string;
   instructions: string;
-  /** What the specification decided on its own that a review questions, for the person to settle. Older answers don't have it. */
+  /** What the specification decided on its own, or the change added, that a review questions, for the person to settle. Older answers don't have it. */
   questioned?: Questioned[];
   overriddenByPerson?: boolean;
 }

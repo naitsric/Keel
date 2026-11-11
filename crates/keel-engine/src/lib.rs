@@ -2066,6 +2066,13 @@ impl Inner {
                 }
             }
         }
+        // Every approver can say in which round something the change added appeared, so every one
+        // is told which round this is, whatever its prompt says.
+        if matches!(spec.role, StepRole::Approver { .. }) {
+            let attempts = self.store.attempts_of_run(&run.id)?;
+            let rounds = workflows::round_text(&attempts, run.round, &run.language);
+            text.push_str(&format!("\n\n{rounds}"));
+        }
         Ok(text)
     }
 
