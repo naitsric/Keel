@@ -10,7 +10,7 @@ use keel_core::{AttemptState, Reason, StepSpec, ToolProfile, WorkflowStep};
 use keel_harness::auth::{self, AuthStatus};
 use keel_harness::process::{self, SIGINT, SIGTERM, Tail};
 use keel_harness::stream::ResultEvent;
-use keel_harness::{Parsed, StepCommand, parse_line, settings};
+use keel_harness::{Parsed, StepCommand, home, parse_line, settings};
 use keel_store::rusqlite_value::Value;
 use keel_store::{Attempt, now};
 use serde_json::json;
@@ -97,28 +97,25 @@ fn allows_host(domains: &[String], host: &str) -> bool {
     })
 }
 
-/// Points the usual tools at a cache a sandboxed command can write to, since theirs live in the
-/// home folder. Cargo and Go keep what they download in `tool_homes`: for setup that's the
-/// project's own cache, which only setup writes, and for any other step it's the run's copy of it.
-/// `domains` are those the step may reach, or `None` when it has the whole network (setup). With no
-/// way to crates.io cargo is told to work offline, and Go has no proxy, so a missing dependency is
-/// an error at once and not minutes of retries. A project that does allow them is left as it was.
+/// What a setup or check command runs with: the home it works in (see `home`), and the little Keel
+/// still tells tools one by one. uv copies into `.venv` rather than linking it to its cache, and Go
+/// doesn't fetch another toolchain. `domains` are those the step may reach, or `None` when it has
+/// the whole network (setup). With no way to crates.io cargo is told to work offline, and Go has no
+/// proxy, so a missing dependency is an error at once and not minutes of retries. A project that
+/// does allow them is left as it was.
 fn cache_env(
-    cache: &std::path::Path,
-    tool_homes: &std::path::Path,
+    home: &std::path::Path,
+    real_home: &std::path::Path,
     domains: Option<&[String]>,
 ) -> Vec<(String, String)> {
-    let homes = tool_homes.to_string_lossy().into_owned();
-    let cache = cache.to_string_lossy().into_owned();
+    let mut env = home::env(home, real_home);
+    env.extend(tool_settings(domains));
+    env
+}
+
+fn tool_settings(domains: Option<&[String]>) -> Vec<(String, String)> {
     let mut env = vec![
-        ("XDG_CACHE_HOME".to_owned(), cache.clone()),
-        ("UV_CACHE_DIR".to_owned(), format!("{cache}/uv")),
         ("UV_LINK_MODE".to_owned(), "copy".to_owned()),
-        ("PIP_CACHE_DIR".to_owned(), format!("{cache}/pip")),
-        ("npm_config_cache".to_owned(), format!("{cache}/npm")),
-        ("CARGO_HOME".to_owned(), format!("{homes}/cargo")),
-        ("GOPATH".to_owned(), format!("{homes}/go")),
-        ("GOCACHE".to_owned(), format!("{cache}/go-build")),
         ("GOTOOLCHAIN".to_owned(), "local".to_owned()),
     ];
     if let Some(domains) = domains {
@@ -132,40 +129,9 @@ fn cache_env(
     env
 }
 
-/// Gives a run its own copy of what setup downloaded for cargo and Go, once. It's a clone on APFS,
-/// which costs almost nothing, and a copy where that's not possible. It's never a link: whatever
-/// an agent changes stays in the run and can't reach the project's cache or the next run.
-fn copy_tool_caches(shared: &std::path::Path, run_cache: &std::path::Path) -> Result<()> {
-    std::fs::create_dir_all(run_cache)?;
-    for tool in ["cargo", "go"] {
-        let (from, to) = (shared.join(tool), run_cache.join(tool));
-        if to.exists() {
-            continue;
-        }
-        if !from.is_dir() {
-            std::fs::create_dir_all(&to)?;
-            continue;
-        }
-        let copy = |flags: &str| {
-            std::process::Command::new("/bin/cp")
-                .arg(flags)
-                .arg(&from)
-                .arg(&to)
-                .status()
-                .is_ok_and(|status| status.success())
-        };
-        if !copy("-cR") {
-            let _ = std::fs::remove_dir_all(&to);
-            if !copy("-R") {
-                let _ = std::fs::remove_dir_all(&to);
-                return Err(Error::Io(std::io::Error::other(format!(
-                    "could not copy {}",
-                    from.display()
-                ))));
-            }
-        }
-    }
-    Ok(())
+/// The run's own copy of the project's home, inside its private copy of the repo.
+fn run_home(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(RUN_CACHE).join(home::FOLDER)
 }
 
 fn runs_commands(kind: &str, tools: Option<ToolProfile>) -> bool {
@@ -351,6 +317,11 @@ impl Inner {
     /// What setup downloads for a project, shared by its runs. Only setup writes there.
     fn shared_cache(&self, project_id: &str) -> PathBuf {
         self.mirror(project_id).with_file_name("cache")
+    }
+
+    /// The home setup fills for a project, in its cache. Each run works in a copy of it.
+    fn project_home(&self, project_id: &str) -> PathBuf {
+        self.shared_cache(project_id).join(home::FOLDER)
     }
 
     /// Makes sure the run has its private clone, and returns the commit the step starts from.
@@ -549,13 +520,13 @@ impl Inner {
         };
         let mut process_command = command.command(spec);
         if let Some(project) = project {
-            let run_cache = workspace.join(RUN_CACHE);
-            copy_tool_caches(&self.shared_cache(project_id), &run_cache)?;
-            process_command.envs(cache_env(
-                &run_cache,
-                &run_cache,
-                Some(&project.allowed_domains),
-            ));
+            // `claude` itself needs the real home folder, so only its tools are pointed at the
+            // run's home, where they find what setup left.
+            let run_home = run_home(&workspace);
+            home::copy(&self.project_home(project_id), &run_home)?;
+            process_command
+                .envs(home::tool_env(&run_home))
+                .envs(tool_settings(Some(&project.allowed_domains)));
         }
         process_command.envs(service_env);
         // After the project's own variables, as for a check, so the folder is always Keel's.
@@ -585,27 +556,28 @@ impl Inner {
         let tools = locked(&self.tools).clone();
         let workspace = PathBuf::from(&attempt.workspace);
         let dir = self.run_dir(&attempt.run_id);
-        let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        let real_home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
         let sockets = services::socket_dirs(&services::root_for(project_id), &project.services);
-        // Setup fills a cache shared by the project's runs. Everything after it gets one of its
-        // own, inside the private copy, so nothing an agent wrote can reach the next run.
+        // Setup fills a home shared by the project's runs, in its cache. Everything after it works
+        // in the run's own copy, inside the private copy, so nothing an agent wrote can reach the
+        // next run.
         let shared_cache = self.shared_cache(project_id);
-        let (profile, cache) = if is_setup {
+        let (profile, home) = if is_setup {
             std::fs::create_dir_all(&shared_cache)?;
             (
                 settings::setup_profile(
                     &workspace,
-                    &home,
+                    &real_home,
                     &project.allowed_read,
                     &sockets,
                     &shared_cache,
                 ),
-                shared_cache.clone(),
+                self.project_home(project_id),
             )
         } else {
             (
-                settings::check_profile(&workspace, &home, &project.allowed_read, &sockets),
-                workspace.join(RUN_CACHE),
+                settings::check_profile(&workspace, &real_home, &project.allowed_read, &sockets),
+                run_home(&workspace),
             )
         };
         let stem = format!("{}-{}", attempt.step_id, attempt.number);
@@ -617,7 +589,7 @@ impl Inner {
         store.append_event(
             &attempt.id,
             "started",
-            &json!({ "command": command_text, "shaBefore": sha_before, "profile": profile }),
+            &json!({ "command": command_text, "shaBefore": sha_before, "profile": profile, "home": home }),
         )?;
         if self.stop_requested(&attempt.id) {
             return Ok(None);
@@ -635,16 +607,17 @@ impl Inner {
             );
         screenshots::empty(&workspace, &dir)?;
         let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
-        // Setup writes to the project's cache. Any other step works on the run's own copy of it.
-        let cache_vars = if is_setup {
-            cache_env(&cache, &cache, None)
+        // Setup writes to the project's home. Any other step works on the run's own copy of it.
+        let home_vars = if is_setup {
+            home::create(&home)?;
+            cache_env(&home, &real_home, None)
         } else {
-            copy_tool_caches(&shared_cache, &cache)?;
-            cache_env(&cache, &cache, Some(&project.allowed_domains))
+            home::copy(&self.project_home(project_id), &home)?;
+            cache_env(&home, &real_home, Some(&project.allowed_domains))
         };
         // After the project's own variables, as for an agent, so the folder is always Keel's.
         command
-            .envs(cache_vars)
+            .envs(home_vars)
             .envs(service_env)
             .env(screenshots::VARIABLE, screenshots::folder(&workspace));
         let child = process::spawn_step(command, &prompt_file, &raw_path, &stderr_path)?;
@@ -1549,9 +1522,11 @@ mod tests {
 
     #[test]
     fn without_crates_io_cargo_and_go_work_offline() {
-        let env = cache_env(Path::new("/c"), Path::new("/h"), Some(&[]));
-        assert_eq!(var(&env, "CARGO_HOME"), Some("/h/cargo"));
-        assert_eq!(var(&env, "GOPATH"), Some("/h/go"));
+        let env = cache_env(Path::new("/w/.keel-cache/home"), Path::new("/u"), Some(&[]));
+        assert_eq!(var(&env, "HOME"), Some("/w/.keel-cache/home"));
+        // Cargo and Go find what setup left in the home itself.
+        assert_eq!(var(&env, "CARGO_HOME"), None);
+        assert_eq!(var(&env, "GOPATH"), None);
         assert_eq!(var(&env, "CARGO_NET_OFFLINE"), Some("true"));
         assert_eq!(var(&env, "GOPROXY"), Some("off"));
     }
@@ -1559,13 +1534,13 @@ mod tests {
     #[test]
     fn a_project_that_allows_them_is_not_forced_offline() {
         let domains = ["Index.crates.io".to_owned(), "proxy.golang.org".to_owned()];
-        let env = cache_env(Path::new("/c"), Path::new("/h"), Some(&domains));
+        let env = cache_env(Path::new("/h"), Path::new("/u"), Some(&domains));
         assert_eq!(var(&env, "CARGO_NET_OFFLINE"), None);
         assert_eq!(var(&env, "GOPROXY"), None);
         // A domain that merely ends in the same letters isn't it.
         let env = cache_env(
-            Path::new("/c"),
             Path::new("/h"),
+            Path::new("/u"),
             Some(&["notcrates.io".to_owned()]),
         );
         assert_eq!(var(&env, "CARGO_NET_OFFLINE"), Some("true"));
@@ -1573,30 +1548,24 @@ mod tests {
 
     #[test]
     fn setup_has_the_network_and_is_left_alone() {
-        let env = cache_env(Path::new("/c"), Path::new("/c"), None);
+        let env = cache_env(Path::new("/p/cache/home"), Path::new("/u"), None);
+        assert_eq!(var(&env, "HOME"), Some("/p/cache/home"));
         assert_eq!(var(&env, "CARGO_NET_OFFLINE"), None);
         assert_eq!(var(&env, "GOPROXY"), None);
     }
 
     #[test]
-    fn a_run_copies_the_cache_once_and_never_writes_to_the_shared_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let shared = dir.path().join("shared");
-        std::fs::create_dir_all(shared.join("cargo/registry")).unwrap();
-        std::fs::write(shared.join("cargo/registry/dep"), "x").unwrap();
-        let run = dir.path().join("run");
-        copy_tool_caches(&shared, &run).unwrap();
-        assert!(run.join("cargo/registry/dep").exists());
-        assert!(run.join("go").is_dir(), "an empty one when setup left none");
-        std::fs::write(run.join("cargo/registry/mine"), "y").unwrap();
-        std::fs::write(run.join("cargo/registry/dep"), "changed").unwrap();
-        // Another step of the same run keeps what the run has.
-        copy_tool_caches(&shared, &run).unwrap();
-        assert!(run.join("cargo/registry/mine").exists());
-        assert!(!shared.join("cargo/registry/mine").exists());
+    fn the_builder_keeps_its_home_and_its_tools_use_the_runs() {
+        let workspace = Path::new("/r/workspace");
         assert_eq!(
-            std::fs::read_to_string(shared.join("cargo/registry/dep")).unwrap(),
-            "x"
+            run_home(workspace),
+            Path::new("/r/workspace/.keel-cache/home")
         );
+        let env = home::tool_env(&run_home(workspace));
+        assert_eq!(
+            var(&env, "CARGO_HOME"),
+            Some("/r/workspace/.keel-cache/home/.cargo")
+        );
+        assert_eq!(var(&env, "HOME"), None);
     }
 }

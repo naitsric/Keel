@@ -4,6 +4,7 @@
 pub mod auth;
 pub mod command;
 pub mod github;
+pub mod home;
 pub mod hook;
 pub mod locate;
 pub mod process;
