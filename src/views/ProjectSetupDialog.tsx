@@ -382,7 +382,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
 
       <div className="space-y-0.5 text-[11.5px] leading-snug text-subtle">
         <p>
-          {fromGuess && `${t("setup.guessed", { files: guess?.from.join(", ") })} `}
+          {fromGuess && `${t(guess?.fromCi ? "setup.fromCi" : "setup.guessed", { files: guess?.from.join(", ") })} `}
           {nothingToGo && `${t("setup.noGuess")} `}
           {t("setup.tryNote")}
         </p>

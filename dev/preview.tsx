@@ -554,7 +554,7 @@ const freshProject: Project = { ...otherProject, id: "p3", name: "shop", path: "
 const manyProjects = params.get("projects") === "many";
 const moreProjects: Project[] = manyProjects ? ["mobile", "billing-api", "docs", "infra", "website", "analytics"].map((name, i) => ({ ...otherProject, id: `p${i + 4}`, name, path: `/Users/you/www/${name}`, githubRepo: `acme/${name}` })) : [];
 let listedProjects: Project[] = params.get("empty") === "1" ? [] : [...projects, ...(params.get("projects") === "mixed" || manyProjects || params.get("dialog") === "setup" ? [freshProject] : []), ...moreProjects];
-const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[]; setupOptions: string[]; checkOptions: string[] }> = {
+const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[]; setupOptions: string[]; checkOptions: string[]; fromCi?: boolean }> = {
   pnpm: { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run check:i18n", "pnpm run lint", "pnpm test", "pnpm run typecheck"] },
   npm: { check: "npm test", setup: "npm ci", from: ["package.json", "package-lock.json"], setupOptions: [], checkOptions: [] },
   yarn: { check: "yarn test", setup: "yarn install --frozen-lockfile", from: ["package.json", "yarn.lock"], setupOptions: [], checkOptions: [] },
@@ -562,6 +562,7 @@ const GUESSES: Record<string, { check: string | null; setup: string | null; from
   cargo: { check: "cargo test", setup: "cargo fetch", from: ["Cargo.toml"], setupOptions: [], checkOptions: [] },
   go: { check: "go test ./...", setup: "go mod download", from: ["go.mod"], setupOptions: [], checkOptions: [] },
   make: { check: "make test", setup: null, from: ["Makefile"], setupOptions: [], checkOptions: [] },
+  ci: { check: "zig build test", setup: "zig fetch && zig build", from: [".github/workflows/ci.yml"], setupOptions: [], checkOptions: [], fromCi: true },
   unknown: { check: null, setup: null, from: [], setupOptions: [], checkOptions: [] },
 };
 const addedAnswer = (): { project: Project; outcome: string; map: unknown } => {
@@ -744,7 +745,7 @@ mockIPC((command, args) => {
       if (!listedProjects.some((p) => p.id === freshProject.id)) listedProjects = [...listedProjects, freshProject];
       return addedAnswer();
     case "project_setup":
-      return { project: listedProjects.find((p) => p.id === (args as { projectId: string }).projectId) ?? freshProject, guess: GUESSES[params.get("setup") ?? "pnpm"] ?? GUESSES.unknown };
+      return { project: listedProjects.find((p) => p.id === (args as { projectId: string }).projectId) ?? freshProject, guess: { fromCi: false, ...(GUESSES[params.get("setup") ?? "pnpm"] ?? GUESSES.unknown) } };
     case "project_try_check":
       return "try1";
     case "project_remove":

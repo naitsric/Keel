@@ -104,6 +104,8 @@ export interface Guess {
   setupOptions: string[];
   /** Other commands that check something here, for a person to add. */
   checkOptions: string[];
+  /** It's what the project's CI runs, since nothing else here says how it installs and tests. */
+  fromCi: boolean;
 }
 
 export interface ProjectSetup {
