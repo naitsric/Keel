@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use keel_core::{StepSpec, ToolProfile, WorkflowStep};
 use keel_engine::{Config, Engine, StartRun};
 use keel_harness::Tools;
-use keel_harness::testing::write_script;
-use keel_store::{Attempt, Store};
+use keel_harness::testing::{skipped, write_script};
+use keel_store::{Attempt, ProjectSettings, Store};
 
 struct World {
     dir: tempfile::TempDir,
@@ -244,6 +244,29 @@ impl World {
     fn bash(&self, session: &str) -> String {
         std::fs::read_to_string(self.log.join(format!("bash-{session}.txt"))).unwrap()
     }
+
+    /// Lets the project's builder reach these domains.
+    fn allow(&self, id: &str, domains: &[&str]) {
+        self.engine
+            .update_project(
+                id,
+                &ProjectSettings {
+                    allowed_domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+                    ..ProjectSettings::default()
+                },
+            )
+            .unwrap();
+    }
+
+    /// How long a command took, from when Keel started it to when it ended.
+    fn took(&self, attempt: &Attempt) -> Duration {
+        let events = self.store.events(&attempt.id, 0).unwrap();
+        let at = |kind: &str| {
+            let event = events.iter().find(|event| event.kind == kind).unwrap();
+            chrono::DateTime::parse_from_rfc3339(&event.at).unwrap()
+        };
+        (at("checkResult") - at("started")).to_std().unwrap()
+    }
 }
 
 /// This test's own home folder, which the fake `claude` gets as Keel's does.
@@ -475,4 +498,176 @@ fn a_resumed_builder_runs_its_commands_in_the_same_home() {
     assert_eq!(said(&after, "HOME"), home.to_string_lossy(), "{after}");
     assert_eq!(said(&after, "tries"), "2", "{after}");
     assert_eq!(said(&after, "claude"), real_home());
+}
+
+/// The registries of cargo, Go, npm and pnpm, and pip and uv.
+const REGISTRIES: [&str; 4] = [
+    "index.crates.io",
+    "proxy.golang.org",
+    "registry.npmjs.org",
+    "pypi.org",
+];
+
+/// What a command is told about the network, tool by tool: cargo, Go, npm, pnpm, pip and uv.
+const OFFLINE: &str = "echo \"offline=[$CARGO_NET_OFFLINE][$GOPROXY][$npm_config_offline]\
+                       [$pnpm_config_offline][$PIP_NO_INDEX][$UV_OFFLINE]\"";
+const ALL_OFFLINE: &str = "[true][off][true][true][1][1]";
+const NONE_OFFLINE: &str = "[][][][][][]";
+
+/// #121: a check has no network, so every tool works offline there, even in a project whose builder
+/// may reach the registries. That builder is left as it was.
+#[test]
+fn a_check_works_offline_even_where_the_builder_may_download() {
+    keel_harness::needs!(sandbox);
+    let w = world(&[]);
+    let id = w.add();
+    w.allow(&id, &REGISTRIES);
+    let run = w.run(
+        &id,
+        OFFLINE,
+        vec![
+            agent("builder"),
+            check("check", OFFLINE),
+            WorkflowStep::Approval { id: "human".into() },
+        ],
+    );
+    assert_eq!(w.wait_done(&run, "builder").state, "succeeded");
+    let built = w.bash("new");
+    assert_eq!(said(&built, "offline"), NONE_OFFLINE, "{built}");
+    let checked = w.passed(&w.wait_done(&run, "check"));
+    assert_eq!(said(&checked, "offline"), ALL_OFFLINE, "{checked}");
+}
+
+/// #121: a builder that can't reach a registry works offline with it too. Setup has the whole
+/// network, and nothing tells it otherwise.
+#[test]
+fn a_builder_with_no_way_to_a_registry_works_offline_and_setup_never_does() {
+    keel_harness::needs!(sandbox);
+    let w = world(&[]);
+    let id = w.add();
+    let run = w.run(&id, OFFLINE, vec![agent("builder")]);
+    assert_eq!(w.wait_done(&run, "builder").state, "succeeded");
+    let built = w.bash("new");
+    assert_eq!(said(&built, "offline"), ALL_OFFLINE, "{built}");
+
+    let (setup, check) = w.try_check(&id, OFFLINE, OFFLINE);
+    assert_eq!(said(&w.passed(&setup), "offline"), NONE_OFFLINE);
+    assert_eq!(said(&w.passed(&check), "offline"), ALL_OFFLINE);
+}
+
+/// A command that needs something downloaded: the program it needs, the files it runs on, and what
+/// its tool says as it fails.
+struct Download {
+    program: &'static str,
+    files: &'static [(&'static str, &'static str)],
+    command: &'static str,
+    says: &'static str,
+}
+
+const PACKAGE: &str = "{ \"name\": \"probe\", \"version\": \"1.0.0\", \"private\": true }\n";
+
+/// One for each tool of #121 that may be on a Mac, each in a folder of its own.
+const DOWNLOADS: [Download; 6] = [
+    Download {
+        program: "npm",
+        files: &[("npm/package.json", PACKAGE)],
+        command: "cd npm && npm install left-pad",
+        says: "ENOTCACHED",
+    },
+    Download {
+        program: "pnpm",
+        files: &[("pnpm/package.json", PACKAGE)],
+        command: "cd pnpm && pnpm add left-pad",
+        says: "ERR_PNPM_",
+    },
+    Download {
+        program: "python3",
+        files: &[],
+        command: "python3 -m pip install --target pip-packages six",
+        says: "No matching distribution found for six",
+    },
+    Download {
+        program: "uv",
+        files: &[(
+            "uv/pyproject.toml",
+            "[project]\nname = \"probe\"\nversion = \"0.1.0\"\nrequires-python = \">=3.9\"\n\
+             dependencies = []\n",
+        )],
+        command: "cd uv && uv add six",
+        says: "network was disabled",
+    },
+    // Bundler needs nothing to give up at once, and this shows it still does. Into the project, as
+    // the gems of the Ruby macOS comes with are where no check may write.
+    Download {
+        program: "bundle",
+        files: &[(
+            "bundler/Gemfile",
+            "source \"https://rubygems.org\"\ngem \"rainbow\", \"3.1.1\"\n",
+        )],
+        command: "cd bundler && BUNDLE_PATH=vendor/bundle bundle install",
+        says: "Could not reach host",
+    },
+    Download {
+        program: "cargo",
+        files: &[
+            (
+                "cargo/Cargo.toml",
+                "[package]\nname = \"probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+                 # Its own workspace, so cargo doesn't look for one in the folders above.\n\
+                 [workspace]\n",
+            ),
+            ("cargo/src/lib.rs", ""),
+        ],
+        command: "cd cargo && cargo add memchr",
+        says: "could not be found in registry index",
+    },
+];
+
+fn installed(program: &str) -> bool {
+    std::env::split_paths(&std::env::var_os("PATH").unwrap()).any(|dir| dir.join(program).is_file())
+}
+
+/// #121: inside a check, a command that would download something fails in seconds, whichever tool
+/// it is, instead of retrying for a minute or more. The project lets its builder reach every
+/// registry, and the check works offline all the same. A tool this Mac doesn't have is skipped.
+#[test]
+fn inside_a_check_a_command_that_needs_a_download_fails_in_seconds() {
+    keel_harness::needs!(sandbox);
+    let files: Vec<(&str, &str)> = DOWNLOADS
+        .iter()
+        .flat_map(|download| download.files.iter().copied())
+        .collect();
+    let w = world(&files);
+    let id = w.add();
+    w.allow(&id, &REGISTRIES);
+    // Every tool is tried before any is judged, so one run says how long each took.
+    let mut wrong = Vec::new();
+    for Download {
+        program,
+        command,
+        says,
+        ..
+    } in DOWNLOADS
+    {
+        if !installed(program) {
+            skipped(&format!("{program} isn't installed"));
+            continue;
+        }
+        let (setup, check) = w.try_check(&id, "true", command);
+        w.passed(&setup);
+        let output = w.output(&check);
+        let took = w.took(&check);
+        eprintln!(
+            "`{command}` ended {} in {:.1}s",
+            check.state,
+            took.as_secs_f64()
+        );
+        if check.state != "failed" || !output.contains(says) || took >= Duration::from_secs(5) {
+            wrong.push(format!(
+                "`{command}` ended {} in {took:?}, without saying {says:?}? {output}",
+                check.state
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n\n"));
 }
