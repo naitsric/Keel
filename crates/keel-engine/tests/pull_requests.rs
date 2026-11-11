@@ -317,6 +317,7 @@ impl World {
 
 #[test]
 fn a_saved_workflow_with_a_plain_spec_step_still_gets_its_text_into_the_pull_request() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.delivered();
     let body = w.body();
@@ -358,6 +359,7 @@ impl World {
 
 #[test]
 fn a_structured_answer_reads_as_text_and_the_pull_request_says_what_the_person_answered() {
+    keel_harness::needs!(sandbox);
     let w = world();
     std::fs::write(w.flags.join("spec-json"), structured(QUESTION)).unwrap();
     let run = w.start_simple();
@@ -470,6 +472,7 @@ const BOTH_MET: &str = r#"{"criteria":[{"id":"C1","result":"met","evidence":"tes
 
 #[test]
 fn the_pull_request_says_when_everything_was_met() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let body = delivered_with_verifier(&w, BOTH_MET, "en");
     assert!(
@@ -496,6 +499,7 @@ fn the_pull_request_says_when_everything_was_met() {
 
 #[test]
 fn the_pull_request_says_what_is_not_verified_and_never_rounds_it_up() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let said = r#"{"criteria":[{"id":"C1","result":"met","evidence":"tests/calc.rs:1"},{"id":"C2","result":"unverified","evidence":""}],"summary":"One has no test"}"#;
     let body = delivered_with_verifier(&w, said, "en");
@@ -513,6 +517,7 @@ fn the_pull_request_says_what_is_not_verified_and_never_rounds_it_up() {
 
 #[test]
 fn the_pull_request_says_plainly_when_nothing_could_be_verified() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let said = r#"{"criteria":[{"id":"C1","result":"unverified","evidence":""},{"id":"C2","result":"unverified","evidence":""}],"summary":"No tests"}"#;
     let body = delivered_with_verifier(&w, said, "es");
@@ -530,6 +535,7 @@ fn the_pull_request_says_plainly_when_nothing_could_be_verified() {
 
 #[test]
 fn what_a_verifier_points_at_is_masked_like_the_rest_of_the_pull_request() {
+    keel_harness::needs!(sandbox);
     let w = world();
     // Put together here, so no secret scanner trips on this file.
     let secret = format!("{}{}", "ghp_", "x".repeat(36));
@@ -569,6 +575,7 @@ fn delivering_frees_what_the_build_left_in_the_run_copy() {
 
 #[test]
 fn a_workflow_with_no_verifier_has_no_such_section() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.delivered();
     assert!(!w.body().contains("What had to be true"), "{}", w.body());
@@ -576,6 +583,7 @@ fn a_workflow_with_no_verifier_has_no_such_section() {
 
 #[test]
 fn a_run_where_nobody_was_asked_lists_no_answers() {
+    keel_harness::needs!(sandbox);
     let w = world();
     std::fs::write(w.flags.join("spec-json"), structured("")).unwrap();
     let run = w.start_simple();
@@ -589,6 +597,7 @@ fn a_run_where_nobody_was_asked_lists_no_answers() {
 
 #[test]
 fn the_simple_built_in_workflow_can_send_work_back_though_it_has_no_approver() {
+    keel_harness::needs!(sandbox);
     let w = world();
     std::fs::write(w.flags.join("spec-json"), structured("")).unwrap();
     let run = w.start_simple();
@@ -626,6 +635,7 @@ fn the_simple_built_in_workflow_can_send_work_back_though_it_has_no_approver() {
 
 #[test]
 fn a_workflow_with_nothing_that_specifies_adds_no_section() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let workflow = w.saved(vec![
         agent("builder", ToolProfile::Build),
@@ -643,6 +653,7 @@ fn a_workflow_with_nothing_that_specifies_adds_no_section() {
 
 #[test]
 fn a_description_too_long_for_github_still_gets_there_and_says_what_was_cut() {
+    keel_harness::needs!(sandbox);
     let w = world();
     std::fs::write(w.flags.join("spec-text"), "word ".repeat(20_000)).unwrap();
     let run = w.delivered();
@@ -665,6 +676,7 @@ fn a_description_too_long_for_github_still_gets_there_and_says_what_was_cut() {
 
 #[test]
 fn a_cut_leaves_no_half_a_secret_in_the_pull_request() {
+    keel_harness::needs!(sandbox);
     let w = world();
     // Long enough that the cut has to land somewhere among them.
     let token = format!("{}{}", "ghp_", "x".repeat(16));
@@ -684,6 +696,7 @@ fn a_cut_leaves_no_half_a_secret_in_the_pull_request() {
 
 #[test]
 fn what_it_just_opened_reads_as_a_draft_without_asking_github() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.delivered();
     let found = w.store.run(&run).unwrap();
@@ -695,6 +708,7 @@ fn what_it_just_opened_reads_as_a_draft_without_asking_github() {
 
 #[test]
 fn opening_a_run_finds_out_what_became_of_its_pull_request_and_only_reads() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.delivered();
     w.forget_looking(&run);
@@ -731,6 +745,7 @@ fn opening_a_run_finds_out_what_became_of_its_pull_request_and_only_reads() {
 
 #[test]
 fn opening_a_run_again_right_away_or_once_merged_asks_nothing_more() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.delivered();
     w.set_pr_view("OPEN", false, "2026-11-06T09:00:00Z");
@@ -759,6 +774,7 @@ fn opening_a_run_again_right_away_or_once_merged_asks_nothing_more() {
 
 #[test]
 fn a_failed_look_stays_quiet_and_keeps_what_was_known() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.delivered();
     let before = w.store.run(&run).unwrap();
@@ -826,6 +842,7 @@ fn a_failed_look_stays_quiet_and_keeps_what_was_known() {
 
 #[test]
 fn a_look_that_changes_nothing_tells_nobody() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.delivered();
     w.set_pr_view("OPEN", false, "2026-11-06T09:00:00Z");
@@ -844,6 +861,7 @@ fn a_look_that_changes_nothing_tells_nobody() {
 
 #[test]
 fn a_run_with_no_pull_request_asks_github_nothing() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let workflow = w.saved(delivering_steps());
     let run = w.start(&workflow);
@@ -858,6 +876,7 @@ fn a_run_with_no_pull_request_asks_github_nothing() {
 
 #[test]
 fn a_pull_request_that_was_already_there_is_unknown_until_keel_looks() {
+    keel_harness::needs!(sandbox);
     let w = world();
     std::fs::write(w.flags.join("pr-exists"), "").unwrap();
     let run = w.delivered();
@@ -882,6 +901,7 @@ fn a_pull_request_that_was_already_there_is_unknown_until_keel_looks() {
 
 #[test]
 fn the_background_look_follows_a_pull_request_until_it_is_merged() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|config| config.pr_look_again = Duration::from_millis(30));
     let run = w.delivered();
     assert_eq!(w.asked_about_prs(), 0, "nothing looks until it's started");
@@ -908,6 +928,7 @@ fn the_background_look_follows_a_pull_request_until_it_is_merged() {
 
 #[test]
 fn one_closed_long_ago_is_left_alone_until_a_person_opens_its_run() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|config| config.pr_look_again = Duration::from_millis(30));
     let run = w.delivered();
     w.set_pr_view("CLOSED", false, "2020-01-01T00:00:00Z");
@@ -933,6 +954,7 @@ fn one_closed_long_ago_is_left_alone_until_a_person_opens_its_run() {
 
 #[test]
 fn the_background_look_survives_a_github_that_keeps_failing() {
+    keel_harness::needs!(sandbox);
     let w = world_with(|config| config.pr_look_again = Duration::from_millis(30));
     let run = w.delivered();
     w.engine.start_pr_watch();
@@ -944,6 +966,7 @@ fn the_background_look_survives_a_github_that_keeps_failing() {
 
 #[test]
 fn a_card_shows_what_became_of_its_pull_request_and_stays_done_either_way() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let workflow = w.saved(delivering_steps());
     let run = w
@@ -985,6 +1008,7 @@ fn a_card_shows_what_became_of_its_pull_request_and_stays_done_either_way() {
 
 #[test]
 fn a_run_remembers_which_workflow_it_used_and_results_count_by_it() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.delivered();
     let found = w.store.run(&run).unwrap();
@@ -1015,6 +1039,7 @@ fn a_run_remembers_which_workflow_it_used_and_results_count_by_it() {
 
 #[test]
 fn a_cards_run_remembers_the_workflow_it_started_with_and_a_single_step_remembers_none() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let workflow = w.saved(vec![agent("spec", ToolProfile::ReadOnly)]);
     w.engine
@@ -1093,6 +1118,7 @@ fn git_out(repo: &Path, args: &[&str]) -> String {
 
 #[test]
 fn a_run_still_delivers_after_another_run_of_its_project_starts_from_newer_code() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(&w.saved(delivering_steps()));
     let human = w.wait_step(&run, "human", AttemptState::WaitingApproval);

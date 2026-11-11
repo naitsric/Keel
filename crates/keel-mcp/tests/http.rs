@@ -373,6 +373,7 @@ fn refused(result: &CallToolResult) -> String {
 
 #[tokio::test]
 async fn it_offers_these_tools_and_no_way_to_approve_anything() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let mut names: Vec<String> = client
@@ -422,6 +423,7 @@ async fn it_offers_these_tools_and_no_way_to_approve_anything() {
 /// A workflow any reader would want: a builder, a check, the person, and a pull request.
 #[tokio::test(flavor = "multi_thread")]
 async fn get_run_says_which_workflow_it_used_and_what_became_of_its_pull_request() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let started = ok(&call(&client, "start_run", w.start_args("Fix the bug")).await);
@@ -470,6 +472,7 @@ fn draft_args(project: &str) -> Json {
 
 #[tokio::test]
 async fn it_tells_a_model_how_to_write_a_draft() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let tools = client.list_all_tools().await.unwrap();
@@ -501,6 +504,7 @@ async fn it_tells_a_model_how_to_write_a_draft() {
 
 #[tokio::test]
 async fn a_draft_can_ask_for_a_step_to_depend_on_the_change_and_it_is_kept_and_shown() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let args = json!({
@@ -552,6 +556,7 @@ async fn a_draft_can_ask_for_a_step_to_depend_on_the_change_and_it_is_kept_and_s
 
 #[tokio::test]
 async fn a_draft_waits_for_the_person_and_nothing_can_run_it_until_they_save_it() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
 
@@ -638,6 +643,7 @@ async fn a_draft_waits_for_the_person_and_nothing_can_run_it_until_they_save_it(
 
 #[tokio::test]
 async fn saving_a_draft_never_replaces_a_workflow_the_person_has() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let draft = ok(&call(&client, "draft_workflow", draft_args("app")).await);
@@ -676,6 +682,7 @@ async fn saving_a_draft_never_replaces_a_workflow_the_person_has() {
 
 #[tokio::test]
 async fn a_draft_that_breaks_the_rules_is_refused_and_says_where() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let cases = [
@@ -731,6 +738,7 @@ async fn a_draft_that_breaks_the_rules_is_refused_and_says_where() {
 
 #[tokio::test]
 async fn a_draft_can_only_ask_for_what_the_editor_offers() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let agent = json!({ "id": "a", "model": "opus", "prompt": "p" });
@@ -787,6 +795,7 @@ async fn a_draft_can_only_ask_for_what_the_editor_offers() {
 
 #[tokio::test]
 async fn a_client_that_may_only_read_cannot_propose_and_drafts_have_a_limit() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let reader = w.client(&w.token(false)).await;
     let refusal = refused(&call(&reader, "draft_workflow", draft_args("app")).await);
@@ -831,6 +840,7 @@ impl World {
 
 #[tokio::test]
 async fn a_proposed_project_waits_for_the_person_and_no_run_can_reach_it_until_they_add_it() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let path = w.repo_outside_keel("other");
@@ -869,6 +879,7 @@ async fn a_proposed_project_waits_for_the_person_and_no_run_can_reach_it_until_t
 
 #[tokio::test]
 async fn a_proposal_can_only_name_the_folder() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let tools = client.list_all_tools().await.unwrap();
@@ -892,6 +903,7 @@ async fn a_proposal_can_only_name_the_folder() {
 
 #[tokio::test]
 async fn a_proposal_is_refused_when_it_should_be_and_the_call_is_on_record() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let reader = w.client(&w.token(false)).await;
     let path = w.repo_outside_keel("other");
@@ -934,6 +946,7 @@ async fn a_proposal_is_refused_when_it_should_be_and_the_call_is_on_record() {
 
 #[tokio::test]
 async fn it_listens_on_this_mac_only() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     assert!(w.addr.ip().is_loopback());
     let status = w.server.status();
@@ -943,6 +956,7 @@ async fn it_listens_on_this_mac_only() {
 
 #[tokio::test]
 async fn a_request_needs_a_token_and_a_revoked_one_stops_at_once() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     assert_eq!(w.post(None).send().await.unwrap().status(), 401);
     assert_eq!(
@@ -962,6 +976,7 @@ async fn a_request_needs_a_token_and_a_revoked_one_stops_at_once() {
 
 #[tokio::test]
 async fn a_web_page_cannot_reach_it_even_with_a_token() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let token = w.token(true);
     let from_a_page = w.post(Some(&token)).header(ORIGIN, "https://evil.example");
@@ -972,6 +987,7 @@ async fn a_web_page_cannot_reach_it_even_with_a_token() {
 
 #[tokio::test]
 async fn a_removed_project_is_not_there_for_a_client() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     w.engine.remove_project(&w.project_id).unwrap();
@@ -991,6 +1007,7 @@ async fn a_removed_project_is_not_there_for_a_client() {
 
 #[tokio::test]
 async fn a_client_that_may_only_read_can_read_and_nothing_else() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(false)).await;
 
@@ -1029,6 +1046,7 @@ async fn a_client_that_may_only_read_can_read_and_nothing_else() {
 
 #[tokio::test]
 async fn a_run_it_starts_shows_who_started_it_and_waits_for_the_person() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
 
@@ -1105,6 +1123,7 @@ async fn a_run_it_starts_shows_who_started_it_and_waits_for_the_person() {
 
 #[tokio::test]
 async fn a_step_asking_the_person_something_reads_as_waiting_for_them() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let workflow = w
         .engine
@@ -1152,6 +1171,7 @@ async fn a_step_asking_the_person_something_reads_as_waiting_for_them() {
 
 #[tokio::test]
 async fn a_run_it_starts_counts_as_working_and_the_board_never_holds_it_back() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let hold = w._dir.path().join("bin/hold");
@@ -1206,6 +1226,7 @@ async fn a_run_it_starts_counts_as_working_and_the_board_never_holds_it_back() {
 
 #[tokio::test]
 async fn a_client_can_only_have_so_many_runs_open() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     for n in 0..MAX_OPEN_RUNS {
@@ -1219,6 +1240,7 @@ async fn a_client_can_only_have_so_many_runs_open() {
 
 #[tokio::test]
 async fn it_says_what_is_wrong_with_a_request() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let no_project = json!({ "project": "nope", "workflow": w.workflow_id, "request": "x" });
@@ -1236,6 +1258,7 @@ async fn it_says_what_is_wrong_with_a_request() {
 
 #[tokio::test]
 async fn every_call_is_on_record_also_the_refused_ones() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(false)).await;
     ok(&call(&client, "list_projects", json!({})).await);
@@ -1255,6 +1278,7 @@ async fn every_call_is_on_record_also_the_refused_ones() {
 
 #[tokio::test]
 async fn a_client_gets_secrets_masked_and_the_record_keeps_them() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     // Put together here, so no secret scanner trips on this file.
@@ -1311,6 +1335,7 @@ async fn a_client_gets_secrets_masked_and_the_record_keeps_them() {
 
 #[tokio::test]
 async fn a_failed_setup_says_why_with_its_secrets_masked() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     // Put together here, so no secret scanner trips on this file.
@@ -1353,6 +1378,7 @@ async fn a_failed_setup_says_why_with_its_secrets_masked() {
 
 #[tokio::test]
 async fn it_says_when_the_port_is_taken_and_stops_when_asked() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let taken = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = taken.local_addr().unwrap().port();
@@ -1374,6 +1400,7 @@ async fn it_says_when_the_port_is_taken_and_stops_when_asked() {
 
 #[tokio::test]
 async fn settings_stay_off_until_the_person_turns_them_on() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let settings = w.server.settings().unwrap();
     assert!(!settings.enabled);
@@ -1417,6 +1444,7 @@ fn reporting_steps() -> Vec<WorkflowStep> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_reports_what_it_did_and_brings_what_the_person_has_to_decide() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let workflow = w.saved("Everything", reporting_steps());
     let client = w.client(&w.steering_token("Claude Code")).await;
@@ -1491,6 +1519,7 @@ async fn a_run_reports_what_it_did_and_brings_what_the_person_has_to_decide() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_report_names_what_was_skipped_for_being_small() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let workflow = w.saved("Everything", reporting_steps());
     let client = w.client(&w.token(true)).await;
@@ -1538,6 +1567,7 @@ async fn the_report_names_what_was_skipped_for_being_small() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_failed_check_says_why_and_only_the_client_that_started_it_may_act_if_allowed() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let workflow = w.saved(
         "Checked",
@@ -1604,6 +1634,7 @@ async fn a_failed_check_says_why_and_only_the_client_that_started_it_may_act_if_
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_the_person_started_is_not_a_client_s_to_act_on() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.steering_token("Claude Code")).await;
     let run = w.person_run("Fix it by hand");
@@ -1617,6 +1648,7 @@ async fn a_run_the_person_started_is_not_a_client_s_to_act_on() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn waiting_on_several_runs_returns_as_soon_as_one_of_them_stops_working() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let asks = w.saved(
@@ -1705,6 +1737,7 @@ async fn waiting_on_several_runs_returns_as_soon_as_one_of_them_stops_working() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_can_find_the_runs_it_started_again() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let mine = w.client(&w.token(true)).await;
     let theirs = w.client(&w.token(true)).await;
@@ -1739,6 +1772,7 @@ async fn a_client_can_find_the_runs_it_started_again() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_keeps_to_the_number_of_open_runs_the_person_set() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let (row, token) = w.server.create_client("Claude Code", true).unwrap();
     w.store.set_mcp_client_max_open_runs(&row.id, 1).unwrap();
@@ -1757,6 +1791,7 @@ async fn a_client_keeps_to_the_number_of_open_runs_the_person_set() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn what_an_agent_wrote_reaches_the_report_with_its_secrets_masked() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let run = id_of(&ok(
@@ -1841,6 +1876,7 @@ fn feedback_args(tool: &str, run: &str) -> Json {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn feedback_needs_the_person_s_permission_and_a_run_of_the_client_s_own() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let owner = w.client(&w.token(true)).await;
     let run = id_of(&ok(&call(&owner, "start_run", w.start_args("Fix it")).await));
@@ -1894,6 +1930,7 @@ async fn feedback_needs_the_person_s_permission_and_a_run_of_the_client_s_own() 
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_sends_its_run_back_from_the_approval_and_the_builder_hears_who_it_was() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.steering_token("Claude Code")).await;
     let hold = w.hold();
@@ -2024,6 +2061,7 @@ fn write_at_length(store: &Store, run: &str) -> usize {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_that_went_round_again_reads_in_one_go_and_says_each_thing_once() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let workflow = w.saved("Everything", reporting_steps());
     let client = w.client(&w.steering_token("Claude Code")).await;
@@ -2323,6 +2361,7 @@ async fn read_whole(client: &Client, args: Json) -> (String, usize) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_big_change_comes_in_short_and_every_part_of_it_reads_whole_in_pieces() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
 
@@ -2497,6 +2536,7 @@ async fn a_big_change_comes_in_short_and_every_part_of_it_reads_whole_in_pieces(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_check_that_printed_a_lot_shows_how_it_ended_and_reads_whole_in_pieces() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     let loud = w.saved(
@@ -2567,6 +2607,7 @@ async fn view_of(client: &Client, run: &str) -> Json {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_retries_only_a_step_that_failed_was_interrupted_or_stopped() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.steering_token("Claude Code")).await;
     let checked = w.failing_check();
@@ -2644,6 +2685,7 @@ async fn a_client_retries_only_a_step_that_failed_was_interrupted_or_stopped() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_closes_its_waiting_run_with_nothing_delivered_and_never_one_that_works() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.steering_token("Claude Code")).await;
     let hold = w.hold();
@@ -2689,6 +2731,7 @@ async fn a_client_closes_its_waiting_run_with_nothing_delivered_and_never_one_th
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_closes_a_failed_run_of_its_own_and_that_makes_room_for_another() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     w.engine
         .update_project(
@@ -2762,6 +2805,7 @@ async fn a_client_closes_a_failed_run_of_its_own_and_that_makes_room_for_another
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_closes_only_the_runs_it_started_and_only_while_it_may_run() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let (row, token) = w.server.create_client("Claude Code", true).unwrap();
     let owner = w.client(&token).await;
@@ -2834,6 +2878,7 @@ async fn a_client_closes_only_the_runs_it_started_and_only_while_it_may_run() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_cannot_close_a_run_that_went_through() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let client = w.client(&w.token(true)).await;
     // The person approved it, and it finished.
@@ -2881,6 +2926,7 @@ async fn a_client_cannot_close_a_run_that_went_through() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_task_is_one_agent_that_only_reads_and_its_finding_is_the_report_s_answer() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     // A project that sets up before building. A task builds nothing, so it doesn't.
     w.engine
@@ -2943,6 +2989,7 @@ async fn a_task_is_one_agent_that_only_reads_and_its_finding_is_the_report_s_ans
 
 #[tokio::test]
 async fn a_task_can_ask_for_nothing_more_than_reading() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let reader = w.client(&w.token(false)).await;
     let args = json!({ "project": "app", "prompt": "What does it do?" });
@@ -2991,6 +3038,7 @@ async fn a_task_can_ask_for_nothing_more_than_reading() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_task_counts_toward_the_runs_a_client_may_have_open() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let (row, token) = w.server.create_client("Claude Code", true).unwrap();
     w.store.set_mcp_client_max_open_runs(&row.id, 1).unwrap();
@@ -3059,6 +3107,7 @@ async fn stop_once_running(client: &Client, run: &str) {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn retries_sent_at_once_start_the_step_once_and_never_more_often_than_allowed() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let sessions = w.sessions(&w.steering_token("Claude Code"), 8).await;
     let client = &sessions[0];
@@ -3097,6 +3146,7 @@ async fn retries_sent_at_once_start_the_step_once_and_never_more_often_than_allo
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_retry_and_a_close_sent_at_once_never_leave_a_step_working_in_a_run_that_ended() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let (row, token) = w.server.create_client("Claude Code", true).unwrap();
     w.store.set_mcp_client_can_steer(&row.id, true).unwrap();
@@ -3148,6 +3198,7 @@ async fn a_retry_and_a_close_sent_at_once_never_leave_a_step_working_in_a_run_th
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runs_started_at_once_keep_to_the_number_the_person_set_and_waiting_holds_none_up() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let (row, token) = w.server.create_client("Claude Code", true).unwrap();
     w.store.set_mcp_client_max_open_runs(&row.id, 1).unwrap();
@@ -3194,6 +3245,7 @@ async fn runs_started_at_once_keep_to_the_number_the_person_set_and_waiting_hold
 
 #[tokio::test]
 async fn a_long_list_of_runs_to_wait_for_is_refused_at_once() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let client = w.client(&w.token(false)).await;
     // About 800 KB, under what a request may carry. Going through it would take a while.
@@ -3216,6 +3268,7 @@ async fn a_long_list_of_runs_to_wait_for_is_refused_at_once() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_change_across_projects_starts_its_agreement_in_the_first_one_and_waits_for_the_person() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let lib = w.other_project("lib");
     let docs = w.other_project("docs");
@@ -3259,6 +3312,7 @@ async fn a_change_across_projects_starts_its_agreement_in_the_first_one_and_wait
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_change_across_projects_is_refused_when_it_should_be_and_creates_nothing() {
+    keel_harness::needs!(sockets);
     let w = world().await;
     let lib = w.other_project("lib");
     let reader = w.client(&w.token(false)).await;
@@ -3344,6 +3398,7 @@ async fn a_change_across_projects_is_refused_when_it_should_be_and_creates_nothi
 
 #[tokio::test(flavor = "multi_thread")]
 async fn once_the_person_agrees_the_parts_open_and_are_the_client_s_to_follow_and_send_back() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world().await;
     let lib = w.other_project("lib");
     w.use_by_default(&w.project_id, &w.workflow_id);

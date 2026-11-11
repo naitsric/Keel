@@ -516,6 +516,7 @@ fn unmet() -> Value {
 #[test]
 fn a_small_change_with_a_check_that_passed_skips_the_reviews_and_still_stops_for_a_person_and_reaches_the_pull_request()
  {
+    keel_harness::needs!(sandbox);
     let w = world();
     let organic = w
         .engine
@@ -594,6 +595,7 @@ fn a_small_change_with_a_check_that_passed_skips_the_reviews_and_still_stops_for
 
 #[test]
 fn a_spec_that_says_normal_moves_the_run_up() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.spec_says(answered_small(json!({ "size": "normal", "risks": [] })));
     let run = w.start(fitting());
@@ -603,6 +605,7 @@ fn a_spec_that_says_normal_moves_the_run_up() {
 
 #[test]
 fn a_spec_from_before_size_was_asked_for_reads_as_normal_and_never_small() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.spec_says(answered_small(json!({})));
     let run = w.start(fitting());
@@ -611,6 +614,7 @@ fn a_spec_from_before_size_was_asked_for_reads_as_normal_and_never_small() {
 
 #[test]
 fn a_step_called_spec_that_only_wrote_text_says_nothing_about_size() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let mut steps = fitting();
     steps[0] = WorkflowStep::Agent(spec_of(
@@ -626,6 +630,7 @@ fn a_step_called_spec_that_only_wrote_text_says_nothing_about_size() {
 
 #[test]
 fn a_spec_that_says_small_and_names_a_risk_moves_the_run_up() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.spec_says(answered_small(
         json!({ "size": "small", "risks": ["security"] }),
@@ -640,6 +645,7 @@ fn a_spec_that_says_small_and_names_a_risk_moves_the_run_up() {
 
 #[test]
 fn a_risk_nobody_knows_is_still_a_risk() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.spec_says(answered_small(
         json!({ "size": "small", "risks": ["somethingNew"] }),
@@ -650,6 +656,7 @@ fn a_risk_nobody_knows_is_still_a_risk() {
 
 #[test]
 fn a_workflow_with_no_check_is_never_small() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let mut steps = fitting();
     steps.remove(2);
@@ -659,6 +666,7 @@ fn a_workflow_with_no_check_is_never_small() {
 
 #[test]
 fn a_check_further_along_has_not_passed_yet_so_the_run_is_not_small() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(vec![
         specifier(),
@@ -692,6 +700,7 @@ fn a_check_further_along_has_not_passed_yet_so_the_run_is_not_small() {
 
 #[test]
 fn a_check_that_failed_stops_the_run_and_passing_it_later_is_what_counts() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let mut steps = fitting();
     steps[2] = WorkflowStep::Check {
@@ -713,6 +722,7 @@ fn a_check_that_failed_stops_the_run_and_passing_it_later_is_what_counts() {
 
 #[test]
 fn an_issue_from_someone_else_is_never_small() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start_from(fitting(), Some(issue("mallory", "Fix add")));
     w.moved_up(&run, "issueFromSomeoneElse");
@@ -721,6 +731,7 @@ fn an_issue_from_someone_else_is_never_small() {
 
 #[test]
 fn an_issue_with_an_unknown_author_counts_as_someone_else() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start_from(fitting(), Some(issue("", "Fix add")));
     w.moved_up(&run, "issueFromUnknownAuthor");
@@ -728,6 +739,7 @@ fn an_issue_with_an_unknown_author_counts_as_someone_else() {
 
 #[test]
 fn an_issue_in_a_project_with_no_account_counts_as_someone_else() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.engine
         .update_project(&w.project_id, &settings(None, &[]))
@@ -738,6 +750,7 @@ fn an_issue_in_a_project_with_no_account_counts_as_someone_else() {
 
 #[test]
 fn a_run_an_assistant_started_is_never_small_since_no_person_wrote_what_it_asks() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start_as(fitting(), None, Some("Some client".into()));
     w.moved_up(&run, "startedByAssistant");
@@ -745,6 +758,7 @@ fn a_run_an_assistant_started_is_never_small_since_no_person_wrote_what_it_asks(
 
 #[test]
 fn an_issue_from_the_projects_own_account_and_a_run_a_person_typed_can_both_be_small() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start_from(fitting(), Some(issue("alice", "Fix add")));
     w.wait_for(&run, "human", AttemptState::WaitingApproval);
@@ -760,6 +774,7 @@ fn an_issue_from_the_projects_own_account_and_a_run_a_person_typed_can_both_be_s
 
 #[test]
 fn text_in_an_issue_calling_it_trivial_changes_nothing_once_the_diff_disagrees() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.builder_does(1, "seq 1 500 > long.txt\n");
     let run = w.start_from(
@@ -779,6 +794,7 @@ fn text_in_an_issue_calling_it_trivial_changes_nothing_once_the_diff_disagrees()
 
 #[test]
 fn text_in_an_issue_from_someone_else_calling_it_trivial_changes_nothing_either() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start_from(
         fitting(),
@@ -797,6 +813,7 @@ fn text_in_an_issue_from_someone_else_calling_it_trivial_changes_nothing_either(
 
 #[test]
 fn a_sensitive_file_moves_the_run_up_and_says_which() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.builder_does(
         1,
@@ -811,6 +828,7 @@ fn a_sensitive_file_moves_the_run_up_and_says_which() {
 
 #[test]
 fn a_file_only_this_project_counts_as_sensitive_moves_the_run_up() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.builder_does(1, "mkdir -p billing && echo x > billing/charge.py\n");
     let run = w.start(fitting());
@@ -845,6 +863,7 @@ fn a_project_cannot_save_a_sensitive_pattern_that_can_not_be_read() {
 
 #[test]
 fn moving_a_file_out_of_a_sensitive_folder_is_not_a_way_around_it() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.builder_does(
         1,
@@ -862,6 +881,7 @@ fn moving_a_file_out_of_a_sensitive_folder_is_not_a_way_around_it() {
 
 #[test]
 fn an_accent_in_a_name_is_not_a_way_around_it_either() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.builder_does(
         1,
@@ -873,6 +893,7 @@ fn an_accent_in_a_name_is_not_a_way_around_it_either() {
 
 #[test]
 fn four_hundred_changed_lines_are_too_many_and_one_less_is_not() {
+    keel_harness::needs!(sandbox);
     let w = world();
     // The builder's own line in `built.txt` counts, so this is 400 with it.
     w.builder_does(1, "seq 1 399 > long.txt\n");
@@ -892,6 +913,7 @@ fn four_hundred_changed_lines_are_too_many_and_one_less_is_not() {
 
 #[test]
 fn deleted_lines_count_as_much_as_added_ones() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.builder_does(1, "rm docs/long.txt\n");
     let run = w.start(fitting());
@@ -901,6 +923,7 @@ fn deleted_lines_count_as_much_as_added_ones() {
 
 #[test]
 fn what_was_added_and_taken_out_again_is_not_part_of_the_change() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.builder_does(
         1,
@@ -926,6 +949,7 @@ fn what_was_added_and_taken_out_again_is_not_part_of_the_change() {
 
 #[test]
 fn hiding_lines_from_git_moves_the_run_up_instead_of_making_it_look_small() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.builder_does(
         1,
@@ -937,6 +961,7 @@ fn hiding_lines_from_git_moves_the_run_up_instead_of_making_it_look_small() {
 
 #[test]
 fn what_a_verifier_found_unmet_moves_the_run_up() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.verifier_says(1, unmet());
     let run = w.start(fitting());
@@ -950,6 +975,7 @@ fn what_a_verifier_found_unmet_moves_the_run_up() {
 
 #[test]
 fn what_it_could_not_verify_does_not_keep_a_run_from_being_small() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.verifier_says(
         1,
@@ -962,6 +988,7 @@ fn what_it_could_not_verify_does_not_keep_a_run_from_being_small() {
 
 #[test]
 fn a_verifier_that_comes_later_has_not_run_so_the_run_is_not_small() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(vec![
         specifier(),
@@ -977,6 +1004,7 @@ fn a_verifier_that_comes_later_has_not_run_so_the_run_is_not_small() {
 
 #[test]
 fn a_verifier_that_looked_before_the_last_change_has_not_looked_at_this_code() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let polish = WorkflowStep::Agent(spec_of(
         "polish",
@@ -999,6 +1027,7 @@ fn a_verifier_that_looked_before_the_last_change_has_not_looked_at_this_code() {
 
 #[test]
 fn a_diff_that_can_not_be_read_moves_the_run_up() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let mut steps = fitting();
     steps.remove(3);
@@ -1017,6 +1046,7 @@ fn a_diff_that_can_not_be_read_moves_the_run_up() {
 
 #[test]
 fn a_step_on_its_own_gets_the_same_treatment_as_one_in_a_group() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let alone = WorkflowStep::Agent(spec_of(
         "security",
@@ -1050,6 +1080,7 @@ fn a_step_on_its_own_gets_the_same_treatment_as_one_in_a_group() {
 
 #[test]
 fn an_approver_that_depends_on_nothing_runs_and_reads_why_the_reviews_have_nothing_to_say() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let mut always = approver(2);
     if let WorkflowStep::Agent(spec) = &mut always {
@@ -1079,6 +1110,7 @@ fn an_approver_that_depends_on_nothing_runs_and_reads_why_the_reviews_have_nothi
 
 #[test]
 fn a_saved_workflow_with_no_conditions_behaves_as_it_always_did() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let mut reader = spec_of("reader", ToolProfile::ReadOnly, StepRole::Reviewer, None);
     // A step on its own has always run whatever its paths say. Only a group's are looked at.
@@ -1125,6 +1157,7 @@ fn a_saved_workflow_with_no_conditions_behaves_as_it_always_did() {
 
 #[test]
 fn the_full_built_in_runs_every_review_even_for_a_change_its_specifier_calls_small() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let full = w
         .engine
@@ -1140,6 +1173,7 @@ fn the_full_built_in_runs_every_review_even_for_a_change_its_specifier_calls_sma
 
 #[test]
 fn once_the_reviews_have_really_run_later_rounds_stay_where_they_are() {
+    keel_harness::needs!(sandbox);
     let w = world();
     // Only the first round has anything against it.
     w.verifier_says(1, unmet());
@@ -1171,6 +1205,7 @@ fn once_the_reviews_have_really_run_later_rounds_stay_where_they_are() {
 
 #[test]
 fn a_restart_remembers_nothing_and_the_run_still_does_not_go_back_down() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.verifier_says(1, unmet());
     w.approver_says(&["rework"]);
@@ -1200,6 +1235,7 @@ fn a_restart_remembers_nothing_and_the_run_still_does_not_go_back_down() {
 
 #[test]
 fn a_person_sending_back_a_small_change_gets_it_looked_at_again_from_where_it_is_then() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(fitting());
     let first = w.wait_for(&run, "human", AttemptState::WaitingApproval);
@@ -1234,6 +1270,7 @@ fn a_person_sending_back_a_small_change_gets_it_looked_at_again_from_where_it_is
 
 #[test]
 fn a_small_change_sent_back_and_still_small_stays_small_and_says_so_again() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(fitting());
     let first = w.wait_for(&run, "human", AttemptState::WaitingApproval);
@@ -1246,6 +1283,7 @@ fn a_small_change_sent_back_and_still_small_stays_small_and_says_so_again() {
 
 #[test]
 fn asking_for_what_was_skipped_runs_it_without_redoing_the_build_and_brings_the_approval_back() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(fitting());
     let first = w.wait_for(&run, "human", AttemptState::WaitingApproval);
@@ -1297,6 +1335,7 @@ fn asking_for_what_was_skipped_runs_it_without_redoing_the_build_and_brings_the_
 
 #[test]
 fn what_a_person_asked_for_survives_a_restart() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(fitting());
     let first = w.wait_for(&run, "human", AttemptState::WaitingApproval);
@@ -1316,6 +1355,7 @@ fn what_a_person_asked_for_survives_a_restart() {
 #[test]
 fn an_approver_that_then_asks_for_rework_takes_the_normal_path_and_this_does_not_count_against_it()
 {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(vec![
         specifier(),
@@ -1345,6 +1385,7 @@ fn an_approver_that_then_asks_for_rework_takes_the_normal_path_and_this_does_not
 
 #[test]
 fn asking_after_a_person_sent_it_back_does_not_count_against_the_approver_either() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(vec![
         specifier(),
@@ -1367,6 +1408,7 @@ fn asking_after_a_person_sent_it_back_does_not_count_against_the_approver_either
 
 #[test]
 fn asking_is_refused_unless_something_really_was_skipped_and_the_attempt_is_waiting() {
+    keel_harness::needs!(sandbox);
     let w = world();
     // It wasn't skipped: the reviews ran.
     w.verifier_says(1, unmet());
@@ -1433,6 +1475,7 @@ fn asking_is_refused_unless_something_really_was_skipped_and_the_attempt_is_wait
 
 #[test]
 fn a_person_asking_counts_in_the_results_and_a_run_is_counted_once_per_reason() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(fitting());
     let first = w.wait_for(&run, "human", AttemptState::WaitingApproval);

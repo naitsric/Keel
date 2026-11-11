@@ -642,6 +642,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Done.","nu
 
     #[test]
     fn a_change_while_advancing_is_held_returns_and_the_card_starts_once_it_is_free() {
+        keel_harness::needs!(sandbox);
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("bin");

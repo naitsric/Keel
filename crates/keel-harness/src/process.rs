@@ -354,6 +354,7 @@ mod tests {
 
     #[test]
     fn a_pid_is_recognised_only_with_its_start_time() {
+        crate::needs!(ps);
         let pid = std::process::id() as i32;
         let started = process_start(pid).unwrap();
         assert!(is_same_process(pid, &started));

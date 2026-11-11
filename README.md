@@ -103,6 +103,11 @@ pnpm check:i18n       # English and Spanish stay complete
 cargo test --workspace
 ```
 
+Inside a sandbox, as when Keel runs this project's check, macOS won't let a test start a sandbox
+of its own, open a local socket or run `ps`. The tests that need one of these print
+`skipped <test>: <why>` and stop, so they count as passed there. That's most of the engine's
+tests. Run `cargo test --workspace` outside Keel to run them all.
+
 `pnpm dev`, then `/dev/preview.html`, shows the real screens with made-up data, for example
 `/dev/preview.html?view=run&state=stalled&lang=es`.
 

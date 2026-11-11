@@ -331,6 +331,7 @@ fn opening_the_dialog_guesses_and_saves_no_command() {
 
 #[test]
 fn trying_a_check_runs_setup_first_in_the_sandbox_and_spends_nothing() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     let id = w.add();
     let run = w
@@ -366,6 +367,7 @@ fn trying_a_check_runs_setup_first_in_the_sandbox_and_spends_nothing() {
 
 #[test]
 fn trying_saves_nothing() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     let id = w.add();
     let run = w.engine.try_check(&id, "true", "true", "en").unwrap();
@@ -377,6 +379,7 @@ fn trying_saves_nothing() {
 
 #[test]
 fn what_is_being_tried_replaces_the_saved_setup() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     let id = w.add();
     w.set_setup(&id, "echo saved > which.txt");
@@ -392,6 +395,7 @@ fn what_is_being_tried_replaces_the_saved_setup() {
 
 #[test]
 fn emptying_the_setup_field_means_no_setup_when_trying() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     let id = w.add();
     w.set_setup(&id, "echo saved > which.txt");
@@ -409,6 +413,7 @@ fn emptying_the_setup_field_means_no_setup_when_trying() {
 
 #[test]
 fn trying_a_check_works_with_claude_signed_out() {
+    keel_harness::needs!(sandbox);
     let w = world(false);
     let id = w.add();
     let run = w.engine.try_check(&id, "", "true", "en").unwrap();
@@ -418,6 +423,7 @@ fn trying_a_check_works_with_claude_signed_out() {
 
 #[test]
 fn a_failed_try_says_why_and_leaves_no_run_open() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     let id = w.add();
     let run = w.engine.try_check(&id, "", "exit 3", "en").unwrap();
@@ -435,6 +441,7 @@ fn a_failed_try_says_why_and_leaves_no_run_open() {
 
 #[test]
 fn a_failed_setup_stops_the_try_before_the_check() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     let id = w.add();
     let run = w.engine.try_check(&id, "exit 4", "true", "en").unwrap();
@@ -450,6 +457,7 @@ fn a_failed_setup_stops_the_try_before_the_check() {
 
 #[test]
 fn retrying_a_failed_try_opens_it_again_and_it_ends_again() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     let id = w.add();
     let run = w
@@ -530,6 +538,7 @@ fn a_failed_try_frees_what_a_retry_rebuilds_and_keeps_what_setup_installed() {
 
 #[test]
 fn only_a_try_closes_itself_when_it_fails() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     let id = w.add();
     let run = w.run(&id, vec![check("check", "exit 1")]);
@@ -577,6 +586,7 @@ fn a_project_with_a_run_waiting_for_approval_stays_until_it_ends() {
 
 #[test]
 fn a_failed_run_also_stays_until_someone_abandons_it() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     let id = w.add();
     let run = w.run(&id, vec![check("check", "exit 1")]);
@@ -618,6 +628,7 @@ fn folder_state(repo: &Path) -> String {
 
 #[test]
 fn removing_deletes_nothing_and_a_new_run_is_refused_until_it_comes_back() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     std::fs::write(w.repo.join("mine.txt"), "uncommitted work\n").unwrap();
     let id = w.add();
@@ -804,6 +815,7 @@ fn wait_column(w: &World, card: &str, wanted: BoardColumn) {
 
 #[test]
 fn a_removed_projects_cards_stay_and_start_nothing_until_it_comes_back() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     let id = w.add();
     with_cards(&w, &id, vec![check("check", "echo card")]);
@@ -838,6 +850,7 @@ fn a_removed_projects_cards_stay_and_start_nothing_until_it_comes_back() {
 
 #[test]
 fn coming_back_wakes_the_board_by_itself() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     let id = w.add();
     with_cards(&w, &id, vec![check("check", "true")]);
@@ -854,6 +867,7 @@ fn coming_back_wakes_the_board_by_itself() {
 
 #[test]
 fn another_projects_cards_keep_starting_while_one_is_removed() {
+    keel_harness::needs!(sandbox);
     let w = world(true);
     let gone = w.add();
     with_cards(&w, &gone, vec![check("check", "true")]);

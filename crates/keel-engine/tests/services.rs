@@ -218,6 +218,7 @@ fn db_env() -> Vec<EnvVar> {
 
 #[test]
 fn a_check_reaches_a_database_on_a_local_port_only_through_its_socket() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world();
     let port = tcp_server();
     w.configure(
@@ -254,6 +255,7 @@ fn a_check_reaches_a_database_on_a_local_port_only_through_its_socket() {
 
 #[test]
 fn the_socket_is_gone_once_the_step_ends() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world();
     let port = tcp_server();
     w.configure(
@@ -284,6 +286,7 @@ fn the_socket_is_gone_once_the_step_ends() {
 
 #[test]
 fn a_command_service_runs_for_the_step_and_stops_after_it() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world();
     let script = w.dir.path().join("server.py");
     let pid_file = w.dir.path().join("server.pid");
@@ -337,6 +340,7 @@ fn a_command_service_runs_for_the_step_and_stops_after_it() {
 
 #[test]
 fn agents_that_run_commands_get_the_socket_and_read_only_ones_do_not() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world();
     let port = tcp_server();
     w.configure(
@@ -378,6 +382,7 @@ fn agents_that_run_commands_get_the_socket_and_read_only_ones_do_not() {
 
 #[test]
 fn a_service_that_cannot_start_blocks_the_step_before_any_agent_runs() {
+    keel_harness::needs!(sandbox, sockets);
     let w = world();
     let closed = TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -433,6 +438,7 @@ fn settings_that_could_reach_a_credential_are_refused() {
 
 #[test]
 fn setup_runs_first_and_later_steps_use_their_own_cache() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.engine
         .update_project(
@@ -486,6 +492,7 @@ fn setup_runs_first_and_later_steps_use_their_own_cache() {
 
 #[test]
 fn what_setup_downloads_stays_in_the_project_cache_and_each_run_gets_its_own_copy() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.engine
         .update_project(
@@ -545,6 +552,7 @@ fn what_setup_downloads_stays_in_the_project_cache_and_each_run_gets_its_own_cop
 
 #[test]
 fn a_project_that_allows_crates_io_is_not_forced_offline() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.engine
         .update_project(
@@ -567,6 +575,7 @@ fn a_project_that_allows_crates_io_is_not_forced_offline() {
 
 #[test]
 fn a_failed_setup_stops_the_run_before_any_agent_and_can_be_retried() {
+    keel_harness::needs!(sandbox);
     let w = world();
     let flag = w.dir.path().join("setup-may-pass");
     // The flag is outside the workspace but in temp, which sandboxed commands can read.

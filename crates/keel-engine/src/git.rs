@@ -743,6 +743,8 @@ mod tests {
 
     /// A run's workspace after a step that had write access to `.git/config`, set up as in a real
     /// install: under the home folder, with a canary a program outside the sandbox could touch.
+    /// Not in the temp folder: a sandboxed command may write there, so a canary there proves
+    /// nothing. Every test with one starts git's sandbox, so inside another sandbox they stop first.
     struct Poisoned {
         _dir: tempfile::TempDir,
         git: Git,
@@ -813,6 +815,7 @@ mod tests {
 
     #[test]
     fn a_filter_a_step_planted_stays_in_the_sandbox() {
+        keel_harness::needs!(sandbox);
         let p = poisoned(FILTER);
         let snapshot = p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
         assert!(
@@ -826,6 +829,7 @@ mod tests {
 
     #[test]
     fn a_planted_diff_program_can_neither_run_nor_lie() {
+        keel_harness::needs!(sandbox);
         let script = "#!/bin/sh\ntouch CANARY\necho FAKE-DIFF\n";
         let p = poisoned("");
         let path = p.workspace.join(".git/evil.sh");
@@ -876,6 +880,7 @@ mod tests {
 
     #[test]
     fn a_submodule_moving_is_not_counted_as_two_lines() {
+        keel_harness::needs!(sandbox);
         let p = poisoned("");
         let head = p.git.head(&p.workspace).unwrap();
         let size = size_after(
@@ -894,6 +899,7 @@ mod tests {
 
     #[test]
     fn moving_a_file_shows_the_folder_it_left_and_not_only_where_it_went() {
+        keel_harness::needs!(sandbox);
         let p = poisoned("");
         p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
         sh(
@@ -911,6 +917,7 @@ mod tests {
 
     #[test]
     fn a_name_with_an_accent_stays_as_it_is_and_is_not_put_in_quotes() {
+        keel_harness::needs!(sandbox);
         let p = poisoned("");
         let size = size_after(&p, "mkdir -p sub && echo x > 'sub/ñandú.txt'");
         assert!(size.files.contains(&"sub/ñandú.txt".to_owned()), "{size:?}");
@@ -918,6 +925,7 @@ mod tests {
 
     #[test]
     fn hiding_lines_with_an_attribute_says_so_instead_of_counting_none() {
+        keel_harness::needs!(sandbox);
         let p = poisoned("");
         let size = size_after(
             &p,
@@ -932,6 +940,7 @@ mod tests {
 
     #[test]
     fn replacing_a_commit_does_not_make_the_change_look_like_nothing() {
+        keel_harness::needs!(sandbox);
         let p = poisoned("");
         p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
         let head = p.git.head(&p.workspace).unwrap();
@@ -942,6 +951,7 @@ mod tests {
 
     #[test]
     fn delivering_a_poisoned_workspace_runs_nothing_either() {
+        keel_harness::needs!(sandbox);
         let p = poisoned(FILTER);
         p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
         std::fs::write(p.workspace.join("a.txt"), "three\n").unwrap();
@@ -962,6 +972,7 @@ mod tests {
 
     #[test]
     fn git_that_hangs_is_given_up_on_along_with_what_it_started() {
+        keel_harness::needs!(sandbox);
         let mut p = poisoned(
             "[filter \"evil\"]\n\tclean = \"touch MARKER; sleep 300\"\n\trequired = true\n",
         );
