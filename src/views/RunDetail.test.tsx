@@ -7,7 +7,7 @@ import type { Attempt, AuditEvent, Run, Screenshot, Screenshots, SpecOutput } fr
 import { type CommandRun, commandsFrom } from "../lib/audit";
 import { useApp } from "../lib/store";
 import type { SizeDecision } from "../lib/size";
-import { ActivityTab, ApprovalCard, CommandsTab, QuestionsCard, Summary } from "./RunDetail";
+import { ActivityTab, ApprovalCard, CommandsTab, OutputTab, QuestionsCard, Summary } from "./RunDetail";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -324,6 +324,30 @@ describe("the approval card", () => {
       expect(page()).toContain(text);
     }
     expect(page()).not.toContain("ran no check");
+  });
+
+  it("says how many tests a check that passed skipped, not just that it passed", async () => {
+    show([builder(["calc.py"]), { ...check, skippedTests: 385 }, human], ["calc.py"]);
+    expect(page()).toContain("Keel ran `make test` and it passed, but 385 tests were skipped.");
+    expect(page()).not.toContain("Keel ran `make test` and it passed.");
+    show([builder(["calc.py"]), { ...check, skippedTests: 1 }, human], ["calc.py"]);
+    expect(page()).toContain("Keel ran `make test` and it passed, but 1 test was skipped.");
+    // None skipped, or nothing Keel could count, reads as before.
+    for (const skippedTests of [0, null, undefined]) {
+      show([builder(["calc.py"]), { ...check, skippedTests } as Attempt, human], ["calc.py"]);
+      expect(page()).toContain("Keel ran `make test` and it passed.");
+      expect(page()).not.toContain("was skipped");
+      expect(page()).not.toContain("were skipped");
+    }
+    // A check that failed says that, whatever it skipped.
+    show([builder(["calc.py"]), { ...check, state: "failed", skippedTests: 3 }, human], ["calc.py"]);
+    expect(page()).toContain("Keel ran `make test` and it didn't pass.");
+    expect(page()).not.toContain("were skipped");
+    await i18next.changeLanguage("es");
+    show([builder(["calc.py"]), { ...check, skippedTests: 385 }, human], ["calc.py"]);
+    expect(page()).toContain("Keel corrió `make test` y pasó, pero se saltaron 385 pruebas.");
+    show([builder(["calc.py"]), { ...check, skippedTests: 1 }, human], ["calc.py"]);
+    expect(page()).toContain("Keel corrió `make test` y pasó, pero se saltó 1 prueba.");
   });
 
   it("says so when Keel ran no check, and that the reviews only read the code", () => {
@@ -1406,6 +1430,22 @@ describe("the run summary", () => {
     expect(page()).toContain("The run didn't run any commands.");
   });
 
+  it("says how many tests the checks skipped, though they passed", async () => {
+    const lint = attempt({ id: "lint", stepId: "lint", kind: "check", tools: "check", prompt: "make lint", skippedTests: 2 });
+    show([builder(["calc.py"]), { ...check, skippedTests: 385 }, lint], []);
+    expect(page()).toContain("2 of 2 checks passed.");
+    expect(page()).toContain("387 tests were skipped, so they prove nothing.");
+    // Only the latest attempt at each check counts.
+    show([builder(["calc.py"]), { ...check, skippedTests: 385 }, { ...check, id: "check-2", skippedTests: 1 }], []);
+    expect(page()).toContain("1 test was skipped, so it proves nothing.");
+    show([builder(["calc.py"]), { ...check, skippedTests: 0 }, { ...lint, skippedTests: null }], []);
+    expect(page()).toContain("2 of 2 checks passed.");
+    expect(page()).not.toContain("skipped");
+    await i18next.changeLanguage("es");
+    show([builder(["calc.py"]), { ...check, skippedTests: 385 }], []);
+    expect(page()).toContain("Se saltaron 385 pruebas, así que no demuestran nada.");
+  });
+
   it("is titled as the run's once it's over", () => {
     show([spec("Done.")], [], "2026-01-01T00:00:00Z");
     expect(document.querySelector("h2")?.textContent).toBe("The run");
@@ -1446,6 +1486,35 @@ describe("the run summary", () => {
       expect(page()).not.toContain("Not proven");
       expect(greenCheck()).not.toBeNull();
     });
+  });
+});
+
+describe("what a check printed", () => {
+  let root: Root;
+  const page = () => document.body.textContent ?? "";
+  const ended = (exitCode: number): AuditEvent => ({ seq: 1, attemptId: "check", at: "", kind: "checkResult", data: { kind: "check", exitCode, stdout: "test result: ok.", stderr: "" } });
+  const show = (attempt: Attempt, exitCode: number) => act(() => root.render(<OutputTab events={[ended(exitCode)]} attempt={attempt} />));
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("says how many tests it skipped when it passed", () => {
+    show({ ...check, skippedTests: 385 }, 0);
+    expect(page()).toContain("The check ended with code 0");
+    expect(page()).toContain("385 tests were skipped, so they prove nothing.");
+    for (const skippedTests of [0, null]) {
+      show({ ...check, skippedTests }, 0);
+      expect(page()).not.toContain("skipped");
+    }
+    show({ ...check, state: "failed", skippedTests: 3 }, 1);
+    expect(page()).toContain("The check ended with code 1");
+    expect(page()).not.toContain("skipped");
   });
 });
 

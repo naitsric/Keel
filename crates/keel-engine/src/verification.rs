@@ -298,6 +298,10 @@ impl Checked {
 pub struct RanCheck {
     pub command: String,
     pub passed: bool,
+    /// How many tests its test tools said they skipped. `None` if Keel didn't recognise how they
+    /// say it, which isn't the same as none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<u32>,
 }
 
 /// What Keel itself ran in a round. It comes from the attempts of the steps that really are checks,
@@ -321,6 +325,17 @@ impl CheckFact {
     pub fn passed(&self) -> bool {
         matches!(self, Self::Ran { checks } if checks.iter().all(|check| check.passed))
     }
+
+    /// How many tests the checks that ran said they skipped, of those Keel could count.
+    pub fn skipped(&self) -> u32 {
+        match self {
+            Self::Ran { checks } => checks
+                .iter()
+                .filter_map(|check| check.skipped)
+                .fold(0, u32::saturating_add),
+            _ => 0,
+        }
+    }
 }
 
 /// Whether the round's code was checked. A later attempt at a check replaces an earlier one, and a
@@ -343,6 +358,9 @@ pub fn checks_in_round(steps: &[WorkflowStep], attempts: &[Attempt], round: i64)
                 .map(|attempt| RanCheck {
                     command: one_line(&attempt.prompt),
                     passed: attempt.state == AttemptState::Succeeded.as_str(),
+                    skipped: attempt
+                        .skipped_tests
+                        .and_then(|count| u32::try_from(count).ok()),
                 })
                 .collect(),
         };
@@ -390,14 +408,40 @@ pub fn check_text(fact: &CheckFact, language: &str) -> String {
         CheckFact::Ran { checks } => checks
             .iter()
             .map(|check| {
-                let RanCheck { command, passed } = check;
-                match (spanish, passed) {
-                    (false, true) => format!("Keel ran `{command}` in this round, and it passed."),
-                    (false, false) => {
+                let RanCheck {
+                    command,
+                    passed,
+                    skipped,
+                } = check;
+                // A check that didn't pass proves nothing anyway.
+                let skipped = skipped.filter(|count| *passed && *count > 0);
+                match (spanish, passed, skipped) {
+                    (false, true, Some(count)) => format!(
+                        "Keel ran `{command}` in this round, and it passed, but its test tools said {}. A skipped test didn't run, so it proves nothing. If the only test that proves an item might be one of them, for example because it skips itself when something it needs is missing, the item is unverified.",
+                        if count == 1 {
+                            "1 test was skipped".to_owned()
+                        } else {
+                            format!("{count} tests were skipped")
+                        }
+                    ),
+                    (false, true, None) => {
+                        format!("Keel ran `{command}` in this round, and it passed.")
+                    }
+                    (false, false, _) => {
                         format!("Keel ran `{command}` in this round, and it didn't pass.")
                     }
-                    (true, true) => format!("Keel corrió `{command}` en esta ronda, y pasó."),
-                    (true, false) => format!("Keel corrió `{command}` en esta ronda, y no pasó."),
+                    (true, true, Some(count)) => format!(
+                        "Keel corrió `{command}` en esta ronda, y pasó, pero sus herramientas de pruebas dijeron que {}. Una prueba saltada no corrió, así que no demuestra nada. Si la única prueba que demuestra un elemento podría ser una de ellas, por ejemplo porque se salta sola cuando le falta algo que necesita, el elemento es unverified.",
+                        if count == 1 {
+                            "se saltó 1 prueba".to_owned()
+                        } else {
+                            format!("se saltaron {count} pruebas")
+                        }
+                    ),
+                    (true, true, None) => format!("Keel corrió `{command}` en esta ronda, y pasó."),
+                    (true, false, _) => {
+                        format!("Keel corrió `{command}` en esta ronda, y no pasó.")
+                    }
                 }
             })
             .collect::<Vec<_>>()
@@ -630,10 +674,15 @@ mod tests {
     use AttemptState::{Failed, Running, Skipped, Succeeded};
 
     fn ran(command: &str, passed: bool) -> CheckFact {
+        ran_skipping(command, passed, None)
+    }
+
+    fn ran_skipping(command: &str, passed: bool, skipped: Option<u32>) -> CheckFact {
         CheckFact::Ran {
             checks: vec![RanCheck {
                 command: command.into(),
                 passed,
+                skipped,
             }],
         }
     }
@@ -752,6 +801,84 @@ mod tests {
             let text = check_text(&fact, language);
             assert!(text.contains(expected), "{text}");
         }
+    }
+
+    #[test]
+    fn a_check_that_passed_says_how_many_tests_it_skipped_and_that_they_prove_nothing() {
+        let cases = [
+            (
+                ran_skipping("cargo test", true, Some(385)),
+                "en",
+                "Keel ran `cargo test` in this round, and it passed, but its test tools said 385 tests were skipped.",
+            ),
+            (
+                ran_skipping("cargo test", true, Some(1)),
+                "en",
+                "Keel ran `cargo test` in this round, and it passed, but its test tools said 1 test was skipped.",
+            ),
+            (
+                ran_skipping("cargo test", true, Some(385)),
+                "es",
+                "Keel corrió `cargo test` en esta ronda, y pasó, pero sus herramientas de pruebas dijeron que se saltaron 385 pruebas.",
+            ),
+            (
+                ran_skipping("cargo test", true, Some(1)),
+                "es",
+                "Keel corrió `cargo test` en esta ronda, y pasó, pero sus herramientas de pruebas dijeron que se saltó 1 prueba.",
+            ),
+        ];
+        for (fact, language, expected) in cases {
+            let text = check_text(&fact, language);
+            assert!(text.starts_with(expected), "{text}");
+            let rule = if language == "es" {
+                "Una prueba saltada no corrió, así que no demuestra nada"
+            } else {
+                "A skipped test didn't run, so it proves nothing"
+            };
+            assert!(text.contains(rule), "{text}");
+            assert!(text.contains("unverified"), "{text}");
+        }
+        // None skipped, or not known, reads as before. So does a check that didn't pass, which
+        // proves nothing either way.
+        for (skipped, passed, expected) in [
+            (
+                Some(0),
+                true,
+                "Keel ran `make test` in this round, and it passed.",
+            ),
+            (
+                None,
+                true,
+                "Keel ran `make test` in this round, and it passed.",
+            ),
+            (
+                Some(3),
+                false,
+                "Keel ran `make test` in this round, and it didn't pass.",
+            ),
+        ] {
+            let text = check_text(&ran_skipping("make test", passed, skipped), "en");
+            assert_eq!(text, expected);
+        }
+    }
+
+    #[test]
+    fn what_keel_counted_comes_from_the_check_on_the_record() {
+        let mut attempts = recorded(&[
+            ("builder", "agent", "build", 0, Succeeded, "b"),
+            ("check", "check", "check", 0, Succeeded, "cargo test"),
+        ]);
+        attempts[1].skipped_tests = Some(385);
+        assert_eq!(
+            checks_in_round(&[check_step()], &attempts, 0),
+            ran_skipping("cargo test", true, Some(385))
+        );
+        assert_eq!(
+            checks_in_round(&[check_step()], &attempts, 0).skipped(),
+            385
+        );
+        attempts[1].skipped_tests = None;
+        assert_eq!(checks_in_round(&[check_step()], &attempts, 0).skipped(), 0);
     }
 
     fn verification(results: &[(Outcome, &str, Option<Correction>)]) -> Verification {

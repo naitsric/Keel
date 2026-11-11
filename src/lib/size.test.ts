@@ -52,6 +52,7 @@ describe("why it isn't small", () => {
     { code: "keelChoseAnAnswer" },
     { code: "noCheck" },
     { code: "checkNotPassed" },
+    { code: "checkSkippedTests", count: 385 },
     { code: "issueFromSomeoneElse", author: "mallory" },
     { code: "issueFromUnknownAuthor" },
     { code: "issueWithNoAccount" },

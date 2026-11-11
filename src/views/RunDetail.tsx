@@ -86,6 +86,9 @@ function Explanations({ attempts }: { attempts: Attempt[] }) {
 
 const auditKey = (rawCheck: RawCheck) => `run.audit${rawCheck[0].toUpperCase()}${rawCheck.slice(1)}`;
 
+/** How many tests a check that passed skipped, as its test tools said. One that failed proves nothing anyway, and one whose tools Keel didn't recognise has nothing to say. */
+const skippedTests = (check: Attempt) => (check.state === "succeeded" ? (check.skippedTests ?? 0) : 0);
+
 /** The rule of the product: never just "finished". What it did, changed, proved, and what's next. */
 export function Summary({ run, attempts, current, commands, rawCheck, closedBy, onShowChanges }: { run: Run | null; attempts: Attempt[]; current: Attempt; commands: CommandRun[]; rawCheck: RawCheck; closedBy: string | null; onShowChanges: () => void }) {
   const { t } = useTranslation();
@@ -97,6 +100,7 @@ export function Summary({ run, attempts, current, commands, rawCheck, closedBy, 
   const checks = attempts.filter((a) => a.kind === "check");
   const latestChecks = checks.filter((a, i) => !checks.slice(i + 1).some((b) => b.stepId === a.stepId));
   const checksPassed = latestChecks.filter((a) => a.state === "succeeded").length;
+  const checksSkipped = latestChecks.reduce((sum, check) => sum + skippedTests(check), 0);
   const anyActive = attempts.some((a) => isActive(a.state));
   // One answer for the title and the separation, so they never disagree. Without a run, the steps decide.
   const going = run ? stillGoing(run, attempts) : anyActive;
@@ -149,6 +153,7 @@ export function Summary({ run, attempts, current, commands, rawCheck, closedBy, 
           {latestChecks.length > 0 && (
             <p className={cx(checksPassed === latestChecks.length ? "text-muted" : "font-medium text-danger")}>{t("run.checksPassed", { passed: checksPassed, total: latestChecks.length })}</p>
           )}
+          {checksSkipped > 0 && <p className="font-medium text-warning">{t("run.testsSkipped", { count: checksSkipped })}</p>}
           <NotProvenByReviews unchecked={unchecked} />
           {verification && <VerificationProof verification={verification} allProven={unchecked.length === 0} />}
           {skipped.length > 0 && <p className="text-muted">{t("fits.summary", { names: skipped.map((step) => step.stepId).join(", ") })}</p>}
@@ -270,18 +275,19 @@ function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { atte
   return (
     <>
       <NotProvenByReviews unchecked={unchecked} />
-      {checks.map((check) =>
-        check.state === "succeeded" ? (
+      {checks.map((check) => {
+        const skipped = skippedTests(check);
+        return check.state === "succeeded" ? (
           <p key={check.id} className="selectable flex gap-1.5">
-            <Check size={13} className="mt-1 shrink-0 text-success" />
-            <span className="min-w-0 break-words">{t("run.approvalCheckPassed", { command: check.prompt })}</span>
+            {skipped > 0 ? <AlertTriangle size={13} className="mt-1 shrink-0 text-warning" /> : <Check size={13} className="mt-1 shrink-0 text-success" />}
+            <span className="min-w-0 break-words">{skipped > 0 ? t("run.approvalCheckSkipped", { command: check.prompt, count: skipped }) : t("run.approvalCheckPassed", { command: check.prompt })}</span>
           </p>
         ) : (
           <p key={check.id} className="selectable font-medium break-words text-danger">
             {t("run.approvalCheckFailed", { command: check.prompt })}
           </p>
-        ),
-      )}
+        );
+      })}
       {checks.length === 0 && (
         <p>
           {t("run.approvalNoCheck")}
@@ -1301,7 +1307,7 @@ export function CommandsTab({ commands }: { commands: CommandRun[] }) {
   );
 }
 
-function OutputTab({ events, attempt }: { events: AuditEvent[]; attempt: Attempt }) {
+export function OutputTab({ events, attempt }: { events: AuditEvent[]; attempt: Attempt }) {
   const { t } = useTranslation();
   const result = events.find((e) => e.kind === "checkResult")?.data;
   return (
@@ -1312,6 +1318,7 @@ function OutputTab({ events, attempt }: { events: AuditEvent[]; attempt: Attempt
       ) : (
         <>
           <p className={cx("text-[12.5px]", result.exitCode === 0 ? "text-success" : "text-danger")}>{t(result.kind === "setup" ? "activity.setupResult" : "activity.checkResult", { code: result.exitCode ?? "?" })}</p>
+          {skippedTests(attempt) > 0 && <p className="text-[12.5px] font-medium text-warning">{t("run.testsSkipped", { count: skippedTests(attempt) })}</p>}
           <Output text={[result.stdout, result.stderr].filter(Boolean).join("\n")} truncated={result.truncated} />
         </>
       )}

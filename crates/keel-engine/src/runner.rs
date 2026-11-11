@@ -19,8 +19,8 @@ use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
 use crate::specs::{self, Verdict};
 use crate::{
-    Error, Inner, Result, Resume, Turn, brain, joint, locked, prompts, screenshots, verification,
-    workflows,
+    Error, Inner, Result, Resume, Turn, brain, joint, locked, prompts, screenshots, skipped_tests,
+    verification, workflows,
 };
 
 /// Tool output kept in the database. The raw file always has all of it.
@@ -1117,15 +1117,24 @@ impl Inner {
         }
 
         if m.kind == "check" || m.kind == "setup" {
+            let stderr_path = m.raw_path.with_file_name(format!(
+                "{}.stderr.txt",
+                m.raw_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy())
+                    .unwrap_or_default()
+            ));
             let output = std::fs::read(&m.raw_path).unwrap_or_default();
-            let stderr = std::fs::read(m.raw_path.with_file_name(format!(
-                    "{}.stderr.txt",
-                    m.raw_path
-                        .file_stem()
-                        .map(|s| s.to_string_lossy())
-                        .unwrap_or_default()
-                )))
-            .unwrap_or_default();
+            let stderr = std::fs::read(&stderr_path).unwrap_or_default();
+            // The exit code says whether it passed. What its test tools printed says whether it
+            // skipped tests on the way.
+            if m.kind == "check" {
+                let skipped = skipped_tests::in_files(&[&m.raw_path, &stderr_path]);
+                fields.push((
+                    "skipped_tests",
+                    skipped.map_or(Value::Null, |count| Value::Integer(i64::from(count))),
+                ));
+            }
             let tail = |bytes: &[u8]| {
                 String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(EVENT_TEXT_LIMIT)..])
                     .into_owned()

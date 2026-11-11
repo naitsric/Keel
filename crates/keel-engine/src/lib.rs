@@ -15,6 +15,7 @@ mod runner;
 mod screenshots;
 mod services;
 mod sizing;
+mod skipped_tests;
 mod specs;
 mod verification;
 mod workflows;

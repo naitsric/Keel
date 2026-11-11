@@ -488,6 +488,8 @@ pub enum WhyNotSmall {
     NoCheck,
     /// It has one, and it hasn't passed on the code as it is in this round.
     CheckNotPassed,
+    /// It passed, but its test tools said they skipped this many tests, which proved nothing.
+    CheckSkippedTests { count: u32 },
     /// The run came from an issue this person wrote, who isn't the project's GitHub account.
     IssueFromSomeoneElse { author: String },
     /// The run came from an issue, and it doesn't say who wrote it.

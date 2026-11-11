@@ -312,11 +312,25 @@ fn why_from_check(steps: &[WorkflowStep], attempts: &[Attempt], round: i64) -> O
         .iter()
         .filter(|step| matches!(step, WorkflowStep::Check { .. }))
         .count();
-    let fact = verification::checks_in_round(steps, attempts, round);
-    match &fact {
+    why_from_fact(
+        &verification::checks_in_round(steps, attempts, round),
+        wanted,
+    )
+}
+
+/// What the round's checks say against it being small, when the workflow has `wanted` of them.
+fn why_from_fact(fact: &CheckFact, wanted: usize) -> Option<WhyNotSmall> {
+    match fact {
         CheckFact::NoCheckInWorkflow => Some(WhyNotSmall::NoCheck),
         // A check further along still has its say, and it can't be counted before it's had it.
-        CheckFact::Ran { checks } if fact.passed() && checks.len() >= wanted => None,
+        CheckFact::Ran { checks } if fact.passed() && checks.len() >= wanted => {
+            // What a skipped test would have proved, nothing did. When the tools don't say, the
+            // check counts as it always has.
+            match fact.skipped() {
+                0 => None,
+                count => Some(WhyNotSmall::CheckSkippedTests { count }),
+            }
+        }
         _ => Some(WhyNotSmall::CheckNotPassed),
     }
 }
@@ -779,6 +793,45 @@ mod tests {
         let ids = conditional_step_ids(&steps);
         assert!(ids.contains("alone") && ids.contains("member"));
         assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn a_check_that_passed_skipping_tests_is_not_enough_for_a_small_change() {
+        let ran = |checks: &[(bool, Option<u32>)]| CheckFact::Ran {
+            checks: checks
+                .iter()
+                .map(|&(passed, skipped)| verification::RanCheck {
+                    command: "cargo test".into(),
+                    passed,
+                    skipped,
+                })
+                .collect(),
+        };
+        assert_eq!(
+            why_from_fact(&ran(&[(true, Some(385))]), 1),
+            Some(WhyNotSmall::CheckSkippedTests { count: 385 })
+        );
+        // All of them count, whichever check skipped them.
+        assert_eq!(
+            why_from_fact(&ran(&[(true, Some(0)), (true, Some(2))]), 2),
+            Some(WhyNotSmall::CheckSkippedTests { count: 2 })
+        );
+        // Not passing comes first: it proves nothing at all.
+        assert_eq!(
+            why_from_fact(&ran(&[(false, Some(3))]), 1),
+            Some(WhyNotSmall::CheckNotPassed)
+        );
+        // None skipped is enough. So is not knowing, as it always was: a project's own tools
+        // decide what its check says.
+        assert_eq!(why_from_fact(&ran(&[(true, Some(0))]), 1), None);
+        assert_eq!(why_from_fact(&ran(&[(true, None)]), 1), None);
+        let on_record = Decision::NotSmall(vec![WhyNotSmall::CheckSkippedTests { count: 385 }])
+            .on_record(0)
+            .unwrap();
+        assert_eq!(
+            on_record["because"][0],
+            serde_json::json!({ "code": "checkSkippedTests", "count": 385 })
+        );
     }
 
     #[test]

@@ -2692,6 +2692,7 @@ mod tests {
             output_tokens: None,
             turns: None,
             duration_ms: None,
+            skipped_tests: None,
             started_at: String::new(),
             finished_at: None,
             last_activity_at: None,
