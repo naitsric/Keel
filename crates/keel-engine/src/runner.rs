@@ -19,7 +19,7 @@ use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
 use crate::specs::{self, Verdict};
 use crate::{
-    Error, Inner, Result, Resume, brain, joint, locked, prompts, screenshots, verification,
+    Error, Inner, Result, Resume, Turn, brain, joint, locked, prompts, screenshots, verification,
     workflows,
 };
 
@@ -192,6 +192,14 @@ impl Inner {
         }
     }
 
+    /// The project's turn, held by `attempt`.
+    fn turn_of(&self, attempt: &Attempt) -> Turn {
+        Turn {
+            attempt_id: attempt.id.clone(),
+            waiting: self.waiting_for(attempt),
+        }
+    }
+
     /// Waits for room. Agents are limited overall, and a project runs one step with commands at
     /// a time, because tests often share resources such as a database. A step waiting for the
     /// project says which one has the turn, and says it again when the turn passes on.
@@ -203,16 +211,15 @@ impl Inner {
         counts_as_agent: bool,
     ) -> bool {
         let (attempt_id, run_id) = (attempt.id.as_str(), attempt.run_id.as_str());
-        let turn = holds_project.then(|| self.waiting_for(attempt));
+        let turn = holds_project.then(|| self.turn_of(attempt));
         let mut last_reason: Option<Reason> = None;
         let mut slots = locked(&self.slots);
         loop {
             if self.stop_requested(attempt_id) {
                 return false;
             }
-            let reason = if holds_project && let Some(waiting) = slots.command_steps.get(project_id)
-            {
-                Some(waiting.clone())
+            let reason = if holds_project && let Some(taken) = slots.command_steps.get(project_id) {
+                Some(taken.waiting.clone())
             } else if counts_as_agent
                 && slots.active.len() >= self.max_agents.load(Ordering::SeqCst)
             {
@@ -255,7 +262,13 @@ impl Inner {
         if counts_as_agent {
             slots.active.remove(attempt_id);
         }
-        if holds_project {
+        // A step recovered without the turn, because another had it, mustn't take it away.
+        if holds_project
+            && slots
+                .command_steps
+                .get(project_id)
+                .is_some_and(|turn| turn.attempt_id == attempt_id)
+        {
             slots.command_steps.remove(project_id);
         }
         drop(slots);
@@ -710,13 +723,15 @@ impl Inner {
             },
         );
         {
-            let turn = context.holds_project.then(|| self.waiting_for(attempt));
+            let turn = context.holds_project.then(|| self.turn_of(attempt));
             let mut slots = locked(&self.slots);
             if context.counts_as_agent {
                 slots.active.insert(attempt.id.clone());
             }
+            // A step still running from before keeps the turn. Steps whose process is gone end
+            // right here, one by one, so one already taken belongs to a step that's alive.
             if let Some(turn) = turn {
-                slots.command_steps.insert(project_id, turn);
+                slots.command_steps.entry(project_id).or_insert(turn);
             }
         }
         if alive {

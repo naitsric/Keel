@@ -949,6 +949,90 @@ fn reopening_after_the_agent_died_marks_it_interrupted_and_keeps_the_audit() {
 }
 
 #[test]
+fn reopening_with_a_lost_step_leaves_the_turn_with_the_one_still_running() {
+    keel_harness::needs!(sandbox);
+    // Runs until the test lets it go, and never more than 20 seconds.
+    let body = format!(
+        "cat > /dev/null\n{}\ni=0; while [ ! -f let-go ] && [ $i -lt 200 ]; do sleep 0.1; i=$((i+1)); done\n{OK_RESULT}",
+        init(BUILD_TOOLS, "none")
+    );
+    let h = harness(&body);
+    let alive = h.start(ToolProfile::Build);
+    let running = h.wait_for(&alive, &[AttemptState::Running]);
+    h.wait_until_kind(&running.id, "init");
+
+    // Another run of the project had a step with commands registered, and its process is gone.
+    // It started later, so it's recovered after the one still running.
+    h.store
+        .add_run(&keel_store::NewRun {
+            id: "other".into(),
+            project_id: h.project_id.clone(),
+            title: "Other".into(),
+            request: "x".into(),
+            workflow: serde_json::to_string(&[keel_core::WorkflowStep::Agent(step(
+                ToolProfile::Build,
+            ))])
+            .unwrap(),
+            language: "en".into(),
+            source_issue: None,
+            workflow_id: None,
+            workflow_name: None,
+            started_by: None,
+        })
+        .unwrap();
+    let copy = h.dir.path().join("other-copy");
+    std::fs::create_dir(&copy).unwrap();
+    let raw = h.dir.path().join("other-builder-1.jsonl");
+    std::fs::write(&raw, "").unwrap();
+    h.store
+        .add_attempt(&keel_store::NewAttempt {
+            id: "lost".into(),
+            run_id: "other".into(),
+            step_id: "builder".into(),
+            kind: "agent".into(),
+            role: "worker".into(),
+            round: 0,
+            number: 1,
+            state: AttemptState::Running,
+            model_requested: "fake".into(),
+            effort: None,
+            tools: "build".into(),
+            max_turns: None,
+            max_budget_usd: None,
+            language: "en".into(),
+            prompt: "x".into(),
+            system_prompt_sources: "[]".into(),
+            settings: "{}".into(),
+            session_id: "gone".into(),
+            resumed_from: None,
+            workspace: copy.to_string_lossy().into_owned(),
+            raw_path: raw.to_string_lossy().into_owned(),
+            started_at: keel_store::now(),
+        })
+        .unwrap();
+
+    let reopened = restart(&h);
+    reopened.recover().unwrap();
+    assert_eq!(h.store.attempt("lost").unwrap().state, "interrupted");
+
+    // The lost one ending doesn't free the project: a new step with commands waits for the turn.
+    let next = reopened
+        .start_run(StartRun::one_step(
+            h.project_id.clone(),
+            step(ToolProfile::Build),
+            "es".into(),
+        ))
+        .unwrap();
+    h.wait_for_reason(&next, &h.waiting_for(&alive));
+    assert_eq!(h.latest(&alive).state, "running");
+
+    reopened.stop(&h.latest(&next).id).unwrap();
+    h.wait_for(&next, &[AttemptState::Stopped]);
+    std::fs::write(Path::new(&running.workspace).join("let-go"), "").unwrap();
+    h.wait_for(&alive, &[AttemptState::Succeeded]);
+}
+
+#[test]
 fn retry_starts_fresh_in_the_same_workspace_and_resume_continues_the_session() {
     keel_harness::needs!(sandbox);
     let body = format!(
