@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use keel_harness::clean_env;
+use keel_harness::home;
 use keel_harness::settings::{check_profile, setup_profile, with_own_output};
 
 struct Sandbox {
@@ -634,4 +635,195 @@ fn the_cache_is_only_writable_during_setup() {
         "a check can't write to the shared cache"
     );
     assert!(!cache.path().join("poison").exists());
+}
+
+/// Credentials tools keep in the home folder. A command gets a home of its own, and these stay in
+/// the real one, out of reach.
+const CREDENTIALS: [&str; 6] = [
+    ".npmrc",
+    ".m2/settings.xml",
+    ".gradle/gradle.properties",
+    ".ssh/id_ed25519",
+    ".cargo/credentials.toml",
+    ".cargo/credentials",
+];
+
+/// Runs `script` as setup does, given its cache, or as a check does, with `real_home` as the home
+/// folder Keel runs in: the same profile and the variables that put it in a home of its own.
+fn in_own_home(
+    real_home: &Path,
+    workspace: &Path,
+    setup_cache: Option<&Path>,
+    script: &str,
+) -> std::process::Output {
+    let (profile, own) = match setup_cache {
+        Some(cache) => (
+            setup_profile(workspace, real_home, &[], &[], cache),
+            cache.join(home::FOLDER),
+        ),
+        None => (
+            check_profile(workspace, real_home, &[], &[]),
+            workspace.join(".keel-cache").join(home::FOLDER),
+        ),
+    };
+    home::create(&own).unwrap();
+    Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", &profile, "/bin/sh", "-c", script])
+        .current_dir(workspace)
+        .env_clear()
+        .envs(clean_env(&std::env::var("PATH").unwrap()))
+        .envs(home::env(&own, real_home))
+        .output()
+        .unwrap()
+}
+
+/// Where a real install keeps a run's copy and a project's cache, under `home`.
+fn install_in(home: &Path) -> (PathBuf, PathBuf) {
+    let data = home.join("Library/Application Support/keel");
+    let workspace = data.join("runs/r1/workspace");
+    let cache = data.join("projects/p1/cache");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    (workspace, cache)
+}
+
+fn refused(output: &std::process::Output, what: &str) {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{what}");
+    assert!(
+        stderr.contains("Operation not permitted"),
+        "{what}: {stderr}"
+    );
+    assert!(output.stdout.is_empty(), "{what}");
+}
+
+#[test]
+fn credentials_in_the_home_folder_stay_out_of_reach_with_a_home_of_its_own() {
+    keel_harness::needs!(sandbox);
+    // A home folder of the test's own with every one of them in it, so nothing is made in the real
+    // one, and Keel's data in it as in a real install.
+    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let real_home = root.path().canonicalize().unwrap().join("Users/me");
+    for name in CREDENTIALS {
+        let path = real_home.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("secret in {name}")).unwrap();
+    }
+    let (workspace, cache) = install_in(&real_home);
+    for (step, setup_cache) in [("check", None), ("setup", Some(cache.as_path()))] {
+        for name in CREDENTIALS {
+            let path = quoted(&real_home.join(name));
+            refused(
+                &in_own_home(&real_home, &workspace, setup_cache, &format!("cat {path}")),
+                &format!("{step}: {name}"),
+            );
+            // The home folder it's told about is its own, and none of them is there.
+            let own = in_own_home(
+                &real_home,
+                &workspace,
+                setup_cache,
+                &format!("cat \"$HOME/{name}\""),
+            );
+            assert!(!own.status.success(), "{step}: ~/{name}");
+            assert!(!String::from_utf8_lossy(&own.stdout).contains("secret"));
+        }
+        for folder in [".ssh", ".cargo", ".m2", ".gradle"] {
+            refused(
+                &in_own_home(
+                    &real_home,
+                    &workspace,
+                    setup_cache,
+                    &format!("ls {}", quoted(&real_home.join(folder))),
+                ),
+                &format!("{step}: {folder}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn the_real_credentials_stay_out_of_reach_too() {
+    keel_harness::needs!(sandbox);
+    let real_home = PathBuf::from(std::env::var("HOME").unwrap());
+    let mut present: Vec<PathBuf> = CREDENTIALS
+        .iter()
+        .map(|name| real_home.join(name))
+        .filter(|path| path.exists())
+        .collect();
+    // Whatever `~/.ssh` has, and the folder itself.
+    let ssh = real_home.join(".ssh");
+    if ssh.is_dir() {
+        present.push(ssh.clone());
+        present.extend(
+            std::fs::read_dir(&ssh)
+                .unwrap()
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| path.is_file()),
+        );
+    }
+    if present.is_empty() {
+        keel_harness::testing::skipped(
+            "this Mac has none of them, and the test above tries them all in a home of its own",
+        );
+        return;
+    }
+    // Keel's data where this test's build is, which is in the home folder like a real install.
+    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let (workspace, cache) = install_in(root.path());
+    for (step, setup_cache) in [("check", None), ("setup", Some(cache.as_path()))] {
+        for path in &present {
+            let read = if path.is_dir() { "ls" } else { "cat" };
+            refused(
+                &in_own_home(
+                    &real_home,
+                    &workspace,
+                    setup_cache,
+                    &format!("{read} {}", quoted(path)),
+                ),
+                &format!("{step}: {}", path.display()),
+            );
+        }
+    }
+}
+
+/// #94: when a repo's settings don't name an ignore file, git, and cargo through it, look for one
+/// in `.config` in the home folder. Any repo but the run's own clone is like that: one a test makes,
+/// a submodule. In the real home folder that was refused, so git complained on every command and
+/// cargo couldn't build a crate with a build script there. A home of its own has nothing to refuse.
+#[test]
+fn a_command_reads_no_settings_from_the_real_home_folder() {
+    keel_harness::needs!(sandbox);
+    let real_home = PathBuf::from(std::env::var("HOME").unwrap());
+    let root = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let (workspace, _) = install_in(root.path());
+    let status = "git -C repo status --porcelain";
+    let own = in_own_home(
+        &real_home,
+        &workspace,
+        None,
+        &format!("git init -q repo && {status} && echo \"$XDG_CONFIG_HOME\""),
+    );
+    let stderr = String::from_utf8_lossy(&own.stderr);
+    assert!(own.status.success(), "{stderr}");
+    assert!(!stderr.contains("not permitted"), "{stderr}");
+    assert_eq!(
+        String::from_utf8_lossy(&own.stdout).trim(),
+        workspace.join(".keel-cache/home/.config").to_string_lossy()
+    );
+
+    // With the real home folder, as a check had before.
+    let profile = check_profile(&workspace, &real_home, &[], &[]);
+    let before = Command::new("/usr/bin/sandbox-exec")
+        .args(["-p", &profile, "/bin/sh", "-c", status])
+        .current_dir(&workspace)
+        .env_clear()
+        .envs(clean_env(&std::env::var("PATH").unwrap()))
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&before.stderr);
+    assert!(
+        stderr.contains(".config/git/ignore") && stderr.contains("not permitted"),
+        "if this fails, the test proves nothing: {stderr}"
+    );
 }

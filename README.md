@@ -63,6 +63,9 @@ most about 4 KB, so when it's full, adding something means retiring something.
   them, and commands reach them only through a Unix socket.
 - A setup command installs dependencies once per run, before any agent. It's the one step with
   internet access, and it still can't reach your home folder or anything else on your Mac.
+- Setup and the check run in a home folder of the project's own. Setup fills it with whatever its
+  tools download, and each run works in a copy of it, so no step can change what the next run gets.
+  Toolchains such as rustup's stay in your home folder, where they can only be read.
 
 ## Secrets in what it shows
 
@@ -107,6 +110,11 @@ Inside a sandbox, as when Keel runs this project's check, macOS won't let a test
 of its own, open a local socket or run `ps`. The tests that need one of these print
 `skipped <test>: <why>` and stop, so they count as passed there. That's most of the engine's
 tests. Run `cargo test --workspace` outside Keel to run them all.
+
+`KEEL_SAMPLE_REPOS=all cargo test -p keel-engine --test samples -- --nocapture` has Keel guess the
+commands of small sample repos (pnpm, pip, uv, Rust) and run their setup and check in the sandbox.
+They download dependencies, so they only run when asked. `KEEL_SAMPLE_REPOS=keel` does the same
+with this repo, built from scratch.
 
 `pnpm dev`, then `/dev/preview.html`, shows the real screens with made-up data, for example
 `/dev/preview.html?view=run&state=stalled&lang=es`.
