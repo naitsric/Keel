@@ -909,6 +909,7 @@ impl Engine {
             self.inner.advance(&attempt.run_id)?;
         } else {
             store.patch_run(&attempt.run_id, &[("finished_at", Value::Text(now()))])?;
+            self.inner.free_builds(&attempt.run_id);
         }
         (self.inner.on_change)(&attempt.run_id);
         Ok(())
@@ -1282,6 +1283,7 @@ impl Engine {
         self.inner
             .store
             .patch_run(&attempt.run_id, &[("finished_at", Value::Text(now()))])?;
+        self.inner.free_builds(&attempt.run_id);
         drop(guard);
         (self.inner.on_change)(&attempt.run_id);
         Ok(())
@@ -1612,6 +1614,35 @@ fn restrict_dir(dir: &Path) {
     let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
 }
 
+/// What a run's tools build in its copy and would build again: Rust's, Node's and Python's, and the
+/// run's own copy of the caches. A run that compiles Rust leaves gigabytes.
+const REBUILT: [&str; 4] = ["target", "node_modules", ".venv", git::RUN_CACHE];
+
+/// Deletes a folder, even one a tool made read-only, as Go does with the modules it downloads.
+fn remove_all(dir: &Path) {
+    if std::fs::remove_dir_all(dir).is_err() {
+        let_owner_change(dir);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+/// Deleting what's in a folder takes being able to change it. Links are left as they are, so
+/// nothing outside `dir` changes.
+fn let_owner_change(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::symlink_metadata(dir) else {
+        return;
+    };
+    if !meta.is_dir() {
+        return;
+    }
+    let mode = meta.permissions().mode() | 0o700;
+    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(mode));
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let_owner_change(&entry.path());
+    }
+}
+
 /// Helpers shared with `runner` and `deliver`.
 impl Inner {
     fn changed(&self, run_id: &str) {
@@ -1642,6 +1673,40 @@ impl Inner {
 
     fn workspace(&self, run_id: &str) -> PathBuf {
         self.run_dir(run_id).join("workspace")
+    }
+
+    /// Frees what a run that has ended no longer needs: whatever its tools built. Its transcripts,
+    /// diffs and logs are outside the workspace and stay, and so does the copy with its commits, so
+    /// a step tried there again builds what it needs anew. A folder git keeps any file in is the
+    /// project's own and stays too. On a thread of its own, since a build can take a while to
+    /// delete, and it stops if a person opens the run again.
+    fn free_builds(self: &Arc<Self>, run_id: &str) {
+        let Some(git) = locked(&self.tools).git.clone().map(Git::new) else {
+            return;
+        };
+        let inner = Arc::clone(self);
+        let run_id = run_id.to_owned();
+        std::thread::spawn(move || {
+            let workspace = inner.workspace(&run_id);
+            if !workspace.join(".git").exists() {
+                return;
+            }
+            let ended = || {
+                inner
+                    .store
+                    .run(&run_id)
+                    .is_ok_and(|run| run.finished_at.is_some())
+            };
+            for name in REBUILT {
+                let dir = workspace.join(name);
+                if std::fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir())
+                    && !git.tracks(&workspace, name)
+                    && ended()
+                {
+                    remove_all(&dir);
+                }
+            }
+        });
     }
 
     /// Where a change too big for a prompt is saved, one file per changed file, for an agent to
@@ -2046,6 +2111,7 @@ impl Inner {
             }
             self.store
                 .patch_run(run_id, &[("finished_at", Value::Text(now()))])?;
+            self.free_builds(run_id);
             self.changed(run_id);
             return Ok(());
         }
