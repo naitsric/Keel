@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
 import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
@@ -462,17 +462,29 @@ function sameLine(quoted: string, line: string): boolean {
 }
 
 /**
+ * Which lines a questioned decision is about: the ones its quote is, or else the one its number
+ * names. A quote that is a line word for word wins over a number, which an agent can get wrong.
+ */
+function questionedLines(q: Questioned, decided: SpecDecided[]): number[] {
+  const quoted = decided.flatMap((item, index) => (sameLine(q.decided, item.text) ? [index] : []));
+  if (quoted.length > 0) return quoted;
+  const { number } = q;
+  return typeof number === "number" && Number.isInteger(number) && number >= 1 && number <= decided.length ? [number - 1] : [];
+}
+
+/**
  * What it settled by itself. Each line can go back to whoever does the work, without starting over.
  * What a review questions of it is the person's to settle, so it shows on its line.
  */
-function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; questioned: { decided: string; why: string }[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
+function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; questioned: Questioned[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
   const { t } = useTranslation();
   const [changing, setChanging] = useState<number | null>(null);
   const draftKey = `${attemptId}:change:${changing}`;
   const instruction = useApp((s) => s.approvalDrafts[draftKey] ?? "");
   const setDraft = useApp((s) => s.setApprovalDraft);
+  const lines = questioned.map((q) => questionedLines(q, decided));
   // One that matches no line still reaches the person, quoted as it came.
-  const elsewhere = questioned.filter((q) => !decided.some((item) => sameLine(q.decided, item.text)));
+  const elsewhere = questioned.filter((_, at) => lines[at].length === 0);
   return (
     <ul className="space-y-1.5">
       {decided.map((item, index) => (
@@ -489,7 +501,7 @@ function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, o
           {item.taken === "person" && <p className="text-[11.5px] text-subtle">{t("run.decidedYouChose")}</p>}
           {item.taken === "roundsLimit" && <p className="text-[11.5px] text-warning">{t("run.decidedKeelTook")}</p>}
           {questioned
-            .filter((q) => sameLine(q.decided, item.text))
+            .filter((_, at) => lines[at].includes(index))
             .map((q, at) => (
               <p key={at} className="selectable text-[11.5px] break-words text-warning">
                 {t("run.decidedQuestioned", { why: q.why })}
@@ -731,10 +743,11 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             )}
           </ApprovalRow>
         )}
-        {anyShots && <ScreenshotsRow shots={shots} onOpen={setLooking} />}
         <ApprovalRow label={t("run.whatProves")}>
           <ApprovalProof attempts={attempts} round={run.round} commands={commands} rawCheck={rawCheck} reviewed={reviewed} />
         </ApprovalRow>
+        {/* After what proves it: in a short window they'd take all its room, and push what wasn't proven out of view. */}
+        {anyShots && <ScreenshotsRow shots={shots} onOpen={setLooking} />}
         {skippedForSize.length > 0 && <SkippedForSize skipped={skippedForSize} onRunNow={empty ? undefined : runSkipped} disabled={!armed || busy} />}
         {sizeDecision && !sizeDecision.small && <MovedUp decision={sizeDecision} round={run.round} />}
         {(reviewers.some((review) => !skippedAsSmall(review)) || approver) && (

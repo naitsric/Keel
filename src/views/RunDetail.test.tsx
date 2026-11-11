@@ -202,6 +202,18 @@ describe("the approval card", () => {
       expect(page()).toContain("Not shown: notes.txt and 12 more.");
     });
 
+    it("come after what proves it, so in a short window what wasn't proven shows first", async () => {
+      screenshots = { shown: [shot("run.light.png"), shot("run.dark.png")], leftOut: [], moreLeftOut: 0 };
+      const ux = attempt({ id: "ux", stepId: "ux", role: "reviewer", output: { verdict: "approved", findings: [], summary: "Fine.", unread: [], unchecked: ["How the Save bar looks in dark mode"] } as unknown as Attempt["output"] });
+      show([builder(["src/views/RunDetail.tsx"]), ux, human], ["src/views/RunDetail.tsx"]);
+      await settle();
+      const labels = [...document.querySelectorAll("dt")].map((dt) => dt.textContent);
+      const proves = labels.indexOf("What proves it");
+      expect(proves).toBeGreaterThan(-1);
+      expect(labels.indexOf("Screenshots")).toBe(proves + 1);
+      expect(document.querySelectorAll("dt")[proves]?.nextElementSibling?.textContent?.startsWith("Not proven")).toBe(true);
+    });
+
     it("has no row when a step left none", async () => {
       await shown();
       expect(page()).not.toContain("Screenshots");
@@ -725,6 +737,41 @@ describe("the approval card", () => {
         expect(line("If it's 0?")).not.toContain("A review questions");
         expect(page()).toContain("A review questions “Sorts by name”, and it's yours to decide: The list was by date.");
         expect(page().match(/A review questions/g)).toHaveLength(2);
+      });
+
+      describe("by the number of its line", () => {
+        const questionedBy = (questioned: unknown[]) => {
+          const approver = attempt({ id: "approver", stepId: "approver", role: "approver", output: { decision: "approve", risk: "low", reasons: "The code review questions what was decided alone.", instructions: "", questioned } as unknown as Attempt["output"] });
+          show([specifier({ decided }), builder(["calc.py"]), approver, human], ["calc.py"], building);
+        };
+        const line = (text: string) => [...document.querySelectorAll("li")].find((li) => li.textContent?.startsWith(text))?.textContent ?? "";
+
+        it("goes on the line its number names, though the quote is in other words", () => {
+          questionedBy([{ decided: "El redondeo sigue igual", number: 1, why: "Totals now drift by a cent." }]);
+          expect(line("Keeps the rounding as it is")).toContain("A review questions this, and it's yours to decide: Totals now drift by a cent.");
+          expect(page()).not.toContain("A review questions “El redondeo sigue igual”");
+          expect(page().match(/A review questions/g)).toHaveLength(1);
+        });
+
+        it("goes by the quote, as before, without a number or with one outside the list", () => {
+          questionedBy([
+            { decided: "round up? leave it", why: "No number." },
+            { decided: "Sorts by name", number: 0, why: "Before the first." },
+            { decided: "Sorts by date", number: 4, why: "Past the last." },
+            { decided: "Keeps the rounding as it is", number: 1.5, why: "Not a whole number." },
+          ]);
+          expect(line("Round up? Leave it")).toContain("A review questions this, and it's yours to decide: No number.");
+          expect(page()).toContain("A review questions “Sorts by name”, and it's yours to decide: Before the first.");
+          expect(page()).toContain("A review questions “Sorts by date”, and it's yours to decide: Past the last.");
+          expect(line("Keeps the rounding as it is")).toContain("A review questions this, and it's yours to decide: Not a whole number.");
+          expect(page().match(/A review questions/g)).toHaveLength(4);
+        });
+
+        it("goes by the quote when it's word for word another line, which a wrong number can't move", () => {
+          questionedBy([{ decided: "Keeps the rounding as it is", number: 3, why: "Totals now drift by a cent." }]);
+          expect(line("Keeps the rounding as it is")).toContain("Totals now drift by a cent.");
+          expect(line("Round up? Leave it")).not.toContain("A review questions");
+        });
       });
 
       it("questions nothing when the approver's answer is from before it could", () => {
