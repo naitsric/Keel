@@ -781,8 +781,10 @@ pub fn answered_prompt(given: &[GivenAnswer], language: &str) -> String {
     prompts::render(template, |name| (name == "answers").then(|| lines.clone()))
 }
 
-const CORRECTION_EN: &str = "Your answer doesn't fit what Keel can show the person. Fix exactly this and answer again in the same structure, without reading the repository again:\n{{problems}}\n\nKeep everything else as it was.";
-const CORRECTION_ES: &str = "Tu respuesta no cabe en lo que Keel le puede mostrar a la persona. Corrige exactamente esto y responde de nuevo con la misma estructura, sin volver a leer el repositorio:\n{{problems}}\n\nDeja todo lo demás como estaba. Responde en español.";
+// As in the specifier's prompt, a text that's too long is asked for below its limit: a fix that
+// misses it again by a character would leave the step stopped.
+const CORRECTION_EN: &str = "Your answer doesn't fit what Keel can show the person. Fix exactly this and answer again in the same structure, without reading the repository again:\n{{problems}}\n\nShorten a text that's too long to about 15% under its limit, since characters are easy to miscount. Keep everything else as it was.";
+const CORRECTION_ES: &str = "Tu respuesta no cabe en lo que Keel le puede mostrar a la persona. Corrige exactamente esto y responde de nuevo con la misma estructura, sin volver a leer el repositorio:\n{{problems}}\n\nAcorta un texto demasiado largo hasta un 15 % por debajo de su límite, porque es fácil contar mal los caracteres. Deja todo lo demás como estaba. Responde en español.";
 
 /// What a specifier is told when it broke a limit, saying exactly what to fix.
 pub fn correction_prompt(problems: &[SpecProblem], language: &str) -> String {
@@ -1102,6 +1104,87 @@ mod tests {
                 chars: 141,
                 limit: 140
             }]
+        );
+    }
+
+    /// Models count characters loosely: asked for 140, one wrote a decision of 141. So the prompt
+    /// asks for less than Keel takes, and a near miss still fits.
+    #[test]
+    fn the_prompt_asks_for_less_than_keel_takes() {
+        let asked = [
+            (
+                "what will change, up to",
+                "qué va a cambiar, hasta",
+                170,
+                MAX_SUMMARY,
+            ),
+            (
+                "together take up to",
+                "juntos llegan hasta",
+                170,
+                MAX_CRITERION,
+            ),
+            ("each up to", "cada uno hasta", 120, MAX_DECIDED_TEXT),
+            (
+                "one line of up to",
+                "una línea de hasta",
+                120,
+                MAX_QUESTION_TEXT,
+            ),
+            (
+                "options of up to",
+                "opciones de hasta",
+                50,
+                MAX_OPTION_LABEL,
+            ),
+        ];
+        let en = prompts::spec_prompt_with_size("en");
+        let es = prompts::spec_prompt_with_size("es");
+        for (in_en, in_es, number, limit) in asked {
+            assert!(
+                en.contains(&format!("{in_en} {number} characters")),
+                "{in_en}"
+            );
+            assert!(
+                es.contains(&format!("{in_es} {number} caracteres")),
+                "{in_es}"
+            );
+            assert!(
+                number < limit && number * 100 >= limit * 80,
+                "a margin: {number} of {limit}"
+            );
+        }
+
+        // Written past the 120 it was asked for, a decision still fits. Past the 140 Keel takes,
+        // it goes back once, saying which one and by how much.
+        let decided = |chars: usize| with("decided", json!([{ "text": "x".repeat(chars) }]));
+        assert!(matches!(
+            judge(Some(&decided(140)), false, 0),
+            Verdict::Ready(_)
+        ));
+        let Verdict::Correct(problems) = judge(Some(&decided(141)), false, 0) else {
+            panic!()
+        };
+        assert_eq!(
+            problems,
+            [SpecProblem::DecidedTooLong {
+                position: 1,
+                chars: 141,
+                limit: 140
+            }]
+        );
+        assert!(
+            correction_prompt(&problems, "en")
+                .contains("Item 1 of `decided` has 141 characters, and the limit is 140.")
+        );
+        // The fix is asked for below the limit too, or it may miss it again by one and stop.
+        assert!(
+            correction_prompt(&problems, "en").contains("to about 15% under its limit"),
+            "en"
+        );
+        assert!(
+            correction_prompt(&problems, "es").contains("hasta un 15 % por debajo de su límite"),
+            "es"
         );
     }
 

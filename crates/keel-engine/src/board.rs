@@ -559,7 +559,12 @@ impl Engine {
             // A part may be in another repo, where the issue's number would point at something else.
             _ if card.joint_position.is_some() => (
                 card.title.clone(),
-                part_request(&card.title, &card.body, issue.as_ref()),
+                part_request(
+                    &card.title,
+                    &card.body,
+                    self.inner.asked_of(card)?.as_deref(),
+                    issue.as_ref(),
+                ),
             ),
             Some(issue) => (
                 title_from_issue(issue.number, &card.title),

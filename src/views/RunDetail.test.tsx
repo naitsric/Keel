@@ -470,6 +470,51 @@ describe("the approval card", () => {
     });
   });
 
+  describe("what the reviews couldn't check by reading the code", () => {
+    const looked = (stepId: string, unchecked: string[]) => attempt({ id: stepId, stepId, role: "reviewer", output: { verdict: "approved", findings: [], summary: "Fine.", unread: [], unchecked } as unknown as Attempt["output"] });
+    const met = said("C1", "met", "test_calc.py:1");
+    const proves = (label = "What proves it") => [...document.querySelectorAll("dt")].find((dt) => dt.textContent === label)?.nextElementSibling?.textContent ?? "";
+    const greenCheck = () => document.querySelector("details summary svg.text-success");
+
+    it("comes first in what proves it, as not proven, though everything that had to be true was met", () => {
+      show([builder(["calc.py"]), check, verifier([met]), looked("ux", ["How the Save bar looks in dark mode"]), looked("code", []), human], ["calc.py"]);
+      const row = proves();
+      expect(row.startsWith("Not proven")).toBe(true);
+      expect(row).toContain("How the Save bar looks in dark mode");
+      expect(row).toContain("ux");
+      expect(row.indexOf("How the Save bar")).toBeLessThan(row.indexOf("1 of 1 met"));
+      // What the verifier found stays as it was, without the check that says it's all proven.
+      expect(document.querySelector("details summary")?.textContent).toBe("1 of 1 met");
+      expect(greenCheck()).toBeNull();
+    });
+
+    it("isn't there when the reviews could check all of it", () => {
+      show([builder(["calc.py"]), check, verifier([met]), looked("ux", []), human], ["calc.py"]);
+      expect(page()).not.toContain("Not proven");
+      expect(greenCheck()).not.toBeNull();
+    });
+
+    it("is there without a verifier too", () => {
+      show([builder(["calc.py"]), looked("ui", ["The page in a wide window"]), human], ["calc.py"]);
+      expect(proves().startsWith("Not proven")).toBe(true);
+      expect(proves()).toContain("The page in a wide window");
+    });
+
+    it("is in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      show([builder(["calc.py"]), check, verifier([met]), looked("ux", ["Cómo se ve en tema oscuro"]), human], ["calc.py"]);
+      expect(proves("Qué lo demuestra").startsWith("Sin probar")).toBe(true);
+      expect(proves("Qué lo demuestra")).toContain("Cómo se ve en tema oscuro");
+    });
+
+    it("is with what each review said, too", () => {
+      show([builder(["calc.py"]), check, verifier([met]), looked("ux", ["How the Save bar looks in dark mode", "  "]), looked("code", []), human], ["calc.py"]);
+      press("See the reviews");
+      expect(page()).toContain("Couldn't check by reading the code, so not proven: How the Save bar looks in dark mode");
+      expect(page().match(/Couldn't check by reading the code/g)).toHaveLength(1);
+    });
+  });
+
   describe("when the workflow fits the change", () => {
     const small = { code: "treatedAsSmall", lines: 12, files: 2 };
     const skip = (id: string, role: Attempt["role"]) => attempt({ id, stepId: id, role, state: "skipped", reason: small });
@@ -1242,6 +1287,28 @@ describe("the run summary", () => {
     expect(page()).toContain("builder sigue trabajando.");
     expect(page()).toContain("1 de 2 comandos de la corrida salieron bien.");
   });
+
+  describe("once a person approved it", () => {
+    const approved = attempt({ id: "human", stepId: "human", kind: "approval", tools: "none", state: "succeeded" });
+    const met = said("C1", "met", "test_calc.py:1");
+    const looked = (unchecked: string[]) => attempt({ id: "ux", stepId: "ux", role: "reviewer", output: { verdict: "approved", findings: [], summary: "Fine.", unread: [], unchecked } as unknown as Attempt["output"] });
+    const greenCheck = () => document.querySelector("details summary svg.text-success");
+
+    it("still says what the reviews couldn't check, without the check that says it's all proven", () => {
+      show([builder(["calc.py"]), check, verifier([met]), looked(["How the Save bar looks in dark mode"]), approved], [], "2026-01-01T00:00:00Z");
+      expect(page()).toContain("Not proven: the reviews couldn't check this by reading the code.");
+      expect(page()).toContain("How the Save bar looks in dark mode");
+      expect(page().indexOf("How the Save bar")).toBeLessThan(page().indexOf("1 of 1 met"));
+      expect(document.querySelector("details summary")?.textContent).toBe("1 of 1 met");
+      expect(greenCheck()).toBeNull();
+    });
+
+    it("keeps the check when the reviews could check all of it", () => {
+      show([builder(["calc.py"]), check, verifier([met]), looked([]), approved], [], "2026-01-01T00:00:00Z");
+      expect(page()).not.toContain("Not proven");
+      expect(greenCheck()).not.toBeNull();
+    });
+  });
 });
 
 describe("the commands a step ran", () => {
@@ -1321,5 +1388,49 @@ describe("the commands a step ran", () => {
 
     listed(failedPlain);
     expect(page()).toContain("falló con código 101");
+  });
+});
+
+describe("an answer Keel asked to fix", () => {
+  let root: Root;
+  const page = () => document.body.textContent ?? "";
+  const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "spec", at: "2026-01-01T00:00:00Z", kind, data });
+  // What run #47 wrote first: a criterion and a decision past their limits.
+  const problems = [
+    { code: "criterionTooLong", id: "C2", chars: 209, limit: 200 },
+    { code: "decidedTooLong", position: 1, chars: 141, limit: 140 },
+  ];
+  const events = [event(1, "result", {}), event(2, "finished", { state: "failed", reason: { code: "specNotUsable", problems } }), event(3, "specCorrected", { problems })];
+  const inActivity = (corrected: boolean) => act(() => root.render(<ActivityTab events={events} role="specifier" corrected={corrected} />));
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    mockIPC(() => null);
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("doesn't say it failed, and says what went past its limit, by how much", () => {
+    inActivity(true);
+    expect(page()).not.toContain("Failed");
+    expect(page()).toContain("Final state: Keel asked for a fix");
+    expect(page()).toContain("C2 has 209 characters, and the limit is 200");
+    expect(page()).toContain("item 1 of what it decided alone has 141 characters, and the limit is 140");
+  });
+
+  it("says it failed while nothing went on to fix it", () => {
+    inActivity(false);
+    expect(page()).toContain("Final state: Failed");
+  });
+
+  it("is all in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    inActivity(true);
+    expect(page()).not.toContain("Falló");
+    expect(page()).toContain("Estado final: Keel pidió corregirlo");
+    expect(page()).toContain("el punto 1 de lo que decidió por su cuenta tiene 141 caracteres y el límite es 140");
   });
 });

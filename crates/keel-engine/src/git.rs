@@ -603,6 +603,18 @@ impl Git {
             .map(|s| !s.is_empty())
             .unwrap_or(false)
     }
+
+    /// Whether git keeps any file under `path`, which makes it part of the project and not
+    /// something a tool built. Capitals don't count: the Mac's disk doesn't tell `Target` from
+    /// `target`, so a folder git keeps as either is the same folder. Not being able to tell counts
+    /// as yes.
+    pub fn tracks(&self, workspace: &Path, path: &str) -> bool {
+        let pathspec = format!(":(icase){path}");
+        !matches!(
+            self.run_in_workspace(workspace, &["ls-files", "--", &pathspec]),
+            Ok(files) if files.is_empty()
+        )
+    }
 }
 
 /// Runs a command and gives up on it at the limit, along with anything it started.

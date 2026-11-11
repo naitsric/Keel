@@ -337,7 +337,17 @@ pub enum Reason {
         minutes: u64,
         cpu_percent: f32,
     },
-    WaitingForProject,
+    /// A project runs one step with commands at a time, and another one has the turn: `step`, in
+    /// the run `run_id`, whose title is `title`. Each run still works in its own copy. A reason
+    /// saved before Keel said who has the turn has none of them, and reads back with them empty.
+    WaitingForProject {
+        #[serde(default)]
+        step: String,
+        #[serde(default)]
+        run_id: String,
+        #[serde(default)]
+        title: String,
+    },
     WaitingForCapacity,
     ResultError {
         subtype: String,
@@ -659,7 +669,7 @@ impl Reason {
             | Self::ProjectRemoved => false,
             // One run.
             Self::Stalled { .. }
-            | Self::WaitingForProject
+            | Self::WaitingForProject { .. }
             | Self::WaitingForCapacity
             | Self::ResultError { .. }
             | Self::ExitedWithoutResult { .. }
@@ -914,7 +924,14 @@ mod tests {
                 },
                 false,
             ),
-            (Reason::WaitingForProject, false),
+            (
+                Reason::WaitingForProject {
+                    step: text(),
+                    run_id: text(),
+                    title: text(),
+                },
+                false,
+            ),
             (Reason::WaitingForCapacity, false),
             (
                 Reason::ResultError {
@@ -1016,7 +1033,7 @@ mod tests {
             Reason::SessionRejected { .. } => 7,
             Reason::RateLimited { .. } => 8,
             Reason::Stalled { .. } => 9,
-            Reason::WaitingForProject => 10,
+            Reason::WaitingForProject { .. } => 10,
             Reason::WaitingForCapacity => 11,
             Reason::ResultError { .. } => 12,
             Reason::ExitedWithoutResult { .. } => 13,
@@ -1076,6 +1093,39 @@ mod tests {
         assert!(limit(Some(1_001)).stops_every_card(1_000));
         assert!(!limit(Some(1_000)).stops_every_card(1_000));
         assert!(!limit(Some(999)).stops_every_card(1_000));
+    }
+
+    /// What the app and MCP clients read about who has a project's turn.
+    #[test]
+    fn waiting_for_the_project_names_the_step_and_run_that_have_the_turn() {
+        let waiting = Reason::WaitingForProject {
+            step: "builder".into(),
+            run_id: "r44".into(),
+            title: "Fix the calendar".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&waiting).unwrap(),
+            serde_json::json!({
+                "code": "waitingForProject",
+                "step": "builder",
+                "runId": "r44",
+                "title": "Fix the calendar",
+            })
+        );
+    }
+
+    /// A reason saved before Keel said who has the turn still reads, so its card says why it waits.
+    #[test]
+    fn waiting_for_the_project_saved_without_who_has_the_turn_still_reads() {
+        let saved: Reason = serde_json::from_str(r#"{"code":"waitingForProject"}"#).unwrap();
+        assert_eq!(
+            saved,
+            Reason::WaitingForProject {
+                step: String::new(),
+                run_id: String::new(),
+                title: String::new(),
+            }
+        );
     }
 
     #[test]

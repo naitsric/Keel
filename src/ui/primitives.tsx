@@ -3,7 +3,7 @@ import type { ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { twMerge } from "tailwind-merge";
 import { useKeymapHold } from "../commands/keymapHold";
 import { formatKeybinding } from "../commands/keys";
-import type { AttemptState } from "../lib/api";
+import type { ShownState } from "../lib/api";
 
 /** Joins class names; on conflicting Tailwind utilities the later one wins. */
 export const cx = (...classes: (string | false | null | undefined)[]) => twMerge(classes.filter(Boolean).join(" "));
@@ -32,7 +32,7 @@ export function Button({ variant = "secondary", className, ...props }: Component
   );
 }
 
-const STATE_TONES: Record<AttemptState, string> = {
+const STATE_TONES: Record<ShownState, string> = {
   queued: "text-muted",
   preparing: "text-accent",
   running: "text-accent",
@@ -47,11 +47,13 @@ const STATE_TONES: Record<AttemptState, string> = {
   rejected: "text-muted",
   returned: "text-muted",
   postponed: "text-muted",
+  // Keel had it fixed straight away: nothing for the person to look into.
+  corrected: "text-muted",
   skipped: "text-subtle",
   abandoned: "text-subtle",
 };
 
-const STATE_DOTS: Record<AttemptState, string> = {
+const STATE_DOTS: Record<ShownState, string> = {
   queued: "bg-subtle",
   preparing: "bg-accent animate-pulse",
   running: "bg-accent animate-pulse",
@@ -66,11 +68,12 @@ const STATE_DOTS: Record<AttemptState, string> = {
   rejected: "bg-subtle",
   returned: "bg-subtle",
   postponed: "bg-subtle",
+  corrected: "bg-subtle",
   skipped: "bg-subtle",
   abandoned: "bg-subtle",
 };
 
-export function StateBadge({ state, label }: { state: AttemptState; label: string }) {
+export function StateBadge({ state, label }: { state: ShownState; label: string }) {
   return (
     <span className={cx("inline-flex items-center gap-1.5 text-[12px] font-medium whitespace-nowrap", STATE_TONES[state])}>
       <span className={cx("inline-block size-1.5 shrink-0 rounded-full", STATE_DOTS[state])} />

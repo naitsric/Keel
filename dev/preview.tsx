@@ -13,7 +13,7 @@ import App from "../src/App";
 import i18next from "../src/i18n";
 import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
 import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, JointChange, JointCheck, PartOf, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunJoint, RunRow, SpecOutput, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
-import { useApp } from "../src/lib/store";
+import { useApp, type View } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
 const view = params.get("view") ?? "home";
@@ -29,7 +29,7 @@ const REASONS: Partial<Record<AttemptState, Reason>> = {
   blocked: { code: "unexpectedAuth", source: "ANTHROPIC_API_KEY" },
   failed: { code: "resultError", subtype: "error_max_turns", detail: "Reached the turn limit." },
   interrupted: { code: "agentLost" },
-  queued: { code: "waitingForProject" },
+  queued: { code: "waitingForProject", step: "builder", runId: "r9", title: "Fix the calendar" },
 };
 const finished = !["queued", "preparing", "running", "stalled"].includes(state);
 const at = (minutes: number) => new Date(Date.now() - minutes * 60000).toISOString();
@@ -58,6 +58,7 @@ const attempt: Attempt = {
   prompt: "The add function in calc.py is wrong. Fix it, then run the tests.",
   settings: { sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, filesystem: { denyRead: ["~"], allowRead: ["<workspace>"] }, network: { allowedDomains: [] } } },
   sessionId: "5e882d0f-0000-4000-8000-000000000000",
+  resumedFrom: null,
   workspace: "/Users/you/Library/Application Support/io.github.naitsric.keel/runs/r1/workspace",
   rawPath: "/Users/you/Library/Application Support/io.github.naitsric.keel/runs/r1/builder-1.jsonl",
   rawSha256: finished ? "9f2c4e1ab7d04c55e6a1f0b3c28d7e6fa1b2c3d4e5f60718293a4b5c6d7e8f90" : null,
@@ -118,7 +119,8 @@ const waiting = params.get("flow") === "approval" || params.get("flow") === "lim
 // with gate=build there's nothing yet to say about what it did. flow=questions is the card that asks,
 // in the language of lang=, with long=1 for text at its limits, many=1 for three questions, none=1 for
 // one with no recommended option, last=1 for the last round and extra=1 for the round after it.
-// flow=corrected is a run stopped because it couldn't keep to the limits.
+// flow=corrected is a run stopped because it couldn't keep to the limits. With fixed=1 the second
+// answer fit and the run went on: node=spec, then its attempt 1, shows what Keel asked it to fix.
 // shots=1 has screenshots a check saved, in dark and light, shots=old one of them saved by the builder, so
 // the code may have changed after it, and shots=many more than fit in a line, with what Keel left out and
 // a count of more. They show with flow=approval: view=run&flow=approval&shots=1, and a click on one opens it
@@ -209,9 +211,24 @@ const questionAttempts: Attempt[] = [
   ...Array.from({ length: answeredRounds }, (_, index) => specRound({ id: `q0-${index}`, number: index + 1, state: "succeeded" }, { ...previewSpec, questions: previewQuestions.slice(0, 1), answered: [{ question: "Q1", asked: previewQuestions[0].text, answer: previewQuestions[0].options[1].label, recommended: false, remember: false }] })),
   specRound({ number: answeredRounds + 1, state: "waitingAnswers" }, { ...previewSpec, decided: previewSpec.decided.slice(0, 1), questions: previewQuestions }),
 ];
+const fixedAtOnce = params.get("fixed") === "1";
+// What run #47 wrote first: a criterion and a decision past their limits.
+const didNotFit: Reason[] = fixedAtOnce
+  ? [
+      { code: "criterionTooLong", id: "C2", chars: 209, limit: 200 },
+      { code: "decidedTooLong", position: 1, chars: 141, limit: 140 },
+    ]
+  : [{ code: "summaryTooLong", chars: 240, limit: 200 }];
 const correctedAttempts: Attempt[] = [
-  specRound({ id: "c1", number: 1, state: "failed", reason: { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 240, limit: 200 }] } }, previewSpec),
-  specRound({ id: "c2", number: 2, state: "blocked", reason: { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 231, limit: 200 }, { code: "tooManyRecommended", id: "Q2", count: 2 }] } }, previewSpec),
+  specRound({ id: "c1", number: 1, state: "failed", reason: { code: "specNotUsable", problems: didNotFit } }, previewSpec),
+  fixedAtOnce
+    ? specRound({ id: "c2", number: 2, state: "succeeded", resumedFrom: "c1" }, previewSpec)
+    : specRound({ id: "c2", number: 2, state: "blocked", resumedFrom: "c1", reason: { code: "specNotUsable", problems: [{ code: "summaryTooLong", chars: 231, limit: 200 }, { code: "tooManyRecommended", id: "Q2", count: 2 }] } }, previewSpec),
+];
+const correctedEvents: AuditEvent[] = [
+  { seq: 100, attemptId: "c1", at: at(2), kind: "result", data: {} },
+  { seq: 101, attemptId: "c1", at: at(2), kind: "finished", data: { state: "failed", reason: { code: "specNotUsable", problems: didNotFit } } },
+  { seq: 102, attemptId: "c1", at: at(2), kind: "specCorrected", data: { problems: didNotFit } },
 ];
 const builtAttempt: Attempt = { ...attempt, state: "succeeded", reason: null, shaAfter: "28c696fd11223344556677889900aabbccddeeff", finishedAt: at(1), rawSha256: "9f2c", resultText: builtText, filesChanged: builtFiles, runFiles: builtFiles };
 const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", round, state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12" };
@@ -359,7 +376,7 @@ const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Atte
   // The answer wasn't in the structure it was asked for, so it stops here for a person.
   verifyUnreadable: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), verifierAttempt("failed", { reason: { code: "noStructuredOutput" }, output: { verdict: "approved" } as unknown as Attempt["output"] })] },
   questions: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...questionAttempts] },
-  corrected: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...correctedAttempts] },
+  corrected: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...correctedAttempts, ...(fixedAtOnce ? [builderRan({ state: "running", finishedAt: null })] : [])] },
   // A person sent it back: the approval they answered says so, and the run is on its next round.
   returned: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), returnedApproval, builderRan({ round: 1, number: 2, state: "running", finishedAt: null })] },
   sentBack: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), returnedApproval, ...[builderRan({ resultText: "I made add return 0 for an empty list." }), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), humanWaits].map(nextRound)] },
@@ -516,7 +533,10 @@ const projects = view === "board" || palette || params.get("drafts") === "1" ? [
 // removing, addError=1 refuses the folder, picker=cancel closes the picker, and history=1 with empty=1
 // keeps the runs of projects that are all gone.
 const freshProject: Project = { ...otherProject, id: "p3", name: "shop", path: "/Users/you/www/shop", githubAccount: null, githubRepo: params.get("repo") === "none" ? null : "acme/shop", setupCommand: null, checkCommand: null, allowedDomains: ["pypi.org"], allowedRead: [], services: [{ type: "bridge", name: "db", port: 5432, socket: null }], env: [{ name: "DB_HOST", value: "{{socketDir:db}}" }] };
-let listedProjects: Project[] = params.get("empty") === "1" ? [] : [...projects, ...(params.get("projects") === "mixed" || params.get("dialog") === "setup" ? [freshProject] : [])];
+// projects=many has that one too, and enough others for the Projects page to filter them.
+const manyProjects = params.get("projects") === "many";
+const moreProjects: Project[] = manyProjects ? ["mobile", "billing-api", "docs", "infra", "website", "analytics"].map((name, i) => ({ ...otherProject, id: `p${i + 4}`, name, path: `/Users/you/www/${name}`, githubRepo: `acme/${name}` })) : [];
+let listedProjects: Project[] = params.get("empty") === "1" ? [] : [...projects, ...(params.get("projects") === "mixed" || manyProjects || params.get("dialog") === "setup" ? [freshProject] : []), ...moreProjects];
 const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[]; setupOptions: string[]; checkOptions: string[] }> = {
   pnpm: { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run check:i18n", "pnpm run lint", "pnpm test", "pnpm run typecheck"] },
   npm: { check: "npm test", setup: "npm ci", from: ["package.json", "package-lock.json"], setupOptions: [], checkOptions: [] },
@@ -766,23 +786,28 @@ mockIPC((command, args) => {
     case "run_attempts":
       return (args as { runId?: string } | undefined)?.runId === "try1" ? tryAttempts() : flowScene ? flowScene.attempts : attemptsList;
     case "github_status": {
-      if ((args as { projectId?: string } | undefined)?.projectId === freshProject.id) return setupAccounts((args as { account?: string | null }).account);
+      const projectId = (args as { projectId?: string } | undefined)?.projectId;
+      if (projectId === freshProject.id) return setupAccounts((args as { account?: string | null }).account);
+      // The repo of the project asked about, as the list shows it: each of projects=many has its own.
+      const asked = listedProjects.find((p) => p.id === projectId);
+      const repo = asked ? asked.githubRepo : "acme/app";
       const access = params.get("access");
       const accounts = [
         { login: "you-personal", active: true, ok: true, scopes: ["repo"] },
         { login: "you-work", active: false, ok: true, scopes: ["repo", "admin:org", "workflow"] },
       ];
+      if (!repo) return { repo, accounts, info: null, excessScopes: [], error: null };
       if (access === "none") {
         return {
-          repo: "acme/app",
+          repo,
           accounts,
           info: null,
           excessScopes: [],
-          error: { code: "deliveryFailed", kind: "noPermission", detail: "GraphQL: Could not resolve to a Repository with the name 'acme/app'. (repository)" },
+          error: { code: "deliveryFailed", kind: "noPermission", detail: `GraphQL: Could not resolve to a Repository with the name '${repo}'. (repository)` },
         };
       }
       return {
-        repo: "acme/app",
+        repo,
         accounts,
         info: { defaultBranch: "main", permission: access === "read" ? "READ" : "ADMIN", private: true, defaultBranchProtected: false },
         excessScopes: (args as { account?: string | null } | undefined)?.account === "you-work" ? ["admin:org", "workflow"] : [],
@@ -867,6 +892,7 @@ mockIPC((command, args) => {
         if (params.get("flow") === "small" || params.get("flow") === "asked") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "skipped", data: { reason: asSmall.reason } }, { seq: 101, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: true, lines: 12, files: 2, round: 0 } }];
         if (params.get("flow") === "movedUp") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: false, because: WHY_MOVED_UP, round: 0 } }];
       }
+      if ((args as { attemptId?: string } | undefined)?.attemptId === "c1" && params.get("flow") === "corrected") return correctedEvents;
       if ((args as { attemptId?: string } | undefined)?.attemptId === returnedApproval.id && (params.get("flow") === "returned" || params.get("flow") === "sentBack")) {
         return [{ seq: 100, attemptId: returnedApproval.id, at: at(5), kind: "returned", data: { instructions: sentBackWith, round: 1, ...(assistantBy ? { by: assistantBy } : {}) } }];
       }
@@ -886,11 +912,21 @@ void useApp.getState().refreshMcp();
 useApp.setState({ preflight: params.get("session") === "checking" ? null : preflight });
 // from=board or from=brain shows a run opened on that page: it stays the current one in the top bar.
 const from = params.get("from");
-if (view === "run") useApp.setState({ view: { name: "run", runId: "r1", backTo: from === "board" ? { name: "board", projectId: "p1" } : from === "brain" ? { name: "brain" } : undefined } });
-if (view === "settings") useApp.setState({ view: { name: "settings" } });
-if (view === "workflows") useApp.setState({ view: { name: "workflows" } });
-if (view === "brain") useApp.setState({ view: { name: "brain" } });
-if (view === "board") useApp.setState({ view: { name: "board" } });
+// What view= opens. It needs one entry for each page in View, so a new page doesn't compile until
+// view= can open it. That's all it checks: a command the mock above doesn't know answers null, so
+// a page that reads something new opens without it until the mock answers it too.
+const PAGES: { [Name in View["name"]]: Extract<View, { name: Name }> } = {
+  home: { name: "home" },
+  run: { name: "run", runId: "r1", backTo: from === "board" ? { name: "board", projectId: "p1" } : from === "brain" ? { name: "brain" } : undefined },
+  settings: { name: "settings" },
+  workflows: { name: "workflows" },
+  brain: { name: "brain" },
+  board: { name: "board" },
+  // project=p3 opens with that one chosen, which is the one that needs setup with projects=mixed|many
+  // (and has no GitHub with repo=none).
+  projects: { name: "projects", projectId: params.get("project") ?? undefined },
+};
+if (Object.hasOwn(PAGES, view)) useApp.setState({ view: PAGES[view as View["name"]] });
 if (params.get("dialog") === "newRun") useApp.setState({ newRunOpen: true });
 if (params.get("dialog") === "quit") useApp.setState({ quitOpen: true });
 if (params.get("dialog") === "setup") useApp.setState({ projectSetup: { projectId: freshProject.id, added: params.get("added") ? (addedAnswer() as ProjectAdded) : null, returnToNewRun: false } });

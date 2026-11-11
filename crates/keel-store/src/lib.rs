@@ -1527,6 +1527,15 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The runs that have ended, oldest first.
+    pub fn ended_run_ids(&self) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let mut stmt =
+            conn.prepare("select id from run where finished_at is not null order by created_at")?;
+        let rows = stmt.query_map([], |row| row.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Runs with a pull request that could still change and that nobody has looked at since `before`,
     /// the longest waiting first. A merged one can't change. A closed one can still be reopened. A
     /// removed project's runs wait until it's back.
