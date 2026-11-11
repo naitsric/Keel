@@ -1,4 +1,4 @@
-import { type Attempt, type Guess, isActive, type Project, type ProjectSettings } from "./api";
+import { type Attempt, type Guess, isActive, type Project, type ProjectSettings, type ToolFolder } from "./api";
 
 /**
  * Whether a project still has setup to finish, worked out from the project so it clears itself
@@ -11,7 +11,22 @@ export const needsSetup = (project: Project) => !project.checkCommand || (Boolea
  * What to send when only these fields change. `project_update` replaces every field, so everything
  * else goes back as it came, including any field added later.
  */
-export const withSetup = (project: Project, change: Pick<ProjectSettings, "githubAccount" | "setupCommand" | "checkCommand">): ProjectSettings => ({ ...project, ...change });
+export const withSetup = (project: Project, change: Pick<ProjectSettings, "githubAccount" | "setupCommand" | "checkCommand"> & Partial<Pick<ProjectSettings, "allowedRead">>): ProjectSettings => ({ ...project, ...change });
+
+/** One way of writing each folder: with `~` for the home folder and no `/` at the end. */
+const sameFolder = (folder: string) => shortPath(folder.trim()).replace(/\/+$/, "");
+
+/** Whether the list already lets this folder be read: it names it, or a folder it's in. */
+export function isListed(folder: string, list: string[]): boolean {
+  const wanted = sameFolder(folder);
+  return list.map(sameFolder).some((listed) => listed !== "" && (wanted === listed || wanted.startsWith(`${listed}/`)));
+}
+
+/** What Keel found that the list doesn't let be read yet. */
+export const foldersToOffer = (found: ToolFolder[], list: string[]) => found.filter((found) => !isListed(found.folder, list));
+
+/** The list with these folders at the end, each once. */
+export const withFolders = (list: string[], folders: string[]) => folders.reduce((all, folder) => (isListed(folder, all) ? all : [...all, folder]), list);
 
 /** The account to show chosen. With several that can push, that's the person's call, not Keel's. */
 export function accountToSelect(saved: string | null, canPush: string[]): string | null {
