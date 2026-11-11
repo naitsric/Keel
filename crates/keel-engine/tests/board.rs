@@ -766,6 +766,7 @@ fn a_run_from_outside_gets_a_card_that_follows_the_columns_and_starts_once() {
 
 #[test]
 fn a_run_from_outside_holds_a_place_so_todo_waits_for_it() {
+    keel_harness::needs!(sandbox);
     let w = world();
     w.use_one_step();
     w.engine.set_max_agents(1).unwrap();
