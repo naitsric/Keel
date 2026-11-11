@@ -919,6 +919,84 @@ fn a_run_that_ends_frees_them_too_but_not_what_the_project_keeps_in_git() {
     );
 }
 
+/// Where what's freed waits to be deleted, next to the run's copy.
+fn trash_of(workspace: &Path) -> PathBuf {
+    workspace.with_file_name("trash")
+}
+
+#[test]
+fn a_folder_the_project_keeps_stays_whatever_its_capitals() {
+    // The Mac's disk doesn't tell `Target` from `target`. Git does, and still keeps `Target`.
+    let body = format!(
+        "cat > /dev/null\n{}\nmv Target t && mv t target\n{OK_RESULT}",
+        init(BUILD_TOOLS, "none")
+    );
+    let h = harness(&body);
+    for own in ["Target", "Node_Modules"] {
+        std::fs::create_dir(h.repo.join(own)).unwrap();
+        std::fs::write(h.repo.join(own).join("kept.txt"), "kept\n").unwrap();
+    }
+    git(&h.repo, &["add", "-A"]);
+    git(&h.repo, &["commit", "-qm", "own folders"]);
+    let run = h.start(ToolProfile::Build);
+    let done = h.wait_for(&run, &[AttemptState::Succeeded]);
+    let workspace = PathBuf::from(&done.workspace);
+    until("the run's cache being freed", || {
+        !workspace.join(".keel-cache").exists() && !trash_of(&workspace).exists()
+    });
+    for kept in ["target/kept.txt", "Node_Modules/kept.txt"] {
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(kept)).unwrap(),
+            "kept\n",
+            "{kept}"
+        );
+    }
+}
+
+#[test]
+fn reopening_the_app_frees_what_ended_runs_still_hold() {
+    let body = format!(
+        "cat > /dev/null\n{}\n{BUILDS}\nexit 1",
+        init(BUILD_TOOLS, "none")
+    );
+    let h = harness(&body);
+    std::fs::write(
+        h.repo.join(".gitignore"),
+        "target/\nnode_modules/\n.venv/\n",
+    )
+    .unwrap();
+    git(&h.repo, &["add", "-A"]);
+    git(&h.repo, &["commit", "-qm", "ignore builds"]);
+    let run = h.start(ToolProfile::Build);
+    let failed = h.wait_for(&run, &[AttemptState::Failed]);
+    let workspace = PathBuf::from(&failed.workspace);
+
+    // Closed by an app that hasn't found git yet, which can't tell what the project keeps.
+    let mut config = Config::new(h.dir.path().join("data"));
+    config.keep_awake = false;
+    let early = Engine::new(
+        h.store.clone(),
+        config,
+        Tools::from_dirs(&[h.dir.path().join("bin")]),
+        |_| {},
+    );
+    early.abandon(&failed.id).unwrap();
+    // And an earlier freeing the app quit in the middle of.
+    let half = trash_of(&workspace).join("half-deleted");
+    std::fs::create_dir_all(half.join("debug")).unwrap();
+    std::fs::write(half.join("debug/app"), "bin").unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    for name in REBUILT {
+        assert!(workspace.join(name).is_dir(), "{name} went without git");
+    }
+
+    restart(&h).recover().unwrap();
+    until("the ended run being freed", || {
+        REBUILT.iter().all(|name| !workspace.join(name).exists()) && !trash_of(&workspace).exists()
+    });
+    assert!(workspace.join("CLAUDE.md").exists());
+}
+
 #[test]
 fn a_new_run_works_in_runs_dir_not_in_the_data_folder() {
     let h = harness_with("echo hi > new.txt\n", LOGGED_IN, "2.1.318", |c| {

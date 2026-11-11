@@ -244,7 +244,7 @@ impl Inner {
     }
 
     pub(crate) fn end_early(
-        &self,
+        self: &Arc<Self>,
         attempt_id: &str,
         run_id: &str,
         state: AttemptState,
