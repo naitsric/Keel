@@ -165,9 +165,9 @@ export function Summary({ run, attempts, current, commands, rawCheck, closedBy, 
   );
 }
 
-function ApprovalRow({ label, note, action, children }: { label: string; note?: string; action?: React.ReactNode; children: React.ReactNode }) {
+function ApprovalRow({ label, note, action, rowRef, children }: { label: string; note?: string; action?: React.ReactNode; rowRef?: React.Ref<HTMLDivElement>; children: React.ReactNode }) {
   return (
-    <div className="grid grid-cols-[116px_1fr] gap-x-3 border-t border-border py-2 first:border-t-0 first:pt-0">
+    <div ref={rowRef} className="grid grid-cols-[116px_1fr] gap-x-3 border-t border-border py-2 first:border-t-0 first:pt-0">
       <dt className="text-[12px] leading-5 font-semibold text-muted">
         {label}
         {note && <span className="block text-[11px] leading-4 font-normal text-subtle">{note}</span>}
@@ -565,6 +565,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   }, [run.id, changesSomething]);
   const [shots, setShots] = useState<Screenshots | null>(null);
   const [looking, setLooking] = useState<Screenshot | null>(null);
+  const provesRow = useRef<HTMLDivElement>(null);
   // Each approval looks again: a later round may have new ones, or have changed the code since.
   useEffect(() => {
     let current = true;
@@ -635,6 +636,11 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const skippedForSize = skippedSteps(attempts);
   const hiddenFiles = files.length - SHOWN_FILES;
   const sentBack = sentBackByAssistant(attempts, run.round);
+  // What nobody could prove, the same as in "What proves it". In a short window that row can be far
+  // down the list, so how much of it there is shows by the note, which never scrolls away.
+  const verification = verificationInRound(attempts, run.round);
+  const notProven = uncheckedInRound(attempts, run.round).length + (verification ? verificationCounts(verification).unverified : 0);
+  const showWhatProves = () => provesRow.current?.scrollIntoView({ block: "nearest" });
 
   return (
     // Short enough for its buttons to show without scrolling: the window less the top bar (38), the
@@ -743,7 +749,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             )}
           </ApprovalRow>
         )}
-        <ApprovalRow label={t("run.whatProves")}>
+        <ApprovalRow label={t("run.whatProves")} rowRef={provesRow}>
           <ApprovalProof attempts={attempts} round={run.round} commands={commands} rawCheck={rawCheck} reviewed={reviewed} />
         </ApprovalRow>
         {/* After what proves it: in a short window they'd take all its room, and push what wasn't proven out of view. */}
@@ -781,6 +787,16 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
           <AlertTriangle size={14} className="mt-0.5 shrink-0" />
           {t(delivers ? "run.secretWarning" : "run.secretWarningLocal")}
         </p>
+      )}
+      {/* Right above the note and the buttons: the focus starts there, so this is in view with them. */}
+      {notProven > 0 && (
+        <div className="mt-2 flex items-center gap-2 rounded-md border border-border-strong bg-inset py-1 pr-1 pl-2 text-[12.5px]">
+          <CircleQuestionMark size={14} className="shrink-0 text-muted" />
+          <p className="min-w-0 flex-1 font-medium">{t("run.notProvenCount", { count: notProven })}</p>
+          <Button variant="ghost" onClick={showWhatProves}>
+            {t("run.notProvenSee", { count: notProven })}
+          </Button>
+        </div>
       )}
       {empty ? (
         <div className="mt-3 border-t border-border pt-3">

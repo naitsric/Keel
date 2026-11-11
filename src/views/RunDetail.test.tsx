@@ -527,6 +527,75 @@ describe("the approval card", () => {
     });
   });
 
+  // In a short window, "What proves it" can be far down the list, or out of it.
+  describe("how much wasn't proven, where it can't scroll out of view", () => {
+    const looked = (stepId: string, unchecked: string[]) => attempt({ id: stepId, stepId, role: "reviewer", output: { verdict: "approved", findings: [], summary: "Fine.", unread: [], unchecked } as unknown as Attempt["output"] });
+    const met = said("C1", "met", "test_calc.py:1");
+    const list = () => document.querySelector("dl") as HTMLElement;
+    const lines = (text: string) => [...document.querySelectorAll("p")].filter((p) => p.textContent === text);
+    const follows = (first: Node, then: Node) => (first.compareDocumentPosition(then) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+
+    it("counts what the reviews couldn't check and what wasn't verified, outside the list, by the note", () => {
+      show([builder(["calc.py"]), check, verifier([met, said("C2", "unverified")]), looked("ux", ["How the Save bar looks in dark mode", "  "]), looked("code", ["The page in a wide window"]), human], ["calc.py"]);
+      const found = lines("3 things weren't proven");
+      expect(found).toHaveLength(1);
+      expect(list().contains(found[0])).toBe(false);
+      expect(follows(list(), found[0])).toBe(true);
+      expect(follows(found[0], textarea())).toBe(true);
+      // What each one is stays in what proves it.
+      expect(list().textContent).toContain("How the Save bar looks in dark mode");
+      expect(found[0].parentElement?.textContent).not.toContain("How the Save bar");
+    });
+
+    it("says one in the singular", () => {
+      show([builder(["calc.py"]), check, verifier([met, said("C2", "unverified")]), human], ["calc.py"]);
+      expect(lines("1 thing wasn't proven")).toHaveLength(1);
+    });
+
+    it("counts each one the verifier couldn't verify when it verified none", () => {
+      show([builder(["calc.py"]), check, verifier([said("C1", "unverified"), said("C2", "unverified")]), human], ["calc.py"]);
+      expect(lines("2 things weren't proven")).toHaveLength(1);
+    });
+
+    it("leaves the card as it was when everything was proven", () => {
+      show([builder(["calc.py"]), check, verifier([met]), looked("ux", []), human], ["calc.py"]);
+      expect(page()).not.toMatch(/proven/);
+      expect(button("See which")).toBeUndefined();
+      expect(list().nextElementSibling?.contains(textarea())).toBe(true);
+    });
+
+    it("doesn't count what was found not met: that isn't unproven, and says so in what proves it", () => {
+      show([builder(["calc.py"]), check, verifier([met, said("C2", "unmet", "calc.py:3")]), human], ["calc.py"]);
+      expect(page()).not.toMatch(/proven/);
+    });
+
+    it("takes you to what proves it, in the list", () => {
+      const scrolled = vi.spyOn(Element.prototype, "scrollIntoView").mockImplementation(() => {});
+      try {
+        show([builder(["calc.py"]), check, looked("ux", ["How the Save bar looks in dark mode"]), human], ["calc.py"]);
+        press("See which");
+        expect(scrolled).toHaveBeenCalledTimes(1);
+        expect(scrolled).toHaveBeenCalledWith({ block: "nearest" });
+        const row = scrolled.mock.contexts[0] as Element;
+        expect(row.querySelector("dt")?.textContent).toBe("What proves it");
+        expect(list().contains(row)).toBe(true);
+        expect(answers).toEqual([]);
+      } finally {
+        scrolled.mockRestore();
+      }
+    });
+
+    it("is in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      show([builder(["calc.py"]), check, looked("ux", ["Cómo se ve en tema oscuro", "Cómo se ve en una ventana ancha"]), human], ["calc.py"]);
+      expect(lines("2 cosas quedaron sin probar")).toHaveLength(1);
+      expect(button("Ver cuáles")).toBeDefined();
+      show([builder(["calc.py"]), check, looked("ux", ["Cómo se ve en tema oscuro"]), human], ["calc.py"]);
+      expect(lines("1 cosa quedó sin probar")).toHaveLength(1);
+      expect(button("Ver cuál")).toBeDefined();
+    });
+  });
+
   describe("when the workflow fits the change", () => {
     const small = { code: "treatedAsSmall", lines: 12, files: 2 };
     const skip = (id: string, role: Attempt["role"]) => attempt({ id, stepId: id, role, state: "skipped", reason: small });
