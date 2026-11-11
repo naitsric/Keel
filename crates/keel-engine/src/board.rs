@@ -6,14 +6,15 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::time::{Duration, Instant};
 
-use keel_core::{AttemptState, BoardColumn, CardLane, PrState, Reason};
+use keel_core::{AttemptState, BoardColumn, CardLane, PrState, Reason, WorkflowStep};
 use keel_harness::github::Issue;
 use keel_store::{Card, NewCard, Project, Store};
 
+use crate::notes::{self, split_assistant_notes};
 use crate::prompts::part_request;
 use crate::{
-    Engine, Error, PartOf, Result, StartRun, Workflow, joint, locked, new_id, request_from_issue,
-    title_from, title_from_issue,
+    Engine, Error, PartOf, Result, StartRun, Workflow, WorkflowRef, joint, locked, new_id,
+    request_from_issue, title_from, title_from_issue,
 };
 
 const MAX_AGENTS_KEY: &str = "max_agents";
@@ -158,15 +159,19 @@ fn issue_of(card: &Card) -> Option<Issue> {
     serde_json::from_value(card.issue.clone()?).ok()
 }
 
-/// A client's note as it goes on a card: who added it, that it's an assistant and not the person,
-/// and when, so neither the person nor an agent takes it for the person's own words.
-fn note_by(text: &str, by: &str, language: &str, at: chrono::NaiveDateTime) -> String {
-    let (date, time) = (at.format("%Y-%m-%d"), at.format("%H:%M"));
-    if language.starts_with("es") {
-        format!("Agregado por {by}, un asistente, el {date} a las {time}:\n{text}")
-    } else {
-        format!("Added by {by}, an assistant, on {date} at {time}:\n{text}")
+/// What a run runs with again: its own steps, and the saved workflow they came from, if any.
+/// `InvalidState` for a run that doesn't say, from before Keel kept its steps.
+fn run_again(run: &keel_store::Run) -> Result<(Vec<WorkflowStep>, Option<WorkflowRef>)> {
+    let steps: Vec<WorkflowStep> = serde_json::from_value(run.workflow.clone()).unwrap_or_default();
+    if steps.is_empty() {
+        return Err(Error::InvalidState);
     }
+    let saved = run
+        .workflow_id
+        .clone()
+        .zip(run.workflow_name.clone())
+        .map(|(id, name)| WorkflowRef { id, name });
+    Ok((steps, saved))
 }
 
 impl Engine {
@@ -246,9 +251,10 @@ impl Engine {
         Ok(())
     }
 
-    /// Adds a note from a client over MCP at the end of a card that waits, saying which client and
-    /// when, in the person's language. What the card says stays as it is. `InvalidState` once Keel
-    /// has the card, or for a note with nothing in it.
+    /// Adds a note from a client over MCP at the end of a card that waits, marked where it starts
+    /// and ends, with which client and when, in the person's language. What the card says stays
+    /// as it is. `InvalidState` once Keel has the card, or for a note with nothing in it. Which
+    /// cards a client may add to is the MCP's to decide.
     pub fn card_append_by(
         &self,
         card_id: &str,
@@ -260,7 +266,7 @@ impl Engine {
         if text.is_empty() {
             return Err(Error::InvalidState);
         }
-        let note = note_by(text, by, language, chrono::Local::now().naive_local());
+        let note = notes::note_by(text, by, language, chrono::Local::now().naive_local());
         if !self.inner.store.append_to_card(card_id, &note)? {
             return Err(Error::InvalidState);
         }
@@ -268,20 +274,37 @@ impl Engine {
         Ok(())
     }
 
-    /// A client over MCP, by its id, puts a card that waits in the Backlog at the bottom of Todo,
-    /// as a person would. The run it starts is that client's, and says so. `InvalidState` for a
-    /// card anywhere else, Todo included.
+    /// A client over MCP, by its id, puts a card back at the bottom of Todo to run its last run
+    /// again, with the same workflow: a task stays a task that only reads. Only a card waiting in
+    /// the Backlog because the client closed that run itself, so nothing the person ended or held
+    /// back: `InvalidState` for any other, Todo included, and for the card where a change across
+    /// projects is agreed, which propose_change starts.
     pub fn card_queue_by(&self, card_id: &str, language: &str, client_id: &str) -> Result<()> {
-        if self.inner.store.card(card_id)?.column() != BoardColumn::Backlog {
+        let store = &self.inner.store;
+        let card = store.card(card_id)?;
+        let Some(last) = card.run_id.as_deref() else {
+            return Err(Error::InvalidState);
+        };
+        if card.column() != BoardColumn::Backlog
+            || joint::agrees(&card)
+            || card.rejection.is_some()
+            || !store.run_closed_by_mcp_client(last, client_id)?
+        {
             return Err(Error::InvalidState);
         }
-        self.card_move_as(
+        let (workflow, _) = run_again(&store.run(last)?)?;
+        self.check_can_run(&store.project(&card.project_id)?, &workflow)?;
+        if !store.move_card_as(
             card_id,
             CardLane::Todo,
             usize::MAX,
             language,
             Some(client_id),
-        )
+        )? {
+            return Err(Error::InvalidState);
+        }
+        self.inner.changed("");
+        Ok(())
     }
 
     /// Moves a card within Backlog and Todo. Entering Todo is what asks for it to start, so that's
@@ -293,17 +316,6 @@ impl Engine {
         lane: CardLane,
         index: usize,
         language: &str,
-    ) -> Result<()> {
-        self.card_move_as(card_id, lane, index, language, None)
-    }
-
-    fn card_move_as(
-        &self,
-        card_id: &str,
-        lane: CardLane,
-        index: usize,
-        language: &str,
-        by: Option<&str>,
     ) -> Result<()> {
         let store = &self.inner.store;
         let card = store.card(card_id)?;
@@ -320,7 +332,7 @@ impl Engine {
             };
             self.check_can_run(&project, &workflow)?;
         }
-        if !store.move_card_as(card_id, lane, index, language, by)? {
+        if !store.move_card(card_id, lane, index, language)? {
             return Err(Error::InvalidState);
         }
         self.inner.changed("");
@@ -612,35 +624,52 @@ impl Engine {
     fn card_request(&self, card: &Card) -> Result<StartRun> {
         let project = self.inner.store.project(&card.project_id)?;
         let language = card.language.clone().unwrap_or_else(|| "en".to_owned());
-        let (workflow, saved_workflow) = if joint::agrees(card) {
-            (joint::plan_workflow(&language), None)
-        } else {
-            let workflow = self.default_workflow(&project, &language)?;
-            let reference = workflow.reference();
-            (workflow.steps, Some(reference))
+        // A client that put the card back in Todo runs its last run again, as it was.
+        let rerun = match (&card.queued_by_client, &card.rerun_of) {
+            (Some(_), Some(run)) => Some(self.inner.store.run(run)?),
+            _ => None,
+        };
+        let (mut workflow, saved_workflow) = match &rerun {
+            Some(run) => run_again(run)?,
+            None if joint::agrees(card) => (joint::plan_workflow(&language), None),
+            None => {
+                let workflow = self.default_workflow(&project, &language)?;
+                let reference = workflow.reference();
+                (workflow.steps, Some(reference))
+            }
         };
         let issue = issue_of(card);
+        // What an assistant added goes after what the person wrote, or what was agreed, and apart.
+        let (said, notes) = split_assistant_notes(&card.body);
         let (title, request) = match &issue {
             // A part may be in another repo, where the issue's number would point at something else.
             _ if card.joint_position.is_some() => (
                 card.title.clone(),
                 part_request(
                     &card.title,
-                    &card.body,
+                    &said,
                     self.inner.asked_of(card)?.as_deref(),
                     issue.as_ref(),
                 ),
             ),
             Some(issue) => (
                 title_from_issue(issue.number, &card.title),
-                request_from_issue(issue, &card.body),
+                request_from_issue(issue, &said),
             ),
-            None if card.body.is_empty() => (card.title.clone(), card.title.clone()),
-            None => (
-                card.title.clone(),
-                format!("{}\n\n{}", card.title, card.body),
-            ),
+            None if said.is_empty() => (card.title.clone(), card.title.clone()),
+            None => (card.title.clone(), format!("{}\n\n{said}", card.title)),
         };
+        let request = notes::with_notes(&request, &notes, &language);
+        // A step that was given the request itself, as a task is, gets the new one.
+        if let Some(run) = &rerun {
+            for step in &mut workflow {
+                if let WorkflowStep::Agent(spec) = step
+                    && spec.prompt == run.request
+                {
+                    spec.prompt.clone_from(&request);
+                }
+            }
+        }
         // A client over MCP that put the card in Todo is who the run says started it, as when it
         // starts one itself.
         let started_by = match &card.queued_by_client {
@@ -709,22 +738,6 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Done.","nu
         }
         assert!(wake.wait(Duration::from_millis(1)));
         assert!(!wake.wait(Duration::from_millis(1)), "that was all of them");
-    }
-
-    #[test]
-    fn a_note_says_which_assistant_added_it_and_when_in_the_person_s_language() {
-        let at = chrono::NaiveDate::from_ymd_opt(2026, 11, 11)
-            .unwrap()
-            .and_hms_opt(9, 3, 0)
-            .unwrap();
-        assert_eq!(
-            note_by("Add the field.", "Claude Code", "en", at),
-            "Added by Claude Code, an assistant, on 2026-11-11 at 09:03:\nAdd the field."
-        );
-        assert_eq!(
-            note_by("Agrega el campo.", "Claude Code", "es", at),
-            "Agregado por Claude Code, un asistente, el 2026-11-11 a las 09:03:\nAgrega el campo."
-        );
     }
 
     #[test]

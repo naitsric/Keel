@@ -306,10 +306,11 @@ const MIGRATIONS: &[&str] = &[
     r#"
     alter table attempt add column skipped_tests integer;
 "#,
-    // 16: Which MCP client put a card back in Todo, so the run it starts is that client's. Null when
-    // the person did, and on cards from before.
+    // 16: Which MCP client put a card back in Todo, so the run it starts is that client's, and the
+    // run it runs again, whose workflow it keeps. Null when the person did, and on cards from before.
     r#"
     alter table card add column queued_by_client text;
+    alter table card add column rerun_of text;
 "#,
 ];
 
@@ -858,6 +859,8 @@ pub struct Card {
     /// The MCP client that put it back in Todo, by id, so the run it starts is that client's. None
     /// when the person did.
     pub queued_by_client: Option<String>,
+    /// The run that client put it back in Todo to run again. The next one keeps its workflow.
+    pub rerun_of: Option<String>,
 }
 
 impl Card {
@@ -951,6 +954,7 @@ fn card_from(r: &Row) -> rusqlite::Result<Card> {
         waiting: !r.get::<_, bool>("is_ready")?,
         basis: serde_json::from_str(&basis).unwrap_or_default(),
         queued_by_client: r.get("queued_by_client")?,
+        rerun_of: r.get("rerun_of")?,
     })
 }
 
@@ -1352,7 +1356,9 @@ impl Store {
     }
 
     /// Runs this client started that haven't finished, counting the cards it put back in Todo: one
-    /// that hasn't started its run yet, and then that run until it finishes.
+    /// that could start now and waits for a place, and then its run until it finishes. One that
+    /// can't start, a part waiting for the one before it or a card of a project taken out of Keel,
+    /// holds no place until it can.
     pub fn open_runs_of_mcp_client(&self, client_id: &str) -> Result<i64> {
         Ok(self.lock().query_row(
             &format!(
@@ -1364,9 +1370,32 @@ impl Store {
                      union
                      select coalesce(k.run_id, k.id) from card k
                      left join run r on r.id = k.run_id
-                     where k.queued_by_client = ?1 and k.lane <> 'backlog' and r.finished_at is null)"
+                     where k.queued_by_client = ?1 and k.lane <> 'backlog' and r.finished_at is null
+                       and (k.lane = 'started'
+                            or ({} and k.project_id in (select id from project where removed_at is null))))",
+                ready("k")
             ),
             [client_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Whether this client closed that run itself, and nothing the person did ended it: its
+    /// close_run on it went through, the latest close names a client rather than the person, and
+    /// the person asked nothing in it to stop. Only such a run is the client's to run again.
+    pub fn run_closed_by_mcp_client(&self, run_id: &str, client_id: &str) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "select exists (select 1 from run where id = ?1 and finished_at is not null)
+                and exists (select 1 from mcp_call c where c.run_id = ?1 and c.client_id = ?2
+                                                       and c.tool = 'close_run' and c.ok = 1)
+                and coalesce((select json_extract(e.data, '$.by') is not null
+                              from event e join attempt a on a.id = e.attempt_id
+                              where a.run_id = ?1 and e.kind = 'abandoned'
+                              order by e.seq desc limit 1), 0)
+                and not exists (select 1 from event e join attempt a on a.id = e.attempt_id
+                                where a.run_id = ?1 and e.kind = 'stopRequested'
+                                  and json_extract(e.data, '$.by') is null)",
+            [run_id, client_id],
             |r| r.get(0),
         )?)
     }
@@ -2460,13 +2489,19 @@ impl Store {
         if from != to {
             if to == BoardColumn::Todo {
                 // A new run replaces the old one, which stays in history.
+                // A client runs the same again: see `rerun_of`.
+                let rerun_of = by.and(card.run_id.as_deref());
                 tx.execute(
-                    "update card set lane = 'todo', language = ?2, todo_at = ?3, run_id = null, start_blocked = null, queued_by_client = ?4 where id = ?1",
-                    params![id, language, now(), by],
+                    "update card set lane = 'todo', language = ?2, todo_at = ?3, run_id = null, start_blocked = null,
+                                     queued_by_client = ?4, rerun_of = ?5
+                     where id = ?1",
+                    params![id, language, now(), by, rerun_of],
                 )?;
             } else {
                 tx.execute(
-                    "update card set lane = 'backlog', language = null, todo_at = null, queued_by_client = null where id = ?1",
+                    "update card set lane = 'backlog', language = null, todo_at = null, queued_by_client = null,
+                                     rerun_of = null
+                     where id = ?1",
                     [id],
                 )?;
             }
@@ -2579,7 +2614,7 @@ impl Store {
             Some(existing) => {
                 tx.execute(
                     "update card set lane = 'started', run_id = null, language = ?2, start_blocked = null,
-                                     queued_by_client = null
+                                     queued_by_client = null, rerun_of = null
                      where id = ?1",
                     params![existing.id, language],
                 )?;
@@ -4646,6 +4681,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table card drop column rerun_of;
                  alter table card drop column queued_by_client;
                  alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;
@@ -5020,9 +5056,22 @@ mod tests {
         assert!(store.card_of_mcp_client("c", "c1").unwrap());
         assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
 
+        // Back in Todo by the client, it remembers which run it runs again.
+        assert!(
+            store
+                .move_card_as("c", CardLane::Todo, 0, "en", Some("c1"))
+                .unwrap()
+        );
+        let again = store.card("c").unwrap();
+        assert_eq!(again.rerun_of.as_deref(), Some("r"));
+        assert_eq!(again.run_id, None);
+        assert!(store.move_card("c", CardLane::Backlog, 0, "en").unwrap());
+        assert_eq!(store.card("c").unwrap().rerun_of, None);
+
         // The person putting it in Todo makes it theirs again.
         assert!(store.move_card("c", CardLane::Todo, 0, "en").unwrap());
         assert_eq!(store.card("c").unwrap().queued_by_client, None);
+        assert_eq!(store.card("c").unwrap().rerun_of, None);
         assert!(!store.card_of_mcp_client("c", "c1").unwrap());
         assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
         // And so does sending one the client put there back to the Backlog.
@@ -5104,6 +5153,122 @@ mod tests {
     }
 
     #[test]
+    fn a_card_a_client_put_in_todo_counts_only_while_it_can_start() {
+        let (_dir, store) = store();
+        seeded(&store);
+        agreed(&store, &[("first", "q"), ("second", "s")]);
+        store
+            .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        let queued = |card: &str| {
+            store
+                .lock()
+                .execute(
+                    "update card set queued_by_client = 'c1' where id = ?1",
+                    [card],
+                )
+                .unwrap();
+        };
+        // A part waiting for the one before it can't start yet, so it doesn't hold a place.
+        queued("second");
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
+        queued("first");
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
+        // Nor does one whose project was taken out of Keel, until it's back.
+        assert!(store.remove_project("q").unwrap());
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
+        store.restore_project("q").unwrap();
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
+    }
+
+    #[test]
+    fn a_run_counts_as_closed_by_a_client_only_if_nothing_the_person_did_ended_it() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let mine = store
+            .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        store
+            .add_mcp_client("c2", "Other", &[8u8; 32], "keel_def", true)
+            .unwrap();
+        let call = |tool: &str| {
+            store
+                .add_mcp_call(&NewMcpCall {
+                    client: &mine,
+                    tool,
+                    args: "{}",
+                    error: None,
+                    run_id: Some("r"),
+                    duration_ms: 1,
+                })
+                .unwrap();
+        };
+        let closed = |client: &str| store.run_closed_by_mcp_client("r", client).unwrap();
+        // Still open.
+        call("close_run");
+        assert!(!closed("c1"));
+
+        store.set_state("a", AttemptState::Abandoned, None).unwrap();
+        store
+            .append_event(
+                "a",
+                "abandoned",
+                &serde_json::json!({ "by": "Claude Code" }),
+            )
+            .unwrap();
+        store
+            .patch_run("r", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        assert!(closed("c1"));
+        assert!(!closed("c2"), "it wasn't the other client's call");
+
+        // A stop the client asked for is its own. One the person asked for is theirs.
+        store
+            .append_event(
+                "a",
+                "stopRequested",
+                &serde_json::json!({ "by": "Claude Code" }),
+            )
+            .unwrap();
+        assert!(closed("c1"));
+        store
+            .append_event("a", "stopRequested", &serde_json::json!({}))
+            .unwrap();
+        assert!(!closed("c1"), "the person stopped it");
+    }
+
+    #[test]
+    fn a_run_the_person_closed_after_the_client_did_is_theirs() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let mine = store
+            .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        store
+            .add_mcp_call(&NewMcpCall {
+                client: &mine,
+                tool: "close_run",
+                args: "{}",
+                error: None,
+                run_id: Some("r"),
+                duration_ms: 1,
+            })
+            .unwrap();
+        // The client closed it, the person opened it again with a retry, and then closed it.
+        for by in [
+            serde_json::json!({ "by": "Claude Code" }),
+            serde_json::json!({}),
+        ] {
+            store.append_event("a", "abandoned", &by).unwrap();
+        }
+        store.set_state("a", AttemptState::Abandoned, None).unwrap();
+        store
+            .patch_run("r", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        assert!(!store.run_closed_by_mcp_client("r", "c1").unwrap());
+    }
+
+    #[test]
     fn cards_from_before_were_all_put_in_todo_by_the_person() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("keel.db");
@@ -5131,6 +5296,7 @@ mod tests {
         }
         let store = Store::open(&path).unwrap();
         assert_eq!(store.card("next").unwrap().queued_by_client, None);
+        assert_eq!(store.card("next").unwrap().rerun_of, None);
         assert!(!store.card_of_mcp_client("next", "c1").unwrap());
         assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
         assert_eq!(claim(&store).as_deref(), Some("next"));

@@ -152,22 +152,26 @@ const CLOSE_RUN: &str = "Close a run this client started and won't take further,
                          that withdraws your request, and doesn't approve or reject anything. Refused while \
                          anything in it is working, so stop that with stop_run first, and once it has \
                          finished. Refused if this client may only read, and on runs it didn't start.";
-const APPEND_TO_CARD: &str = "Add a note at the end of a card that waits, in Backlog or Todo, so its next run gets \
-                              it with the rest of what the card says: a part of a change across projects \
-                              waiting for its turn, or a card whose run you closed. The note says this client \
-                              added it, and when, and nothing already on the card changes. Takes a `cardId` \
-                              from get_run, or a part's from `jointChange.parts`, whose `youCan` says where \
-                              it applies. Refused on a card whose run is underway or finished, unless the \
-                              person lets this client give feedback, and on cards of runs or changes it \
-                              didn't start.";
-const MOVE_CARD_TO_TODO: &str = "Put a card that waits in the Backlog back in Todo, so Keel starts a new run of it \
-                                 when there's room: a card whose run you closed, with close_run first for one \
-                                 that failed. A part of a change across projects starts once the part before \
-                                 it has a pull request. It spends the person's Claude usage and counts toward \
-                                 this client's open runs, and the run is this client's to follow: list_runs \
-                                 with `mine` finds it once it starts. Refused if this client may only read or \
-                                 already has as many runs open as the person allows, on a card whose run the \
-                                 person rejected, and on cards of runs or changes it didn't start.";
+const APPEND_TO_CARD: &str = "Add a note at the end of a card, so its next run gets it: one waiting in Todo, like a \
+                              part of a change across projects waiting for its turn, or one in the Backlog \
+                              whose last run this client closed itself. The note is marked as this client's, \
+                              with when, and agents read it as an assistant's note, not as the person's words \
+                              nor as anything agreed. Nothing already on the card changes. Takes a `cardId` \
+                              from get_run, or a part's from `jointChange.parts`, whose `youCan` says where it \
+                              applies. Refused unless the person lets this client give feedback, on a card \
+                              whose run is underway or finished, on one whose run the person rejected, closed \
+                              or stopped, or that they hold in the Backlog, and on cards of runs or changes \
+                              it didn't start.";
+const MOVE_CARD_TO_TODO: &str = "Put back in Todo a card whose last run this client closed itself, like one that \
+                                 failed, so Keel runs it again with the same workflow when there's room: a task \
+                                 that only reads stays one. A part of a change across projects starts once the \
+                                 part before it has a pull request. It spends the person's Claude usage and \
+                                 counts toward this client's open runs from when it can start, and the run is \
+                                 this client's to follow: list_runs with `mine` finds it once it starts. Refused \
+                                 if this client may only read or already has as many runs open as the person \
+                                 allows, on a card whose run the person rejected, closed or stopped, or that \
+                                 they moved, on the card where a change across projects is agreed, which \
+                                 propose_change starts, and on cards of runs or changes it didn't start.";
 
 /// What rmcp serves: one per session, or per request without one.
 #[derive(Clone)]

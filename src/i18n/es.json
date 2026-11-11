@@ -461,6 +461,7 @@
     "stalled": "Marcado como atascado",
     "stallCleared": "Volvió a avanzar",
     "stopRequested": "Pediste detenerlo",
+    "stopRequestedBy": "{{client}} pidió detenerlo",
     "waitLonger": "Elegiste esperar más",
     "commandKilled": "Mataste: {{command}}",
     "abandoned": "Dejaste esta ejecución",

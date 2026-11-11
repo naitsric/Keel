@@ -1049,7 +1049,11 @@ impl McpServer {
                 ));
             }
             for attempt in working {
-                server.0.engine.stop(&attempt.id).map_err(engine_error)?;
+                server
+                    .0
+                    .engine
+                    .stop_by(&attempt.id, &client.name)
+                    .map_err(engine_error)?;
             }
             Ok((server.run_view(client, &args.run)?, Some(args.run)))
         })
@@ -1140,7 +1144,7 @@ impl McpServer {
         self.call(client, "append_to_card", args, |server, client, args| {
             may_steer(client)?;
             let card = server.own_card(client, &args.card)?;
-            note_target(&card)?;
+            server.note_target(client, &card)?;
             let text = args.text.trim();
             if text.is_empty() || text.len() > MAX_TEXT {
                 return Err(ToolError::new("Say what to add in `text`, in up to 16 KB."));
@@ -1168,7 +1172,7 @@ impl McpServer {
                 return Err(may_only_read());
             }
             let card = server.own_card(client, &args.card)?;
-            queue_target(&card)?;
+            server.queue_target(client, &card)?;
             let language = server.language(args.language.as_deref())?;
             server.room_for_another_run(client)?;
             server
@@ -1344,7 +1348,7 @@ impl McpServer {
             .map_err(store_error)?;
         if open >= client.max_open_runs.clamp(1, MAX_OPEN_RUNS_CEILING) {
             return Err(ToolError::new(format!(
-                "This client has as many runs open as the person allows it ({open}). A run that waits for the person stays open until they decide in Keel, or until you close it with close_run if you won't take it further. list_runs with `mine` finds them. The person can also raise the limit in Keel's settings."
+                "This client has as many runs open as the person allows it ({open}). A run that waits for the person stays open until they decide in Keel, or until you close it with close_run if you won't take it further. A card you put back in Todo counts from when it can start, and then as its run, which close_run closes once it has started. list_runs with `mine` finds them. The person can also raise the limit in Keel's settings."
             )));
         }
         Ok(())
@@ -1414,13 +1418,86 @@ impl McpServer {
         {
             return Ok(tools);
         }
-        if may_steer(client).is_ok() && note_target(card).is_ok() {
+        if may_steer(client).is_ok() && self.note_target(client, card).is_ok() {
             tools.push("append_to_card");
         }
-        if queue_target(card).is_ok() && self.room_for_another_run(client).is_ok() {
+        if self.queue_target(client, card).is_ok() && self.room_for_another_run(client).is_ok() {
             tools.push("move_card_to_todo");
         }
         Ok(tools)
+    }
+
+    /// Whether a client could add a note to a card of its own: one waiting in Todo, like a part
+    /// waiting for its turn, or one in the Backlog whose last run it closed itself. Its run gets
+    /// the note when it starts. A card the person ended or held back is theirs, and a note on it
+    /// would only ride along when they start it.
+    fn note_target(&self, client: &McpClient, card: &Card) -> Result<(), ToolError> {
+        match card.column() {
+            BoardColumn::Todo => Ok(()),
+            BoardColumn::Backlog => self.closed_by_client(client, card),
+            BoardColumn::Done => Err(ToolError::new(
+                "This card's run has finished, so a note would reach nothing.",
+            )),
+            BoardColumn::InProgress | BoardColumn::HumanReview => Err(ToolError::new(
+                "This card's run is underway, so what it was asked can't change now. A note goes on a card waiting in Todo, or in the Backlog once this client closed its run.",
+            )),
+        }
+    }
+
+    /// Whether a client could put a card back in Todo: only one in the Backlog whose last run it
+    /// closed itself. It runs that run's workflow again.
+    fn queue_target(&self, client: &McpClient, card: &Card) -> Result<(), ToolError> {
+        match card.column() {
+            BoardColumn::Backlog => {
+                self.closed_by_client(client, card)?;
+                let run = card.run_id.as_deref().unwrap_or_default();
+                let run = self.0.store.run(run).map_err(store_error)?;
+                if steps_of(&run).is_empty() {
+                    return Err(ToolError::new(
+                        "Keel doesn't know which workflow this card's last run used, so only the person can start it again, in Keel.",
+                    ));
+                }
+                Ok(())
+            }
+            BoardColumn::Todo => Err(ToolError::new(
+                "This card is already in Todo, waiting to start.",
+            )),
+            BoardColumn::Done => Err(ToolError::new("This card's run has finished.")),
+            BoardColumn::InProgress | BoardColumn::HumanReview => Err(ToolError::new(
+                "This card's run is still open. Close it with close_run first, after stop_run if something in it is working.",
+            )),
+        }
+    }
+
+    /// Whether a card waits in the Backlog because this client closed its last run itself, with
+    /// nothing the person did ending it or holding the card back.
+    fn closed_by_client(&self, client: &McpClient, card: &Card) -> Result<(), ToolError> {
+        if card.joint_change_id.as_deref() == Some(card.id.as_str()) {
+            return Err(ToolError::new(
+                "This card is where a change across projects is agreed. To agree on one again, use propose_change.",
+            ));
+        }
+        if card.rejection.is_some() {
+            return Err(ToolError::new(
+                "The person rejected this card's run. What happens to it is theirs to decide, in Keel.",
+            ));
+        }
+        let Some(run) = card.run_id.as_deref() else {
+            return Err(ToolError::new(
+                "This card has no run this client closed: the person is holding it in the Backlog, or it couldn't start. Either way it's the person's to decide, in Keel.",
+            ));
+        };
+        if !self
+            .0
+            .store
+            .run_closed_by_mcp_client(run, &client.id)
+            .map_err(store_error)?
+        {
+            return Err(ToolError::new(
+                "The person ended this card's last run, closing or stopping it, so whether it runs again is theirs to decide, in Keel.",
+            ));
+        }
+        Ok(())
     }
 
     /// A card as the card tools return it. What it says ends with the latest note, so a long one
@@ -1867,38 +1944,6 @@ fn close_target<'a>(run: &Run, attempts: &'a [Attempt]) -> Result<&'a Attempt, T
                 "This run is moving between steps, so it can't be closed right now. Try again in a moment.",
             )
         })
-}
-
-/// Whether a client could add a note to a card: only one that waits in Backlog or Todo, as a person
-/// could edit it, like a part waiting for its turn. Its run gets the note when it starts.
-fn note_target(card: &Card) -> Result<(), ToolError> {
-    match card.column() {
-        BoardColumn::Backlog | BoardColumn::Todo => Ok(()),
-        BoardColumn::Done => Err(ToolError::new(
-            "This card's run has finished, so a note would reach nothing.",
-        )),
-        BoardColumn::InProgress | BoardColumn::HumanReview => Err(ToolError::new(
-            "This card's run is underway, so what it was asked can't change now. A note goes only on a card that waits, in Backlog or Todo.",
-        )),
-    }
-}
-
-/// Whether a client could put a card back in Todo: only one that waits in the Backlog because its
-/// run was closed or never started. One the person rejected is theirs to decide.
-fn queue_target(card: &Card) -> Result<(), ToolError> {
-    match card.column() {
-        BoardColumn::Backlog if card.rejection.is_some() => Err(ToolError::new(
-            "The person rejected this card's run. Whether it runs again is theirs to decide, in Keel.",
-        )),
-        BoardColumn::Backlog => Ok(()),
-        BoardColumn::Todo => Err(ToolError::new(
-            "This card is already in Todo, waiting to start.",
-        )),
-        BoardColumn::Done => Err(ToolError::new("This card's run has finished.")),
-        BoardColumn::InProgress | BoardColumn::HumanReview => Err(ToolError::new(
-            "This card's run is still open. Close it with close_run first, after stop_run if something in it is working.",
-        )),
-    }
 }
 
 /// What the last worker wrote last. For a task that only reads, that's what it found.

@@ -8,6 +8,7 @@ mod detect;
 mod diffs;
 mod git;
 mod joint;
+mod notes;
 mod project_proposals;
 mod prompts;
 mod pull_requests;
@@ -40,6 +41,7 @@ use keel_store::rusqlite_value::Value;
 use keel_store::{
     Decision, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
 };
+pub use notes::split_assistant_notes;
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
 pub use prompts::full_workflow;
 pub use screenshots::{Screenshot, Screenshots};
@@ -1091,6 +1093,16 @@ impl Engine {
     /// Asks a step to stop. A queued step never starts; a running one gets SIGINT, and the
     /// monitor escalates if it doesn't answer.
     pub fn stop(&self, attempt_id: &str) -> Result<()> {
+        self.stop_as(attempt_id, None)
+    }
+
+    /// `stop` for a client over MCP. Its event names the client, so a stop the person asked for
+    /// can be told from one a client did.
+    pub fn stop_by(&self, attempt_id: &str, by: &str) -> Result<()> {
+        self.stop_as(attempt_id, Some(by))
+    }
+
+    fn stop_as(&self, attempt_id: &str, by: Option<&str>) -> Result<()> {
         let attempt = self.inner.store.attempt(attempt_id)?;
         let state = AttemptState::parse(&attempt.state).ok_or(Error::InvalidState)?;
         if !state.is_active() {
@@ -1102,9 +1114,13 @@ impl Engine {
             control.stop_requested = true;
             control.pid
         };
+        let data = match by {
+            Some(by) => json!({ "by": by }),
+            None => json!({}),
+        };
         self.inner
             .store
-            .append_event(attempt_id, "stopRequested", &json!({}))?;
+            .append_event(attempt_id, "stopRequested", &data)?;
         if let Some(pid) = pid {
             process::signal_group(pid, SIGINT);
         }

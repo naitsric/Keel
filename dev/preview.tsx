@@ -376,7 +376,8 @@ const WHY_MOVED_UP: Reason[] =
       ]
     : [{ code: "sensitiveFiles", files: [".github/workflows/ci.yml"], total: 1 }, { code: "tooManyLines", lines: 512, limit: 400 }];
 // What an assistant over MCP did, in place of the person: by=1 has Claude Code send back flow=returned
-// (node=approval shows it), or close the run with state=abandoned. flow=sentBack is the approval it
+// (node=approval shows it), close the run with state=abandoned, or ask it to stop with state=stopped,
+// which without by=1 the person did. flow=sentBack is the approval it
 // comes back to, which says why. task=1 is a read-only task it started, with no saved workflow.
 const assistantBy = params.get("by") === "1" || params.get("flow") === "sentBack" ? "Claude Code" : null;
 const sentBackWith = say("Return 0 instead of raising when the list is empty.", "Devuelve 0 en vez de lanzar un error cuando la lista está vacía.");
@@ -450,6 +451,7 @@ const events: AuditEvent[] = [
   event(10, "toolCall", { id: "t4", name: "Bash", input: { command: state === "stalled" ? "uv run pytest -q" : "python3 test_calc.py" } }),
   ...(state === "stalled" || state === "running" ? [] : [event(11, "toolResult", { id: "t4", isError: false, text: "ok" })]),
   ...(state === "stalled" ? [event(12, "stalled", {})] : []),
+  ...(state === "stopped" ? [event(12, "stopRequested", assistantBy ? { by: assistantBy } : {})] : []),
   ...(finished ? [event(13, "result", {}), event(14, "finished", { state })] : []),
   ...(state === "abandoned" ? [event(15, "abandoned", assistantBy ? { by: assistantBy } : {})] : []),
 ];

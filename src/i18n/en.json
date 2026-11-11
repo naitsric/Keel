@@ -461,6 +461,7 @@
     "stalled": "Marked as stalled",
     "stallCleared": "Progress resumed",
     "stopRequested": "You asked it to stop",
+    "stopRequestedBy": "{{client}} asked it to stop",
     "waitLonger": "You chose to wait longer",
     "commandKilled": "You killed: {{command}}",
     "abandoned": "You left this run",

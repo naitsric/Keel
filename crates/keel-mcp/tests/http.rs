@@ -12,6 +12,7 @@ use keel_core::{
 };
 use keel_engine::{
     AddOutcome, Answer, AnswerChoice, Config, Engine, MAX_PROJECT_PROPOSALS, StartRun, Workflow,
+    split_assistant_notes,
 };
 use keel_harness::Tools;
 use keel_mcp::{MAX_DRAFTS, MAX_OPEN_RUNS, MCP_PATH, McpServer, StartError};
@@ -3523,11 +3524,19 @@ async fn a_client_adds_a_note_and_puts_back_in_todo_only_a_waiting_card_of_its_o
     w.store.set_mcp_client_can_steer(&row.id, true).unwrap();
     w.store.set_mcp_client_max_open_runs(&row.id, 1).unwrap();
     let client = w.client(&token).await;
+    // Not the project's default: running the card again keeps it.
+    let workflow = w.saved(
+        "Also builds",
+        vec![
+            WorkflowStep::Agent(agent("builder", ToolProfile::Build, StepRole::Worker)),
+            WorkflowStep::Approval { id: "human".into() },
+        ],
+    );
 
     let first = id_of(&ok(&call(
         &client,
         "start_run",
-        w.start_args("Fix the bug\n\nAnd its test."),
+        w.args_for(&workflow, "Fix the bug\n\nAnd its test."),
     )
     .await));
     let view = settled(&client, &first).await;
@@ -3569,11 +3578,17 @@ async fn a_client_adds_a_note_and_puts_back_in_todo_only_a_waiting_card_of_its_o
     assert_eq!(noted["cardId"], json!(card));
     assert_eq!(noted["column"], "backlog");
     let body = w.store.card(&card).unwrap().body;
+    let (person, notes) = split_assistant_notes(&body);
+    assert_eq!(person, "Fix the bug\n\nAnd its test.");
+    assert_eq!(notes.len(), 1, "{body}");
     assert!(
-        body.starts_with("Fix the bug\n\nAnd its test.\n\nAdded by Claude Code, an assistant, on "),
+        notes[0].starts_with("⟦Note from Claude Code, an assistant, on "),
         "{body}"
     );
-    assert!(body.ends_with(":\nAlso the docs."), "{body}");
+    assert!(
+        notes[0].ends_with("⟧\nAlso the docs.\n⟦End of the note⟧"),
+        "{body}"
+    );
     assert_eq!(noted["body"], json!(body));
     // It can't go back to Todo while the client has as many runs open as it may.
     assert_eq!(noted["youCan"], json!(["append_to_card"]));
@@ -3615,21 +3630,23 @@ async fn a_client_adds_a_note_and_puts_back_in_todo_only_a_waiting_card_of_its_o
     )
     .await);
 
-    // The run it starts is the client's to follow, and says who asked for it.
+    // The run it starts is the client's to follow, says who asked for it, runs the same workflow,
+    // and keeps the notes apart from what the person wrote.
     w.engine.start_board();
     let again = next_run_of(&w, &card, None).await;
     let view = settled(&client, &again).await;
     assert_eq!(view["startedByYou"], true, "{view}");
     assert_eq!(view["startedBy"], "Claude Code");
+    assert_eq!(view["workflowId"], json!(workflow));
     assert_eq!(
         view["waitingFor"]["youCan"],
         json!(["send_back", "close_run"])
     );
     let request = ok(&call(&client, "get_run", json!({ "run": again })).await)["request"].clone();
-    assert!(
-        request.as_str().unwrap().ends_with(":\nAnd the changelog."),
-        "{request}"
-    );
+    let (person, notes) = split_assistant_notes(request.as_str().unwrap());
+    assert!(!person.contains("docs"), "{request}");
+    assert_eq!(notes.len(), 2, "{request}");
+    assert!(notes[1].contains("\nAnd the changelog.\n"), "{request}");
     let mine = ok(&call(&client, "list_runs", json!({ "mine": true })).await);
     assert!(mine.to_string().contains(&again), "{mine}");
 
@@ -3693,12 +3710,13 @@ async fn a_part_waiting_its_turn_takes_a_note_and_one_closed_goes_back_to_todo()
     )
     .await);
     assert_eq!(noted["column"], "todo");
-    let body = w.store.card(&second).unwrap().body;
+    let (agreed, notes) = split_assistant_notes(&w.store.card(&second).unwrap().body);
+    assert!(!agreed.contains("expiresAt"), "{agreed}");
     assert!(
-        body.contains("Added by Claude Code, an assistant, on "),
-        "{body}"
+        notes[0].starts_with("⟦Note from Claude Code, an assistant, on "),
+        "{notes:?}"
     );
-    assert!(body.ends_with(":\nSend `expiresAt` too."), "{body}");
+    assert!(notes[0].contains("\nSend `expiresAt` too.\n"), "{notes:?}");
     // Not on the part that's underway, and not for another client.
     let refusal = refused(&call(&client, "append_to_card", note_args(&first, "x")).await);
     assert!(refusal.contains("underway"), "{refusal}");
@@ -3708,6 +3726,24 @@ async fn a_part_waiting_its_turn_takes_a_note_and_one_closed_goes_back_to_todo()
     let seen = ok(&call(&stranger, "get_run", json!({ "run": part_run })).await);
     assert_eq!(seen["jointChange"]["parts"][1]["youCan"], json!([]));
     assert_eq!(seen["waitingFor"]["youCan"], json!([]));
+
+    // The person holds the second part back in the Backlog: it's theirs from now on.
+    w.engine
+        .card_move(&second, CardLane::Backlog, 0, "en")
+        .unwrap();
+    for (tool, args) in [
+        ("append_to_card", note_args(&second, "x")),
+        ("move_card_to_todo", json!({ "card": second })),
+    ] {
+        let refusal = refused(&call(&client, tool, args).await);
+        assert!(refusal.contains("the person"), "{tool}: {refusal}");
+    }
+    let part = ok(&call(&client, "get_run", json!({ "run": part_run })).await);
+    assert_eq!(part["jointChange"]["parts"][1]["youCan"], json!([]));
+    assert_eq!(
+        part["waitingFor"]["youCan"],
+        json!(["send_back", "close_run"])
+    );
 
     // A part it closes goes back to Todo with a note, and its new run is the client's.
     ok(&call(&client, "close_run", json!({ "run": part_run })).await);
@@ -3736,12 +3772,98 @@ async fn a_part_waiting_its_turn_takes_a_note_and_one_closed_goes_back_to_todo()
     let view = settled(&client, &again).await;
     assert_eq!(view["startedByYou"], true, "{view}");
     assert_eq!(view["startedBy"], "Claude Code");
+    // The note stays out of what was agreed for the part, which wins over the request.
     let request = ok(&call(&client, "get_run", json!({ "run": again })).await)["request"].clone();
-    assert!(
-        request.as_str().unwrap().contains(":\nName it `token`."),
-        "{request}"
-    );
+    let (agreed, notes) = split_assistant_notes(request.as_str().unwrap());
+    assert!(agreed.contains("In this project: "), "{request}");
+    assert!(!agreed.contains("Name it"), "{request}");
+    assert_eq!(notes.len(), 1, "{request}");
+    assert!(notes[0].contains("\nName it `token`.\n"), "{request}");
     for client in [client, stranger] {
         client.cancel().await.unwrap();
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_cannot_add_to_or_run_again_what_the_person_ended() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    w.other_project("lib");
+    w.use_by_default(&w.project_id, &w.workflow_id);
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let started = |request: &'static str| {
+        let args = w.start_args(request);
+        let client = &client;
+        async move {
+            let run = id_of(&ok(&call(client, "start_run", args).await));
+            let approval = waiting_attempt(&settled(client, &run).await);
+            (run, approval)
+        }
+    };
+    let refuses = async |run: &str, says: &str| {
+        let card = w.store.card_of_run(run).unwrap().unwrap();
+        let note = refused(&call(&client, "append_to_card", note_args(&card, "x")).await);
+        assert!(note.contains(says), "{note}");
+        let moved = refused(&call(&client, "move_card_to_todo", json!({ "card": card })).await);
+        assert!(moved.contains(says), "{moved}");
+    };
+
+    // The person rejected it.
+    let (rejected, approval) = started("Rejected").await;
+    w.engine
+        .answer_approval(&approval, false, "Not like this")
+        .unwrap();
+    w.card_in(&rejected, BoardColumn::Backlog).await;
+    refuses(&rejected, "rejected").await;
+
+    // The person closed it.
+    let (closed, approval) = started("Closed").await;
+    w.engine.abandon(&approval).unwrap();
+    w.card_in(&closed, BoardColumn::Backlog).await;
+    refuses(&closed, "The person ended").await;
+
+    // The person stopped it, though it was the client that closed it after.
+    let hold = w.hold();
+    let stopped = id_of(&ok(
+        &call(&client, "start_run", w.start_args("Stopped")).await
+    ));
+    let builder = loop {
+        let attempts = w.store.attempts_of_run(&stopped).unwrap();
+        if let Some(running) = attempts.iter().find(|a| a.state == "running") {
+            break running.id.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    w.engine.stop(&builder).unwrap();
+    std::fs::remove_file(&hold).unwrap();
+    settled(&client, &stopped).await;
+    ok(&call(&client, "close_run", json!({ "run": stopped })).await);
+    w.card_in(&stopped, BoardColumn::Backlog).await;
+    refuses(&stopped, "The person ended").await;
+
+    // Where a change across projects is agreed starts with propose_change, even closed by the client.
+    let agreement = id_of(&ok(&call(
+        &client,
+        "propose_change",
+        json!({ "project": "app", "alsoTouches": ["lib"], "request": "Log in through lib" }),
+    )
+    .await));
+    settled(&client, &agreement).await;
+    ok(&call(&client, "close_run", json!({ "run": agreement })).await);
+    w.card_in(&agreement, BoardColumn::Backlog).await;
+    refuses(&agreement, "propose_change").await;
+
+    // One it stopped and closed itself is its own to run again.
+    let hold = w.hold();
+    let own = id_of(&ok(
+        &call(&client, "start_run", w.start_args("Its own")).await
+    ));
+    stop_once_running(&client, &own).await;
+    std::fs::remove_file(&hold).unwrap();
+    ok(&call(&client, "close_run", json!({ "run": own })).await);
+    let card = w.card_in(&own, BoardColumn::Backlog).await;
+    ok(&call(&client, "append_to_card", note_args(&card.id, "Try again.")).await);
+    let moved = ok(&call(&client, "move_card_to_todo", json!({ "card": card.id })).await);
+    assert_eq!(moved["column"], "todo");
+    client.cancel().await.unwrap();
 }

@@ -63,9 +63,10 @@ workflows, add a project, or accept anything into the Brain: there is no tool fo
 around it.\n\
 - Close a run you started and won't take further, like one that failed and you won't retry, with close_run. It \
 delivers nothing, and frees its place among the runs you may have open.\n\
-- A card of yours that waits, like a part waiting for its turn, takes a note at its end with append_to_card. \
-move_card_to_todo puts one whose run you closed back in Todo, which starts a new run as start_run does. Each \
-part in `jointChange` says which of these apply to its card.\n\
+- A card of yours waiting in Todo, like a part waiting for its turn, takes a note at its end with \
+append_to_card. move_card_to_todo runs again, with the same workflow, a card whose run you closed yourself, as \
+start_run would start one. What the person rejected, closed, stopped or held back stays theirs. Each part in \
+`jointChange` says which of these apply to its card.\n\
 - draft_workflow and propose_project only leave a proposal for the person. A draft can't run until they save it, \
 and a folder isn't a project until they add it, with the account and commands they choose. Tell them it's there \
 rather than waiting for it.\n\
