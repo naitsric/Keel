@@ -474,6 +474,72 @@ fn a_failed_check_stops_the_run_and_can_be_retried_alone() {
 }
 
 #[test]
+fn a_retry_takes_the_project_s_fixed_commands_only_when_asked_to() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let set_commands = |setup: &str, check: &str| {
+        let settings = ProjectSettings {
+            github_account: Some("alice".into()),
+            setup_command: Some(setup.into()),
+            check_command: Some(check.into()),
+            ..ProjectSettings::default()
+        };
+        w.engine.update_project(&w.project_id, &settings).unwrap();
+    };
+    set_commands("echo old setup", "exit 3");
+    let run = w.start(Some("exit 3"));
+    let failed = w.wait(&run, "check", AttemptState::Failed);
+    assert_eq!(w.engine.command_changes(&run).unwrap(), vec![]);
+
+    // The person fixes the project's commands while the run waits.
+    set_commands("echo new setup", "echo fixed");
+    let changes = w.engine.command_changes(&run).unwrap();
+    assert_eq!(
+        serde_json::to_value(&changes).unwrap(),
+        serde_json::json!([
+            { "stepId": "setup", "before": "echo old setup", "now": "echo new setup" },
+            { "stepId": "check", "before": "exit 3", "now": "echo fixed" },
+        ])
+    );
+
+    // A plain retry runs what the run started with.
+    w.engine.retry(&failed.id, false).unwrap();
+    let again = w.wait(&run, "check", AttemptState::Failed);
+    assert_eq!((again.number, again.prompt.as_str()), (2, "exit 3"));
+
+    // Asked to, it runs the project's, and the run keeps them for what comes after.
+    w.engine
+        .retry_with_current_commands(&again.id, false)
+        .unwrap();
+    w.wait(&run, "approval", AttemptState::WaitingApproval);
+    let fixed = w.step(&run, "check").unwrap();
+    assert_eq!((fixed.number, fixed.prompt.as_str()), (3, "echo fixed"));
+    let steps: Vec<WorkflowStep> =
+        serde_json::from_value(w.store.run(&run).unwrap().workflow).unwrap();
+    assert!(steps.contains(&WorkflowStep::Setup {
+        id: "setup".into(),
+        run: "echo new setup".into()
+    }));
+    assert!(steps.contains(&WorkflowStep::Check {
+        id: "check".into(),
+        run: "echo fixed".into()
+    }));
+    assert_eq!(w.engine.command_changes(&run).unwrap(), vec![]);
+    // Where the person sees it, on the attempt that was retried.
+    let updated = w
+        .store
+        .events(&again.id, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "commandsUpdated")
+        .unwrap();
+    assert_eq!(
+        updated.data,
+        serde_json::json!({ "changes": serde_json::to_value(&changes).unwrap() })
+    );
+}
+
+#[test]
 fn checks_run_with_no_credentials_in_the_environment() {
     keel_harness::needs!(sandbox);
     // SAFETY: only this test sets this variable, and nothing reads it concurrently.

@@ -259,6 +259,10 @@ pub struct RetryStepArgs {
     /// isn't an agent always starts over. False by default.
     #[serde(default)]
     pub resume: Option<bool>,
+    /// Run the project's setup and check as they are now, not as they were when the run started.
+    /// get_run's `commandsChanged` says which differ. False by default.
+    #[serde(default)]
+    pub use_current_commands: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -1080,11 +1084,13 @@ impl McpServer {
             }
             // As the app's Retry button: the step starts over unless asked to go on.
             let resume = args.resume.unwrap_or(false);
-            server
-                .0
-                .engine
-                .retry_by(&step.id, resume, &client.name)
-                .map_err(changed_meanwhile)?;
+            let engine = &server.0.engine;
+            if args.use_current_commands.unwrap_or(false) {
+                engine.retry_with_current_commands_by(&step.id, resume, &client.name)
+            } else {
+                engine.retry_by(&step.id, resume, &client.name)
+            }
+            .map_err(changed_meanwhile)?;
             Ok((server.run_view(client, &args.run)?, Some(args.run)))
         })
         .await
@@ -1448,6 +1454,17 @@ impl McpServer {
         });
         if left_out > 0 {
             view["earlierAttemptsLeftOut"] = json!(left_out);
+        }
+        // Only while it can still be retried with them. It's extra, and not finding out mustn't
+        // hide the run.
+        if run.finished_at.is_none()
+            && let Ok(changes) = self.0.engine.command_changes(&run.id)
+            && !changes.is_empty()
+        {
+            view["commandsChanged"] = changes
+                .iter()
+                .map(|c| json!({ "step": c.step_id, "before": c.before, "now": c.now }))
+                .collect();
         }
         if let Some(joint) = self.joint_view(run)? {
             view["jointChange"] = joint;

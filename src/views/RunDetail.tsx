@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, type CommandChange, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
 import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
@@ -999,9 +999,52 @@ export function QuestionsCard({ attempt, attempts, onError }: { attempt: Attempt
   );
 }
 
-function Actions({ attempt, projectId, onError }: { attempt: Attempt; projectId: string; onError: (message: string) => void }) {
+/** A setup or check that can start over, and the run's commands the project changed since it started. */
+function useCommandChanges(attempt: Attempt): CommandChange[] {
+  const [found, setFound] = useState<{ attemptId: string; changes: CommandChange[] } | null>(null);
+  const asks = (attempt.kind === "setup" || attempt.kind === "check") && ["failed", "interrupted", "blocked", "stopped"].includes(attempt.state);
+  useEffect(() => {
+    if (!asks) return;
+    let current = true;
+    api
+      .runCommandChanges(attempt.runId)
+      .then((changes) => current && setFound({ attemptId: attempt.id, changes: changes ?? [] }))
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [asks, attempt.id, attempt.runId]);
+  return asks && found?.attemptId === attempt.id ? found.changes : [];
+}
+
+/** Each command as the run started with it and as the project has it now. */
+function CommandChanges({ changes }: { changes: CommandChange[] }) {
+  const { t } = useTranslation();
+  return (
+    <div className="mt-2.5 rounded-md border border-border p-3">
+      <p className="text-[12.5px] font-medium">{t("run.commandsChanged")}</p>
+      <dl className="mt-2 space-y-2">
+        {changes.map((change) => (
+          <div key={change.stepId}>
+            <dt className="text-[11.5px] font-semibold text-muted">{change.stepId}</dt>
+            <dd className="mt-0.5 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-[12px]">
+              <span className="text-subtle">{t("run.commandBefore")}</span>
+              <code className="selectable font-mono break-all text-muted">{change.before}</code>
+              <span className="text-subtle">{t("run.commandNow")}</span>
+              <code className="selectable font-mono break-all">{change.now}</code>
+            </dd>
+          </div>
+        ))}
+      </dl>
+      <p className="mt-2 text-[11.5px] text-subtle">{t("run.commandsChangedHint")}</p>
+    </div>
+  );
+}
+
+export function Actions({ attempt, projectId, onError }: { attempt: Attempt; projectId: string; onError: (message: string) => void }) {
   const { t } = useTranslation();
   const navigate = useApp((s) => s.navigate);
+  const changes = useCommandChanges(attempt);
   const act = (run: () => Promise<unknown>) => run().catch((e) => onError(errorText(t, e)));
   if (attempt.reason?.code === "reworkLimit") {
     return (
@@ -1050,13 +1093,21 @@ function Actions({ attempt, projectId, onError }: { attempt: Attempt; projectId:
   }
   if (attempt.state === "succeeded" || attempt.state === "abandoned" || attempt.state === "rejected" || attempt.state === "skipped" || attempt.state === "returned" || attempt.state === "postponed") return null;
   const canResume = attempt.kind === "agent" && ["interrupted", "blocked", "stopped", "failed"].includes(attempt.state);
+  // Only when what it would start over runs something else now.
+  const commandChanged = changes.some((change) => change.stepId === attempt.stepId);
   return (
     <Card className="p-4">
       {attempt.reason && <p className="selectable text-[12.5px] text-warning">{reasonText(t, attempt.reason)}</p>}
-      <div className={cx("flex flex-wrap gap-2", attempt.reason && "mt-2.5")}>
+      {commandChanged && <CommandChanges changes={changes} />}
+      <div className={cx("flex flex-wrap gap-2", (attempt.reason || commandChanged) && "mt-2.5")}>
         {needsSignIn(attempt.reason) && <Button onClick={() => void act(() => api.openClaudeLogin())}>{t("run.signIn")}</Button>}
         {needsProjectSettings(attempt.reason) && <Button onClick={() => navigate({ name: "projects", projectId })}>{t("newRun.openProject")}</Button>}
         {canResume && <Button variant="primary" onClick={() => void act(() => api.attemptRetry(attempt.id, true))}>{t("run.resume")}</Button>}
+        {commandChanged && (
+          <Button variant="primary" onClick={() => void act(() => api.attemptRetry(attempt.id, false, true))}>
+            {t("run.retryWithNewCommands")}
+          </Button>
+        )}
         <Button onClick={() => void act(() => api.attemptRetry(attempt.id, false))}>{t("run.retry")}</Button>
         <Button variant="ghost" onClick={() => void act(() => api.attemptAbandon(attempt.id))}>
           {t("run.abandon")}
@@ -1249,6 +1300,19 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
     // Only an assistant's retry leaves one, so the person sees it wasn't them.
     case "retryRequested":
       return data.by ? line(t("activity.retryRequested", { client: data.by })) : null;
+    case "commandsUpdated":
+      return (
+        <div>
+          {line(t("activity.commandsUpdated"), "font-medium")}
+          <ul className="selectable mt-0.5 space-y-0.5 font-mono text-[11.5px] break-all text-muted">
+            {(data.changes ?? []).map((change: CommandChange) => (
+              <li key={change.stepId}>
+                {change.stepId}: {change.before} → {change.now}
+              </li>
+            ))}
+          </ul>
+        </div>
+      );
     case "recovered":
       return line(t("activity.recovered"), "text-subtle");
     case "snapshotFailed":

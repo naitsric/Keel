@@ -8,6 +8,7 @@ mod detect;
 mod diffs;
 mod git;
 mod joint;
+mod project_commands;
 mod project_proposals;
 mod prompts;
 mod pull_requests;
@@ -40,6 +41,7 @@ use keel_store::rusqlite_value::Value;
 use keel_store::{
     Decision, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
 };
+pub use project_commands::CommandChange;
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
 pub use prompts::full_workflow;
 pub use screenshots::{Screenshot, Screenshots};
@@ -1163,15 +1165,58 @@ impl Engine {
     /// Tries a step again in the same workspace. With `resume`, an agent continues its session
     /// instead of starting a new one. A failed delivery retries only the delivery.
     pub fn retry(&self, attempt_id: &str, resume: bool) -> Result<String> {
-        self.retry_as(attempt_id, resume, None)
+        self.retry_as(attempt_id, resume, None, false)
     }
 
     /// `retry` for a client over MCP. The step it retries says who asked, so the person sees it.
     pub fn retry_by(&self, attempt_id: &str, resume: bool, by: &str) -> Result<String> {
-        self.retry_as(attempt_id, resume, Some(by))
+        self.retry_as(attempt_id, resume, Some(by), false)
     }
 
-    fn retry_as(&self, attempt_id: &str, resume: bool, by: Option<&str>) -> Result<String> {
+    /// `retry`, with the project's setup and check as they are now. The run keeps them for the rest
+    /// of its steps and rounds. See `command_changes`.
+    pub fn retry_with_current_commands(&self, attempt_id: &str, resume: bool) -> Result<String> {
+        self.retry_as(attempt_id, resume, None, true)
+    }
+
+    /// `retry_with_current_commands` for a client over MCP.
+    pub fn retry_with_current_commands_by(
+        &self,
+        attempt_id: &str,
+        resume: bool,
+        by: &str,
+    ) -> Result<String> {
+        self.retry_as(attempt_id, resume, Some(by), true)
+    }
+
+    /// The run's setup and check whose command the project has changed since the run started. A
+    /// run that tries a command keeps the one it tries.
+    pub fn command_changes(&self, run_id: &str) -> Result<Vec<CommandChange>> {
+        let run = self.inner.store.run(run_id)?;
+        self.command_changes_of(&run)
+    }
+
+    fn command_changes_of(&self, run: &keel_store::Run) -> Result<Vec<CommandChange>> {
+        if is_trial(run) {
+            return Ok(Vec::new());
+        }
+        let project = self.inner.store.project(&run.project_id)?;
+        let steps: Vec<WorkflowStep> =
+            serde_json::from_value(run.workflow.clone()).unwrap_or_default();
+        Ok(project_commands::changed(
+            &steps,
+            project.setup_command.as_deref(),
+            project.check_command.as_deref(),
+        ))
+    }
+
+    fn retry_as(
+        &self,
+        attempt_id: &str,
+        resume: bool,
+        by: Option<&str>,
+        current_commands: bool,
+    ) -> Result<String> {
         let store = &self.inner.store;
         // Held from looking at the attempt until its next try is on the record, so two retries, or
         // a retry and a close, can't both go through. `start_step` never takes it: `advance` and
@@ -1219,9 +1264,26 @@ impl Engine {
             return Err(Error::InvalidState);
         }
         let number = workflows::next_number(&attempts, &attempt.step_id);
+        let changes = if current_commands {
+            self.command_changes_of(&run)?
+        } else {
+            Vec::new()
+        };
         let steps: Vec<WorkflowStep> =
             serde_json::from_value(run.workflow.clone()).unwrap_or_default();
+        let steps = project_commands::with_changes(&steps, &changes);
         let step = workflows::find_step(&steps, &attempt.step_id).ok_or(Error::InvalidState)?;
+        // Every later step and round reads the run's copy, so they run the same commands. Each
+        // attempt keeps the command it ran.
+        if !changes.is_empty() {
+            let workflow = serde_json::to_string(&steps).map_err(|_| Error::InvalidState)?;
+            store.patch_run(&attempt.run_id, &[("workflow", Value::Text(workflow))])?;
+            store.append_event(
+                attempt_id,
+                "commandsUpdated",
+                &json!({ "changes": changes }),
+            )?;
+        }
         let resume = (resume && attempt.kind == "agent").then(|| Resume {
             session: attempt.session_id.clone(),
             from: attempt.id.clone(),

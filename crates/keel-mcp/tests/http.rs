@@ -2683,6 +2683,68 @@ async fn a_client_retries_only_a_step_that_failed_was_interrupted_or_stopped() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_client_retries_with_the_project_s_current_commands_only_when_it_asks() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let set_check = |check: &str| {
+        let settings = keel_store::ProjectSettings {
+            check_command: Some(check.into()),
+            ..keel_store::ProjectSettings::default()
+        };
+        w.engine.update_project(&w.project_id, &settings).unwrap();
+    };
+    set_check("exit 1");
+    // As in the built-in workflows: the check is called `check` and has the project's command.
+    let checked = w.saved(
+        "Checked",
+        vec![
+            WorkflowStep::Agent(agent("builder", ToolProfile::Build, StepRole::Worker)),
+            WorkflowStep::Check {
+                id: "check".into(),
+                run: "exit 1".into(),
+            },
+            WorkflowStep::Approval { id: "human".into() },
+        ],
+    );
+    let run = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.args_for(&checked, "Fix it"),
+    )
+    .await));
+    let failed = settled(&client, &run).await;
+    assert_eq!(failed["waitingFor"]["state"], "failed", "{failed}");
+    assert!(failed.get("commandsChanged").is_none(), "{failed}");
+
+    set_check("echo fixed");
+    assert_eq!(
+        view_of(&client, &run).await["commandsChanged"],
+        json!([{ "step": "check", "before": "exit 1", "now": "echo fixed" }])
+    );
+    // Without asking, it runs what the run started with.
+    ok(&call(&client, "retry_step", json!({ "run": run })).await);
+    let again = settled(&client, &run).await;
+    assert_eq!(again["waitingFor"]["state"], "failed", "{again}");
+
+    let args = json!({ "run": run, "useCurrentCommands": true });
+    ok(&call(&client, "retry_step", args).await);
+    let view = settled(&client, &run).await;
+    assert_eq!(view["waitingFor"]["state"], "waitingApproval", "{view}");
+    assert!(view.get("commandsChanged").is_none(), "{view}");
+    let check = w
+        .store
+        .attempts_of_run(&run)
+        .unwrap()
+        .into_iter()
+        .rev()
+        .find(|a| a.step_id == "check")
+        .unwrap();
+    assert_eq!((check.number, check.prompt.as_str()), (3, "echo fixed"));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_client_closes_its_waiting_run_with_nothing_delivered_and_never_one_that_works() {
     keel_harness::needs!(sandbox, sockets);
     let w = world().await;

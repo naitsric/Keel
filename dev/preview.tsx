@@ -382,6 +382,18 @@ const assistantBy = params.get("by") === "1" || params.get("flow") === "sentBack
 const sentBackWith = say("Return 0 instead of raising when the list is empty.", "Devuelve 0 en vez de lanzar un error cuando la lista está vacía.");
 const returnedApproval = ran("approval", "returned", { kind: "approval", tools: "none", modelRequested: "", modelActual: null, output: { instructions: sentBackWith, ...(assistantBy ? { by: assistantBy } : {}) } as unknown as Attempt["output"] });
 const nextRound = (a: Attempt): Attempt => ({ ...a, id: `${a.stepId}-1-2`, round: 1, number: 2 });
+// flow=commands is a check that failed, and the person changed the project's commands after the run
+// started: it can start over with the new ones. flow=newCommands is after that, where node=check,
+// then clickStart=Attempt 1 and then=Activity, says which ones it took.
+const newCommands = [
+  { stepId: "setup", before: "uv sync --frozen", now: "uv sync --frozen --group test" },
+  { stepId: "check", before: "make test", now: "uv run --group test pytest" },
+];
+const withNewCommands = (steps: WorkflowStep[]): WorkflowStep[] =>
+  steps.map((step) => {
+    const change = newCommands.find((c) => c.stepId === step.id);
+    return change && (step.type === "setup" || step.type === "check") ? { ...step, run: change.now } : step;
+  });
 const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Attempt[]; round: number }> = {
   small: { steps: fittingSteps, round: 0, attempts: [specRan, builderRan(), checkRan(), verifierAttempt("succeeded"), skippedAsSmallRan("security"), skippedAsSmallRan("ux"), skippedAsSmallRan("ui"), skippedAsSmallRan("code"), skippedAsSmallRan("approver", "approver"), humanWaits] },
   asked: { steps: fittingSteps, round: 0, attempts: [specRan, builderRan(), checkRan(), verifierAttempt("succeeded"), skippedAsSmallRan("security"), skippedAsSmallRan("ux"), skippedAsSmallRan("ui"), skippedAsSmallRan("code"), skippedAsSmallRan("approver", "approver"), ran("approval", "postponed", { kind: "approval", tools: "none", modelRequested: "", modelActual: null }), reviewRan("security", "running", { number: 2, modelActual: "claude-sonnet-5-5", finishedAt: null }), reviewRan("ux", "skipped", { number: 2 }), reviewRan("ui", "skipped", { number: 2 }), reviewRan("code", "running", { number: 2, modelActual: "claude-sonnet-5-5", finishedAt: null })] },
@@ -391,6 +403,8 @@ const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Atte
   rework: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "succeeded", verdict("changes")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", verdict("approved")), decided("rework"), builderRan({ round: 1, number: 2, state: "running", finishedAt: null })] },
   skipped: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), humanWaits] },
   failed: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("failed"), checkRan("failed", { number: 2 })] },
+  commands: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("failed")] },
+  newCommands: { steps: withNewCommands(fullWorkflow), round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("failed"), checkRan("running", { number: 2, prompt: newCommands[1].now, exitCode: null, finishedAt: null })] },
   many: { steps: manySteps, round: 0, attempts: [setupRan, ...Array.from({ length: 6 }, (_, i) => ran(`step-${i + 1}`, "succeeded", { modelRequested: i % 2 ? "sonnet" : "opus", modelActual: i % 2 ? "claude-sonnet-5-5" : "claude-opus-5-5" })), ran("a-step-whose-name-is-much-too-long-to-fit-in-any-node-at-all", "succeeded", { modelRequested: "claude-a-model-with-a-very-long-name-indeed", modelActual: "claude-a-model-with-a-very-long-name-indeed" }), checkRan(), reviewRan("security", "succeeded", verdict("approved")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", verdict("approved")), reviewRan("a-reviewer-with-a-very-long-name-as-well", "succeeded", verdict("approved")), decided("approve"), ran("after-the-reviews", "succeeded", { filesChanged: ["calc.py"], runFiles: ["calc.py"] }), checkRan("succeeded", { id: "check-again-0-1", stepId: "check-again" }), humanWaits] },
   unreadable: { steps: null, round: 0, attempts: [setupRan, specRan, builderRan(), reviewRan("security", "succeeded", verdict("approved")), checkRan("failed")] },
   try: { steps: [setupStep, { type: "check", id: "try-check", run: "pnpm test" }], round: 0, attempts: [setupRan, checkRan("failed", { id: "try-check-0-1", stepId: "try-check", prompt: "pnpm test" })] },
@@ -811,6 +825,8 @@ mockIPC((command, args) => {
     }
     case "run_attempts":
       return (args as { runId?: string } | undefined)?.runId === "try1" ? tryAttempts() : flowScene ? flowScene.attempts : attemptsList;
+    case "run_command_changes":
+      return params.get("flow") === "commands" ? newCommands : [];
     case "github_status": {
       const projectId = (args as { projectId?: string } | undefined)?.projectId;
       if (projectId === freshProject.id) return setupAccounts((args as { account?: string | null }).account);
@@ -919,6 +935,12 @@ mockIPC((command, args) => {
         if (params.get("flow") === "movedUp") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: false, because: WHY_MOVED_UP, round: 0 } }];
       }
       if ((args as { attemptId?: string } | undefined)?.attemptId === "c1" && params.get("flow") === "corrected") return correctedEvents;
+      if ((args as { attemptId?: string } | undefined)?.attemptId === "check-0-1" && params.get("flow") === "newCommands") {
+        return [
+          { seq: 100, attemptId: "check-0-1", at: at(3), kind: "checkResult", data: { kind: "check", exitCode: 1, stdout: "", stderr: "make: *** No rule to make target 'test'.  Stop.\n", truncated: false, leftWorkspaceDirty: false } },
+          { seq: 101, attemptId: "check-0-1", at: at(1), kind: "commandsUpdated", data: { changes: newCommands } },
+        ];
+      }
       if ((args as { attemptId?: string } | undefined)?.attemptId === returnedApproval.id && (params.get("flow") === "returned" || params.get("flow") === "sentBack")) {
         return [{ seq: 100, attemptId: returnedApproval.id, at: at(5), kind: "returned", data: { instructions: sentBackWith, round: 1, ...(assistantBy ? { by: assistantBy } : {}) } }];
       }

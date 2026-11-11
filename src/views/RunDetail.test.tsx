@@ -3,11 +3,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18next from "../i18n";
-import type { Attempt, AuditEvent, Run, Screenshot, Screenshots, SpecOutput } from "../lib/api";
+import type { Attempt, AuditEvent, CommandChange, Run, Screenshot, Screenshots, SpecOutput } from "../lib/api";
 import { type CommandRun, commandsFrom } from "../lib/audit";
 import { useApp } from "../lib/store";
 import type { SizeDecision } from "../lib/size";
-import { ActivityTab, ApprovalCard, CommandsTab, OutputTab, QuestionsCard, Summary } from "./RunDetail";
+import { Actions, ActivityTab, ApprovalCard, CommandsTab, OutputTab, QuestionsCard, Summary } from "./RunDetail";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -1639,5 +1639,79 @@ describe("an answer Keel asked to fix", () => {
     expect(page()).not.toContain("Falló");
     expect(page()).toContain("Estado final: Keel pidió corregirlo");
     expect(page()).toContain("el punto 1 de lo que decidió por su cuenta tiene 141 caracteres y el límite es 140");
+  });
+});
+
+describe("starting over a step whose command the project changed", () => {
+  let root: Root;
+  let changes: CommandChange[];
+  let retried: unknown[];
+  const page = () => document.body.textContent ?? "";
+  const button = (text: string) => [...document.querySelectorAll("button")].find((b) => b.textContent === text);
+  const settle = () => act(() => Promise.resolve());
+  const failedCheck = attempt({ id: "check-2", runId: "r1", stepId: "check", kind: "check", tools: "check", state: "failed", reason: { code: "checkFailed", exitCode: 1 }, prompt: "uv run pytest" });
+  const show = async (shown: Attempt) => {
+    act(() => root.render(<Actions attempt={shown} projectId="p1" onError={() => {}} />));
+    await settle();
+  };
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    changes = [];
+    retried = [];
+    mockIPC((command, args) => {
+      if (command === "run_command_changes") return changes;
+      if (command === "attempt_retry") retried.push(args);
+      return null;
+    });
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("offers the new commands, says which they were and which they are, and runs them only when chosen", async () => {
+    changes = [
+      { stepId: "setup", before: "uv sync", now: "uv sync --group test" },
+      { stepId: "check", before: "uv run pytest", now: "uv run --group test pytest" },
+    ];
+    await show(failedCheck);
+    expect(page()).toContain("The project's commands changed after this run started.");
+    for (const command of ["uv sync", "uv sync --group test", "uv run pytest", "uv run --group test pytest"]) expect(page()).toContain(command);
+    act(() => button("Start over")?.click());
+    await settle();
+    act(() => button("Start over with the new commands")?.click());
+    await settle();
+    expect(retried).toEqual([
+      { attemptId: "check-2", resume: false, currentCommands: false },
+      { attemptId: "check-2", resume: false, currentCommands: true },
+    ]);
+  });
+
+  it("offers nothing new when the step's own command is the project's", async () => {
+    await show(failedCheck);
+    expect(button("Start over")).toBeDefined();
+    expect(button("Start over with the new commands")).toBeUndefined();
+    expect(page()).not.toContain("changed after this run started");
+    // What it would start over runs the same command either way.
+    changes = [{ stepId: "setup", before: "uv sync", now: "uv sync --group test" }];
+    await show({ ...failedCheck, id: "check-3" });
+    expect(button("Start over with the new commands")).toBeUndefined();
+  });
+
+  it("is all in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    changes = [{ stepId: "check", before: "uv run pytest", now: "uv run --group test pytest" }];
+    await show(failedCheck);
+    expect(page()).toContain("Los comandos del proyecto cambiaron después de que empezó esta ejecución.");
+    expect(button("Empezar de nuevo con los comandos nuevos")).toBeDefined();
+  });
+
+  it("says in the activity which commands the step started over with", async () => {
+    const event: AuditEvent = { seq: 1, attemptId: "check-2", at: "2026-01-01T00:00:00Z", kind: "commandsUpdated", data: { changes: [{ stepId: "check", before: "uv run pytest", now: "uv run --group test pytest" }] } };
+    act(() => root.render(<ActivityTab events={[event]} role="worker" />));
+    expect(page()).toContain("Started over with the project's new commands");
+    expect(page()).toContain("check: uv run pytest → uv run --group test pytest");
   });
 });
