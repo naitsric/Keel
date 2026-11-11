@@ -633,15 +633,20 @@ export interface Screenshot {
   mime: string;
   /** Base64. */
   data: string;
-  takenAt: string;
-  /** A step changed the code after it was saved, so it may not show what's being approved. */
+  /** The step it was saved during. Keel took it from the folder when that step ended. */
+  step: string;
+  /** A step that changed the code ended with that one or after it, so it may not show what's being approved. */
   beforeLastChange: boolean;
 }
 
+/** This round's pictures. An earlier round's were for its own approval. */
 export interface Screenshots {
+  /** The latest step's first. */
   shown: Screenshot[];
-  /** What else is in the folder, and isn't shown: not one of those pictures, too big, or past the limit. */
+  /** What else this round's steps saved and isn't shown: not one of those pictures, too big, a link, or past the limit. */
   leftOut: string[];
+  /** How many more were left out than `leftOut` names. */
+  moreLeftOut: number;
 }
 
 export interface Board {

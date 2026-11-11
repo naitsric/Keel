@@ -108,6 +108,26 @@ pub fn signal_process(pid: i32, signal: i32) -> bool {
     pid > 1 && unsafe { libc::kill(pid, signal) == 0 }
 }
 
+/// Whether a child has ended, without collecting it. Until it's collected its pid stays its own,
+/// and so does its group's, so `signal_group` can still reach what it left running and nothing
+/// else. `Child::try_wait` collects it, after which the pid may go to an unrelated process.
+pub fn has_ended(pid: i32) -> io::Result<bool> {
+    // All zeros is a valid `siginfo_t`, and macOS leaves it untouched when nothing has ended.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    let found = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            pid as libc::id_t,
+            &mut info,
+            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+        )
+    };
+    if found == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(info.si_pid == pid)
+}
+
 /// What a command printed, if it finished within `limit`. If it didn't, it and whatever it started
 /// are killed and this is `None`.
 pub fn stdout_within(mut command: Command, limit: Duration) -> io::Result<Option<Vec<u8>>> {
@@ -309,6 +329,27 @@ mod tests {
         let path = dir.path().join("raw");
         create_private(&path).unwrap();
         assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    #[test]
+    fn an_ended_child_is_seen_without_being_collected() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "read line; exit 3"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        assert!(!has_ended(pid).unwrap(), "still waiting for its input");
+        drop(child.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !has_ended(pid).unwrap() {
+            assert!(Instant::now() < deadline, "never ended");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Still there to collect, with its exit code.
+        assert!(has_ended(pid).unwrap());
+        assert_eq!(child.wait().unwrap().code(), Some(3));
+        assert!(has_ended(pid).is_err(), "nothing left to wait for");
     }
 
     #[test]

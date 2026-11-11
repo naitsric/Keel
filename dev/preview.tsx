@@ -119,11 +119,12 @@ const waiting = params.get("flow") === "approval" || params.get("flow") === "lim
 // in the language of lang=, with long=1 for text at its limits, many=1 for three questions, none=1 for
 // one with no recommended option, last=1 for the last round and extra=1 for the round after it.
 // flow=corrected is a run stopped because it couldn't keep to the limits.
-// shots=1 has screenshots a step saved, in dark and light, shots=old one of them taken before the code last
-// changed, and shots=many more than fit in a line, with what Keel left out. They show with flow=approval:
-// view=run&flow=approval&shots=1, and a click on one opens it bigger.
+// shots=1 has screenshots a check saved, in dark and light, shots=old one of them saved by the builder, so
+// the code may have changed after it, and shots=many more than fit in a line, with what Keel left out and
+// a count of more. They show with flow=approval: view=run&flow=approval&shots=1, and a click on one opens it
+// bigger.
 const shotsMode = params.get("shots");
-const fakeScreenshot = (name: string, dark: boolean, beforeLastChange = false) => {
+const fakeScreenshot = (name: string, dark: boolean, step = "screens", beforeLastChange = false) => {
   const canvas = document.createElement("canvas");
   canvas.width = 1280;
   canvas.height = 800;
@@ -144,14 +145,15 @@ const fakeScreenshot = (name: string, dark: boolean, beforeLastChange = false) =
     g.fillStyle = dark ? "#71717a" : "#a1a1aa";
     for (let line = 0; line < 5; line++) g.fillRect(70, 160 + line * 36, 900 - line * 120, 14);
   }
-  return { name, mime: "image/png", data: canvas.toDataURL("image/png").split(",")[1], takenAt: at(1), beforeLastChange };
+  return { name, mime: "image/png", data: canvas.toDataURL("image/png").split(",")[1], step, beforeLastChange };
 };
 const previewScreenshots = () => {
-  if (!shotsMode) return { shown: [], leftOut: [] };
-  const shown = [fakeScreenshot("run-detail.dark.png", true), fakeScreenshot("run-detail.light.png", false, shotsMode === "old")];
-  if (shotsMode !== "many") return { shown, leftOut: [] };
+  if (!shotsMode) return { shown: [], leftOut: [], moreLeftOut: 0 };
+  const old = shotsMode === "old";
+  const shown = [fakeScreenshot("run-detail.dark.png", true), fakeScreenshot("run-detail.light.png", false, old ? "builder" : "screens", old)];
+  if (shotsMode !== "many") return { shown, leftOut: [], moreLeftOut: 0 };
   const more = Array.from({ length: 6 }, (_, index) => fakeScreenshot(`board-${index + 1}.${index % 2 ? "light" : "dark"}.png`, index % 2 === 0));
-  return { shown: [...more, ...shown], leftOut: ["flow.svg", "notes.txt", "settings.full-page.png"] };
+  return { shown: [...more, ...shown], leftOut: ["flow.svg", "notes.txt", "settings.full-page.png"], moreLeftOut: 4 };
 };
 const noCheck = params.get("check") === "none";
 const noReviews = params.get("reviews") === "none";

@@ -66,7 +66,7 @@ describe("the approval card", () => {
     askedToRun = [];
     runFails = false;
     errors = [];
-    screenshots = { shown: [], leftOut: [] };
+    screenshots = { shown: [], leftOut: [], moreLeftOut: 0 };
     mockIPC((command, args) => {
       if (command === "run_screenshots") return screenshots;
       if (command === "approval_run_skipped") {
@@ -153,38 +153,53 @@ describe("the approval card", () => {
   });
 
   describe("screenshots a step left", () => {
-    const shot = (name: string, beforeLastChange = false): Screenshot => ({ name, mime: "image/png", data: "iVBORw0KGgo=", takenAt: "2026-11-10T10:00:00.000Z", beforeLastChange });
+    const shot = (name: string, step = "screens", beforeLastChange = false): Screenshot => ({ name, mime: "image/png", data: "iVBORw0KGgo=", step, beforeLastChange });
     const picture = (name: string) => document.querySelector<HTMLImageElement>(`img[alt="${name}"]`);
     const shown = async () => {
       show([builder(["src/views/RunDetail.tsx"]), human], ["src/views/RunDetail.tsx"]);
       await settle();
     };
 
-    it("shows them with the change, and one bigger on a click", async () => {
-      screenshots = { shown: [shot("run.light.png"), shot("run.dark.png")], leftOut: [] };
+    it("shows them with the change and the step that saved each, and one bigger on a click", async () => {
+      screenshots = { shown: [shot("run.light.png"), shot("run.dark.png", "builder")], leftOut: [], moreLeftOut: 0 };
       await shown();
       expect(page()).toContain("Screenshots");
       expect(picture("run.light.png")?.src).toBe("data:image/png;base64,iVBORw0KGgo=");
       expect(picture("run.dark.png")).not.toBeNull();
-      expect(page()).not.toContain("before the last change");
+      expect(page()).toContain("Saved by screens");
+      expect(page()).toContain("Saved by builder");
+      expect(page()).not.toContain("may have changed");
 
       act(() => document.querySelector<HTMLButtonElement>('button[aria-label="See run.dark.png larger"]')?.click());
       const dialog = document.querySelector('[role="dialog"]');
       expect(dialog?.textContent).toContain("run.dark.png");
+      expect(dialog?.textContent).toContain("Saved by builder");
       expect(dialog?.querySelector("img")?.getAttribute("src")).toBe("data:image/png;base64,iVBORw0KGgo=");
     });
 
-    it("says which were taken before the code last changed", async () => {
-      screenshots = { shown: [shot("old.png", true), shot("new.png")], leftOut: [] };
+    it("shows two with the same name from different steps", async () => {
+      screenshots = { shown: [shot("screen.png"), shot("screen.png", "builder")], leftOut: [], moreLeftOut: 0 };
       await shown();
-      expect(page().match(/Taken before the last change to the code/g)).toHaveLength(1);
+      expect(document.querySelectorAll('img[alt="screen.png"]')).toHaveLength(2);
+    });
+
+    it("says which the code may have changed after", async () => {
+      screenshots = { shown: [shot("old.png", "builder", true), shot("new.png")], leftOut: [], moreLeftOut: 0 };
+      await shown();
+      expect(page().match(/The code may have changed after it was saved/g)).toHaveLength(1);
     });
 
     it("says what it left out and why", async () => {
-      screenshots = { shown: [], leftOut: ["notes.txt", "view.svg"] };
+      screenshots = { shown: [], leftOut: ["notes.txt", "view.svg"], moreLeftOut: 0 };
       await shown();
       expect(page()).toContain("Not shown: notes.txt, view.svg.");
       expect(page()).toContain("PNG, JPEG, GIF or WebP");
+    });
+
+    it("counts what it left out past the names it lists", async () => {
+      screenshots = { shown: [], leftOut: ["notes.txt"], moreLeftOut: 12 };
+      await shown();
+      expect(page()).toContain("Not shown: notes.txt and 12 more.");
     });
 
     it("has no row when a step left none", async () => {

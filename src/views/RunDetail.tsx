@@ -312,27 +312,39 @@ const SHOWN_FILES = 5;
 
 const pictureOf = (shot: Screenshot) => `data:${shot.mime};base64,${shot.data}`;
 
-/** What a step saved of how the change looks, small, with what it left out. Keel doesn't take them. */
+/**
+ * What this round's steps saved of how the change looks, small, each with the step it came from, and
+ * what was left out. Keel doesn't take them.
+ */
 function ScreenshotsRow({ shots, onOpen }: { shots: Screenshots; onOpen: (shot: Screenshot) => void }) {
   const { t } = useTranslation();
+  const names = shots.leftOut.join(", ");
   return (
     <ApprovalRow label={t("run.screenshots")}>
       {shots.shown.length > 0 && (
         <ul className="flex flex-wrap gap-2">
-          {shots.shown.map((shot) => (
-            <li key={shot.name} className="w-32 min-w-0">
+          {shots.shown.map((shot, index) => (
+            // Two steps can save pictures with the same name.
+            <li key={`${index}-${shot.step}-${shot.name}`} className="w-32 min-w-0">
               <button type="button" aria-label={t("run.screenshotOpen", { name: shot.name })} onClick={() => onOpen(shot)} className="block w-full overflow-hidden rounded border border-border bg-inset hover:border-border-strong focus-visible:border-accent focus-visible:outline-none">
                 <img src={pictureOf(shot)} alt={shot.name} className="h-20 w-full object-cover object-top" />
               </button>
               <p className="selectable mt-0.5 truncate font-mono text-[11px] text-muted" title={shot.name}>
                 {shot.name}
               </p>
+              <p className="selectable truncate text-[11px] text-subtle" title={shot.step}>
+                {t("run.screenshotStep", { step: shot.step })}
+              </p>
               {shot.beforeLastChange && <p className="text-[11px] leading-4 text-warning">{t("run.screenshotBeforeChange")}</p>}
             </li>
           ))}
         </ul>
       )}
-      {shots.leftOut.length > 0 && <p className={cx("selectable text-[11.5px] break-words text-muted", shots.shown.length > 0 && "mt-1")}>{t("run.screenshotsLeftOut", { names: shots.leftOut.join(", ") })}</p>}
+      {shots.leftOut.length > 0 && (
+        <p className={cx("selectable text-[11.5px] break-words text-muted", shots.shown.length > 0 && "mt-1")}>
+          {shots.moreLeftOut > 0 ? t("run.screenshotsLeftOutMore", { names, count: shots.moreLeftOut }) : t("run.screenshotsLeftOut", { names })}
+        </p>
+      )}
     </ApprovalRow>
   );
 }
@@ -762,6 +774,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
       <Modal open={looking !== null} onOpenChange={(open) => !open && setLooking(null)} title={looking?.name ?? ""} className="w-[960px]">
         {looking && (
           <>
+            <p className="selectable mb-2 text-[12.5px] text-muted">{t("run.screenshotStep", { step: looking.step })}</p>
             {looking.beforeLastChange && <p className="mb-2 text-[12.5px] text-warning">{t("run.screenshotBeforeChange")}</p>}
             <img src={pictureOf(looking)} alt={looking.name} className="max-w-full rounded border border-border" />
           </>

@@ -2027,6 +2027,26 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The events of one kind from all of a run's attempts, in the order they happened.
+    pub fn run_events(&self, run_id: &str, kind: &str) -> Result<Vec<Event>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select e.seq, e.attempt_id, e.at, e.kind, e.data from event e join attempt a on a.id = e.attempt_id
+             where a.run_id = ?1 and e.kind = ?2 order by e.seq",
+        )?;
+        let rows = stmt.query_map(params![run_id, kind], |r| {
+            let data: String = r.get(4)?;
+            Ok(Event {
+                seq: r.get(0)?,
+                attempt_id: r.get(1)?,
+                at: r.get(2)?,
+                kind: r.get(3)?,
+                data: serde_json::from_str(&data).unwrap_or_default(),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Runs, newest first, each with its latest attempt.
     pub fn runs(&self, limit: i64) -> Result<Vec<RunRow>> {
         self.run_rows("1", params![limit])
@@ -2676,6 +2696,49 @@ mod tests {
         assert!(updated.unwrap_err().to_string().contains("append-only"));
         let deleted = conn.execute("delete from event where seq = ?1", [seq]);
         assert!(deleted.unwrap_err().to_string().contains("append-only"));
+    }
+
+    #[test]
+    fn a_runs_events_of_one_kind_come_from_all_its_attempts_in_order() {
+        let (_dir, store) = store();
+        let id = seeded(&store);
+        store
+            .add_attempt(&new_attempt("b", "r", "check", AttemptState::Running))
+            .unwrap();
+        store
+            .add_run(&NewRun {
+                id: "other".into(),
+                project_id: "p".into(),
+                title: "other".into(),
+                request: "other".into(),
+                workflow: "[]".into(),
+                language: "en".into(),
+                source_issue: None,
+                workflow_id: None,
+                workflow_name: None,
+                started_by: None,
+            })
+            .unwrap();
+        store
+            .add_attempt(&new_attempt("c", "other", "check", AttemptState::Running))
+            .unwrap();
+        for (attempt, kind, n) in [
+            ("b", "shot", 1),
+            (id.as_str(), "note", 2),
+            (id.as_str(), "shot", 3),
+            ("c", "shot", 4),
+        ] {
+            store
+                .append_event(attempt, kind, &serde_json::json!({ "n": n }))
+                .unwrap();
+        }
+        let found: Vec<_> = store
+            .run_events("r", "shot")
+            .unwrap()
+            .into_iter()
+            .map(|event| (event.attempt_id, event.data["n"].as_i64().unwrap()))
+            .collect();
+        assert_eq!(found, [("b".to_owned(), 1), ("a".to_owned(), 3)]);
     }
 
     #[test]

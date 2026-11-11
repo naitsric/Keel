@@ -1329,13 +1329,22 @@ impl Engine {
         Ok(self.git()?.diff_since(&workspace, &base)?)
     }
 
-    /// The pictures a step left of how the change looks, for its approval, each saying whether the
-    /// code changed after it.
+    /// The pictures this round's steps left of how the change looks, for its approval, each with
+    /// the step it came from and whether the code may have changed after it.
     pub fn run_screenshots(&self, run_id: &str) -> Result<Screenshots> {
-        let attempts = self.inner.store.attempts_of_run(run_id)?;
-        Ok(screenshots::read(
-            &self.inner.workspace(run_id),
-            screenshots::last_change(&attempts),
+        let store = &self.inner.store;
+        let round = store.run(run_id)?.round;
+        let attempts = store.attempts_of_run(run_id)?;
+        let taken: Vec<(String, screenshots::Taken)> = store
+            .run_events(run_id, screenshots::EVENT)?
+            .into_iter()
+            .filter_map(|event| Some((event.attempt_id, serde_json::from_value(event.data).ok()?)))
+            .collect();
+        Ok(screenshots::for_approval(
+            &self.inner.run_dir(run_id),
+            &attempts,
+            round,
+            &taken,
         ))
     }
 
