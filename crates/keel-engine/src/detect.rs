@@ -8,11 +8,15 @@ use std::path::Path;
 use serde::Serialize;
 use toml::Value;
 
+mod ci;
+
 /// Far more than a manifest takes. Something this large isn't one.
 const LARGEST_FILE: u64 = 1024 * 1024;
 /// A repo decides how many of these there are, and a person has to read them.
 const MOST_OPTIONS: usize = 12;
 const LONGEST_NAME: usize = 64;
+/// How many names in one folder are looked at, in a folder that has no end of them.
+const MOST_ENTRIES: usize = 4096;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -25,6 +29,8 @@ pub struct Guess {
     pub setup_options: Vec<String>,
     /// Other commands that check something here, for a person to add.
     pub check_options: Vec<String>,
+    /// It's what the project's CI runs, since nothing else here says how it installs and tests.
+    pub from_ci: bool,
 }
 
 /// What one kind of project gives away. A check is left out when nothing says how it tests itself,
@@ -33,7 +39,7 @@ pub struct Guess {
 struct Stack {
     setup: Option<String>,
     check: Option<String>,
-    from: Vec<&'static str>,
+    from: Vec<String>,
     setup_options: Vec<String>,
     check_options: Vec<String>,
 }
@@ -45,12 +51,55 @@ fn is_file(root: &Path, name: &str) -> bool {
         .is_ok_and(|meta| meta.is_file())
 }
 
+/// A real folder, not a link to one somewhere else.
+fn is_dir(root: &Path, name: &str) -> bool {
+    root.join(name)
+        .symlink_metadata()
+        .is_ok_and(|meta| meta.is_dir())
+}
+
 fn read(root: &Path, name: &str) -> Option<String> {
     let path = root.join(name);
     let meta = path.symlink_metadata().ok()?;
     (meta.is_file() && meta.len() <= LARGEST_FILE)
         .then(|| std::fs::read_to_string(path).ok())
         .flatten()
+}
+
+/// The regular files in a folder, by name.
+fn file_names(folder: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(folder)
+        .into_iter()
+        .flatten()
+        .take(MOST_ENTRIES)
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect();
+    names.sort();
+    names
+}
+
+/// An alias repeats what its anchor holds, so a few lines of them can grow into more than fits in
+/// memory. A `*` where a value starts is one, and that's enough to leave the file unread.
+fn has_alias(text: &str) -> bool {
+    text.lines().any(|line| {
+        let mut before = None;
+        line.chars().any(|c| {
+            let alias = c == '*' && before.is_none_or(|b| ":-[{,?".contains(b));
+            if !c.is_whitespace() {
+                before = Some(c);
+            }
+            alias
+        })
+    })
+}
+
+fn yaml(text: &str) -> Option<serde_yaml_ng::Value> {
+    if has_alias(text) {
+        return None;
+    }
+    serde_yaml_ng::from_str(text).ok()
 }
 
 fn has_test_target(makefile: &str) -> bool {
@@ -69,53 +118,58 @@ fn has_test_target(makefile: &str) -> bool {
     })
 }
 
+/// A project's scripts, or Deno's tasks, by name.
+type Scripts = serde_json::Map<String, serde_json::Value>;
+
+fn scripts(config: &str, key: &str) -> Scripts {
+    serde_json::from_str::<serde_json::Value>(config)
+        .ok()
+        .and_then(|config| config.get(key)?.as_object().cloned())
+        .unwrap_or_default()
+}
+
 /// A test script `npm init` wrote is a placeholder that always fails.
 fn is_real_script(script: &str) -> bool {
     !script.trim().is_empty() && !script.contains("no test specified")
 }
 
-fn has_test_script(package: &str) -> bool {
-    let Ok(package) = serde_json::from_str::<serde_json::Value>(package) else {
-        return false;
-    };
-    package["scripts"]["test"]
-        .as_str()
+fn is_real(scripts: &Scripts, name: &str) -> bool {
+    scripts
+        .get(name)
+        .and_then(serde_json::Value::as_str)
         .is_some_and(is_real_script)
 }
 
-/// Going by its name. `dev` and `test:watch` never end, and a check that never ends holds a run until
-/// someone stops it. `lint:fix` changes what it was meant to check.
+/// Words in a name that say it checks something.
+const CHECKS: [&str; 12] = [
+    "test",
+    "tests",
+    "spec",
+    "e2e",
+    "lint",
+    "typecheck",
+    "types",
+    "tsc",
+    "check",
+    "verify",
+    "validate",
+    "ci",
+];
+/// `dev` and `test:watch` never end, and a check that never ends holds a run until someone stops
+/// it. `lint:fix` changes what it was meant to check.
+const NOT_CHECKS: [&str; 9] = [
+    "watch", "dev", "ui", "serve", "start", "open", "debug", "fix", "update",
+];
+
+/// Going by its name.
 fn reads_as_a_check(name: &str) -> bool {
-    const CHECKS: [&str; 12] = [
-        "test",
-        "tests",
-        "spec",
-        "e2e",
-        "lint",
-        "typecheck",
-        "types",
-        "tsc",
-        "check",
-        "verify",
-        "validate",
-        "ci",
-    ];
-    const NOT_CHECKS: [&str; 9] = [
-        "watch", "dev", "ui", "serve", "start", "open", "debug", "fix", "update",
-    ];
     let name = name.to_ascii_lowercase();
     let words: Vec<&str> = name.split([':', '-', '_', '.']).collect();
     words.iter().any(|word| CHECKS.contains(word))
         && !words.iter().any(|word| NOT_CHECKS.contains(word))
 }
 
-fn script_checks(tool: &str, package: &str) -> Vec<String> {
-    let Ok(package) = serde_json::from_str::<serde_json::Value>(package) else {
-        return Vec::new();
-    };
-    let Some(scripts) = package["scripts"].as_object() else {
-        return Vec::new();
-    };
+fn script_checks(scripts: &Scripts, run: &impl Fn(&str) -> String) -> Vec<String> {
     let mut names: Vec<&String> = scripts
         .iter()
         .filter(|(name, script)| {
@@ -130,22 +184,30 @@ fn script_checks(tool: &str, package: &str) -> Vec<String> {
     names
         .into_iter()
         .take(MOST_OPTIONS)
-        .map(|name| match name.as_str() {
-            "test" => format!("{tool} test"),
-            name => format!("{tool} run {name}"),
-        })
+        .map(|name| run(name))
         .collect()
 }
 
 /// The script that type-checks, which is quick and catches what the tests don't. Lint, e2e and the
 /// rest stay as options, for being slow or fragile.
-fn typecheck_script(package: &str) -> Option<&'static str> {
-    let package = serde_json::from_str::<serde_json::Value>(package).ok()?;
-    ["typecheck", "types", "tsc"].into_iter().find(|name| {
-        package["scripts"][name]
-            .as_str()
-            .is_some_and(is_real_script)
-    })
+fn typecheck_script(scripts: &Scripts) -> Option<&'static str> {
+    ["typecheck", "types", "tsc"]
+        .into_iter()
+        .find(|name| is_real(scripts, name))
+}
+
+/// The check, and the scripts that check something for a person to add, given how the tool runs one.
+fn script_stack(scripts: &Scripts, run: impl Fn(&str) -> String) -> (Option<String>, Vec<String>) {
+    let mut options = script_checks(scripts, &run);
+    // One that runs every script that checks something, for a person to pick.
+    if options.len() > 1 {
+        options.push(options.join(" && "));
+    }
+    let check = is_real(scripts, "test").then(|| match typecheck_script(scripts) {
+        Some(name) => format!("{} && {}", run(name), run("test")),
+        None => run("test"),
+    });
+    (check, options)
 }
 
 /// Yarn 2 and later need a global folder that's in the home folder. Nobody has tried them in the
@@ -159,20 +221,47 @@ fn javascript(root: &Path) -> Option<Stack> {
     } else if is_file(root, "package-lock.json") {
         ("npm", "npm ci", "package-lock.json")
     } else {
-        return None;
+        let lock = ["bun.lock", "bun.lockb"]
+            .into_iter()
+            .find(|name| is_file(root, name))?;
+        ("bun", "bun install --frozen-lockfile", lock)
     };
-    let mut check_options = script_checks(tool, &package);
-    // One that runs every script that checks something, for a person to pick.
-    if check_options.len() > 1 {
-        check_options.push(check_options.join(" && "));
-    }
+    let (check, check_options) =
+        script_stack(&scripts(&package, "scripts"), |name| match (tool, name) {
+            // `bun test` is Bun's own runner, which doesn't run the script.
+            ("bun", _) => format!("bun run {name}"),
+            (_, "test") => format!("{tool} test"),
+            _ => format!("{tool} run {name}"),
+        });
     Some(Stack {
         setup: Some(setup.to_owned()),
-        check: has_test_script(&package).then(|| match typecheck_script(&package) {
-            Some(name) => format!("{tool} run {name} && {tool} test"),
-            None => format!("{tool} test"),
-        }),
-        from: vec!["package.json", lock],
+        check,
+        from: vec!["package.json".to_owned(), lock.to_owned()],
+        check_options,
+        ..Stack::default()
+    })
+}
+
+/// Deno has a runner of its own, but a bare `deno test` fails where there are no tests, or where they
+/// need permissions. A `test` task is how a project says it. JSON with comments doesn't parse, and
+/// then there are no tasks to go by.
+fn deno(root: &Path) -> Option<Stack> {
+    let (name, config) = ["deno.json", "deno.jsonc"]
+        .into_iter()
+        .find_map(|name| Some((name, read(root, name)?)))?;
+    // A task can also be `{ "command": … }`.
+    let tasks: Scripts = scripts(&config, "tasks")
+        .into_iter()
+        .filter_map(|(task, value)| {
+            let command = value.as_str().or_else(|| value["command"].as_str())?;
+            Some((task, command.into()))
+        })
+        .collect();
+    let (check, check_options) = script_stack(&tasks, |task| format!("deno task {task}"));
+    Some(Stack {
+        setup: Some("deno install".to_owned()),
+        check,
+        from: vec![name.to_owned()],
         check_options,
         ..Stack::default()
     })
@@ -291,17 +380,27 @@ fn uv_options(pyproject: &str) -> (Vec<String>, Option<String>) {
     (options, for_pytest)
 }
 
+fn locks_pytest(lock: &str) -> bool {
+    lock.contains("name = \"pytest\"")
+}
+
+/// One tool per project: a uv or poetry project often keeps a list for pip too, and both would fill
+/// the same `.venv`.
+fn python(root: &Path) -> Option<Stack> {
+    uv(root).or_else(|| poetry(root)).or_else(|| pip(root))
+}
+
 /// `--frozen` also on the check, which has no network to compare the lock with. A check needs pytest
 /// to be installed, or it fails after the agents are paid for, but only setup can install it.
 fn uv(root: &Path) -> Option<Stack> {
     let lock = read(root, "uv.lock")?;
-    let has_pytest = lock.contains("name = \"pytest\"");
+    let has_pytest = locks_pytest(&lock);
     let (setup_options, for_pytest) = read(root, "pyproject.toml")
         .map(|pyproject| uv_options(&pyproject))
         .unwrap_or_default();
-    let mut from = vec!["uv.lock"];
+    let mut from = vec!["uv.lock".to_owned()];
     if !setup_options.is_empty() {
-        from.push("pyproject.toml");
+        from.push("pyproject.toml".to_owned());
     }
     Some(Stack {
         setup: Some(match for_pytest.filter(|_| has_pytest) {
@@ -311,6 +410,49 @@ fn uv(root: &Path) -> Option<Stack> {
         check: has_pytest.then(|| "uv run --frozen pytest".to_owned()),
         from,
         setup_options,
+        ..Stack::default()
+    })
+}
+
+/// `poetry install` installs every group that isn't optional, which is where pytest usually is.
+fn poetry(root: &Path) -> Option<Stack> {
+    let lock = read(root, "poetry.lock")?;
+    is_file(root, "pyproject.toml").then(|| Stack {
+        setup: Some("poetry install".to_owned()),
+        check: locks_pytest(&lock).then(|| "poetry run pytest".to_owned()),
+        from: vec!["pyproject.toml".to_owned(), "poetry.lock".to_owned()],
+        ..Stack::default()
+    })
+}
+
+/// Into a `.venv` of its own, since pip outside one installs for the whole Mac, if it's let.
+/// `requirements.txt` is the project's, and the first other list with pytest is for testing.
+fn pip(root: &Path) -> Option<Stack> {
+    let lists: Vec<String> = file_names(root)
+        .into_iter()
+        .filter(|name| {
+            name.starts_with("requirements") && name.ends_with(".txt") && is_plain_name(name)
+        })
+        .take(MOST_OPTIONS)
+        .collect();
+    let has_pytest = |name: &str| read(root, name).is_some_and(|text| text.lines().any(is_pytest));
+    let main = lists.iter().find(|name| *name == "requirements.txt");
+    let main_has_pytest = main.is_some_and(|name| has_pytest(name));
+    let for_tests = lists
+        .iter()
+        .find(|name| !main_has_pytest && has_pytest(name));
+    let install: Vec<String> = main.into_iter().chain(for_tests).cloned().collect();
+    if install.is_empty() {
+        return None;
+    }
+    let lists: String = install.iter().map(|name| format!(" -r {name}")).collect();
+    Some(Stack {
+        setup: Some(format!(
+            "python3 -m venv .venv && .venv/bin/pip install{lists}"
+        )),
+        check: (main_has_pytest || for_tests.is_some())
+            .then(|| ".venv/bin/python -m pytest".to_owned()),
+        from: install,
         ..Stack::default()
     })
 }
@@ -333,7 +475,7 @@ fn rust(root: &Path) -> Option<Stack> {
             }
             .to_owned(),
         ),
-        from: vec!["Cargo.toml"],
+        from: vec!["Cargo.toml".to_owned()],
         ..Stack::default()
     })
 }
@@ -342,14 +484,200 @@ fn go(root: &Path) -> Option<Stack> {
     is_file(root, "go.mod").then(|| Stack {
         setup: Some("go mod download".to_owned()),
         check: Some("go test ./...".to_owned()),
-        from: vec!["go.mod"],
+        from: vec!["go.mod".to_owned()],
+        ..Stack::default()
+    })
+}
+
+/// The wrapper a project brings, if it does, pins the version it builds with.
+fn with_wrapper(root: &Path, manifest: &str, wrapper: &str, tool: &str) -> (String, Vec<String>) {
+    if is_file(root, wrapper) {
+        (
+            format!("./{wrapper}"),
+            vec![manifest.to_owned(), wrapper.to_owned()],
+        )
+    } else {
+        (tool.to_owned(), vec![manifest.to_owned()])
+    }
+}
+
+fn maven(root: &Path) -> Option<Stack> {
+    is_file(root, "pom.xml").then(|| {
+        let (tool, from) = with_wrapper(root, "pom.xml", "mvnw", "mvn");
+        Stack {
+            setup: Some(format!("{tool} dependency:go-offline")),
+            check: Some(format!("{tool} test")),
+            from,
+            ..Stack::default()
+        }
+    })
+}
+
+/// `testClasses` compiles the code and its tests, which downloads what both need.
+fn gradle(root: &Path) -> Option<Stack> {
+    let build = [
+        "build.gradle.kts",
+        "build.gradle",
+        "settings.gradle.kts",
+        "settings.gradle",
+    ]
+    .into_iter()
+    .find(|name| is_file(root, name))?;
+    let (tool, from) = with_wrapper(root, build, "gradlew", "gradle");
+    Some(Stack {
+        setup: Some(format!("{tool} testClasses")),
+        check: Some(format!("{tool} test")),
+        from,
+        ..Stack::default()
+    })
+}
+
+/// `rspec-core (3.13.0)` in a lock, or `gem "rspec-rails"` in a Gemfile, but not `rspecial`.
+fn uses_gem(gems: &str, gem: &str) -> bool {
+    gems.lines().any(|line| {
+        let line = line.trim_start();
+        let name = line.strip_prefix("gem ").map_or(line, |rest| {
+            rest.trim_start().trim_start_matches(['"', '\''])
+        });
+        name.strip_prefix(gem).is_some_and(|rest| {
+            rest.is_empty() || rest.starts_with(['-', '_', ' ', '(', '"', '\''])
+        })
+    })
+}
+
+/// RSpec wins, since Rails brings minitest along either way. Minitest has no command of its own, so
+/// it takes Rails or a Rake task to say how it runs.
+fn ruby(root: &Path) -> Option<Stack> {
+    let gemfile = read(root, "Gemfile")?;
+    let lock = read(root, "Gemfile.lock");
+    let gems = lock.as_deref().unwrap_or(&gemfile);
+    let mut from = vec!["Gemfile".to_owned()];
+    if lock.is_some() {
+        from.push("Gemfile.lock".to_owned());
+    }
+    let check = if uses_gem(gems, "rspec") {
+        Some("bundle exec rspec")
+    } else if is_file(root, "bin/rails") {
+        from.push("bin/rails".to_owned());
+        Some("bin/rails test")
+    } else if uses_gem(gems, "minitest")
+        && read(root, "Rakefile").is_some_and(|rakefile| rakefile.contains("TestTask"))
+    {
+        from.push("Rakefile".to_owned());
+        Some("bundle exec rake test")
+    } else {
+        None
+    };
+    Some(Stack {
+        setup: Some("bundle install".to_owned()),
+        check: check.map(str::to_owned),
+        from,
+        ..Stack::default()
+    })
+}
+
+/// The project's own `test` script wins over PHPUnit, since it can have flags PHPUnit needs.
+fn php(root: &Path) -> Option<Stack> {
+    let composer = read(root, "composer.json")?;
+    let composer = serde_json::from_str::<serde_json::Value>(&composer).unwrap_or_default();
+    let script = &composer["scripts"]["test"];
+    let has_script = script.as_str().is_some_and(|s| !s.trim().is_empty())
+        || script.as_array().is_some_and(|list| !list.is_empty());
+    let has_phpunit = ["require-dev", "require"]
+        .into_iter()
+        .any(|key| composer[key].get("phpunit/phpunit").is_some());
+    let mut from = vec!["composer.json".to_owned()];
+    if is_file(root, "composer.lock") {
+        from.push("composer.lock".to_owned());
+    }
+    let check = if has_script {
+        Some("composer test")
+    } else if has_phpunit {
+        Some("vendor/bin/phpunit")
+    } else {
+        None
+    };
+    Some(Stack {
+        setup: Some("composer install".to_owned()),
+        check: check.map(str::to_owned),
+        from,
+        ..Stack::default()
+    })
+}
+
+/// Told which solution, or which project when there's no solution: with more than one in the
+/// folder `dotnet` stops, and a guess could pick the wrong one.
+fn dotnet(root: &Path) -> Option<Stack> {
+    let files = file_names(root);
+    let ending = |ends: &[&str]| -> Vec<&String> {
+        files
+            .iter()
+            .filter(|name| ends.iter().any(|end| name.ends_with(end)))
+            .collect()
+    };
+    let solutions = ending(&[".sln", ".slnx"]);
+    let found = if solutions.is_empty() {
+        ending(&[".csproj", ".fsproj", ".vbproj"])
+    } else {
+        solutions
+    };
+    let [one] = found.as_slice() else {
+        return None;
+    };
+    is_plain_name(one).then(|| Stack {
+        setup: Some(format!("dotnet restore {one}")),
+        check: Some(format!("dotnet test {one}")),
+        from: vec![(*one).clone()],
+        ..Stack::default()
+    })
+}
+
+/// `swift test` fails on a package with no test target.
+fn swift(root: &Path) -> Option<Stack> {
+    let manifest = read(root, "Package.swift")?;
+    Some(Stack {
+        setup: Some("swift package resolve".to_owned()),
+        check: manifest
+            .contains(".testTarget(")
+            .then(|| "swift test".to_owned()),
+        from: vec!["Package.swift".to_owned()],
+        ..Stack::default()
+    })
+}
+
+/// A Flutter app depends on Flutter itself. Each tests with a package the project has to name.
+fn dart(root: &Path) -> Option<Stack> {
+    let pubspec = yaml(&read(root, "pubspec.yaml")?).unwrap_or_default();
+    let flutter = pubspec["dependencies"]["flutter"]["sdk"].as_str() == Some("flutter");
+    let (tool, runner) = if flutter {
+        ("flutter", "flutter_test")
+    } else {
+        ("dart", "test")
+    };
+    let names_runner = ["dev_dependencies", "dependencies"]
+        .into_iter()
+        .any(|key| pubspec[key].get(runner).is_some());
+    Some(Stack {
+        setup: Some(format!("{tool} pub get")),
+        check: names_runner.then(|| format!("{tool} test")),
+        from: vec!["pubspec.yaml".to_owned()],
+        ..Stack::default()
+    })
+}
+
+fn elixir(root: &Path) -> Option<Stack> {
+    is_file(root, "mix.exs").then(|| Stack {
+        setup: Some("mix deps.get".to_owned()),
+        check: Some("mix test".to_owned()),
+        from: vec!["mix.exs".to_owned()],
         ..Stack::default()
     })
 }
 
 /// A Makefile's `test` target is what the project itself calls testing, so it wins. Every stack found
-/// adds its setup and its check, chained so that each one has to pass. An unknown stack gets nothing
-/// rather than something plausible.
+/// adds its setup and its check, chained so that each one has to pass. When nothing here is known,
+/// what the project's CI runs is the guess. Without that either, an unknown stack gets nothing rather
+/// than something plausible.
 pub fn guess(root: &Path) -> Guess {
     let mut guess = Guess::default();
     let makefile = ["Makefile", "GNUmakefile", "makefile"]
@@ -359,11 +687,23 @@ pub fn guess(root: &Path) -> Guess {
         guess.check = Some("make test".to_owned());
         guess.from.push(name.to_owned());
     }
-    let stacks: Vec<Stack> = [javascript, uv, rust, go]
-        .iter()
-        .filter_map(|find| find(root))
-        .collect();
+    let stacks: Vec<Stack> = [
+        javascript, deno, python, rust, go, maven, gradle, ruby, php, dotnet, swift, dart, elixir,
+    ]
+    .iter()
+    .filter_map(|find| find(root))
+    .collect();
     let chained = |parts: Vec<String>| (!parts.is_empty()).then(|| parts.join(" && "));
+    if stacks.is_empty() && makefile.is_none() {
+        let ci = ci::commands(root);
+        return Guess {
+            setup: chained(ci.setup),
+            check: chained(ci.check),
+            from_ci: !ci.from.is_empty(),
+            from: ci.from,
+            ..Guess::default()
+        };
+    }
     let setup = chained(stacks.iter().filter_map(|s| s.setup.clone()).collect());
     let check = chained(stacks.iter().filter_map(|s| s.check.clone()).collect());
     // With a single stack and no Makefile its check is the guess itself, or what it already offers.
@@ -373,7 +713,7 @@ pub fn guess(root: &Path) -> Guess {
         guess.check = check;
     }
     for stack in stacks {
-        guess.from.extend(stack.from.into_iter().map(str::to_owned));
+        guess.from.extend(stack.from);
         guess.setup_options.extend(stack.setup_options);
         let own = stack.check.filter(|_| offer_checks);
         for option in stack.check_options.into_iter().chain(own) {
@@ -391,20 +731,22 @@ mod tests {
 
     const WITH_TEST: &str = r#"{"scripts":{"test":"vitest run"}}"#;
 
-    fn repo(files: &[(&str, &str)]) -> tempfile::TempDir {
+    pub(super) fn repo(files: &[(&str, &str)]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         for (name, text) in files {
-            std::fs::write(dir.path().join(name), text).unwrap();
+            let path = dir.path().join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
         }
         dir
     }
 
-    fn found(files: &[(&str, &str)]) -> (Option<String>, Option<String>) {
+    pub(super) fn found(files: &[(&str, &str)]) -> (Option<String>, Option<String>) {
         let guess = guess(repo(files).path());
         (guess.check, guess.setup)
     }
 
-    fn both(check: &str, setup: &str) -> (Option<String>, Option<String>) {
+    pub(super) fn both(check: &str, setup: &str) -> (Option<String>, Option<String>) {
         (Some(check.to_owned()), Some(setup.to_owned()))
     }
 
@@ -760,6 +1102,332 @@ mod tests {
             found(&[("go.mod", "")]),
             both("go test ./...", "go mod download")
         );
+    }
+
+    fn setup_only(setup: &str) -> (Option<String>, Option<String>) {
+        (None, Some(setup.to_owned()))
+    }
+
+    const PIP_SETUP: &str = "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt";
+
+    #[test]
+    fn pip_installs_into_a_folder_of_its_own_and_tests_with_pytest() {
+        assert_eq!(
+            found(&[(
+                "requirements.txt",
+                "flask==3.1\npytest>=8 ; python_version > '3.9'\n"
+            )]),
+            both(".venv/bin/python -m pytest", PIP_SETUP)
+        );
+        // pytest in a list of its own is installed as well. The docs aren't.
+        let guess = guess(
+            repo(&[
+                ("requirements.txt", "flask\n"),
+                ("requirements-dev.txt", "-r requirements.txt\npytest\n"),
+                ("requirements-docs.txt", "sphinx\n"),
+            ])
+            .path(),
+        );
+        assert_eq!(
+            guess.setup.as_deref(),
+            Some(&*format!("{PIP_SETUP} -r requirements-dev.txt"))
+        );
+        assert_eq!(guess.check.as_deref(), Some(".venv/bin/python -m pytest"));
+        assert_eq!(guess.from, ["requirements.txt", "requirements-dev.txt"]);
+        // Once is enough when the main list has it.
+        assert_eq!(
+            found(&[
+                ("requirements.txt", "pytest\n"),
+                ("requirements-dev.txt", "pytest\n")
+            ])
+            .1
+            .as_deref(),
+            Some(PIP_SETUP)
+        );
+        assert_eq!(
+            found(&[("requirements.txt", "flask\npytest-cov\n")]),
+            setup_only(PIP_SETUP)
+        );
+        // A name that could put something else in the command isn't read.
+        assert_eq!(found(&[("requirements;x.txt", "pytest\n")]), (None, None));
+    }
+
+    #[test]
+    fn poetry_tests_with_pytest_when_its_lock_has_it() {
+        let guess = guess(
+            repo(&[
+                ("pyproject.toml", "[tool.poetry]\nname = \"a\"\n"),
+                ("poetry.lock", LOCK_WITH_PYTEST),
+            ])
+            .path(),
+        );
+        assert_eq!(guess.check.as_deref(), Some("poetry run pytest"));
+        assert_eq!(guess.setup.as_deref(), Some("poetry install"));
+        assert_eq!(guess.from, ["pyproject.toml", "poetry.lock"]);
+        assert_eq!(
+            found(&[
+                ("pyproject.toml", ""),
+                ("poetry.lock", "[[package]]\nname = \"pytest-cov\"\n")
+            ]),
+            setup_only("poetry install")
+        );
+        // A lock without the project it locks says nothing.
+        assert_eq!(found(&[("poetry.lock", LOCK_WITH_PYTEST)]), (None, None));
+    }
+
+    #[test]
+    fn one_python_tool_per_project() {
+        // A uv or poetry project often keeps a list for pip too, and both would fill `.venv`.
+        assert_eq!(
+            found(&[
+                ("uv.lock", LOCK_WITH_PYTEST),
+                ("requirements.txt", "pytest\n")
+            ]),
+            both("uv run --frozen pytest", "uv sync --frozen")
+        );
+        assert_eq!(
+            found(&[
+                ("pyproject.toml", ""),
+                ("poetry.lock", LOCK_WITH_PYTEST),
+                ("requirements.txt", "pytest\n")
+            ]),
+            both("poetry run pytest", "poetry install")
+        );
+    }
+
+    #[test]
+    fn maven_and_gradle_use_the_wrapper_they_bring() {
+        assert_eq!(
+            found(&[("pom.xml", "<project/>")]),
+            both("mvn test", "mvn dependency:go-offline")
+        );
+        let maven = guess(repo(&[("pom.xml", "<project/>"), ("mvnw", "#!/bin/sh\n")]).path());
+        assert_eq!(maven.check.as_deref(), Some("./mvnw test"));
+        assert_eq!(maven.setup.as_deref(), Some("./mvnw dependency:go-offline"));
+        assert_eq!(maven.from, ["pom.xml", "mvnw"]);
+
+        assert_eq!(
+            found(&[("build.gradle", "")]),
+            both("gradle test", "gradle testClasses")
+        );
+        let gradle = guess(
+            repo(&[
+                ("settings.gradle.kts", ""),
+                ("build.gradle.kts", ""),
+                ("gradlew", "#!/bin/sh\n"),
+            ])
+            .path(),
+        );
+        assert_eq!(gradle.check.as_deref(), Some("./gradlew test"));
+        assert_eq!(gradle.setup.as_deref(), Some("./gradlew testClasses"));
+        assert_eq!(gradle.from, ["build.gradle.kts", "gradlew"]);
+    }
+
+    fn gem_lock(gems: &str) -> String {
+        format!("GEM\n  remote: https://rubygems.org/\n  specs:\n{gems}\nPLATFORMS\n  ruby\n")
+    }
+
+    #[test]
+    fn bundler_tests_with_rspec_or_minitest() {
+        let rspec = gem_lock("    rspec-core (3.13.0)\n");
+        assert_eq!(
+            found(&[
+                ("Gemfile", "source 'https://rubygems.org'\n"),
+                ("Gemfile.lock", &rspec)
+            ]),
+            both("bundle exec rspec", "bundle install")
+        );
+        assert_eq!(
+            found(&[("Gemfile", "gem 'rspec', '~> 3'\n")]),
+            both("bundle exec rspec", "bundle install")
+        );
+        // Rails brings minitest even when the tests are in RSpec.
+        let both_runners = gem_lock("    minitest (5.25.0)\n    rspec-rails (7.0.0)\n");
+        assert_eq!(
+            found(&[
+                ("Gemfile", ""),
+                ("Gemfile.lock", &both_runners),
+                ("bin/rails", "")
+            ])
+            .0,
+            Some("bundle exec rspec".to_owned())
+        );
+        let rails = gem_lock("    minitest (5.25.0)\n    railties (8.0.0)\n");
+        assert_eq!(
+            found(&[("Gemfile", ""), ("Gemfile.lock", &rails), ("bin/rails", "")]),
+            both("bin/rails test", "bundle install")
+        );
+        let guess = guess(
+            repo(&[
+                ("Gemfile", "gem \"minitest\"\n"),
+                ("Rakefile", "Minitest::TestTask.create\n"),
+            ])
+            .path(),
+        );
+        assert_eq!(guess.check.as_deref(), Some("bundle exec rake test"));
+        assert_eq!(guess.from, ["Gemfile", "Rakefile"]);
+        // minitest with nothing that runs it, or a gem that only starts like one, says nothing.
+        assert_eq!(
+            found(&[("Gemfile", "gem 'minitest'\n")]),
+            setup_only("bundle install")
+        );
+        assert_eq!(
+            found(&[("Gemfile", "gem 'rspecial'\n")]),
+            setup_only("bundle install")
+        );
+    }
+
+    #[test]
+    fn composer_tests_with_its_own_script_or_phpunit() {
+        let phpunit = r#"{"require-dev":{"phpunit/phpunit":"^11"}}"#;
+        assert_eq!(
+            found(&[("composer.json", phpunit)]),
+            both("vendor/bin/phpunit", "composer install")
+        );
+        let script = r#"{"require-dev":{"phpunit/phpunit":"^11"},"scripts":{"test":["@phpunit"]}}"#;
+        assert_eq!(
+            found(&[("composer.json", script), ("composer.lock", "{}")]),
+            both("composer test", "composer install")
+        );
+        for nothing in ["{}", "not json", r#"{"scripts":{"test":""}}"#] {
+            assert_eq!(
+                found(&[("composer.json", nothing)]),
+                setup_only("composer install"),
+                "{nothing}"
+            );
+        }
+    }
+
+    #[test]
+    fn dotnet_is_told_which_solution_or_project() {
+        assert_eq!(
+            found(&[("Shop.sln", ""), ("Shop.csproj", "")]),
+            both("dotnet test Shop.sln", "dotnet restore Shop.sln")
+        );
+        assert_eq!(
+            found(&[("Tool.fsproj", "")]),
+            both("dotnet test Tool.fsproj", "dotnet restore Tool.fsproj")
+        );
+        // With several there's no telling which, and some names can't go in a command.
+        assert_eq!(found(&[("A.sln", ""), ("B.slnx", "")]), (None, None));
+        assert_eq!(found(&[("a b.sln", "")]), (None, None));
+    }
+
+    #[test]
+    fn swift_tests_only_a_package_with_test_targets() {
+        let package = r#"let package = Package(name: "A", targets: [.target(name: "A"), .testTarget(name: "ATests")])"#;
+        assert_eq!(
+            found(&[("Package.swift", package)]),
+            both("swift test", "swift package resolve")
+        );
+        assert_eq!(
+            found(&[("Package.swift", r#"let package = Package(name: "A")"#)]),
+            setup_only("swift package resolve")
+        );
+    }
+
+    #[test]
+    fn dart_and_flutter_test_with_the_package_they_name() {
+        assert_eq!(
+            found(&[(
+                "pubspec.yaml",
+                "name: a\ndev_dependencies:\n  test: ^1.25.0\n"
+            )]),
+            both("dart test", "dart pub get")
+        );
+        let flutter = "name: app\ndependencies:\n  flutter:\n    sdk: flutter\n";
+        assert_eq!(
+            found(&[(
+                "pubspec.yaml",
+                &format!("{flutter}dev_dependencies:\n  flutter_test:\n    sdk: flutter\n")
+            )]),
+            both("flutter test", "flutter pub get")
+        );
+        assert_eq!(
+            found(&[("pubspec.yaml", flutter)]),
+            setup_only("flutter pub get")
+        );
+        assert_eq!(
+            found(&[("pubspec.yaml", "name: a\n")]),
+            setup_only("dart pub get")
+        );
+    }
+
+    #[test]
+    fn mix_is_recognized() {
+        assert_eq!(found(&[("mix.exs", "")]), both("mix test", "mix deps.get"));
+    }
+
+    #[test]
+    fn deno_tests_with_its_test_task() {
+        let config = r#"{"tasks":{"test":"deno test -A","lint":"deno lint","dev":"deno run --watch main.ts"}}"#;
+        let guess = guess(repo(&[("deno.json", config)]).path());
+        assert_eq!(guess.check.as_deref(), Some("deno task test"));
+        assert_eq!(guess.setup.as_deref(), Some("deno install"));
+        assert_eq!(
+            guess.check_options,
+            [
+                "deno task lint",
+                "deno task test",
+                "deno task lint && deno task test"
+            ]
+        );
+        assert_eq!(guess.from, ["deno.json"]);
+        // The longer way of writing a task.
+        assert_eq!(
+            found(&[("deno.json", r#"{"tasks":{"test":{"command":"deno test"}}}"#)]).0,
+            Some("deno task test".to_owned())
+        );
+        // Without a task nothing says how, and a bare `deno test` fails where there are no tests.
+        assert_eq!(
+            found(&[("deno.jsonc", "// comment\n{}")]),
+            setup_only("deno install")
+        );
+    }
+
+    #[test]
+    fn bun_runs_the_test_script_and_not_its_own_runner() {
+        // `bun test` is Bun's runner, which doesn't run the script.
+        assert_eq!(
+            found(&[("package.json", WITH_TEST), ("bun.lock", "")]),
+            both("bun run test", "bun install --frozen-lockfile")
+        );
+        let guess = guess(repo(&[("package.json", PNPM_BOTH), ("bun.lockb", "")]).path());
+        assert_eq!(
+            guess.check.as_deref(),
+            Some("bun run typecheck && bun run test")
+        );
+        assert_eq!(
+            guess.check_options,
+            [
+                "bun run test",
+                "bun run typecheck",
+                "bun run test && bun run typecheck"
+            ]
+        );
+        assert_eq!(guess.from, ["package.json", "bun.lockb"]);
+    }
+
+    #[test]
+    fn the_new_stacks_chain_like_the_others() {
+        let guess = guess(
+            repo(&[
+                ("package.json", WITH_TEST),
+                ("pnpm-lock.yaml", ""),
+                ("pom.xml", ""),
+                ("mix.exs", ""),
+            ])
+            .path(),
+        );
+        assert_eq!(
+            guess.setup.as_deref(),
+            Some("pnpm install --frozen-lockfile && mvn dependency:go-offline && mix deps.get")
+        );
+        assert_eq!(
+            guess.check.as_deref(),
+            Some("pnpm test && mvn test && mix test")
+        );
+        assert!(!guess.from_ci);
     }
 
     const PNPM_BOTH: &str = r#"{"scripts":{"test":"vitest","typecheck":"tsc"}}"#;

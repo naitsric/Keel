@@ -1061,6 +1061,7 @@
     "canAdd": "You can also add:",
     "addOption": "Add {{option}}",
     "guessed": "Guessed from {{files}}.",
+    "fromCi": "Taken from your CI: {{files}}.",
     "noGuess": "Keel couldn't tell how this project tests itself, so these are empty.",
     "tryNote": "Trying it uses no tokens.",
     "noCheckNote": "Without a check, runs go out unverified.",
