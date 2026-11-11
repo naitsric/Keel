@@ -12,8 +12,8 @@ use keel_core::{
 };
 use keel_engine::{
     Error, Finding, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
-    can_send_back, files_changed, findings_of, request_from_issue, skipped_steps, spec_of_attempt,
-    verification_of_attempt,
+    can_send_back, files_changed, findings_of, limits_with_ids, request_from_issue, skipped_steps,
+    spec_of_attempt, verification_of_attempt,
 };
 use keel_store::{Attempt, MAX_OPEN_RUNS_CEILING, McpClient, NewMcpCall, Project, Run};
 use schemars::JsonSchema;
@@ -1902,9 +1902,8 @@ fn step_overview(attempt: &Attempt, long: &LongParts) -> Json {
     view["brainReceived"] = attempt.system_prompt_sources.clone();
     let mut left_out = serde_json::Map::new();
     // Its structured answer as Keel read it, which Keel may have corrected, or else what it wrote.
-    match &attempt.output {
+    match answer_of(attempt) {
         Some(output) => {
-            let output = mask_value(output.clone());
             if output.to_string().len() <= MAX_ANSWER {
                 view["output"] = output;
             } else {
@@ -1971,11 +1970,21 @@ fn step_overview(attempt: &Attempt, long: &LongParts) -> Json {
 
 /// What an attempt answered, as text: its structured answer as Keel read it, laid out, or else
 /// what it wrote. Masked.
+/// An attempt's structured answer, masked. A specification's limits come with the id a finding
+/// names them by, as agents get them.
+fn answer_of(attempt: &Attempt) -> Option<Json> {
+    let output = attempt.output.clone()?;
+    let output = if attempt.role == "specifier" {
+        limits_with_ids(output)
+    } else {
+        output
+    };
+    Some(mask_value(output))
+}
+
 fn answer_text(attempt: &Attempt) -> String {
-    match &attempt.output {
-        Some(output) => {
-            serde_json::to_string_pretty(&mask_value(output.clone())).unwrap_or_default()
-        }
+    match answer_of(attempt) {
+        Some(output) => serde_json::to_string_pretty(&output).unwrap_or_default(),
         None => attempt
             .result_text
             .as_deref()
@@ -2778,6 +2787,30 @@ mod tests {
         assert_eq!(
             step_overview(&new, &parts)["output"]["findings"][0]["breaks"],
             "C5"
+        );
+    }
+
+    #[test]
+    fn get_step_shows_the_specifications_limits_by_the_id_a_finding_names_them_by() {
+        let mut spec = attempt("spec", 1);
+        spec.role = "specifier".into();
+        spec.output =
+            Some(json!({ "summary": "s", "criteria": [], "limits": ["Stays", "Also stays"] }));
+        let parts = LongParts {
+            prompt: String::new(),
+            diff: None,
+            printed: None,
+        };
+        let limits = json!([{ "id": "L1", "text": "Stays" }, { "id": "L2", "text": "Also stays" }]);
+        assert_eq!(step_overview(&spec, &parts)["output"]["limits"], limits);
+        let whole: Json = serde_json::from_str(&answer_text(&spec)).unwrap();
+        assert_eq!(whole["limits"], limits);
+        // Anything else's answer is as it was kept.
+        let mut other = attempt("spec", 1);
+        other.output = spec.output.clone();
+        assert_eq!(
+            step_overview(&other, &parts)["output"]["limits"],
+            json!(["Stays", "Also stays"])
         );
     }
 

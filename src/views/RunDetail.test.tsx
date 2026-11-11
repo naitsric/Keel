@@ -553,13 +553,14 @@ describe("the approval card", () => {
 
   describe("what the reviews found", () => {
     const found = (stepId: string, findings: unknown[]) => attempt({ id: stepId, stepId, role: "reviewer", output: { verdict: "changes", findings, summary: "Two things.", unread: [], unchecked: [] } as unknown as Attempt["output"] });
-    const both = () => [builder(["calc.py"]), check, found("security", ["app/api.py:42 doesn't call require_role"]), found("code", [{ file: "calc.py", line: 3, text: "Subtracts when one is negative", breaks: "C2" }, { file: "test_calc.py", line: null, text: "The test name could say more", breaks: null }]), human];
+    const asked = specifier({ criteria: [{ id: "C2", when: "one is negative", then: "it still adds" }] });
+    const both = () => [asked, builder(["calc.py"]), check, found("security", ["app/api.py:42 doesn't call require_role"]), found("code", [{ file: "calc.py", line: 3, text: "Subtracts when one is negative", breaks: "C2" }, { file: "test_calc.py", line: null, text: "The test name could say more", breaks: null }, { file: "calc.py", line: 9, text: "Names what isn't there", breaks: "C9" }]), human];
     const items = () => [...document.querySelectorAll('[role="dialog"] li li')].map((li) => li.textContent);
 
     it("shows text from before Keel asked as it was, and what a finding breaks before where it is", () => {
       show(both(), ["calc.py"]);
       press("See the reviews");
-      expect(items()).toEqual(["app/api.py:42 doesn't call require_role", "Breaks C2. calc.py:3 Subtracts when one is negative", "test_calc.py The test name could say more"]);
+      expect(items()).toEqual(["app/api.py:42 doesn't call require_role", "Breaks C2. calc.py:3 Subtracts when one is negative", "test_calc.py The test name could say more", "calc.py:9 Names what isn't there"]);
     });
 
     it("says it in Spanish too", async () => {

@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, breakableIds, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -1414,6 +1414,8 @@ function ApproverVerdict({ output, riskClass = "text-subtle" }: { output: NonNul
 function ReviewsList({ attempts, round }: { attempts: Attempt[]; round: number }) {
   const { t } = useTranslation();
   const { reviewers, approver } = reviewsOfRound(attempts, round);
+  const asked = specifyingAttempt(attempts);
+  const breakable = breakableIds(asked ? specOf(asked) : null);
   // A person can ask for a review that was skipped, and then that's what became of it.
   return (
     <>
@@ -1428,9 +1430,9 @@ function ReviewsList({ attempts, round }: { attempts: Attempt[]; round: number }
             {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
             {(review.output?.unread ?? []).length > 0 && <p className="selectable mt-0.5 text-warning">{t("run.unreadFiles", { files: review.output?.unread?.join(", ") })}</p>}
             {uncheckedOf(review.output).length > 0 && <p className="selectable mt-0.5 text-muted">{t("run.reviewUnchecked", { items: uncheckedOf(review.output).join("; ") })}</p>}
-            {findingsOf(review.output).length > 0 && (
+            {findingsOf(review.output, breakable).length > 0 && (
               <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 text-muted">
-                {findingsOf(review.output).map((finding, index) => (
+                {findingsOf(review.output, breakable).map((finding, index) => (
                   // A review's list, in its order: two findings can say the same.
                   <li key={index}>
                     {finding.breaks && <span className="font-medium text-warning">{t("run.findingBreaks", { id: finding.breaks })} </span>}

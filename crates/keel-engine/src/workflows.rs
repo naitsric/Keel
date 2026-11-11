@@ -99,11 +99,26 @@ pub struct NotAnApproval {
     pub breaks: Vec<String>,
 }
 
+/// What a finding can say the change breaks: each criterion of the latest specification, by its id,
+/// and each of its limits, from `L1`. Without a specifier's answer there's nothing to break.
+pub fn breakable_ids(attempts: &[Attempt]) -> Vec<String> {
+    let Some(spec) = specifying_attempt(attempts).and_then(specs::of_attempt) else {
+        return Vec::new();
+    };
+    let limits = (1..=spec.limits.len()).map(|number| format!("L{number}"));
+    spec.criteria
+        .into_iter()
+        .map(|criterion| criterion.id)
+        .chain(limits)
+        .collect()
+}
+
 /// What a reviewer answered, as Keel keeps it. One that says it couldn't read part of the change
 /// didn't review all of it, and one that says the change breaks a criterion or a limit found a
 /// reason not to approve it, however minor it called it. Neither is an approval, whatever it says.
-/// `None` if it stands.
-pub fn review_as_kept(output: &Value) -> Option<(Value, NotAnApproval)> {
+/// Only what's in `breakable` counts as broken: an id the specification doesn't have stays in the
+/// finding, and breaks nothing. `None` if it stands.
+pub fn review_as_kept(output: &Value, breakable: &[String]) -> Option<(Value, NotAnApproval)> {
     if output.get("verdict")? != "approved" {
         return None;
     }
@@ -120,6 +135,7 @@ pub fn review_as_kept(output: &Value) -> Option<(Value, NotAnApproval)> {
     let mut breaks: Vec<String> = Vec::new();
     for finding in findings_of(output) {
         if let Some(id) = finding.breaks()
+            && breakable.iter().any(|known| known == id)
             && !breaks.iter().any(|seen| seen == id)
         {
             breaks.push(id.to_owned());
@@ -134,17 +150,22 @@ pub fn review_as_kept(output: &Value) -> Option<(Value, NotAnApproval)> {
 }
 
 /// What the latest review of each step says the change breaks, for the approver to read apart: a
-/// review can call it minor and approve. Empty if none says so.
+/// review can call it minor and approve. Only what the specification has counts. Empty if none
+/// says so.
 pub fn broken_text(attempts: &[Attempt], language: &str) -> String {
     let es = language.starts_with("es");
     let breaks = if es { "rompe" } else { "breaks" };
+    let breakable = breakable_ids(attempts);
     let lines: Vec<String> = attempts
         .iter()
         .filter(|a| a.role == "reviewer" && is_latest_of_its_step(attempts, a))
         .filter_map(|a| Some((&a.step_id, findings_of(a.output.as_ref()?))))
         .flat_map(|(step, findings)| {
+            let breakable = &breakable;
             findings.into_iter().filter_map(move |finding| {
-                let id = finding.breaks()?;
+                let id = finding
+                    .breaks()
+                    .filter(|id| breakable.iter().any(|known| known == id))?;
                 Some(format!(
                     "- {step}: {breaks} {id}. {}",
                     finding.where_and_what()
@@ -155,10 +176,11 @@ pub fn broken_text(attempts: &[Attempt], language: &str) -> String {
     if lines.is_empty() {
         return String::new();
     }
+    // What the specification decided alone stays the person's to settle, as the approver is told.
     let intro = if es {
-        "Estos hallazgos dicen que el cambio rompe un criterio o un límite de la especificación. Cada uno es motivo de rework, salvo que digas en reasons dónde lo cumple el código, con archivo y línea:"
+        "Estos hallazgos dicen que el cambio rompe un criterio o un límite de la especificación. Cada uno es motivo de rework, salvo que digas en reasons dónde lo cumple el código, con archivo y línea. Uno que cuestiona lo que la especificación decidió por su cuenta, en `decided`, no lo es: ponlo en `questioned` y di en why cuál rompería, para que lo decida la persona:"
     } else {
-        "These findings say the change breaks a criterion or a limit of the specification. Each one is a reason for rework, unless you say in reasons where the code meets it, with file and line:"
+        "These findings say the change breaks a criterion or a limit of the specification. Each one is a reason for rework, unless you say in reasons where the code meets it, with file and line. One that questions what the specification decided on its own, in `decided`, isn't: put it in `questioned`, and say in why which one it would break, for the person to decide:"
     };
     format!("{intro}\n{}", lines.join("\n"))
 }
@@ -486,7 +508,7 @@ fn numbered_decided(output: &Value) -> Value {
 /// A specification with each of its limits as an id and its text, from `L1`, in the order the person
 /// sees them. They have no id of their own, and a review names the one a change breaks by it, as it
 /// does a criterion.
-fn limits_with_ids(mut output: Value) -> Value {
+pub fn limits_with_ids(mut output: Value) -> Value {
     if let Some(limits) = output.get_mut("limits").and_then(Value::as_array_mut) {
         for (index, limit) in limits.iter_mut().enumerate() {
             if let Some(text) = limit.as_str() {
@@ -2231,22 +2253,26 @@ mod tests {
     #[test]
     fn a_review_that_left_part_of_the_change_unread_is_never_an_approval() {
         let review = |verdict: &str, unread: Value| serde_json::json!({ "verdict": verdict, "findings": [], "summary": "Fine", "unread": unread });
+        let kept_as = |output: &Value| review_as_kept(output, &[]);
         let (kept, why) =
-            review_as_kept(&review("approved", serde_json::json!(["src/b.ts", " "]))).unwrap();
+            kept_as(&review("approved", serde_json::json!(["src/b.ts", " "]))).unwrap();
         assert_eq!(kept["verdict"], "changes");
         assert_eq!(kept["summary"], "Fine");
         assert_eq!(why.unread, ["src/b.ts"]);
         assert!(why.breaks.is_empty());
         // Read it all, or already asking for changes, or from before Keel asked: it stands.
-        assert!(review_as_kept(&review("approved", serde_json::json!([]))).is_none());
-        assert!(review_as_kept(&review("approved", serde_json::json!(["  "]))).is_none());
-        assert!(review_as_kept(&review("changes", serde_json::json!(["src/b.ts"]))).is_none());
+        assert!(kept_as(&review("approved", serde_json::json!([]))).is_none());
+        assert!(kept_as(&review("approved", serde_json::json!(["  "]))).is_none());
+        assert!(kept_as(&review("changes", serde_json::json!(["src/b.ts"]))).is_none());
         assert!(
-            review_as_kept(
-                &serde_json::json!({ "verdict": "approved", "findings": [], "summary": "" })
-            )
-            .is_none()
+            kept_as(&serde_json::json!({ "verdict": "approved", "findings": [], "summary": "" }))
+                .is_none()
         );
+    }
+
+    /// The criteria and limits of a specification with two of each.
+    fn breakable() -> Vec<String> {
+        ["C1", "C5", "L1", "L2"].map(str::to_owned).to_vec()
     }
 
     #[test]
@@ -2254,29 +2280,81 @@ mod tests {
         use serde_json::json;
         let review = |verdict: &str, findings: Value| json!({ "verdict": verdict, "findings": findings, "summary": "Fine", "unread": [] });
         let found = |breaks: Value| json!({ "file": "src/jobs.py", "line": 42, "text": "Sends the notice twice", "breaks": breaks });
+        let kept_as = |output: &Value| review_as_kept(output, &breakable());
         let findings = json!([
             found(json!("C5")),
             found(Value::Null),
             found(json!(" L2 ")),
             found(json!("C5"))
         ]);
-        let (kept, why) = review_as_kept(&review("approved", findings.clone())).unwrap();
+        let (kept, why) = kept_as(&review("approved", findings.clone())).unwrap();
         assert_eq!(kept["verdict"], "changes");
         assert_eq!(kept["findings"], findings);
         assert_eq!(why.breaks, ["C5", "L2"]);
         assert!(why.unread.is_empty());
         // Only minor ones, or text from before Keel asked, or already asking for changes: it stands.
         let minor = json!([found(Value::Null), found(json!(" "))]);
-        assert!(review_as_kept(&review("approved", minor)).is_none());
+        assert!(kept_as(&review("approved", minor)).is_none());
         let old = json!(["src/jobs.py:42 breaks C5"]);
-        assert!(review_as_kept(&review("approved", old)).is_none());
+        assert!(kept_as(&review("approved", old)).is_none());
         let asked = json!([found(json!("C5"))]);
-        assert!(review_as_kept(&review("changes", asked)).is_none());
+        assert!(kept_as(&review("changes", asked)).is_none());
         // Both at once, and each reason is kept.
         let both = json!({ "verdict": "approved", "findings": [found(json!("C1"))], "summary": "" , "unread": ["src/b.ts"] });
-        let (_, why) = review_as_kept(&both).unwrap();
+        let (_, why) = kept_as(&both).unwrap();
         assert_eq!(why.unread, ["src/b.ts"]);
         assert_eq!(why.breaks, ["C1"]);
+    }
+
+    #[test]
+    fn what_the_specification_does_not_have_breaks_nothing() {
+        use serde_json::json;
+        let review = |breaks: &[&str]| {
+            let findings: Vec<Value> = breaks
+                .iter()
+                .map(|id| json!({ "file": "a.py", "line": 1, "text": "Something", "breaks": id }))
+                .collect();
+            json!({ "verdict": "approved", "findings": findings, "summary": "Fine", "unread": [] })
+        };
+        // An id it doesn't have, a limit past its last one, or words: the approval stands.
+        for unknown in ["C9", "L3", "3", "none", "c5"] {
+            assert!(
+                review_as_kept(&review(&[unknown]), &breakable()).is_none(),
+                "{unknown}"
+            );
+        }
+        // Only what it has counts, and the rest stays in the finding.
+        let output = review(&["C9", "C5"]);
+        let (kept, why) = review_as_kept(&output, &breakable()).unwrap();
+        assert_eq!(why.breaks, ["C5"]);
+        assert_eq!(kept["findings"], output["findings"]);
+        // Without a specification, nothing can be broken.
+        assert!(review_as_kept(&review(&["C5"]), &[]).is_none());
+    }
+
+    #[test]
+    fn what_can_be_broken_is_each_criterion_of_the_latest_specification_and_each_limit() {
+        let mut attempts = recorded(&[
+            ("spec", "agent", "specifier", Succeeded, ""),
+            ("spec", "agent", "specifier", Succeeded, ""),
+            ("builder", "agent", "worker", Succeeded, ""),
+        ]);
+        let spec = |criteria: &[&str], limits: &[&str]| {
+            let criteria: Vec<Value> = criteria
+                .iter()
+                .map(|id| serde_json::json!({ "id": id, "when": "w", "then": "t" }))
+                .collect();
+            serde_json::json!({ "summary": "s", "criteria": criteria, "limits": limits })
+        };
+        attempts[0].output = Some(spec(&["C1"], &[]));
+        attempts[1].output = Some(spec(&["C1", "C2", "K1"], &["Stays", "Also stays"]));
+        assert_eq!(
+            breakable_ids(&attempts),
+            ["C1", "C2", "K1", "L1", "L2"].map(str::to_owned)
+        );
+        // Without a specifier, a step called `spec` wrote free text that names nothing.
+        let text = recorded(&[("spec", "agent", "worker", Succeeded, "C1: add works")]);
+        assert!(breakable_ids(&text).is_empty());
     }
 
     #[test]
@@ -2331,22 +2409,29 @@ mod tests {
     fn what_a_review_says_is_broken_reaches_the_approver_apart() {
         use serde_json::json;
         let mut attempts = recorded(&[
+            ("spec", "agent", "specifier", Succeeded, ""),
             ("code", "agent", "reviewer", Succeeded, ""),
             ("security", "agent", "reviewer", Succeeded, ""),
             ("ux", "agent", "reviewer", Succeeded, ""),
             ("code", "agent", "reviewer", Succeeded, ""),
         ]);
-        attempts[0].output = Some(json!({ "verdict": "changes", "findings": [
+        attempts[0].output = Some(json!({
+            "summary": "s", "limits": ["Its signature stays", "No new dependency"],
+            "criteria": [{ "id": "C1", "when": "w", "then": "t" }, { "id": "C5", "when": "w", "then": "t" }],
+        }));
+        attempts[1].output = Some(json!({ "verdict": "changes", "findings": [
             { "file": "old.py", "line": 1, "text": "From an earlier try", "breaks": "C1" },
         ]}));
-        attempts[1].output =
+        attempts[2].output =
             Some(json!({ "verdict": "approved", "findings": ["a.py:1 text from before"] }));
-        attempts[2].output = Some(json!({ "verdict": "approved", "findings": [
+        attempts[3].output = Some(json!({ "verdict": "approved", "findings": [
             { "file": "src/a.tsx", "line": null, "text": "Could be shorter", "breaks": null },
         ]}));
-        attempts[3].output = Some(json!({ "verdict": "changes", "findings": [
+        attempts[4].output = Some(json!({ "verdict": "changes", "findings": [
             { "file": "src/jobs.py", "line": 42, "text": "Sends the notice twice", "breaks": "C5" },
+            { "file": "src/a.py", "line": 7, "text": "Names a criterion it doesn't have", "breaks": "C9" },
             { "file": null, "line": null, "text": "Changes the public API", "breaks": "L2" },
+            { "file": null, "line": null, "text": "Past the last limit", "breaks": "L3" },
         ]}));
         let en = broken_text(&attempts, "en");
         assert!(
@@ -2359,7 +2444,7 @@ mod tests {
             en.contains("unless you say in reasons where the code meets it"),
             "{en}"
         );
-        for left_out in ["earlier try", "Could be shorter", "from before"] {
+        for left_out in ["earlier try", "Could be shorter", "from before", "C9", "L3"] {
             assert!(!en.contains(left_out), "{left_out}");
         }
         let es = broken_text(&attempts, "es");
@@ -2371,8 +2456,50 @@ mod tests {
             es.contains("salvo que digas en reasons dónde lo cumple el código"),
             "{es}"
         );
-        // Nothing broken, nothing to say.
-        assert_eq!(broken_text(&attempts[1..3], "en"), "");
+        // Nothing broken, or nothing to break without a specification: nothing to say.
+        let quiet = [
+            attempts[0].clone(),
+            attempts[2].clone(),
+            attempts[3].clone(),
+        ];
+        assert_eq!(broken_text(&quiet, "en"), "");
+        assert_eq!(broken_text(&attempts[1..], "en"), "");
+    }
+
+    /// What the specification decided on its own is the person's to settle, even when a review
+    /// says it breaks a criterion: the approver doesn't send it back, it shows the person why.
+    #[test]
+    fn what_breaks_a_criterion_by_what_was_decided_alone_still_goes_to_the_person() {
+        use serde_json::json;
+        let mut attempts = recorded(&[
+            ("spec", "agent", "specifier", Succeeded, ""),
+            ("code", "agent", "reviewer", Succeeded, ""),
+        ]);
+        attempts[0].output = Some(json!({
+            "summary": "s", "criteria": [{ "id": "C5", "when": "w", "then": "t" }],
+            "decided": [{ "text": "Marks the alert sent after publishing, without a lock" }],
+        }));
+        attempts[1].output = Some(json!({ "verdict": "changes", "findings": [
+            { "file": "jobs.py", "line": 9, "text": "Two runs can send it twice", "breaks": "C5" },
+        ]}));
+        for (language, told) in [
+            (
+                "en",
+                "One that questions what the specification decided on its own, in `decided`, isn't: put it in `questioned`, and say in why which one it would break",
+            ),
+            (
+                "es",
+                "Uno que cuestiona lo que la especificación decidió por su cuenta, en `decided`, no lo es: ponlo en `questioned` y di en why cuál rompería",
+            ),
+        ] {
+            let text = broken_text(&attempts, language);
+            assert!(text.contains(told), "{language}: {text}");
+            // Before the list, so the list can't read as the last word.
+            assert!(
+                text.find(told) < text.find("\n- code"),
+                "{language}: {text}"
+            );
+        }
     }
 
     #[test]

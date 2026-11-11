@@ -1402,12 +1402,16 @@ impl Inner {
     /// limit, isn't an approval of it, and the record says why. What it answered as it came stays
     /// in the `result` event.
     fn correct_review(&self, m: &Monitor) {
-        let Some((kept, why)) = self
-            .store
-            .attempt(&m.attempt_id)
-            .ok()
-            .and_then(|attempt| attempt.output)
-            .and_then(|output| workflows::review_as_kept(&output))
+        let Ok(attempts) = self.store.attempts_of_run(&m.run_id) else {
+            return;
+        };
+        let Some((kept, why)) = attempts
+            .iter()
+            .find(|a| a.id == m.attempt_id)
+            .and_then(|attempt| attempt.output.as_ref())
+            .and_then(|output| {
+                workflows::review_as_kept(output, &workflows::breakable_ids(&attempts))
+            })
         else {
             return;
         };

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { Attempt, AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, findingsOf, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, breakableIds, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, findingsOf, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -358,6 +358,13 @@ describe("what the reviews couldn't check by reading the code", () => {
 });
 
 describe("what a review found", () => {
+  const breakable = breakableIds({ summary: "s", criteria: [{ id: "C1", when: "w", then: "t" }, { id: "C2", when: "w", then: "t" }], changes: [], limits: ["Its signature stays"], decided: [], questions: [] });
+
+  it("can break each criterion of the specification, and each of its limits from L1", () => {
+    expect(breakable).toEqual(["C1", "C2", "L1"]);
+    expect(breakableIds(null)).toEqual([]);
+  });
+
   it("reads text from before Keel asked, and where it is and what it breaks now", () => {
     const output = {
       verdict: "changes",
@@ -370,7 +377,7 @@ describe("what a review found", () => {
         null,
       ],
     };
-    expect(findingsOf(output)).toEqual([
+    expect(findingsOf(output, breakable)).toEqual([
       { where: null, text: "app/api.py:42 doesn't call require_role", breaks: null },
       { where: "calc.py:3", text: "Subtracts when one is negative", breaks: "C2" },
       { where: "test_calc.py", text: "The test name could say more", breaks: null },
@@ -378,10 +385,16 @@ describe("what a review found", () => {
     ]);
   });
 
+  it("says nothing breaks when the specification has no such criterion or limit, as Keel does", () => {
+    const output = { findings: [{ file: "a.py", line: 1, text: "Something", breaks: "C9" }, { file: "a.py", line: 2, text: "Past the last limit", breaks: "L2" }, { file: "a.py", line: 3, text: "Words", breaks: "none" }] };
+    expect(findingsOf(output, breakable).map((finding) => finding.breaks)).toEqual([null, null, null]);
+    expect(findingsOf({ findings: [{ file: "a.py", line: 1, text: "Something", breaks: "C1" }] }, []).map((finding) => finding.breaks)).toEqual([null]);
+  });
+
   it("is nothing for an answer it can't read", () => {
-    expect(findingsOf(null)).toEqual([]);
-    expect(findingsOf({ verdict: "approved" })).toEqual([]);
-    expect(findingsOf({ findings: "Not a list" })).toEqual([]);
+    expect(findingsOf(null, breakable)).toEqual([]);
+    expect(findingsOf({ verdict: "approved" }, breakable)).toEqual([]);
+    expect(findingsOf({ findings: "Not a list" }, breakable)).toEqual([]);
   });
 });
 

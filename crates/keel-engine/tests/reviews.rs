@@ -77,7 +77,9 @@ REVIEW-UNREAD*)
 REVIEW-BREAKS*)
   result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{{"verdict":"approved","findings":[{{"file":"built.tsx","line":1,"text":"Sends the notice twice","breaks":"C5"}}],"summary":"Only minor things","unread":[]}}}}';;
 REVIEW-MINOR*)
-  result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{{"verdict":"approved","findings":[{{"file":"built.tsx","line":1,"text":"Could be shorter","breaks":null}}],"summary":"Fine","unread":[]}}}}';;
+  result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{{"verdict":"approved","findings":[{{"file":"built.tsx","line":1,"text":"Could be shorter","breaks":null}},{{"file":"built.tsx","line":2,"text":"Names what the spec lacks","breaks":"C9"}}],"summary":"Fine","unread":[]}}}}';;
+SPEC*)
+  result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{{"summary":"Sends each notice once","criteria":[{{"id":"C5","when":"two runs overlap","then":"the notice goes once"}}],"changes":[],"limits":["The schema stays"],"decided":[],"questions":[]}}}}';;
 REVIEW-NOANSWER*)
   result='{{"type":"result","subtype":"success","is_error":false,"result":"I looked.","num_turns":1}}';;
 REVIEW*)
@@ -1033,6 +1035,17 @@ fn a_review_that_says_a_criterion_is_broken_is_not_an_approval_and_the_approver_
             "APPROVE\nsecurity={{steps.security.output}}",
         )),
     );
+    // What can be broken is what the specification has: C5 and L1.
+    steps.insert(
+        0,
+        WorkflowStep::Agent(spec(
+            "spec",
+            ToolProfile::ReadOnly,
+            StepRole::Specifier,
+            &[],
+            "SPEC {{request}}",
+        )),
+    );
     let run = w.start(steps);
     w.wait(&run, "human", AttemptState::WaitingApproval);
 
@@ -1052,9 +1065,11 @@ fn a_review_that_says_a_criterion_is_broken_is_not_an_approval_and_the_approver_
         result.data
     );
 
-    // One whose findings break nothing stands as it said.
+    // One whose findings break nothing the specification has stands as it said, and keeps them.
     let minor = w.all(&run, "ux").pop().unwrap();
-    assert_eq!(minor.output.unwrap()["verdict"], "approved");
+    let output = minor.output.unwrap();
+    assert_eq!(output["verdict"], "approved");
+    assert_eq!(output["findings"][1]["breaks"], "C9");
     let events = w.store.events(&minor.id, 0).unwrap();
     assert!(events.iter().all(|e| e.kind != "reviewBreaks"));
 
@@ -1072,4 +1087,5 @@ fn a_review_that_says_a_criterion_is_broken_is_not_an_approval_and_the_approver_
         "{}",
         approver.prompt
     );
+    assert!(!approver.prompt.contains("C9"), "{}", approver.prompt);
 }

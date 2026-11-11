@@ -204,7 +204,7 @@ const previewQuestioned = [
 ];
 // unchecked=1: what the code review couldn't check by reading the code.
 const previewUnchecked = uncheckedShown ? [say("How the invoices page shows the new totals", "Cómo se ven los totales nuevos en la página de facturas"), say("That the export still opens in the accounting app", "Que la exportación siga abriendo en el programa de contabilidad")] : [];
-const useSpecifier = params.get("specifier") === "1" || questionedShown;
+const useSpecifier = params.get("specifier") === "1" || questionedShown || params.get("findings") === "breaks";
 const specAttempt: Attempt = { ...attempt, id: "a0", stepId: "spec", role: useSpecifier ? "specifier" : "worker", tools: "readOnly", state: "succeeded", reason: null, modelActual: "claude-opus-5-5", filesChanged: null, output: useSpecifier ? (previewSpec as unknown as Attempt["output"]) : null, resultText: useSpecifier ? "" : long ? askedLong : "1. add returns the sum.\n2. The tests pass.", finishedAt: at(2) };
 const previewQuestions = [
   {
@@ -281,22 +281,23 @@ const verifierOutput = () => ({ criteria: verifiedItems(), summary: atLimit(say(
 const verifierAttempt = (s: AttemptState, fields: Partial<Attempt> = {}): Attempt => ({ ...attempt, id: "v1", stepId: "verify", role: "verifier", round: verifyMode === "old" ? 0 : round, tools: "readOnly", state: s, reason: null, filesChanged: null, resultText: null, finishedAt: at(1), output: s === "succeeded" ? verifierOutput() : null, ...fields });
 const verifiedAttempts = verifyMode !== null ? [verifierAttempt("succeeded")] : [];
 // findings=1 has the security review find a problem, as text, the way reviews wrote them before Keel
-// asked where each is and what it breaks. findings=breaks adds the code review calling two things
-// minor, one of which breaks C2: Keel keeps it as asking for changes, and node=code says why in its
-// Activity.
+// asked where each is and what it breaks. findings=breaks adds the code review calling three things
+// minor: one breaks C2, so Keel keeps it as asking for changes and node=code says why in its
+// Activity, and one names C9, which the specification doesn't have, so it breaks nothing.
 const breaksShown = params.get("findings") === "breaks";
 const securityFinds = params.get("findings") === "1" || breaksShown;
 const codeFindings: Finding[] = breaksShown
   ? [
       { file: "calc.py", line: 3, text: say("Still subtracts when one argument is negative", "Sigue restando cuando un argumento es negativo"), breaks: "C2" },
       { file: "test_calc.py", line: null, text: say("The test's name could say which case it covers", "El nombre de la prueba podría decir qué caso cubre"), breaks: null },
+      { file: "calc.py", line: 9, text: say("The docstring doesn't mention decimals", "El docstring no menciona los decimales"), breaks: "C9" },
     ]
   : [];
 const reviews: Attempt[] = [
   reviewer("security", securityFinds ? "changes" : "approved", securityFinds ? "The new endpoint skips the role check." : "No problems in authorization, logs or input handling.", securityFinds ? ["app/api.py:42 doesn't call require_role"] : []),
   skippedReviewer("ux"),
   skippedReviewer("ui"),
-  reviewer("code", breaksShown ? "changes" : "approved", breaksShown ? say("Two minor things, nothing that blocks.", "Dos cosas menores, nada que bloquee.") : "It meets each criterion, and the tests prove it.", codeFindings, previewUnchecked),
+  reviewer("code", breaksShown ? "changes" : "approved", breaksShown ? say("Minor things, nothing that blocks.", "Cosas menores, nada que bloquee.") : "It meets each criterion, and the tests prove it.", codeFindings, previewUnchecked),
   approverAttempt(securityFinds ? "rework" : "approve"),
 ];
 const built = [builtAttempt, ...(round > 0 ? [reworkAttempt] : [])];

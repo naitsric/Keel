@@ -264,8 +264,14 @@ export interface FindingShown {
   breaks: string | null;
 }
 
-/** What one review found, old text included. Anything else is left out. */
-export function findingsOf(output: unknown): FindingShown[] {
+/** What a finding can say the change breaks: each criterion of the specification, and each of its limits from `L1`. */
+export function breakableIds(spec: SpecOutput | null): string[] {
+  if (!spec) return [];
+  return [...spec.criteria.map((criterion) => criterion.id), ...spec.limits.map((_, index) => `L${index + 1}`)];
+}
+
+/** What one review found, old text included. Anything else is left out. As for Keel, only what's in `breakable` breaks anything. */
+export function findingsOf(output: unknown, breakable: string[]): FindingShown[] {
   const findings = (output as { findings?: unknown } | null)?.findings;
   if (!Array.isArray(findings)) return [];
   const filled = (value: unknown) => (typeof value === "string" && value.trim() !== "" ? value.trim() : null);
@@ -274,7 +280,8 @@ export function findingsOf(output: unknown): FindingShown[] {
     if (!finding || typeof finding !== "object") return [];
     const { file, line, text, breaks } = finding as Record<string, unknown>;
     const at = filled(file);
-    return [{ where: at && typeof line === "number" ? `${at}:${line}` : at, text: typeof text === "string" ? text : "", breaks: filled(breaks) }];
+    const id = filled(breaks);
+    return [{ where: at && typeof line === "number" ? `${at}:${line}` : at, text: typeof text === "string" ? text : "", breaks: id && breakable.includes(id) ? id : null }];
   });
 }
 

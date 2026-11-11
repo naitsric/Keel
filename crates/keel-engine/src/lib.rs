@@ -51,7 +51,9 @@ pub use specs::of_attempt as spec_of_attempt;
 pub use specs::{Answer, AnswerChoice, Spec};
 pub use verification::of_attempt as verification_of_attempt;
 pub use verification::{Outcome, Verification};
-pub use workflows::{Finding, Workflow, WorkflowDraft, can_send_back, files_changed, findings_of};
+pub use workflows::{
+    Finding, Workflow, WorkflowDraft, can_send_back, files_changed, findings_of, limits_with_ids,
+};
 
 const RESUME_PROMPT: &str = "Continue where you left off.";
 
