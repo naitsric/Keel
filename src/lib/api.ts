@@ -292,9 +292,8 @@ export interface SpecQuestion {
 
 export interface SpecDecided {
   text: string;
-  /** Who settled it, if it was once a question: a person, or Keel when the rounds of them ran out. Or the person in the request, which `quote` has word for word. */
+  /** Who settled it, if it was once a question: a person, or Keel when the rounds of them ran out. Or the request, in a list of what was already decided, which `text` is word for word. */
   taken?: "person" | "roundsLimit" | "request";
-  quote?: string;
   /** The assistant that wrote that request for the person, when one did. */
   assistant?: string;
 }

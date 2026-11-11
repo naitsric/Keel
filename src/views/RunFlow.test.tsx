@@ -711,18 +711,19 @@ describe("the run page's flow", () => {
       expect(page()).not.toContain('"criteria"');
     });
 
-    it("says what the request already decided, in its words, and who wrote it", async () => {
+    it("says what the request already decided, and who wrote it", async () => {
       const decided = [
         { text: "Keeps the rounding" },
-        { text: "Counts a thread its author resolves", taken: "request", quote: "If its author resolves it, it counts for now." },
-        { text: "Old threads stay", taken: "request", quote: "Old threads stay as they are.", assistant: "Claude Code" },
+        { text: "If its author resolves it, it counts for now.", taken: "request" },
+        { text: "Old threads stay as they are.", taken: "request", assistant: "Claude Code" },
       ];
       attempts = [specifier("succeeded", { output: { ...output, decided } as unknown as Attempt["output"] }), attempt("builder", "running")];
       await open();
       await choose(node("spec"));
       await choose(radio("What it understood"));
-      expect(page()).toContain("Counts a thread its author resolvesFrom the request: “If its author resolves it, it counts for now.”");
-      expect(page()).toContain("Old threads stayFrom the request Claude Code wrote: “Old threads stay as they are.”");
+      expect(page()).toContain("If its author resolves it, it counts for now.From the request");
+      expect(page()).toContain("Old threads stay as they are.From the request Claude Code wrote");
+      expect(page()).not.toContain("From the request:");
       expect(page().match(/From the request/g)).toHaveLength(2);
     });
 

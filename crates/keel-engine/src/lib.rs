@@ -891,16 +891,29 @@ impl Engine {
             );
         }
         let run_id = new_id();
+        // With what the issue said and what was added to it apart, as they came, since who wrote
+        // each is different: only the person's can settle anything for them.
+        let source_issue = request.source_issue.as_ref().map(|issue| {
+            json!({
+                "number": issue.number,
+                "title": issue.title,
+                "author": issue.author,
+                "url": issue.url,
+                "body": issue.body,
+                "added": prompts::added_to_issue(&request.request, issue),
+            })
+            .to_string()
+        });
         let run = NewRun {
             id: run_id.clone(),
             project_id: project.id,
-            title: request.title.unwrap_or_else(|| title_from(&request.request)),
+            title: request
+                .title
+                .unwrap_or_else(|| title_from(&request.request)),
             request: request.request,
             workflow: serde_json::to_string(&workflow).unwrap_or_else(|_| "[]".into()),
             language: request.language,
-            source_issue: request.source_issue.as_ref().map(|issue| {
-                json!({ "number": issue.number, "title": issue.title, "author": issue.author, "url": issue.url }).to_string()
-            }),
+            source_issue,
             workflow_id: request.saved_workflow.as_ref().map(|w| w.id.clone()),
             workflow_name: request.saved_workflow.map(|w| w.name),
             started_by: request.started_by,

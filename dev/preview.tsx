@@ -194,8 +194,8 @@ const previewSpec = {
     ...(params.get("taken") === "1"
       ? [
           { text: say("Should the total round up? Leave it as it is", "¿El total debe redondear hacia arriba? Dejarlo como está"), taken: "roundsLimit" },
-          { text: say("A critical thread its author resolves counts as fixed, for now", "Un hilo critical que resuelve su autor cuenta como arreglado, por ahora"), taken: "request", quote: say("If the author resolves their own critical thread, it counts for now.", "Si el autor resuelve su propio hilo critical, por ahora cuenta.") },
-          { text: say("Old invoices keep their totals", "Las facturas viejas conservan sus totales"), taken: "request", quote: say("Invoices already sent keep the total they had.", "Las facturas ya enviadas conservan el total que tenían."), assistant: "Claude Code" },
+          { text: say("If the author resolves their own critical thread, it counts for now.", "Si el autor resuelve su propio hilo critical, por ahora cuenta."), taken: "request" },
+          { text: say("Invoices already sent keep the total they had.", "Las facturas ya enviadas conservan el total que tenían."), taken: "request", assistant: "Claude Code" },
         ]
       : []),
     ...(questionedShown ? [{ text: say("Sorts the invoices by date, as the list does today.", "Ordena las facturas por fecha, como la lista de hoy.") }] : []),

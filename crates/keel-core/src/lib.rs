@@ -628,11 +628,6 @@ pub enum SpecProblem {
         count: usize,
         limit: usize,
     },
-    /// Lines of `decided` that quote the request. They don't count with what it decided alone.
-    TooManyFromRequest {
-        count: usize,
-        limit: usize,
-    },
 }
 
 impl Reason {

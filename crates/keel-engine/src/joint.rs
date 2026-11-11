@@ -27,6 +27,9 @@ const ASKED: &str = "request";
 /// And the assistant that wrote that request, when one did.
 const ASKED_BY: &str = "requestBy";
 
+/// And what the person wrote in it, or that assistant, as Keel knew when the change was agreed.
+const ASKED_WRITTEN: &str = "requestWritten";
+
 /// Where a project's mirror keeps what Keel last read of its default branch for a run in another
 /// project. Apart from `keel-base`, which a run of this project starts from.
 const READ_BRANCH: &str = "keel-read";
@@ -416,11 +419,15 @@ impl Inner {
             .map(str::to_owned))
     }
 
-    /// The assistant that wrote the request a part's change was agreed from, when one did. None for
-    /// a person, and for a change agreed before Keel kept who wrote it.
-    pub(crate) fn asked_by(&self, run_id: &str) -> Option<String> {
-        let (_, change) = self.joint_card(run_id).ok()??;
-        change.agreed?.get(ASKED_BY)?.as_str().map(str::to_owned)
+    /// What the person wrote in the request a part's change was agreed from, or an assistant they
+    /// allowed. Nothing for a change agreed before Keel kept it.
+    pub(crate) fn asked_written(&self, run_id: &str) -> Vec<specs::Written> {
+        self.joint_card(run_id)
+            .ok()
+            .flatten()
+            .and_then(|(_, change)| change.agreed)
+            .and_then(|agreed| serde_json::from_value(agreed.get(ASKED_WRITTEN)?.clone()).ok())
+            .unwrap_or_default()
     }
 
     /// Whether a run does one part of a change across projects.
@@ -989,6 +996,7 @@ impl Inner {
         if let Some(by) = run.started_by {
             agreed[ASKED_BY] = json!(by);
         }
+        agreed[ASKED_WRITTEN] = json!(self.written_in_request(run_id));
         self.store
             .open_joint_parts(&agreement.change.id, &agreed, &parts, &spec.together)
             .map_err(|error| error.to_string())

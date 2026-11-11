@@ -397,8 +397,8 @@
     "decidedChange": "Change",
     "decidedChangeThis": "Change: {{text}}",
     "decidedYouChose": "You chose this.",
-    "decidedFromRequest": "From the request: “{{quote}}”",
-    "decidedFromRequestBy": "From the request {{client}} wrote: “{{quote}}”",
+    "decidedFromRequest": "From the request",
+    "decidedFromRequestBy": "From the request {{client}} wrote",
     "decidedKeelTook": "The rounds of questions ran out, so Keel stopped asking and took the recommended option.",
     "decidedQuestioned": "A review questions this, and it's yours to decide: {{why}}",
     "decidedQuestionedElsewhere": "A review questions “{{decided}}”, and it's yours to decide: {{why}}",
@@ -1116,8 +1116,7 @@
     "tooManyParts": "it changes {{count}} projects, and the limit is {{limit}}",
     "unknownProject": "it names {{project}}, which isn't one of the projects you chose",
     "repeatedPart": "it lists {{project}} twice",
-    "tooManyTogether": "it lists {{count}} things to try together, and the limit is {{limit}}",
-    "tooManyFromRequest": "it lists {{count}} things the request already decided, and the limit is {{limit}}"
+    "tooManyTogether": "it lists {{count}} things to try together, and the limit is {{limit}}"
   },
   "invalidAnswers": {
     "unknownQuestion": "That answer is for a question this step didn't ask.",

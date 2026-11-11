@@ -1448,22 +1448,22 @@ fn a_change_proposed_from_outside_the_board_is_agreed_like_one_started_from_a_ca
 }
 
 #[test]
-fn a_part_quoting_the_request_an_assistant_proposed_says_the_assistant_wrote_it() {
+fn a_part_keeps_what_the_request_of_its_change_decided_and_who_wrote_it() {
     keel_harness::needs!(sandbox);
     let w = world();
     w.short_workflows();
-    let mut part = plain("Valora sends the token");
-    part["decided"] = json!([
-        { "text": "In a header", "quote": "The token travels in a header." },
-        // What was agreed for the part is an agent's, not the person's.
-        { "text": "Sends it", "quote": "Sends the token" },
+    w.answers(&[
+        both(),
+        plain("Valora sends the token"),
+        json!({}),
+        json!({}),
     ]);
-    w.answers(&[both(), part, json!({}), json!({})]);
     let run = w
         .engine
         .propose_change_on_board(
             StartRun {
-                request: "Log in through Valora. The token travels in a header.".into(),
+                request: "Log in through Valora.\n\nDecided:\n- The token travels in a header."
+                    .into(),
                 ..proposal(&w, None)
             },
             std::slice::from_ref(&w.valora),
@@ -1476,11 +1476,12 @@ fn a_part_quoting_the_request_an_assistant_proposed_says_the_assistant_wrote_it(
     w.engine.board_tick().unwrap();
     let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
 
+    // Only that: what was agreed for the part is an agent's, and Keel's words around it are Keel's.
     let spec = w.wait_for(&first, "spec", AttemptState::Succeeded);
-    let decided = &spec.output.unwrap()["decided"];
-    assert_eq!(decided[0]["taken"], "request");
-    assert_eq!(decided[0]["assistant"], "client");
-    assert_eq!(decided[1].get("taken"), None);
+    assert_eq!(
+        spec.output.unwrap()["decided"],
+        json!([{ "text": "The token travels in a header.", "taken": "request", "assistant": "client" }])
+    );
 }
 
 #[test]

@@ -2,10 +2,9 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import type { SpecDecided, SpecOutput } from "../lib/api";
 
-/** What the request said about a line it decided, in its words, so the person can check it, and who wrote it when an assistant did. */
+/** Says a line came from the request, word for word, and who wrote it when an assistant did. */
 export function fromRequest(t: TFunction, decided: SpecDecided): string {
-  const quote = decided.quote ?? "";
-  return decided.assistant ? t("run.decidedFromRequestBy", { client: decided.assistant, quote }) : t("run.decidedFromRequest", { quote });
+  return decided.assistant ? t("run.decidedFromRequestBy", { client: decided.assistant }) : t("run.decidedFromRequest");
 }
 
 function SpecList({ title, items }: { title: string; items: React.ReactNode[] }) {

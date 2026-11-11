@@ -20,12 +20,15 @@ const MAX_LISTED_TEXT: usize = 200;
 const MAX_DECIDED: usize = 5;
 const MAX_DECIDED_TEXT: usize = 140;
 /// What the request decided doesn't count with what the specifier decided alone: a request can
-/// settle many things at once.
+/// settle many things at once. Past this many, the rest stay in the request, for agents to read.
 const MAX_FROM_REQUEST: usize = 10;
-/// A quote goes into every prompt after the spec, so it can't carry the whole request with it.
-const MAX_QUOTE: usize = 300;
-/// Fewer words than this are in any request, as a sentence or not, and settle nothing.
-const MIN_QUOTED_WORDS: usize = 3;
+/// What a list of what the person already decided can be called, as a heading.
+const DECIDED_HEADINGS: [&str; 4] = [
+    "decisiones ya tomadas",
+    "decisiones tomadas",
+    "decisions already made",
+    "decided",
+];
 const MAX_QUESTIONS: usize = 3;
 const MAX_QUESTION_TEXT: usize = 140;
 const MIN_OPTIONS: usize = 2;
@@ -40,7 +43,7 @@ pub const MAX_QUESTION_ROUNDS: usize = 2;
 /// `size` and `risks` are a prediction, for a workflow with steps that depend on the change. The schema
 /// says what small means as well as the prompt, since any specifier gets asked for it, whatever its
 /// prompt says. Its words keep clear of those the test fakes tell schemas apart by.
-pub const SPEC_SCHEMA: &str = r#"{"type":"object","properties":{"size":{"type":"string","enum":["small","normal"],"description":"small only if it is understood with nothing left to ask, its risk is contained, and someone could pick the work up from just the request and the change. How much code it touches does not decide this: one changed line in permissions is not small. If in doubt, normal."},"risks":{"type":"array","items":{"type":"string","enum":["security","money","personalData","irreversibleData","sharedContracts","concurrency","environment","noRegressionTest"]}},"summary":{"type":"string"},"criteria":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"when":{"type":"string"},"then":{"type":"string"}},"required":["id","when","then"],"additionalProperties":false}},"changes":{"type":"array","items":{"type":"object","properties":{"kind":{"type":"string","enum":["adds","changes","removes"]},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}},"limits":{"type":"array","items":{"type":"string"}},"decided":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"quote":{"type":"string","description":"Only if the request itself settles it in so many words: its whole sentence or list item, copied exactly."}},"required":["text"],"additionalProperties":false}},"questions":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"recommended":{"type":"boolean","description":"true for one option at most, and only when the code or the request backs it up. When only the person can know, such as an amount, a date or a business rule, none is: never make up a value."}},"required":["label","recommended"],"additionalProperties":false}}},"required":["id","text","options"],"additionalProperties":false}}},"required":["size","risks","summary","criteria","changes","limits","decided","questions"],"additionalProperties":false}"#;
+pub const SPEC_SCHEMA: &str = r#"{"type":"object","properties":{"size":{"type":"string","enum":["small","normal"],"description":"small only if it is understood with nothing left to ask, its risk is contained, and someone could pick the work up from just the request and the change. How much code it touches does not decide this: one changed line in permissions is not small. If in doubt, normal."},"risks":{"type":"array","items":{"type":"string","enum":["security","money","personalData","irreversibleData","sharedContracts","concurrency","environment","noRegressionTest"]}},"summary":{"type":"string"},"criteria":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"when":{"type":"string"},"then":{"type":"string"}},"required":["id","when","then"],"additionalProperties":false}},"changes":{"type":"array","items":{"type":"object","properties":{"kind":{"type":"string","enum":["adds","changes","removes"]},"text":{"type":"string"}},"required":["kind","text"],"additionalProperties":false}},"limits":{"type":"array","items":{"type":"string"}},"decided":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}},"questions":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"},"text":{"type":"string"},"options":{"type":"array","items":{"type":"object","properties":{"label":{"type":"string"},"recommended":{"type":"boolean","description":"true for one option at most, and only when the code or the request backs it up. When only the person can know, such as an amount, a date or a business rule, none is: never make up a value."}},"required":["label","recommended"],"additionalProperties":false}}},"required":["id","text","options"],"additionalProperties":false}}},"required":["size","risks","summary","criteria","changes","limits","decided","questions"],"additionalProperties":false}"#;
 
 /// How big a specifier expects a change to be. Only ever a claim: it can stop a run from counting as
 /// small, and never makes one so by itself.
@@ -136,7 +139,7 @@ pub enum Taken {
     Person,
     /// It would have asked a third time, so Keel took the recommended option.
     RoundsLimit,
-    /// The person wrote it in the request: its `quote` is there, word for word.
+    /// The person wrote it in the request, in a list of what they already decided.
     Request,
 }
 
@@ -145,20 +148,17 @@ pub struct Decided {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taken: Option<Taken>,
-    /// The words of the request that settle it, as the specifier quoted them. Kept only if the
-    /// request has them.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub quote: Option<String>,
-    /// The assistant that wrote those words for the person, when one did.
+    /// Where the request decided it: the assistant that wrote it for the person, when one did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant: Option<String>,
 }
 
-/// A piece of a run's request that the person wrote, or an assistant they allowed to start it. Only
-/// these can settle something for them.
-#[derive(Debug, Clone, PartialEq)]
+/// A piece of a run's request that the person wrote, or an assistant they allowed to start it, as
+/// Keel knows from how the run started. Only these can settle something for the person.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Written {
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assistant: Option<String>,
 }
 
@@ -259,11 +259,6 @@ impl Spec {
             tidy(&mut decided.text);
             // Only the engine says who settled something.
             decided.taken = None;
-            decided.quote = decided
-                .quote
-                .as_deref()
-                .map(one_line)
-                .filter(|quote| !quote.is_empty() && chars(quote) <= MAX_QUOTE);
             decided.assistant = None;
         }
         for question in &mut self.questions {
@@ -345,22 +340,10 @@ impl Spec {
             });
         }
 
-        let from_request = self
-            .decided
-            .iter()
-            .filter(|decided| decided.taken == Some(Taken::Request))
-            .count();
-        let alone = self.decided.len() - from_request;
-        if alone > MAX_DECIDED {
+        if self.decided.len() > MAX_DECIDED {
             problems.push(SpecProblem::TooManyDecided {
-                count: alone,
+                count: self.decided.len(),
                 limit: MAX_DECIDED,
-            });
-        }
-        if from_request > MAX_FROM_REQUEST {
-            problems.push(SpecProblem::TooManyFromRequest {
-                count: from_request,
-                limit: MAX_FROM_REQUEST,
             });
         }
         for (index, decided) in self.decided.iter().enumerate() {
@@ -480,26 +463,6 @@ impl Spec {
         serde_json::to_value(self).is_ok_and(|value| any_string(&value))
     }
 
-    /// What the specifier quoted from the request is the person's, if it's whole sentences or list
-    /// items of what they wrote, word for word. A quote that isn't goes, and what it was quoted for
-    /// stays the specification's own.
-    fn take_from_request(&mut self, written: &[Written]) {
-        for decided in &mut self.decided {
-            let found = decided.quote.as_deref().and_then(|quote| {
-                written
-                    .iter()
-                    .find(|piece| quotes_whole(&piece.text, quote))
-            });
-            match found {
-                Some(piece) => {
-                    decided.taken = Some(Taken::Request);
-                    decided.assistant.clone_from(&piece.assistant);
-                }
-                None => decided.quote = None,
-            }
-        }
-    }
-
     /// Whether every question recommends an option, so that Keel could take them all.
     fn all_recommend(&self) -> bool {
         self.questions
@@ -519,7 +482,6 @@ impl Spec {
             self.decided.push(Decided {
                 text: decided_line(&question.text, &option.label),
                 taken: Some(taken),
-                quote: None,
                 assistant: None,
             });
             settled.push(json!({
@@ -609,98 +571,114 @@ impl Spec {
     }
 }
 
-/// One word of a text, and whether a sentence, a line or a list item starts right before it or
-/// ends with it.
-struct Word<'a> {
-    text: &'a str,
-    starts: bool,
-    ends: bool,
-}
-
-/// What can open or close a sentence around its words: quotation marks, brackets and emphasis.
-const AROUND: &[char] = &[
-    '"', '\'', '«', '»', '“', '”', '‘', '’', '(', ')', '[', ']', '*', '_', '`', '¿', '¡',
-];
-const STOPS: &[char] = &['.', '!', '?', ':', ';', '…'];
-
-fn ends_a_sentence(word: &str) -> bool {
-    word.trim_end_matches(AROUND).ends_with(STOPS)
-}
-
-/// A word that only says a list item or a heading starts: `-`, `*`, `6.`, `a)`, `##`, `[x]`.
-fn marks_an_item(word: &str) -> bool {
-    if word.chars().all(|c| "-*+•>#".contains(c)) || matches!(word, "[" | "]" | "[x]" | "[X]") {
-        return true;
+/// A heading's words, without `#`, bold or italics around them, a note in brackets after them, or
+/// a colon.
+fn heading_name(line: &str) -> &str {
+    let mut name = line
+        .trim()
+        .trim_start_matches('#')
+        .trim_start()
+        .trim_start_matches(['*', '_']);
+    loop {
+        let before = name;
+        name = name.trim_end().trim_end_matches([':', '*', '_']).trim_end();
+        if name.ends_with(')')
+            && let Some(open) = name.rfind('(')
+        {
+            name = &name[..open];
+        }
+        if name == before {
+            return name;
+        }
     }
-    let inner = word.strip_prefix('(').unwrap_or(word);
-    inner.strip_suffix(['.', ')']).is_some_and(|number| {
-        let numbered =
-            (1..=3).contains(&number.len()) && number.chars().all(|c| c.is_ascii_digit());
-        let lettered = number.chars().count() == 1 && number.chars().all(char::is_alphabetic);
-        numbered || lettered
-    })
 }
 
-/// The words of a text, without what marks where each line's list item starts.
-fn words_of(text: &str) -> Vec<Word<'_>> {
-    let mut words = Vec::new();
+fn is_decided_heading(line: &str) -> bool {
+    let name = heading_name(line);
+    DECIDED_HEADINGS
+        .iter()
+        .any(|heading| name.eq_ignore_ascii_case(heading))
+}
+
+/// What a list item says, if the line is one: after `-`, `*`, `1.` or `1)`.
+fn list_item(line: &str) -> Option<&str> {
+    let line = line.trim_start();
+    let rest = line.strip_prefix(['-', '*']).or_else(|| {
+        let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+        if (1..=3).contains(&digits) {
+            line[digits..].strip_prefix(['.', ')'])
+        } else {
+            None
+        }
+    })?;
+    rest.starts_with(char::is_whitespace).then(|| rest.trim())
+}
+
+/// What a person settled in so many words in a text: each item of a list under a heading such as
+/// "Decided" or "Decisiones ya tomadas", on one line. The list ends at a blank line followed by
+/// anything but another item, or at any other line that isn't one, but a line indented under an
+/// item goes on with it. Nothing in a code block or a quote counts: someone else may be speaking.
+pub(crate) fn decided_in(text: &str) -> Vec<String> {
+    let mut items: Vec<String> = Vec::new();
+    let (mut in_code, mut in_list, mut in_item, mut after_blank) = (false, false, false, false);
     for line in text.lines() {
-        let mut starts = true;
-        let first = words.len();
-        for word in line
-            .split_whitespace()
-            .skip_while(|word| marks_an_item(word))
-        {
-            let ends = ends_a_sentence(word);
-            words.push(Word {
-                text: word,
-                starts,
-                ends,
-            });
-            starts = ends;
+        let trimmed = line.trim();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            (in_code, in_list) = (!in_code, false);
+            continue;
         }
-        if words.len() > first
-            && let Some(last) = words.last_mut()
-        {
-            last.ends = true;
+        if in_code {
+            continue;
+        }
+        if trimmed.is_empty() {
+            (after_blank, in_item) = (true, false);
+            continue;
+        }
+        let blank_before = std::mem::take(&mut after_blank);
+        if trimmed.starts_with('>') {
+            in_list = false;
+        } else if let Some(item) = list_item(line) {
+            if in_list {
+                items.push(item.to_owned());
+                in_item = true;
+            }
+        } else if is_decided_heading(line) {
+            (in_list, in_item) = (true, false);
+        } else if in_item && !blank_before && line.starts_with(char::is_whitespace) {
+            if let Some(last) = items.last_mut() {
+                last.push(' ');
+                last.push_str(trimmed);
+            }
+        } else {
+            (in_list, in_item) = (false, false);
         }
     }
-    words
+    let mut decided: Vec<String> = Vec::new();
+    for item in items.iter().map(|item| one_line(item)) {
+        if !item.is_empty() && !decided.contains(&item) {
+            decided.push(item);
+        }
+    }
+    decided
 }
 
-/// Whether `quote` is one or more whole sentences, lines or list items of `text`, word for word
-/// however it's spaced, but for quotation marks or a full stop around it. Part of one could say
-/// something else, such as a sentence that starts with "No" without it.
-fn quotes_whole(text: &str, quote: &str) -> bool {
-    let quoted: Vec<&str> = quote
-        .split_whitespace()
-        .skip_while(|word| marks_an_item(word))
-        .collect();
-    if quoted.len() < MIN_QUOTED_WORDS {
-        return false;
+/// What the request decided, as lines of `decided` that say so and who wrote them. Where two
+/// pieces say the same, it's the first one's.
+fn from_request(written: &[Written]) -> Vec<Decided> {
+    let mut decided: Vec<Decided> = Vec::new();
+    for piece in written {
+        for text in decided_in(&piece.text) {
+            if !decided.iter().any(|known| known.text == text) {
+                decided.push(Decided {
+                    text,
+                    taken: Some(Taken::Request),
+                    assistant: piece.assistant.clone(),
+                });
+            }
+        }
     }
-    let last = quoted.len() - 1;
-    let same = |index: usize, said: &str| {
-        let word = quoted[index];
-        if index == 0 {
-            return said.trim_start_matches(AROUND) == word.trim_start_matches(AROUND);
-        }
-        if index < last {
-            return said == word;
-        }
-        // The stop at the end can be left out or added, but not changed.
-        let (said, word) = (said.trim_end_matches(AROUND), word.trim_end_matches(AROUND));
-        let bare = said.trim_end_matches(STOPS);
-        bare == word.trim_end_matches(STOPS) && (word == said || word == bare || said == bare)
-    };
-    words_of(text).windows(quoted.len()).any(|run| {
-        run[0].starts
-            && run[last].ends
-            && run
-                .iter()
-                .enumerate()
-                .all(|(index, word)| same(index, word.text))
-    })
+    decided.truncate(MAX_FROM_REQUEST);
+    decided
 }
 
 /// A settled question, as a line of what's decided: "If whole is 0, what should happen? Show an error".
@@ -718,7 +696,7 @@ fn decided_line(question: &str, answer: &str) -> String {
 ///
 /// `projects` is where a change across projects is agreed, by the names the agent was given. Only
 /// then does a spec have parts: anywhere else they're dropped, like anything else not asked for.
-/// `written` is what the request has that the person wrote, which a decision can quote.
+/// `written` is what the person wrote in the request, where Keel finds what they already decided.
 fn validate_spec_for(
     output: &Value,
     projects: Option<&[String]>,
@@ -727,8 +705,11 @@ fn validate_spec_for(
     let mut spec: Spec =
         serde_json::from_value(output.clone()).map_err(|_| vec![SpecProblem::Unreadable])?;
     spec.normalize();
-    // Before the limits, since what the request decided has one of its own.
-    spec.take_from_request(written);
+    // What the request decided, Keel adds after the limits, which are for what the spec decided.
+    // What the spec copied of it is the request's, and not its own.
+    let from_request = from_request(written);
+    spec.decided
+        .retain(|own| !from_request.iter().any(|item| item.text == own.text));
     let mut problems = spec.problems();
     match projects {
         Some(projects) => problems.extend(spec.part_problems(projects)),
@@ -738,6 +719,7 @@ fn validate_spec_for(
         }
     }
     if problems.is_empty() {
+        spec.decided.splice(0..0, from_request);
         Ok(spec)
     } else {
         Err(problems)
@@ -1030,20 +1012,10 @@ fn problem_line(problem: &SpecProblem, es: bool) -> String {
         RepeatedCriterion { id } if es => format!("El `id` {id} se repite en `criteria`."),
         RepeatedCriterion { id } => format!("The `id` {id} is repeated in `criteria`."),
         TooManyDecided { count, limit } if es => {
-            format!(
-                "`decided` tiene {count} elementos que no citan el pedido y el máximo es {limit}."
-            )
+            format!("`decided` tiene {count} elementos y el máximo es {limit}.")
         }
         TooManyDecided { count, limit } => {
-            format!(
-                "`decided` has {count} items that don't quote the request, and the limit is {limit}."
-            )
-        }
-        TooManyFromRequest { count, limit } if es => {
-            format!("`decided` tiene {count} elementos que citan el pedido y el máximo es {limit}.")
-        }
-        TooManyFromRequest { count, limit } => {
-            format!("`decided` has {count} items that quote the request, and the limit is {limit}.")
+            format!("`decided` has {count} items, and the limit is {limit}.")
         }
         DecidedTooLong {
             position,
@@ -1338,12 +1310,6 @@ mod tests {
                 50,
                 MAX_OPTION_LABEL,
             ),
-            (
-                "copied exactly, up to",
-                "copiado tal cual, hasta",
-                250,
-                MAX_QUOTE,
-            ),
         ];
         let en = prompts::spec_prompt_with_size("en");
         let es = prompts::spec_prompt_with_size("es");
@@ -1538,9 +1504,63 @@ mod tests {
         assert_eq!(kept.get("answered"), None);
     }
 
-    const ASKED: &str = "Count the threads that got fixed.\n\nDecisions already made (don't ask them):\n6. If the author resolves their own\n   critical thread, it counts for now.";
+    #[test]
+    fn a_list_under_a_decisions_heading_is_what_the_request_decided_word_for_word() {
+        // Its items, and one broken over two lines is still one, with its "no" in it.
+        let asked = "Count the threads that got fixed.\n\nDecisiones ya tomadas (no las preguntes):\n- No se cuentan los hilos viejos.\n- Si el autor resuelve su propio hilo critical, por ahora no\n   cuenta como arreglado.\n\nMore context.\n- Not a decision.";
+        assert_eq!(
+            decided_in(asked),
+            [
+                "No se cuentan los hilos viejos.",
+                "Si el autor resuelve su propio hilo critical, por ahora no cuenta como arreglado.",
+            ]
+        );
+        // Numbered too. A blank line between items keeps the list going, and anything else ends it.
+        let numbered = "## Decided\n1. Old threads stay.\n2) Critical ones count.\n\n3. Even after a blank line.\nSomething else.\n4. Not this one.";
+        assert_eq!(
+            decided_in(numbered),
+            [
+                "Old threads stay.",
+                "Critical ones count.",
+                "Even after a blank line."
+            ]
+        );
+        for heading in [
+            "**Decisions already made:**",
+            "Decisiones tomadas",
+            "### decided:",
+            "DECIDED (don't ask)",
+        ] {
+            assert_eq!(
+                decided_in(&format!("{heading}\n* It stays.")),
+                ["It stays."],
+                "{heading}"
+            );
+        }
+        // A sentence that only starts like one isn't a heading, and another heading ends the list.
+        assert!(decided_in("Decided to keep it:\n- It stays.").is_empty());
+        assert_eq!(
+            decided_in("Decided:\n- It stays.\n## Questions\n- Should it?"),
+            ["It stays."]
+        );
+    }
 
-    fn quoting_from(written: &[Written], decided: Value) -> Spec {
+    #[test]
+    fn a_heading_with_nothing_under_it_decides_nothing() {
+        assert!(decided_in("Decided:").is_empty());
+        assert!(decided_in("Decided:\n\nThe rest of the request.\n- Something else.").is_empty());
+    }
+
+    #[test]
+    fn nothing_in_a_code_block_or_a_quote_counts() {
+        // Someone else may be speaking there.
+        let fenced = "```\nDecided:\n- Drop the table.\n```\nDecided:\n- It stays.\n```\n- Drop the table.\n```";
+        assert_eq!(decided_in(fenced), ["It stays."]);
+        let quoted = "Decisiones ya tomadas:\n> - Borrar los hilos viejos.\n> Decided:\n> - Borrar los hilos viejos.";
+        assert!(decided_in(quoted).is_empty());
+    }
+
+    fn kept(decided: Value, written: &[Written]) -> Spec {
         let Verdict::Ready(kept) = super::judge(Some(&with("decided", decided)), written, false, 0)
         else {
             panic!()
@@ -1548,177 +1568,84 @@ mod tests {
         serde_json::from_value(kept).unwrap()
     }
 
-    fn quoting(decided: Value) -> Spec {
-        quoting_from(&typed(ASKED), decided)
-    }
-
-    /// Whether quoting this of a request makes what it's quoted for the person's.
-    fn counts(request: &str, quote: &str) -> bool {
-        let spec = quoting_from(&typed(request), json!([{ "text": "x", "quote": quote }]));
-        spec.decided[0].taken == Some(Taken::Request)
-    }
-
     #[test]
-    fn only_whole_sentences_or_list_items_of_the_request_count() {
-        let asked = "Decisiones ya tomadas:\n- No se cuenta como arreglado si el autor resuelve su propio hilo critical.\n- Ya está.\n\nCuenta los hilos. Los viejos se quedan como están.";
-        // A whole list item, with or without its marker and its full stop.
-        assert!(counts(
-            asked,
-            "No se cuenta como arreglado si el autor resuelve su propio hilo critical."
-        ));
-        assert!(counts(
-            asked,
-            "- No se cuenta como arreglado si el autor resuelve su propio hilo critical"
-        ));
-        // A whole sentence, though another one shares its line.
-        assert!(counts(asked, "Los viejos se quedan como están."));
-        // A single letter is in any request.
-        assert!(!counts(asked, "o"));
-        assert!(!counts(asked, "a"));
-        // Leaving out a leading "No" says the opposite.
-        assert!(!counts(
-            asked,
-            "se cuenta como arreglado si el autor resuelve su propio hilo critical."
-        ));
-        // Part of a sentence, or one cut short, isn't what it says either.
-        assert!(!counts(asked, "el autor resuelve su propio hilo"));
-        assert!(!counts(
-            asked,
-            "No se cuenta como arreglado si el autor resuelve"
-        ));
-        // A whole item still needs three words to say something.
-        assert!(!counts(asked, "Ya está."));
-    }
-
-    #[test]
-    fn a_quote_too_long_to_carry_into_every_prompt_is_dropped() {
-        let sentence = |words: usize| format!("{}.", vec!["word"; words].join(" "));
-        // 59 words are 295 characters, and 61 are 305.
-        assert!(counts(&sentence(59), &sentence(59)));
-        assert!(!counts(&sentence(61), &sentence(61)));
-    }
-
-    #[test]
-    fn only_what_a_person_wrote_counts_and_it_says_when_an_assistant_did() {
+    fn what_the_request_decided_comes_first_says_who_wrote_it_and_leaves_the_five_alone() {
         let written = [
             Written {
-                text: "Keep it small.".into(),
+                text: "Decided:\n- Old threads stay.".into(),
                 assistant: None,
             },
             Written {
-                text: "Leave the old threads as they are.".into(),
+                text: "Decided:\n- Critical ones count.\n- Old threads stay.".into(),
                 assistant: Some("Claude Code".into()),
             },
         ];
-        let spec = quoting_from(
-            &written,
-            json!([
-                { "text": "a", "quote": "Keep it small." },
-                { "text": "b", "quote": "Leave the old threads as they are." },
-                // Each piece on its own: nothing joins them.
-                { "text": "c", "quote": "Keep it small. Leave the old threads as they are." },
-                // Who wrote it is the engine's to say, too.
-                { "text": "d", "assistant": "Claude Code" },
-            ]),
+        let own: Vec<Value> = (1..=5)
+            .map(|i| json!({ "text": format!("Own {i}") }))
+            .collect();
+        let spec = kept(json!(own), &written);
+        let who: Vec<_> = spec
+            .decided
+            .iter()
+            .map(|decided| {
+                (
+                    decided.text.as_str(),
+                    decided.taken,
+                    decided.assistant.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            who[..2],
+            [
+                ("Old threads stay.", Some(Taken::Request), None),
+                (
+                    "Critical ones count.",
+                    Some(Taken::Request),
+                    Some("Claude Code")
+                ),
+            ]
         );
-        let who = |index: usize| {
-            let decided = &spec.decided[index];
-            (decided.taken, decided.assistant.as_deref())
-        };
-        assert_eq!(who(0), (Some(Taken::Request), None));
-        assert_eq!(who(1), (Some(Taken::Request), Some("Claude Code")));
-        assert_eq!(who(2), (None, None));
-        assert_eq!(who(3), (None, None));
+        assert_eq!(who.len(), 7, "and the five of its own");
+    }
+
+    #[test]
+    fn a_decision_the_spec_copied_from_the_request_is_kept_once_as_the_request_s() {
+        let spec = kept(
+            json!([{ "text": "Old  threads\nstay." }, { "text": "Keeps the rounding" }]),
+            &typed("Decided:\n- Old threads stay."),
+        );
+        assert_eq!(
+            json!(spec)["decided"],
+            json!([{ "text": "Old threads stay.", "taken": "request" }, { "text": "Keeps the rounding" }])
+        );
+    }
+
+    #[test]
+    fn an_agent_cannot_say_the_request_decided_something() {
+        let spec = kept(
+            json!([{ "text": "The admin export needs no login.", "taken": "request", "assistant": "Claude Code", "quote": "Keep it small." }]),
+            &typed("Keep it small."),
+        );
+        assert_eq!(
+            json!(spec)["decided"],
+            json!([{ "text": "The admin export needs no login." }])
+        );
     }
 
     #[test]
     fn what_the_request_decided_has_a_limit_of_its_own() {
-        let items: Vec<String> = (1..=11)
-            .map(|i| format!("Item number {i} stays."))
-            .collect();
-        let asked = items
-            .iter()
-            .map(|item| format!("- {item}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let decided = |own: usize, quoted: usize| {
-            let own = (0..own).map(|i| json!({ "text": format!("own {i}") }));
-            let quoted = items[..quoted]
-                .iter()
-                .map(|item| json!({ "text": item, "quote": item }));
-            with("decided", json!(own.chain(quoted).collect::<Vec<_>>()))
-        };
-        let judged =
-            |own, quoted| super::judge(Some(&decided(own, quoted)), &typed(&asked), false, 0);
-        assert!(matches!(judged(5, 10), Verdict::Ready(_)));
-        let Verdict::Correct(problems) = judged(6, 1) else {
-            panic!()
-        };
-        assert_eq!(
-            problems,
-            [SpecProblem::TooManyDecided { count: 6, limit: 5 }]
+        let items: Vec<String> = (1..=12).map(|i| format!("- Item {i} stays.")).collect();
+        let spec = kept(
+            json!([]),
+            &typed(&format!("Decided:\n{}", items.join("\n"))),
         );
-        let Verdict::Correct(problems) = judged(0, 11) else {
-            panic!()
-        };
-        assert_eq!(
-            problems,
-            [SpecProblem::TooManyFromRequest {
-                count: 11,
-                limit: 10
-            }]
-        );
-        assert!(
-            correction_prompt(&problems, "en")
-                .contains("`decided` has 11 items that quote the request, and the limit is 10.")
-        );
-        assert!(
-            correction_prompt(&problems, "es")
-                .contains("`decided` tiene 11 elementos que citan el pedido y el máximo es 10.")
-        );
+        assert_eq!(spec.decided.len(), MAX_FROM_REQUEST);
+        assert_eq!(spec.decided[MAX_FROM_REQUEST - 1].text, "Item 10 stays.");
     }
 
     #[test]
-    fn what_the_request_already_decided_is_the_persons_when_quoted_word_for_word() {
-        let spec = quoting(json!([
-            // Spaced and broken into lines otherwise than in the request, they're still its words.
-            { "text": "A critical thread its author resolves counts", "quote": "If the author resolves their own critical thread,\n it counts  for now." },
-            { "text": "Keeps the rounding as it is" },
-        ]));
-        assert_eq!(spec.decided[0].taken, Some(Taken::Request));
-        assert_eq!(
-            spec.decided[0].quote.as_deref(),
-            Some("If the author resolves their own critical thread, it counts for now.")
-        );
-        assert_eq!(spec.decided[1].taken, None, "the spec's own");
-        let kept = json!(spec);
-        assert_eq!(kept["decided"][0]["taken"], "request");
-        assert_eq!(kept["decided"][1].get("quote"), None);
-    }
-
-    #[test]
-    fn a_quote_that_is_not_in_the_request_word_for_word_is_dropped() {
-        let spec = quoting(json!([
-            // Close, but not what the request says.
-            { "text": "a", "quote": "If the author resolves their own critical thread, it always counts." },
-            { "text": "b", "quote": "if the author resolves their own critical thread" },
-            // Nothing quoted is in every request.
-            { "text": "c", "quote": " \n " },
-            // And an agent can't say so without quoting it.
-            { "text": "d", "taken": "request" },
-        ]));
-        for decided in &spec.decided {
-            assert_eq!(
-                (decided.taken, decided.quote.as_deref()),
-                (None, None),
-                "{}",
-                decided.text
-            );
-        }
-    }
-
-    #[test]
-    fn a_spec_kept_before_quotes_reads_and_is_kept_as_it_was() {
+    fn a_spec_kept_before_this_reads_and_is_kept_as_it_was() {
         let decided = json!([{ "text": "Keeps the rounding" }, { "text": "If 0? Show an error", "taken": "person" }]);
         let spec: Spec = serde_json::from_value(with("decided", decided.clone())).unwrap();
         assert_eq!(spec.decided[1].taken, Some(Taken::Person));
@@ -1972,10 +1899,11 @@ mod tests {
                 "noRegressionTest"
             ])
         );
-        // A quote of the request is only there when it decides something.
-        let decided = &schema["properties"]["decided"]["items"];
-        assert_eq!(decided["required"], json!(["text"]));
-        assert_eq!(decided["properties"]["quote"]["type"], "string");
+        // What the request decided, Keel finds itself: nobody asks the agent to quote it.
+        assert_eq!(
+            schema["properties"]["decided"]["items"]["properties"],
+            json!({ "text": { "type": "string" } })
+        );
     }
 
     #[test]

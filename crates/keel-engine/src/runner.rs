@@ -19,8 +19,8 @@ use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
 use crate::specs::{self, Verdict};
 use crate::{
-    Error, Inner, Result, Resume, Turn, brain, joint, locked, prompts, screenshots, skipped_tests,
-    verification, workflows,
+    Error, Inner, Result, Resume, Turn, brain, joint, locked, prompts, screenshots, sizing,
+    skipped_tests, verification, workflows,
 };
 
 /// Tool output kept in the database. The raw file always has all of it.
@@ -1345,33 +1345,47 @@ impl Inner {
     }
 
     /// What the person wrote in a run's request, or an assistant they allowed to start it, which is
-    /// all a decision can quote to count as theirs. With nothing to tell by, nothing counts.
-    fn written_in_request(&self, run_id: &str) -> Vec<specs::Written> {
+    /// where Keel finds what they already decided. Who wrote what comes from how the run started,
+    /// never from what the request says, and Keel's own words around it never count. With nothing
+    /// to tell by, nothing counts.
+    pub(crate) fn written_in_request(&self, run_id: &str) -> Vec<specs::Written> {
         let (Ok(run), Ok(part)) = (self.store.run(run_id), self.is_part(run_id)) else {
             return Vec::new();
         };
+        // A part's request is the one its change was agreed from, and what was agreed for it is an
+        // agent's.
+        if part {
+            return self.asked_written(run_id);
+        }
+        let Some(issue) = &run.source_issue else {
+            return vec![specs::Written {
+                text: run.request,
+                assistant: run.started_by,
+            }];
+        };
+        let text = |key: &str| issue.get(key).and_then(serde_json::Value::as_str);
         let account = self
             .store
             .project(&run.project_id)
             .ok()
             .and_then(|project| project.github_account);
-        // A part's request was written for the whole change, by whoever asked for that.
-        let starter = if part {
-            self.asked_by(run_id)
-        } else {
-            run.started_by.clone()
-        };
-        let typed = run.source_issue.is_none() && !part;
-        prompts::written_by_the_person(&run.request, typed, account.as_deref())
-            .into_iter()
-            .map(|(text, wrote)| specs::Written {
-                text: text.to_owned(),
-                assistant: match wrote {
-                    prompts::Wrote::Starter => starter.clone(),
-                    prompts::Wrote::IssueAuthor => None,
-                },
-            })
-            .collect()
+        let mut written = Vec::new();
+        // An issue is the person's only if they wrote it, by the rule for a small change.
+        if sizing::why_from_issue(Some(issue), account.as_deref()).is_none()
+            && let Some(body) = text("body")
+        {
+            written.push(specs::Written {
+                text: body.to_owned(),
+                assistant: None,
+            });
+        }
+        if let Some(added) = text("added") {
+            written.push(specs::Written {
+                text: added.to_owned(),
+                assistant: run.started_by.clone(),
+            });
+        }
+        written
     }
 
     /// What it answered, without anything an agent added beyond the structure. The whole answer as
