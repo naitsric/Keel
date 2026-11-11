@@ -441,15 +441,27 @@ fn an_approver_knows_its_round_and_keeps_the_round_of_what_the_change_added() {
     );
     assert!(
         approvers[1].prompt.ends_with(
-            "This is round 2.\n\nWhat the change added that an earlier round left to the person. If it's still there, keep its round:\n- Fails the check on an unknown severity (round 1)"
+            "This is round 2.\n\nWhat the change added that an earlier round left to the person. While one is still in the change, put it in `questioned` again with its round, even if no review repeats it:\n- Fails the check on an unknown severity (round 1)"
         ),
         "{}",
         approvers[1].prompt
     );
-    // Only an approver answers with rounds.
+    // It gets the end of what the builder said, where it lists what it added that nothing asks for.
+    let builder_said = "The end of the builder's last message, where it lists what it says it added that nothing asks for. Check each one in the code: one that holds goes in `questioned` too, even if no review reports it.\nBuilt it.\n\nThis is round";
+    for approver in &approvers {
+        assert!(
+            approver.prompt.contains(builder_said),
+            "{}",
+            approver.prompt
+        );
+    }
+    // Only an approver answers with rounds, and reviewers judge the change itself.
     let builders = w.all(&run, "builder");
     assert!(!builders[1].prompt.contains("This is round"));
-    assert!(!w.all(&run, "security")[1].prompt.contains("This is round"));
+    for review in w.all(&run, "security") {
+        assert!(!review.prompt.contains("This is round"));
+        assert!(!review.prompt.contains("builder's last message"));
+    }
 }
 
 #[test]

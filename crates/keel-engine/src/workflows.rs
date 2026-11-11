@@ -18,7 +18,7 @@ use crate::{brain, prompts, sizing, specs, verification};
 const MAX_ROUNDS: u32 = 5;
 
 pub const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"verdict":{"type":"string","enum":["approved","changes"]},"findings":{"type":"array","items":{"type":"string"}},"summary":{"type":"string"},"unread":{"type":"array","items":{"type":"string"},"description":"Each file of the change you could not read, if any. A review that left one out is not an approval."},"unchecked":{"type":"array","items":{"type":"string"},"description":"Each thing in this change you could not check by reading the code, such as how it looks on screen, in one line, if any. Keel shows them to the person as not proven."}},"required":["verdict","findings","summary","unread","unchecked"],"additionalProperties":false}"#;
-pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"},"questioned":{"type":"array","items":{"type":"object","properties":{"decided":{"type":"string"},"number":{"type":["integer","null"],"description":"The `number` that decision has in `decided`, or null for one the change added."},"round":{"type":["integer","null"],"description":"For one the change added, the round it appeared in. null for one in `decided`."},"why":{"type":"string"}},"required":["decided","number","round","why"],"additionalProperties":false},"description":"Each thing the specification decided on its own that a finding questions, quoted as `decided` says it, with the `number` it has there, and why it does not hold. Also each behavior the change added that no criterion, limit or decision asks for, in one line, with no `number` and with the `round` it appeared in. A person decides these at the approval, so none is a reason for rework."}},"required":["decision","risk","reasons","instructions","questioned"],"additionalProperties":false}"#;
+pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"},"questioned":{"type":"array","items":{"type":"object","properties":{"decided":{"type":"string"},"number":{"type":["integer","null"],"description":"The `number` that decision has in `decided`, or null for one the change added."},"round":{"type":["integer","null"],"description":"For one the change added, the round it appeared in. null for one in `decided`."},"why":{"type":"string"}},"required":["decided","number","round","why"],"additionalProperties":false},"description":"Each thing the specification decided on its own that a finding questions, quoted as `decided` says it, with the `number` it has there, and why it does not hold. Also each behavior the change added that no criterion, limit, decision or work sent back asks for: that it exists and the choice it makes, in one line, with no `number` and with the `round` it appeared in. A defect in it, or behavior that breaks a limit, is a finding and not one of these. A person decides these at the approval, so none is a reason for rework."}},"required":["decision","risk","reasons","instructions","questioned"],"additionalProperties":false}"#;
 
 /// What a reviewer answered, as Keel keeps it. One that says it couldn't read part of the change
 /// didn't review all of it, so it's never an approval, whatever it says. `None` if it stands.
@@ -491,14 +491,25 @@ pub fn round_text(attempts: &[Attempt], round: i64, language: &str) -> String {
         format!("This is round {}.", round + 1)
     };
     // What the latest earlier round left stands. One it no longer has isn't there any more.
-    let added: Vec<String> = attempts
+    let Some((left_in, items)) = attempts
         .iter()
         .rev()
         .filter(|a| a.role == "approver" && a.round < round)
-        .find_map(|a| a.output.as_ref()?.get("questioned")?.as_array())
-        .into_iter()
-        .flatten()
+        .find_map(|a| Some((a.round, a.output.as_ref()?.get("questioned")?.as_array()?)))
+    else {
+        return this;
+    };
+    // What a person, or an assistant they allowed, sent the work back about since is asked for now.
+    // The app quotes the line word for word when they send it back from it.
+    let sent_back: Vec<String> = attempts
+        .iter()
+        .filter(|a| a.round >= left_in && a.state == AttemptState::Returned.as_str())
+        .filter_map(instructions_of)
+        .collect();
+    let added: Vec<String> = items
+        .iter()
         .filter_map(added_by_the_change)
+        .filter(|(text, _)| !sent_back.iter().any(|said| said.contains(text)))
         .map(|(text, appeared)| {
             let label = if es { "ronda" } else { "round" };
             format!("- {text} ({label} {appeared})")
@@ -507,12 +518,49 @@ pub fn round_text(attempts: &[Attempt], round: i64, language: &str) -> String {
     if added.is_empty() {
         return this;
     }
+    // A review sees it again only if it reports it again, so it's not left to one.
     let intro = if es {
-        "Lo que agregó el cambio y una ronda anterior le dejó a la persona. Si sigue ahí, mantén su ronda:"
+        "Lo que agregó el cambio y una ronda anterior le dejó a la persona. Mientras siga en el cambio, vuelve a ponerlo en `questioned` con su ronda, aunque ninguna revisión lo repita:"
     } else {
-        "What the change added that an earlier round left to the person. If it's still there, keep its round:"
+        "What the change added that an earlier round left to the person. While one is still in the change, put it in `questioned` again with its round, even if no review repeats it:"
     };
     format!("{this}\n\n{intro}\n{}", added.join("\n"))
+}
+
+/// How much of the end of the builder's last message an approver gets: where it lists what it added
+/// that nothing asks for, which the builder is told to do in its final message.
+pub const BUILDER_TAIL: usize = 2048;
+
+/// The end of what the builder said last, for an approver, so what it lists as added reaches the
+/// person even if no review reports it. Reviewers don't get it: they judge the change itself. The
+/// builder is the last step that could change files and worked. Empty if it said nothing.
+pub fn builder_text(attempts: &[Attempt], language: &str) -> String {
+    let Some(said) = attempts
+        .iter()
+        .rev()
+        .find(|a| {
+            a.kind == "agent"
+                && a.role == "worker"
+                && a.tools == ToolProfile::Build.as_str()
+                && a.state == AttemptState::Succeeded.as_str()
+        })
+        .and_then(|a| a.result_text.as_deref())
+        .map(str::trim)
+        .filter(|said| !said.is_empty())
+    else {
+        return String::new();
+    };
+    let mut start = said.len().saturating_sub(BUILDER_TAIL);
+    while !said.is_char_boundary(start) {
+        start += 1;
+    }
+    let cut = if start > 0 { "…" } else { "" };
+    let intro = if language.starts_with("es") {
+        "El final del último mensaje del builder, donde lista lo que dice que agregó sin que nada lo pidiera. Compruébalo en el código: lo que se sostenga va también a `questioned`, aunque ninguna revisión lo reporte."
+    } else {
+        "The end of the builder's last message, where it lists what it says it added that nothing asks for. Check each one in the code: one that holds goes in `questioned` too, even if no review reports it."
+    };
+    format!("{intro}\n{cut}{}", &said[start..])
 }
 
 /// A questioned decision that the change added, not the specification, with the round it appeared
@@ -615,11 +663,11 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
             "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{{{{answers}}}}\n\n{{{{rework}}}}\n\n{}\n{{{{diff}}}}",
             if es {
                 format!(
-                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque. No cuestiones lo que eligió una persona: una decisión cuyo `taken` es `person`, o lo que la persona respondió. Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Una decisión que no se sostenga con el cambio ya hecho también lo es: cítala como la dice `decided`, con el archivo y la línea donde se ve, si los hay. Reporta como decisión que el cambio tomó por su cuenta el comportamiento nuevo que no pide ningún criterio, límite ni decisión, con archivo y línea. Si no hay, el veredicto es approved. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
+                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque. No cuestiones lo que eligió una persona: una decisión cuyo `taken` es `person`, o lo que la persona respondió. Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Una decisión que no se sostenga con el cambio ya hecho también lo es: cítala como la dice `decided`, con el archivo y la línea donde se ve, si los hay. Reporta como decisión que el cambio tomó por su cuenta el comportamiento nuevo que no pide ningún criterio, límite, decisión ni lo que se devolvió, con archivo y línea. Un defecto en él, o un comportamiento que rompe un límite, es un problema, no una decisión. Si no hay, el veredicto es approved. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
                 )
             } else {
                 format!(
-                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Also question what the specification decided on its own, in `decided`, where it touches your focus. Don't question what a person chose: a decision whose `taken` is `person`, or what the person answered. Report only real problems in this change, each with its file and line. A decision that doesn't hold up now that the change is made is one too: quote it as `decided` says it, with the file and line where it shows, if any. Report new behavior that no criterion, limit or decision asks for as a decision the change took on its own, with its file and line. If there are none, the verdict is approved. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
+                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Also question what the specification decided on its own, in `decided`, where it touches your focus. Don't question what a person chose: a decision whose `taken` is `person`, or what the person answered. Report only real problems in this change, each with its file and line. A decision that doesn't hold up now that the change is made is one too: quote it as `decided` says it, with the file and line where it shows, if any. Report new behavior that no criterion, limit, decision or what was sent back asks for as a decision the change took on its own, with its file and line. A defect in it, or behavior that breaks a limit, is a problem, not a decision. If there are none, the verdict is approved. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
                 )
             },
             text("Specification:", "Especificación:"),
@@ -640,8 +688,8 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
         text("Specification:", "Especificación:"),
         // What the specification decided on its own is the person's to settle, not the builder's.
         text(
-            "A finding that questions what the specification decided on its own, in `decided`, is not a reason for rework, even if it's right: a person decides that, and can change it at the approval. Put each one in `questioned`, quoting the decision as `decided` says it, with the `number` it has there, and saying why it doesn't hold, mention them in reasons, and leave them out of instructions. Do the same with a finding about behavior the change added that no criterion, limit or decision asks for: put it in `questioned` as a decision of the change, said in one line, with `number` null and the `round` it appeared in.",
-            "Un hallazgo que cuestiona lo que la especificación decidió por su cuenta, en `decided`, no es motivo de rework, aunque tenga razón: eso lo decide una persona, que puede cambiarlo en la aprobación. Pon cada uno en `questioned`, citando la decisión como la dice `decided`, con el `number` que tiene ahí, y diciendo por qué no se sostiene, menciónalos en reasons y déjalos fuera de instructions. Haz lo mismo con un hallazgo sobre un comportamiento que agregó el cambio y que no pide ningún criterio, límite ni decisión: ponlo en `questioned` como una decisión del cambio, dicha en una línea, con `number` en null y el `round` en que apareció.",
+            "A finding that questions what the specification decided on its own, in `decided`, is not a reason for rework, even if it's right: a person decides that, and can change it at the approval. Put each one in `questioned`, quoting the decision as `decided` says it, with the `number` it has there, and saying why it doesn't hold, mention them in reasons, and leave them out of instructions. Do the same with behavior the change added that no criterion, limit, decision or what was sent back asks for: put in `questioned` that it exists and the choice it makes, as a decision of the change, said in one line, with `number` null and the `round` it appeared in. A defect in it, such as a bug or a security hole, is still a real finding, and so is behavior that breaks a limit.",
+            "Un hallazgo que cuestiona lo que la especificación decidió por su cuenta, en `decided`, no es motivo de rework, aunque tenga razón: eso lo decide una persona, que puede cambiarlo en la aprobación. Pon cada uno en `questioned`, citando la decisión como la dice `decided`, con el `number` que tiene ahí, y diciendo por qué no se sostiene, menciónalos en reasons y déjalos fuera de instructions. Haz lo mismo con un comportamiento que agregó el cambio y que no pide ningún criterio, límite, decisión ni lo que se devolvió: pon en `questioned` que existe y lo que elige, como una decisión del cambio, dicha en una línea, con `number` en null y el `round` en que apareció. Un defecto en él, como un error o un hueco de seguridad, sigue siendo un hallazgo real, y también lo es un comportamiento que rompe un límite.",
         ),
     );
 
@@ -910,7 +958,7 @@ mod tests {
         specifying_attempt(&attempts).and_then(asked_text)
     }
 
-    use AttemptState::{Failed, Succeeded};
+    use AttemptState::{Failed, Returned, Succeeded};
 
     #[test]
     fn a_workflow_saved_before_the_role_says_what_was_asked_in_a_step_called_spec() {
@@ -1213,21 +1261,24 @@ mod tests {
             questioned["items"]["properties"]["round"]["type"],
             serde_json::json!(["integer", "null"])
         );
-        assert!(
-            questioned["description"].as_str().unwrap().contains(
-                "behavior the change added that no criterion, limit or decision asks for"
-            )
-        );
+        // Only that it exists, and the choice it makes. A defect in it still means rework.
+        let described = questioned["description"].as_str().unwrap();
+        for part in [
+            "each behavior the change added that no criterion, limit, decision or work sent back asks for: that it exists and the choice it makes,",
+            "A defect in it, or behavior that breaks a limit, is a finding and not one of these.",
+        ] {
+            assert!(described.contains(part), "{part}");
+        }
         for (language, reported, settled) in [
             (
                 "en",
-                "Report new behavior that no criterion, limit or decision asks for as a decision the change took on its own, with its file and line.",
-                "Do the same with a finding about behavior the change added that no criterion, limit or decision asks for: put it in `questioned` as a decision of the change, said in one line, with `number` null and the `round` it appeared in.",
+                "Report new behavior that no criterion, limit, decision or what was sent back asks for as a decision the change took on its own, with its file and line. A defect in it, or behavior that breaks a limit, is a problem, not a decision.",
+                "Do the same with behavior the change added that no criterion, limit, decision or what was sent back asks for: put in `questioned` that it exists and the choice it makes, as a decision of the change, said in one line, with `number` null and the `round` it appeared in. A defect in it, such as a bug or a security hole, is still a real finding, and so is behavior that breaks a limit.",
             ),
             (
                 "es",
-                "Reporta como decisión que el cambio tomó por su cuenta el comportamiento nuevo que no pide ningún criterio, límite ni decisión, con archivo y línea.",
-                "Haz lo mismo con un hallazgo sobre un comportamiento que agregó el cambio y que no pide ningún criterio, límite ni decisión: ponlo en `questioned` como una decisión del cambio, dicha en una línea, con `number` en null y el `round` en que apareció.",
+                "Reporta como decisión que el cambio tomó por su cuenta el comportamiento nuevo que no pide ningún criterio, límite, decisión ni lo que se devolvió, con archivo y línea. Un defecto en él, o un comportamiento que rompe un límite, es un problema, no una decisión.",
+                "Haz lo mismo con un comportamiento que agregó el cambio y que no pide ningún criterio, límite, decisión ni lo que se devolvió: pon en `questioned` que existe y lo que elige, como una decisión del cambio, dicha en una línea, con `number` en null y el `round` en que apareció. Un defecto en él, como un error o un hueco de seguridad, sigue siendo un hallazgo real, y también lo es un comportamiento que rompe un límite.",
             ),
         ] {
             let (mut reviewers, mut approvers) = (0, 0);
@@ -1275,6 +1326,47 @@ mod tests {
     }
 
     #[test]
+    fn an_approver_gets_the_end_of_what_the_builder_said_last_where_it_lists_what_it_added() {
+        let builders = |said: &[&str]| {
+            let mut attempts = recorded(
+                &said
+                    .iter()
+                    .map(|text| ("builder", "agent", "worker", Succeeded, *text))
+                    .collect::<Vec<Row>>(),
+            );
+            for attempt in &mut attempts {
+                attempt.tools = "build".into();
+            }
+            attempts
+        };
+        let mut attempts = builders(&["Round one.", "Done. Added apart: retries a lost save."]);
+        // A worker that can't change files, and one that failed, aren't the builder's last word.
+        attempts.extend(recorded(&[
+            ("notes", "agent", "worker", Succeeded, "Read it."),
+            ("builder", "agent", "worker", Failed, "Gave up."),
+        ]));
+        attempts[3].tools = "build".into();
+        assert_eq!(
+            builder_text(&attempts, "en"),
+            "The end of the builder's last message, where it lists what it says it added that nothing asks for. Check each one in the code: one that holds goes in `questioned` too, even if no review reports it.\nDone. Added apart: retries a lost save."
+        );
+        assert_eq!(
+            builder_text(&attempts, "es"),
+            "El final del último mensaje del builder, donde lista lo que dice que agregó sin que nada lo pidiera. Compruébalo en el código: lo que se sostenga va también a `questioned`, aunque ninguna revisión lo reporte.\nDone. Added apart: retries a lost save."
+        );
+        // Only its end, about 2 KB, cut where a character starts.
+        let long = format!("{}{}", "é".repeat(3000), "Added apart: nothing.");
+        let text = builder_text(&builders(&[&long]), "en");
+        let said = text.split_once('\n').unwrap().1;
+        assert!(said.starts_with('…'), "{said}");
+        assert!(said.ends_with("Added apart: nothing."));
+        assert!(said.len() <= BUILDER_TAIL + '…'.len_utf8());
+        // Nothing when no builder said anything.
+        assert_eq!(builder_text(&builders(&["  \n"]), "en"), "");
+        assert_eq!(builder_text(&[], "en"), "");
+    }
+
+    #[test]
     fn an_approver_is_told_its_round_counted_as_the_person_sees_it() {
         assert_eq!(round_text(&[], 0, "en"), "This is round 1.");
         assert_eq!(round_text(&[], 2, "es"), "Esta es la ronda 3.");
@@ -1300,14 +1392,34 @@ mod tests {
             // This round's own answer isn't earlier.
             approver_in(2, serde_json::json!([added("Not yet", 3)])),
         ];
-        // What the latest earlier round left stands, so one it no longer has is gone.
+        // What the latest earlier round left stands, so one it no longer has is gone. One still in
+        // the change goes back in, even if no review repeats it.
         assert_eq!(
             round_text(&attempts, 2, "en"),
-            "This is round 3.\n\nWhat the change added that an earlier round left to the person. If it's still there, keep its round:\n- Fails the check on an unknown severity (round 1)\n- Retries a lost save (round 2)"
+            "This is round 3.\n\nWhat the change added that an earlier round left to the person. While one is still in the change, put it in `questioned` again with its round, even if no review repeats it:\n- Fails the check on an unknown severity (round 1)\n- Retries a lost save (round 2)"
         );
         assert_eq!(
             round_text(&attempts, 2, "es"),
-            "Esta es la ronda 3.\n\nLo que agregó el cambio y una ronda anterior le dejó a la persona. Si sigue ahí, mantén su ronda:\n- Fails the check on an unknown severity (ronda 1)\n- Retries a lost save (ronda 2)"
+            "Esta es la ronda 3.\n\nLo que agregó el cambio y una ronda anterior le dejó a la persona. Mientras siga en el cambio, vuelve a ponerlo en `questioned` con su ronda, aunque ninguna revisión lo repita:\n- Fails the check on an unknown severity (ronda 1)\n- Retries a lost save (ronda 2)"
+        );
+
+        // One the person sent the work back about since is something they asked for now. Sending
+        // it back before that round's approver raised it again says nothing about it.
+        let returned = |round: i64, instructions: &str| {
+            let mut attempt = recorded(&[("human", "approval", "worker", Returned, "")]).remove(0);
+            attempt.round = round;
+            attempt.output = Some(serde_json::json!({ "instructions": instructions }));
+            attempt
+        };
+        let mut answered = attempts.clone();
+        answered.insert(
+            0,
+            returned(0, "About “Fails the check on an unknown severity”: keep it"),
+        );
+        answered.insert(2, returned(1, "About “Retries a lost save”: drop it"));
+        assert_eq!(
+            round_text(&answered, 2, "en"),
+            "This is round 3.\n\nWhat the change added that an earlier round left to the person. While one is still in the change, put it in `questioned` again with its round, even if no review repeats it:\n- Fails the check on an unknown severity (round 1)"
         );
         // An earlier answer from before this, or with nothing left, adds nothing.
         let old = vec![approver_in(

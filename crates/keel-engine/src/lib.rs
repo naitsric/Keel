@@ -2067,11 +2067,14 @@ impl Inner {
             }
         }
         // Every approver can say in which round something the change added appeared, so every one
-        // is told which round this is, whatever its prompt says.
+        // is told which round this is, and what the builder said it added, whatever its prompt says.
         if matches!(spec.role, StepRole::Approver { .. }) {
             let attempts = self.store.attempts_of_run(&run.id)?;
+            let builder = workflows::builder_text(&attempts, &run.language);
             let rounds = workflows::round_text(&attempts, run.round, &run.language);
-            text.push_str(&format!("\n\n{rounds}"));
+            for part in [builder, rounds].iter().filter(|part| !part.is_empty()) {
+                text.push_str(&format!("\n\n{part}"));
+            }
         }
         Ok(text)
     }
