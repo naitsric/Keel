@@ -638,14 +638,15 @@ fn dotnet(root: &Path) -> Option<Stack> {
     })
 }
 
-/// `swift test` fails on a package with no test target.
+/// `swift test` fails on a package with no test target. SwiftPM runs the manifest in a sandbox of
+/// its own, which macOS won't start inside the step's, and the step's is there anyway.
 fn swift(root: &Path) -> Option<Stack> {
     let manifest = read(root, "Package.swift")?;
     Some(Stack {
-        setup: Some("swift package resolve".to_owned()),
+        setup: Some("swift package resolve --disable-sandbox".to_owned()),
         check: manifest
             .contains(".testTarget(")
-            .then(|| "swift test".to_owned()),
+            .then(|| "swift test --disable-sandbox".to_owned()),
         from: vec!["Package.swift".to_owned()],
         ..Stack::default()
     })
@@ -1327,16 +1328,21 @@ mod tests {
         assert_eq!(found(&[("a b.sln", "")]), (None, None));
     }
 
+    /// SwiftPM runs a package's manifest in a sandbox of its own, which macOS won't start inside
+    /// the step's.
     #[test]
     fn swift_tests_only_a_package_with_test_targets() {
         let package = r#"let package = Package(name: "A", targets: [.target(name: "A"), .testTarget(name: "ATests")])"#;
         assert_eq!(
             found(&[("Package.swift", package)]),
-            both("swift test", "swift package resolve")
+            both(
+                "swift test --disable-sandbox",
+                "swift package resolve --disable-sandbox"
+            )
         );
         assert_eq!(
             found(&[("Package.swift", r#"let package = Package(name: "A")"#)]),
-            setup_only("swift package resolve")
+            setup_only("swift package resolve --disable-sandbox")
         );
     }
 
