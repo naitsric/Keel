@@ -10,12 +10,12 @@ use keel_core::{AttemptState, PrState, Reason, StepRole, StepSpec, ToolProfile, 
 use keel_harness::github;
 use keel_store::rusqlite_value::Value as Column;
 use keel_store::{Attempt, Card, JointChange, NewPart, Project, Run};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::deliver::repo_url;
 use crate::git::{BASE_REF, BRANCH_PREFIX, Git, RemoteAuth};
-use crate::specs::{Criterion, GivenAnswer, Spec};
+use crate::specs::{ContractPoint, Criterion, GivenAnswer, Spec};
 use crate::verification::Outcome;
 use crate::{Error, Inner, Result, locked, new_id, prompts, specs, verification, workflows};
 
@@ -31,6 +31,10 @@ const ASKED_WRITTEN: &str = "requestWritten";
 /// Where a project's mirror keeps what Keel last read of its default branch for a run in another
 /// project. Apart from `keel-base`, which a run of this project starts from.
 const READ_BRANCH: &str = "keel-read";
+
+/// What a part's specifier was given of the contract, recorded on its attempt once what it wrote is
+/// kept: the points, as they were then.
+pub(crate) const CONTRACT_GIVEN: &str = "contractGiven";
 
 /// Where it keeps what it last read of an earlier part's branch.
 fn part_read_branch(branch: &str) -> String {
@@ -103,9 +107,13 @@ pub struct JointChangeView {
     pub read_only: Vec<Named>,
     /// What only works with every part in place, which only a person can try.
     pub checks: Vec<keel_store::JointCheck>,
-    /// What the parts agree on exactly, point by point, with what each part that keeps it verified.
-    /// Empty until it's agreed, and for an agreement without any.
+    /// What the parts agree on exactly, point by point, with what each part that keeps it verified:
+    /// as a person corrected it since it was agreed, if they did. Empty until it's agreed, and for
+    /// an agreement without any.
     pub contract: Vec<ContractView>,
+    /// The number the next new point of the contract takes, so a person sees the id it'll have.
+    /// None until it's agreed.
+    pub contract_next: Option<i64>,
 }
 
 /// A point of what the parts agree on exactly.
@@ -115,6 +123,8 @@ pub struct ContractView {
     pub id: String,
     pub when: String,
     pub then: String,
+    /// The projects it names, by the names they go by in what was agreed.
+    pub projects: Vec<String>,
     /// The parts that keep it, first to last.
     pub parts: Vec<ContractPart>,
 }
@@ -125,11 +135,28 @@ pub struct ContractPart {
     pub card_id: String,
     pub position: i64,
     pub project: String,
-    /// What its verifier said of it in its run's latest round. None until it said something.
+    /// What its verifier said of it in its run's latest round. None until it said something, and
+    /// while the part was specified with the point as it no longer is.
     pub result: Option<Outcome>,
     /// False once its run shows a workflow with no verifier, which never will. Until it has a run,
     /// nothing says.
     pub verifies: bool,
+    /// Whether its part was specified with this point as it was before a person corrected it, or
+    /// before it was added. Starting the part again gives it the point as it is.
+    pub earlier: bool,
+}
+
+/// A point of the contract as a person writes it, correcting it once it's agreed. One already
+/// there keeps its id, and a new one has none until Keel gives it one.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContractEdit {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub when: String,
+    pub then: String,
+    /// The projects whose part has to keep it, by the names they go by in what was agreed.
+    pub projects: Vec<String>,
 }
 
 /// Whether a workflow has a step that checks what its spec says has to be true. A verifier can't
@@ -240,6 +267,10 @@ pub struct PartOf {
     pub waits_for: Option<Neighbour>,
     /// What changed in the parts before it since it read them.
     pub warnings: Vec<PartWarning>,
+    /// The points of the contract it was specified with as they no longer are, by id: corrected,
+    /// added or removed since. Empty until it's specified. Starting it again gives it the contract
+    /// as it is.
+    pub contract_changed: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -278,6 +309,51 @@ pub(crate) fn issue_ref(issue: &Value, repo: &str) -> Option<String> {
 /// What was agreed, as a spec. None until it was.
 fn agreed_spec(change: &JointChange) -> Option<Spec> {
     serde_json::from_value(change.agreed.clone()?).ok()
+}
+
+/// What was agreed, as a spec, with its contract as a person corrected it since. None until it was
+/// agreed, and if the correction can't be read.
+fn current_spec(change: &JointChange) -> Option<Spec> {
+    let mut spec = agreed_spec(change)?;
+    if let Some(contract) = &change.contract {
+        spec.contract = serde_json::from_value(contract.clone()).ok()?;
+    }
+    Some(spec)
+}
+
+/// The number in a point's id: 3 for K3.
+fn point_number(id: &str) -> Option<i64> {
+    id.strip_prefix('K')?.parse().ok()
+}
+
+/// The number the next new point of a change's contract takes: past every one it ever gave, so a
+/// point removed never comes back meaning something else.
+fn next_point(change: &JointChange) -> i64 {
+    change.contract_next.unwrap_or_else(|| {
+        let agreed = agreed_spec(change).map(|spec| spec.contract);
+        let highest = agreed
+            .iter()
+            .flatten()
+            .filter_map(|point| point_number(&point.id))
+            .max();
+        highest.unwrap_or(0) + 1
+    })
+}
+
+/// The points a part was `given` as they no longer are, by id: each of the points it has `now` that
+/// it wasn't given word for word, then each it was given that it no longer has.
+fn changed_points(given: &[Criterion], now: &[Criterion]) -> Vec<String> {
+    let mut changed: Vec<String> = now
+        .iter()
+        .filter(|point| !given.contains(point))
+        .map(|point| point.id.clone())
+        .collect();
+    for point in given {
+        if !now.iter().any(|kept| kept.id == point.id) && !changed.contains(&point.id) {
+            changed.push(point.id.clone());
+        }
+    }
+    changed
 }
 
 /// The name a part's project goes by in what was agreed.
@@ -330,6 +406,7 @@ impl crate::Engine {
             .cloned()
             .collect();
         let contract = inner.contract_view(&change, &parts)?;
+        let contract_next = change.agreed.is_some().then(|| next_point(&change));
         Ok(JointChangeView {
             id: change.id.clone(),
             agreed_in: agreeing
@@ -346,6 +423,7 @@ impl crate::Engine {
             parts,
             checks: change.checks,
             contract,
+            contract_next,
         })
     }
 
@@ -369,6 +447,60 @@ impl crate::Engine {
             .store
             .confirm_joint_check(change_id, seq, works)?
         {
+            return Err(Error::InvalidState);
+        }
+        self.inner.changed("");
+        Ok(())
+    }
+
+    /// A person corrects what the parts of an agreed change agree on exactly: `points` replace the
+    /// contract, in their order. One already there keeps its id wherever it goes, and a new one
+    /// takes the next, never one given before. It's checked as the agreement's was, and what was
+    /// approved stays as it was. Nothing else can: no agent, and no assistant. A part takes the
+    /// contract as it is when its specifier's answer is kept, so one specified before says so,
+    /// and starting it again gives it this one. `InvalidState` before it's agreed, for an id that
+    /// isn't there or comes twice, and when another correction came first.
+    pub fn joint_contract_set(&self, change_id: &str, points: &[ContractEdit]) -> Result<()> {
+        let store = &self.inner.store;
+        let change = store.joint_change(change_id)?;
+        let Some(spec) = current_spec(&change) else {
+            return Err(Error::InvalidState);
+        };
+        let mut next = next_point(&change);
+        let mut kept: Vec<&str> = Vec::new();
+        let mut numbered = Vec::new();
+        for point in points {
+            let id = match &point.id {
+                Some(id) => {
+                    let there = spec.contract.iter().any(|known| known.id == *id);
+                    if !there || kept.contains(&id.as_str()) {
+                        return Err(Error::InvalidState);
+                    }
+                    kept.push(id);
+                    id.clone()
+                }
+                None => {
+                    next += 1;
+                    format!("K{}", next - 1)
+                }
+            };
+            numbered.push(ContractPoint {
+                id,
+                when: point.when.clone(),
+                then: point.then.clone(),
+                projects: point.projects.clone(),
+            });
+        }
+        let contract = spec
+            .corrected_contract(numbered)
+            .map_err(|problems| Error::Blocked(Reason::ContractNotValid { problems }))?;
+        if !store.correct_joint_contract(
+            change_id,
+            change.contract.as_ref(),
+            change.contract_next,
+            &json!(contract),
+            next,
+        )? {
             return Err(Error::InvalidState);
         }
         self.inner.changed("");
@@ -472,18 +604,51 @@ impl Inner {
             .map(str::to_owned))
     }
 
-    /// The points of the contract a run's part has to keep, as criteria. Empty for any other run,
-    /// and for a part of an agreement without any.
+    /// The points of the contract a run's part has to keep, as criteria: as a person corrected
+    /// them since it was agreed, if they did. Empty for any other run, and for a part of an
+    /// agreement without any.
     pub(crate) fn contract_of(&self, run_id: &str) -> Result<Vec<Criterion>> {
         let Some((card, change)) = self.joint_card(run_id)? else {
             return Ok(Vec::new());
         };
-        let (Some(here), Some(spec)) = (card.joint_position, agreed_spec(&change)) else {
+        let (Some(here), Some(spec)) = (card.joint_position, current_spec(&change)) else {
             return Ok(Vec::new());
         };
         Ok(part_name(&spec, here)
             .map(|name| spec.contract_of(name))
             .unwrap_or_default())
+    }
+
+    /// The points of the contract a part's card was specified with as they no longer are: see
+    /// [`PartOf::contract_changed`]. What its specifier was given is on its kept attempt. One
+    /// specified before Keel recorded that was given what was agreed, since nobody could correct
+    /// it then. Nothing can differ while nobody has corrected it.
+    fn contract_changed(&self, change: &JointChange, card: &Card) -> Result<Vec<String>> {
+        let (Some(here), Some(run_id)) = (card.joint_position, &card.run_id) else {
+            return Ok(Vec::new());
+        };
+        if change.contract.is_none() {
+            return Ok(Vec::new());
+        }
+        let attempts = self.store.attempts_of_run(run_id)?;
+        let Some(specified) = workflows::specifying_attempt(&attempts) else {
+            return Ok(Vec::new());
+        };
+        let of = |spec: Option<Spec>| {
+            spec.and_then(|spec| part_name(&spec, here).map(|name| spec.contract_of(name)))
+                .unwrap_or_default()
+        };
+        let recorded = self
+            .store
+            .run_events(run_id, CONTRACT_GIVEN)?
+            .into_iter()
+            .rev()
+            .find(|event| event.attempt_id == specified.id);
+        let given: Vec<Criterion> = match recorded {
+            Some(event) => serde_json::from_value(event.data["points"].clone()).unwrap_or_default(),
+            None => of(agreed_spec(change)),
+        };
+        Ok(changed_points(&given, &of(current_spec(change))))
     }
 
     /// Each point of the contract, with what the verifier of each part that keeps it said of it in
@@ -493,7 +658,7 @@ impl Inner {
         change: &JointChange,
         parts: &[JointCard],
     ) -> Result<Vec<ContractView>> {
-        let Some(spec) = agreed_spec(change).filter(|spec| !spec.contract.is_empty()) else {
+        let Some(spec) = current_spec(change).filter(|spec| !spec.contract.is_empty()) else {
             return Ok(Vec::new());
         };
         let mut verified = Vec::new();
@@ -520,21 +685,24 @@ impl Inner {
                 id: point.id.clone(),
                 when: point.when.clone(),
                 then: point.then.clone(),
+                projects: point.projects.clone(),
                 parts: parts
                     .iter()
                     .zip(&verified)
                     .filter_map(|(card, (latest, verifies))| {
-                        let position = card.part.as_ref()?.position;
-                        let name = part_name(&spec, position)?;
+                        let part = card.part.as_ref()?;
+                        let name = part_name(&spec, part.position)?;
+                        // What its verifier found is of the point as it was then.
+                        let earlier = part.contract_changed.contains(&point.id);
                         point
                             .projects
                             .iter()
                             .any(|named| named == name)
                             .then(|| ContractPart {
                                 card_id: card.card_id.clone(),
-                                position,
+                                position: part.position,
                                 project: card.project.clone(),
-                                result: latest.as_ref().and_then(|latest| {
+                                result: latest.as_ref().filter(|_| !earlier).and_then(|latest| {
                                     latest
                                         .criteria
                                         .iter()
@@ -542,6 +710,7 @@ impl Inner {
                                         .map(|checked| checked.result)
                                 }),
                                 verifies: *verifies,
+                                earlier,
                             })
                     })
                     .collect(),
@@ -710,6 +879,7 @@ impl Inner {
             total: total(&change),
             waits_for,
             warnings,
+            contract_changed: self.contract_changed(&change, card)?,
         }))
     }
 
@@ -993,8 +1163,8 @@ impl Inner {
         let language = self.store.run(run_id)?.language;
         let mut text = String::new();
         let agreed = change.agreed.clone().unwrap_or_default();
-        let spec = serde_json::from_value::<Spec>(agreed.clone()).ok();
-        if let (Some(here), Some(spec)) = (card.joint_position, spec) {
+        // The contract as it is now, if a person corrected it since.
+        if let (Some(here), Some(spec)) = (card.joint_position, current_spec(&change)) {
             let answered: Vec<GivenAnswer> = agreed
                 .get("answered")
                 .and_then(|answered| serde_json::from_value(answered.clone()).ok())
@@ -1011,6 +1181,11 @@ impl Inner {
                 total = spec.parts.len(),
                 agreed = spec.readable(&language),
             ));
+            if change.contract.is_some() {
+                text.push_str(
+                    "\nA person corrected what the parts agree on exactly after approving it. It reads above as it is now, and that's what counts.\n",
+                );
+            }
             if !answered.is_empty() {
                 text.push_str(&format!(
                     "\n## What the person answered\n\n{}\n",
@@ -1157,5 +1332,60 @@ impl Inner {
         self.store
             .open_joint_parts(&agreement.change.id, &agreed, &parts, &spec.together)
             .map_err(|error| error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn point(id: &str, then: &str) -> Criterion {
+        Criterion {
+            id: id.into(),
+            when: "someone logs in".into(),
+            then: then.into(),
+        }
+    }
+
+    #[test]
+    fn a_part_was_given_a_point_as_it_no_longer_is_when_it_changed_came_or_went() {
+        let given = [point("K1", "201"), point("K2", "401"), point("K3", "409")];
+        assert!(changed_points(&given, &given).is_empty());
+        // K1 says something else now, K4 is new, and K2 is gone. K3 stays as it was.
+        let now = [
+            point("K1", "201 with `id`"),
+            point("K3", "409"),
+            point("K4", "429"),
+        ];
+        assert_eq!(changed_points(&given, &now), ["K1", "K4", "K2"]);
+        // Given none, every point it has now is new to it.
+        assert_eq!(changed_points(&[], &now), ["K1", "K3", "K4"]);
+    }
+
+    fn change(ids: &[&str], next: Option<i64>) -> JointChange {
+        let contract: Vec<Value> = ids
+            .iter()
+            .map(|id| json!({ "id": id, "when": "a", "then": "b", "projects": ["valora"] }))
+            .collect();
+        JointChange {
+            id: "c".into(),
+            projects: vec![],
+            agreed: Some(json!({ "summary": "s", "criteria": [], "contract": contract })),
+            contract: None,
+            contract_next: next,
+            created_at: String::new(),
+            parts: vec![],
+            checks: vec![],
+        }
+    }
+
+    #[test]
+    fn a_new_point_takes_a_number_past_every_one_given_before() {
+        assert_eq!(next_point(&change(&["K1", "K2", "K3"], None)), 4);
+        assert_eq!(next_point(&change(&[], None)), 1);
+        // Once a person corrected it, the count is what's kept, past points removed since.
+        assert_eq!(next_point(&change(&["K1"], Some(7))), 7);
+        assert_eq!(point_number("C1"), None);
+        assert_eq!(point_number("K"), None);
     }
 }

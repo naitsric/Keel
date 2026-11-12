@@ -757,6 +757,8 @@ const jointAgreed: SpecOutput = {
 // What each part found of each point: met, not met, not verified, and not checked yet.
 // ?jointContract=none is an agreement without any.
 // ?jointVerify=none has demo's part run a workflow with no verifier.
+// ?jointContract=corrected has a person correct K1 after payments' part was specified.
+const jointCorrected = params.get("jointContract") === "corrected";
 const jointContract = (parts: JointCard[]): ContractPoint[] => {
   if (params.get("jointContract") === "none") return [];
   const noVerifier = params.get("jointVerify") === "none";
@@ -764,17 +766,19 @@ const jointContract = (parts: JointCard[]): ContractPoint[] => {
   return (jointAgreed.contract ?? []).map((point) => ({
     id: point.id,
     when: point.when,
-    then: point.then,
+    then: jointCorrected && point.id === "K1" ? "it answers 200 with `settledAt` and `reference`" : point.then,
+    projects: point.projects,
     parts: parts
       .filter((card) => point.projects.includes(card.project))
       .map((card) => {
         const unverifiable = noVerifier && card.project === "demo";
-        return { cardId: card.cardId, position: card.part?.position ?? 0, project: card.project, result: unverifiable ? null : (found[point.id] ?? null), verifies: !unverifiable };
+        const earlier = jointCorrected && point.id === "K1";
+        return { cardId: card.cardId, position: card.part?.position ?? 0, project: card.project, result: unverifiable || earlier ? null : (found[point.id] ?? null), verifies: !unverifiable, earlier };
       }),
   }));
 };
 function partOf(changeId: string, position: number, extra: Partial<PartOf> = {}): PartOf {
-  return { changeId, position, total: 2, waitsFor: null, warnings: [], ...extra };
+  return { changeId, position, total: 2, waitsFor: null, warnings: [], contractChanged: params.get("jointContract") === "corrected" && position === 1 ? ["K1"] : [], ...extra };
 }
 function jointChange(changeId: string): JointChange {
   const name = (projectId: string) => listedProjects.find((p) => p.id === projectId)?.name ?? projectId;
@@ -791,6 +795,7 @@ function jointChange(changeId: string): JointChange {
     readOnly: [],
     checks: agreed ? jointChecks : [],
     contract: agreed ? jointContract(parts.map(view)) : [],
+    contractNext: agreed ? 5 : null,
   };
 }
 // ?joint=agree or ?joint=part shows a run in a change across projects.

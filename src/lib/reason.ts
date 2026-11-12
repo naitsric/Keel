@@ -27,6 +27,8 @@ export function reasonText(t: TFunction, reason: Reason): string {
       return t(`invalidWorkflow.${data.problem}`, { step: data.step, defaultValue: data.problem });
     case "specNotUsable":
       return t("reasons.specNotUsable", { problems: (data.problems ?? []).map((problem: Reason) => specProblemText(t, problem)).join("; ") });
+    case "contractNotValid":
+      return t("reasons.contractNotValid", { problems: (data.problems ?? []).map((problem: Reason) => specProblemText(t, problem)).join("; ") });
     case "invalidAnswer":
       return t(`invalidAnswers.${data.problem}`, { question: data.question, defaultValue: t("reasons.invalidAnswer") });
     case "noMatchingPaths":

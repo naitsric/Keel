@@ -35,8 +35,8 @@ pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
 pub use detect::{CiGap, CiLeftOut, CiWhy, Guess};
 pub use git::{ChangeSize, Git, GitError, Snapshot};
 pub use joint::{
-    ContractPart, ContractView, JointCard, JointChangeView, Named, Neighbour, PartOf, PartWarning,
-    RunJoint,
+    ContractEdit, ContractPart, ContractView, JointCard, JointChangeView, Named, Neighbour, PartOf,
+    PartWarning, RunJoint,
 };
 use keel_core::{AttemptState, CardLane, Reason, StepCondition, StepRole, StepSpec, WorkflowStep};
 use keel_harness::auth::{self, AuthStatus, VersionCheck};

@@ -390,6 +390,21 @@ const MIGRATIONS: &[&str] = &[
                                      and julianday(c.at) + 2000 / 86400000.0, 1));
     alter table run add column request_written text;
 "#,
+    // 20: What the parts of a change across projects agree on exactly, as a person corrected it
+    // after it was agreed, and the number the next new point takes. Null until a person corrects
+    // it: then it's what was agreed. A correction is only made once there's an agreement, never
+    // goes back to it, and never gives an id again, so a point that was removed doesn't come back
+    // meaning something else.
+    r#"
+    alter table joint_change add column contract text;
+    alter table joint_change add column contract_next integer;
+    create trigger joint_contract_only_forward before update of contract, contract_next on joint_change
+    when new.agreed is null
+      or (old.contract is not null and new.contract is null)
+      or (old.contract_next is not null
+          and (new.contract_next is null or new.contract_next < old.contract_next))
+    begin select raise(abort, 'a contract is corrected once agreed, and its ids are never given again'); end;
+"#,
 ];
 
 /// Whether the card a query calls `card` can start as far as other cards go: it waits for none,
@@ -1208,6 +1223,11 @@ pub struct JointChange {
     pub projects: Vec<String>,
     /// What was approved. None until the parts are open, and fixed from then on.
     pub agreed: Option<serde_json::Value>,
+    /// The points of its contract as a person corrected them since, numbered. None until a person
+    /// does: then they're what was agreed.
+    pub contract: Option<serde_json::Value>,
+    /// The number the next new point of the contract takes. None until a person corrects it.
+    pub contract_next: Option<i64>,
     pub created_at: String,
     /// The card of each part, first to last. A part that was deleted is no longer here.
     pub parts: Vec<String>,
@@ -1375,18 +1395,21 @@ fn write_joint_change(conn: &Connection, card_id: &str, chosen: &[String]) -> Re
 fn read_joint_change(conn: &Connection, id: &str) -> Result<JointChange> {
     let found = conn
         .query_row(
-            "select projects, agreed, created_at from joint_change where id = ?1",
+            "select projects, agreed, created_at, contract, contract_next from joint_change
+             where id = ?1",
             [id],
             |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, Option<String>>(1)?,
                     r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<i64>>(4)?,
                 ))
             },
         )
         .optional()?;
-    let Some((projects, agreed, created_at)) = found else {
+    let Some((projects, agreed, created_at, contract, contract_next)) = found else {
         return Err(Error::NotFound(format!("joint change {id}")));
     };
     let mut parts = conn.prepare(
@@ -1412,6 +1435,8 @@ fn read_joint_change(conn: &Connection, id: &str) -> Result<JointChange> {
         id: id.to_owned(),
         projects: serde_json::from_str(&projects).unwrap_or_default(),
         agreed: agreed.and_then(|text| serde_json::from_str(&text).ok()),
+        contract: contract.and_then(|text| serde_json::from_str(&text).ok()),
+        contract_next,
         created_at,
         parts,
         checks,
@@ -2827,6 +2852,35 @@ impl Store {
         Ok(opened)
     }
 
+    /// A person's correction of what the parts of an agreed change agree on exactly: its points,
+    /// numbered, and the number the next new one takes. `before` is the contract and number the
+    /// correction was made from, both None while it's what was agreed. `false`, with nothing
+    /// changed, before it's agreed, or once another correction came first.
+    pub fn correct_joint_contract(
+        &self,
+        id: &str,
+        before: Option<&serde_json::Value>,
+        before_next: Option<i64>,
+        points: &serde_json::Value,
+        next: i64,
+    ) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let change = read_joint_change(&tx, id)?;
+        if change.agreed.is_none()
+            || change.contract.as_ref() != before
+            || change.contract_next != before_next
+        {
+            return Ok(false);
+        }
+        tx.execute(
+            "update joint_change set contract = ?2, contract_next = ?3 where id = ?1",
+            params![id, points.to_string(), next],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Marks something that only works with every part in place as tried, or not tried after all.
     /// `false` if there's no such thing. Trying it again keeps when it was first said to work.
     pub fn confirm_joint_check(&self, id: &str, seq: i64, works: bool) -> Result<bool> {
@@ -3704,6 +3758,9 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 15;
+                 drop trigger joint_contract_only_forward;
+                 alter table joint_change drop column contract_next;
+                 alter table joint_change drop column contract;
                  alter table card drop column body_by;
                  alter table card drop column body_by_unknown;
                  alter table run drop column request_written;
@@ -6374,6 +6431,9 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "pragma user_version = 16;
+             drop trigger joint_contract_only_forward;
+             alter table joint_change drop column contract_next;
+             alter table joint_change drop column contract;
              alter table card drop column body_by;
              alter table card drop column body_by_unknown;
              alter table run drop column request_written;
@@ -6981,6 +7041,80 @@ mod tests {
             None
         );
         assert!(!store.confirm_joint_check("plan", 3, true).unwrap());
+    }
+
+    #[test]
+    fn only_an_agreed_contract_is_corrected_and_its_ids_are_never_given_again() {
+        let (_dir, store) = store();
+        seeded(&store);
+        other_project(&store, "q");
+        card(&store, "plan");
+        store.set_joint_projects("plan", &["q".into()]).unwrap();
+        let points =
+            serde_json::json!([{ "id": "K4", "when": "a", "then": "b", "projects": ["q"] }]);
+
+        // Before it's agreed there's nothing to correct: what the agent wrote is sent back instead.
+        assert!(
+            !store
+                .correct_joint_contract("plan", None, None, &points, 5)
+                .unwrap()
+        );
+        assert!(
+            store
+                .lock()
+                .execute("update joint_change set contract = '[]'", [])
+                .is_err()
+        );
+        let change = store.joint_change("plan").unwrap();
+        assert_eq!((change.contract, change.contract_next), (None, None));
+
+        store
+            .open_joint_parts("plan", &serde_json::json!({}), &[part("one", "q")], &[])
+            .unwrap();
+        assert!(
+            store
+                .correct_joint_contract("plan", None, None, &points, 5)
+                .unwrap()
+        );
+        let change = store.joint_change("plan").unwrap();
+        assert_eq!(change.contract, Some(points.clone()));
+        assert_eq!(change.contract_next, Some(5));
+        // What was agreed stays as it was.
+        assert_eq!(change.agreed, Some(serde_json::json!({})));
+
+        // A correction made from what's no longer there changes nothing: another came first.
+        let empty = serde_json::json!([]);
+        assert!(
+            !store
+                .correct_joint_contract("plan", None, None, &empty, 5)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .correct_joint_contract("plan", Some(&points), Some(4), &empty, 5)
+                .unwrap()
+        );
+        assert!(
+            store
+                .correct_joint_contract("plan", Some(&points), Some(5), &empty, 5)
+                .unwrap()
+        );
+        let change = store.joint_change("plan").unwrap();
+        assert_eq!(
+            change.contract,
+            Some(empty),
+            "a contract with no points left"
+        );
+
+        // Nothing writes it back to what was agreed, or gives an id again.
+        for sql in [
+            "update joint_change set contract = null",
+            "update joint_change set contract_next = 4",
+            "update joint_change set contract_next = null",
+        ] {
+            assert!(store.lock().execute(sql, []).is_err(), "{sql}");
+        }
+        assert_eq!(store.joint_change("plan").unwrap().contract_next, Some(5));
     }
 
     #[test]

@@ -82,7 +82,7 @@ describe("a card that touches other projects", () => {
   });
 
   it("isn't offered on a part, which is already one project's share", () => {
-    show(card({ jointChangeId: "plan", part: { changeId: "plan", position: 1, total: 2, waitsFor: null, warnings: [] } }));
+    show(card({ jointChangeId: "plan", part: { changeId: "plan", position: 1, total: 2, waitsFor: null, warnings: [], contractChanged: [] } }));
     expect(page()).not.toContain("Also touches");
   });
 });

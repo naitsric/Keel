@@ -178,7 +178,8 @@
     "specNotChecked": "Keel no pudo leer lo que necesitaba para revisar esta respuesta, así que no cuenta: {{detail}}. Inténtalo de nuevo.",
     "newCommandsNeedSetupOrCheck": "Solo una preparación o una verificación puede empezar de nuevo con los comandos nuevos del proyecto.",
     "assistantMayNotRun": "{{client}} volvió a poner esta tarjeta en Por hacer y ya no puede lanzar ejecuciones. Muévela tú a Por hacer para empezarla.",
-    "rerunWorkflowMissing": "Esta tarjeta volvió a Por hacer para correr de nuevo con el workflow “{{workflow}}”, que ya no existe. Muévela tú a Por hacer para empezarla con el workflow por defecto del proyecto."
+    "rerunWorkflowMissing": "Esta tarjeta volvió a Por hacer para correr de nuevo con el workflow “{{workflow}}”, que ya no existe. Muévela tú a Por hacer para empezarla con el workflow por defecto del proyecto.",
+    "contractNotValid": "No se guardó la corrección: {{problems}}."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
@@ -548,6 +549,7 @@
     "specCorrected": "Lo que escribió no cabía en lo que Keel te puede mostrar, así que Keel le pidió corregir esto:",
     "reviewIncomplete": "No pudo leer parte del cambio, así que Keel no lo cuenta como aprobación: {{files}}",
     "contractReplaced": "Escribió {{ids}} con sus propias palabras. Keel los dejó como se acordaron.",
+    "contractGiven": "Keel agregó {{ids}} de lo que las partes acuerdan a sus criterios, como decían entonces.",
     "reviewBreaks": "Dice que el cambio rompe {{ids}}, así que Keel no lo cuenta como aprobación.",
     "specAnswer": "Escribió lo que entendió",
     "verifyAnswer": "Escribió lo que encontró",
@@ -1004,6 +1006,7 @@
       "waitsFor": "Espera a que la parte {{position}}, en {{project}}, tenga pull request",
       "waitsForCard": "Espera a que la parte anterior, en {{project}}, tenga pull request",
       "open": "Ver el cambio",
+      "contractChanged": "Se especificó con una versión anterior de lo que las partes acuerdan ({{points}}). Toma la actual cuando vuelva a empezar desde Por hacer.",
       "warnings": {
         "closed": "Parte {{position}}, en {{project}}: su pull request se cerró.",
         "changed": "La parte {{position}}, en {{project}}, tiene commits que esta parte no leyó."
@@ -1288,6 +1291,17 @@
     "contractPart": "Parte {{position}}, {{project}}",
     "notChecked": "Sin revisar aún",
     "noVerifier": "Este flujo no verifica",
+    "contractEarlier": "Se especificó con una versión anterior",
+    "contractCorrect": "Corregir",
+    "contractCorrectHint": "Una parte que ya se especificó sigue con lo que recibió hasta que vuelva a empezar.",
+    "contractAddFirst": "Agregar un punto que las partes acuerdan",
+    "contractAdd": "Agregar un punto",
+    "contractRemove": "Quitar",
+    "contractNew": "nuevo",
+    "contractWhen": "Cuando",
+    "contractThen": "Entonces",
+    "contractSave": "Guardar",
+    "contractCancel": "Cancelar",
     "stopWaiting": "No esperar",
     "stopWaitingHint": "Deja que esta parte arranque sin el pull request de la anterior.",
     "openRun": "Abrir run",

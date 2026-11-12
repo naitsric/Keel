@@ -473,7 +473,7 @@ describe("notices", () => {
 
 describe("what a card says about a change across several projects", () => {
   const names = (id: string) => ({ p2: "valora", p3: "dupplaBack" })[id] ?? id;
-  const part = (extra: Partial<NonNullable<BoardCard["part"]>> = {}) => ({ changeId: "plan", position: 2, total: 2, waitsFor: null, warnings: [], ...extra });
+  const part = (extra: Partial<NonNullable<BoardCard["part"]>> = {}) => ({ changeId: "plan", position: 2, total: 2, waitsFor: null, warnings: [], contractChanged: [], ...extra });
 
   it("says nothing on an ordinary card", () => {
     expect(jointLabel(en, card("a", "todo"), names)).toBeNull();
@@ -503,6 +503,12 @@ describe("what a card says about a change across several projects", () => {
       }),
     });
     expect(jointLabel(en, warned, names)?.warnings).toEqual(["Part 1, in valora, has commits this part didn't read.", "Part 1, in valora: its pull request was closed."]);
+  });
+
+  it("warns when it was specified with points of the contract as they no longer are", () => {
+    const earlier = card("b", "humanReview", { jointChangeId: "plan", part: part({ warnings: [{ kind: "changed", position: 1, project: "valora" }], contractChanged: ["K1", "K4"] }) });
+    expect(jointLabel(en, earlier, names)?.warnings).toEqual(["Part 1, in valora, has commits this part didn't read.", "Specified with an earlier version of what the parts agree on (K1, K4). It takes the current one when it starts again from Todo."]);
+    expect(jointLabel(t("es"), earlier, names)?.warnings[1]).toBe("Se especificó con una versión anterior de lo que las partes acuerdan (K1, K4). Toma la actual cuando vuelva a empezar desde Por hacer.");
   });
 });
 
