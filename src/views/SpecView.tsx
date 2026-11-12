@@ -51,6 +51,7 @@ export function SpecView({ spec }: { spec: SpecOutput }) {
           <>
             {decided.text}
             {decided.assistant && <span className="block text-[11.5px] text-subtle">{t("run.decidedWrittenBy", { client: decided.assistant })}</span>}
+            {!decided.assistant && decided.githubAccount && <span className="block text-[11.5px] text-subtle">{t("run.decidedWrittenWithAccount")}</span>}
           </>
         ))}
       />

@@ -24,8 +24,7 @@ const AGREE_STEP: &str = "spec";
 /// Where what was agreed keeps the request it was agreed from, which each part reads in full.
 const ASKED: &str = "request";
 
-/// And what the person wrote in it, or an assistant they allowed, as Keel knew when the change was
-/// agreed.
+/// And who wrote each piece of it, as Keel knew when the run that agreed it started.
 const ASKED_WRITTEN: &str = "requestWritten";
 
 /// Where a project's mirror keeps what Keel last read of its default branch for a run in another
@@ -398,34 +397,37 @@ impl Inner {
         }
     }
 
-    /// The request a part's change was agreed from, word for word. None for a part opened before
-    /// Keel kept it.
-    pub(crate) fn asked_of(&self, part: &Card) -> Result<Option<String>> {
+    /// What was agreed for the change a part belongs to. None for a card of no change, or one
+    /// that's gone.
+    fn agreed_of(&self, part: &Card) -> Result<Option<Value>> {
         let Some(change_id) = &part.joint_change_id else {
             return Ok(None);
         };
-        let change = match self.store.joint_change(change_id) {
-            Ok(change) => change,
-            Err(keel_store::Error::NotFound(_)) => return Ok(None),
-            Err(error) => return Err(error.into()),
-        };
-        Ok(change
-            .agreed
+        match self.store.joint_change(change_id) {
+            Ok(change) => Ok(change.agreed),
+            Err(keel_store::Error::NotFound(_)) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// The request a part's change was agreed from, word for word. None for a part opened before
+    /// Keel kept it.
+    pub(crate) fn asked_of(&self, part: &Card) -> Result<Option<String>> {
+        Ok(self
+            .agreed_of(part)?
             .as_ref()
             .and_then(|agreed| agreed.get(ASKED))
             .and_then(Value::as_str)
             .map(str::to_owned))
     }
 
-    /// What the person wrote in the request a part's change was agreed from, or an assistant they
-    /// allowed. Nothing for a change agreed before Keel kept it.
-    pub(crate) fn asked_written(&self, run_id: &str) -> Vec<specs::Written> {
-        self.joint_card(run_id)
-            .ok()
-            .flatten()
-            .and_then(|(_, change)| change.agreed)
+    /// Who wrote each piece of the request a part's change was agreed from, as Keel knew when the
+    /// run that agreed it started. Nothing for a change agreed before Keel kept it.
+    pub(crate) fn asked_written_of(&self, part: &Card) -> Result<Vec<specs::Written>> {
+        Ok(self
+            .agreed_of(part)?
             .and_then(|agreed| serde_json::from_value(agreed.get(ASKED_WRITTEN)?.clone()).ok())
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 
     /// Whether a run does one part of a change across projects.

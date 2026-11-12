@@ -476,7 +476,7 @@ impl World {
                     workflow: serde_json::to_string(&[&step]).unwrap(),
                     language: "en".into(),
                     source_issue: None,
-                    issue_text: None,
+                    request_written: None,
                     workflow_id: None,
                     workflow_name: None,
                     started_by: None,
@@ -830,6 +830,72 @@ fn a_card_an_assistant_wrote_is_still_its_words_when_a_person_runs_it_again() {
     assert_eq!(
         decided_in_run(&w, &theirs),
         serde_json::json!([{ "text": "The admin export asks for a login.", "taken": "request" }])
+    );
+}
+
+#[test]
+fn a_run_keeps_who_wrote_its_request_when_its_card_changes_after_it_started() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    w.engine.start_board();
+    let first = w
+        .engine
+        .start_run_on_board(StartRun {
+            started_by: Some("client".into()),
+            ..outside_run(
+                &w,
+                steps_of(&w, "builtin:simple"),
+                "Export the threads\n\nDecided:\n- The admin export needs no login.",
+            )
+        })
+        .unwrap();
+    let card = w.store.card_of_run(&first).unwrap().unwrap();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    // The person runs the assistant's card again, rejects that run too, and then makes the card
+    // theirs.
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let again = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    w.engine
+        .card_update(
+            &card,
+            "Export the threads",
+            "Decided:\n- The admin export needs no login.\n- Nor a token.",
+        )
+        .unwrap();
+
+    // Its spec, tried again, is still what the assistant wrote.
+    let spec = |run: &str| {
+        w.store
+            .attempts_of_run(run)
+            .unwrap()
+            .into_iter()
+            .filter(|attempt| attempt.step_id == "spec")
+            .collect::<Vec<_>>()
+    };
+    w.engine
+        .retry(&spec(&again).pop().unwrap().id, false)
+        .unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    while !spec(&again)
+        .get(1)
+        .is_some_and(|attempt| attempt.state == AttemptState::Succeeded.as_str())
+    {
+        assert!(Instant::now() < deadline, "{:?}", spec(&again));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        decided_in_run(&w, &again),
+        serde_json::json!([{ "text": "The admin export needs no login.", "taken": "request", "assistant": "client" }])
     );
 }
 
@@ -3039,7 +3105,7 @@ fn dying_with_the_run_linked_and_not_yet_begun_runs_the_card_once() {
                 workflow: serde_json::to_string(&steps).unwrap(),
                 language: "en".into(),
                 source_issue: None,
-                issue_text: None,
+                request_written: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,

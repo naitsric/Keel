@@ -399,6 +399,7 @@
     "decidedYouChose": "Esto lo elegiste tú.",
     "decidedInRequest": "Lo que se decidió en el pedido",
     "decidedWrittenBy": "Lo escribió {{client}}",
+    "decidedWrittenWithAccount": "Lo escribió la cuenta del proyecto en GitHub",
     "decidedKeelTook": "Se acabaron las rondas de preguntas, así que Keel dejó de preguntar y tomó la opción recomendada.",
     "decidedQuestioned": "Una revisión cuestiona esto, y te toca decidirlo: {{why}}",
     "decidedQuestionedElsewhere": "Una revisión cuestiona “{{decided}}”, y te toca decidirlo: {{why}}",

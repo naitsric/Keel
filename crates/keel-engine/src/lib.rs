@@ -894,16 +894,17 @@ impl Engine {
         let source_issue = request.source_issue.as_ref().map(|issue| {
             json!({ "number": issue.number, "title": issue.title, "author": issue.author, "url": issue.url }).to_string()
         });
-        // What the issue said and what was added to it, apart, as they came, since who wrote each
-        // is different: only the person's can settle anything for them. Kept apart from what the
-        // run shows, since its request already says both.
-        let issue_text = request.source_issue.as_ref().map(|issue| {
-            json!({
-                "body": issue.body,
-                "added": prompts::added_to_issue(&request.request, issue),
-            })
-            .to_string()
-        });
+        // Who wrote each piece of what it asks, as Keel knows now: only what the person wrote can
+        // settle anything for them, and a card or a project can change afterwards. Kept apart from
+        // what the run shows, since its request already says all of it.
+        let from_card = card.map(|id| self.inner.store.card(id)).transpose()?;
+        let written = self.inner.written_at_start(
+            &request.request,
+            request.started_by.as_deref(),
+            request.source_issue.as_ref(),
+            from_card.as_ref(),
+            project.github_account.as_deref(),
+        )?;
         let run = NewRun {
             id: run_id.clone(),
             project_id: project.id,
@@ -914,7 +915,7 @@ impl Engine {
             workflow: serde_json::to_string(&workflow).unwrap_or_else(|_| "[]".into()),
             language: request.language,
             source_issue,
-            issue_text,
+            request_written: serde_json::to_string(&written).ok(),
             workflow_id: request.saved_workflow.as_ref().map(|w| w.id.clone()),
             workflow_name: request.saved_workflow.map(|w| w.name),
             started_by: request.started_by,
@@ -2124,8 +2125,8 @@ impl Inner {
             StepRole::Reviewer | StepRole::Verifier | StepRole::Approver { .. }
         );
         let mut text = self.render_prompt(&spec.prompt, run, judging)?;
-        // What Keel adds from the request itself, the specifier has to know of to leave it out,
-        // whatever a saved workflow's prompt says.
+        // What Keel adds from the request itself, and what it leaves there, the specifier has to
+        // know of to leave it out, whatever a saved workflow's prompt says.
         if spec.role == StepRole::Specifier {
             let decided = specs::from_request(&self.written_in_request(&run.id));
             if let Some(told) = specs::already_decided_prompt(&decided, &run.language) {

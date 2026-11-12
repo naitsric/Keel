@@ -332,7 +332,8 @@ const MIGRATIONS: &[&str] = &[
     // says, or the call that asked for it, also one that failed to start. Such a card is written
     // while that call lasts, so one that says something, was written then, and shows none of these
     // can't be told: it's nobody's until a person changes it, and what it says settles nothing.
-    // A run also keeps what its issue said, and what was added to it, apart from what it shows.
+    // A run also keeps who wrote each piece of its request, as Keel knew when it started. One from
+    // before has none, so nothing it asks settles anything.
     r#"
     alter table card add column body_by text;
     alter table card add column body_by_unknown integer not null default 0;
@@ -359,7 +360,7 @@ const MIGRATIONS: &[&str] = &[
                     and coalesce(julianday(card.created_at)
                                  between julianday(c.at) - (c.duration_ms + 2000) / 86400000.0
                                      and julianday(c.at) + 2000 / 86400000.0, 1));
-    alter table run add column issue_text text;
+    alter table run add column request_written text;
 "#,
 ];
 
@@ -583,9 +584,10 @@ pub struct NewRun {
     pub workflow: String,
     pub language: String,
     pub source_issue: Option<String>,
-    /// What that issue said, and what the request added to it, apart, for Keel to tell who wrote
-    /// what. The request has both, so nothing shows this. See [`Store::issue_text`].
-    pub issue_text: Option<String>,
+    /// Each piece of the request and who wrote it, as Keel knows when the run starts, so it can't
+    /// change with the card or the project afterwards. The request has all of it, so nothing shows
+    /// this. See [`Store::request_written`].
+    pub request_written: Option<String>,
     pub workflow_id: Option<String>,
     pub workflow_name: Option<String>,
     /// The assistant that started it over MCP, if one did.
@@ -1164,9 +1166,9 @@ fn read_joint_change(conn: &Connection, id: &str) -> Result<JointChange> {
 
 fn insert_run(conn: &Connection, run: &NewRun) -> rusqlite::Result<()> {
     conn.execute(
-        "insert into run (id, project_id, title, request, workflow, language, source_issue, created_at, workflow_id, workflow_name, started_by, issue_text)
+        "insert into run (id, project_id, title, request, workflow, language, source_issue, created_at, workflow_id, workflow_name, started_by, request_written)
          values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-        params![run.id, run.project_id, run.title, run.request, run.workflow, run.language, run.source_issue, now(), run.workflow_id, run.workflow_name, run.started_by, run.issue_text],
+        params![run.id, run.project_id, run.title, run.request, run.workflow, run.language, run.source_issue, now(), run.workflow_id, run.workflow_name, run.started_by, run.request_written],
     )?;
     Ok(())
 }
@@ -1618,14 +1620,16 @@ impl Store {
         Ok(())
     }
 
-    /// What the issue a run came from said, and what its request added to it, as the engine kept
-    /// them apart. None for a run from no issue, or from before Keel kept this.
-    pub fn issue_text(&self, run_id: &str) -> Result<Option<serde_json::Value>> {
+    /// Who wrote each piece of a run's request, as the engine kept it when the run started. None
+    /// for a run from before Keel kept this.
+    pub fn request_written(&self, run_id: &str) -> Result<Option<serde_json::Value>> {
         let text: Option<String> = self
             .lock()
-            .query_row("select issue_text from run where id = ?1", [run_id], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "select request_written from run where id = ?1",
+                [run_id],
+                |r| r.get(0),
+            )
             .optional()?
             .ok_or_else(|| Error::NotFound(format!("run {run_id}")))?;
         Ok(text.and_then(|text| serde_json::from_str(&text).ok()))
@@ -2791,7 +2795,7 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
-                issue_text: None,
+                request_written: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,
@@ -2856,7 +2860,7 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
-                issue_text: None,
+                request_written: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,
@@ -2943,7 +2947,7 @@ mod tests {
                 "pragma user_version = 4;
                  alter table card drop column body_by;
                  alter table card drop column body_by_unknown;
-                 alter table run drop column issue_text;
+                 alter table run drop column request_written;
                  alter table run drop column extra_read;
                  alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;
@@ -3267,7 +3271,7 @@ mod tests {
                 "pragma user_version = 15;
                  alter table card drop column body_by;
                  alter table card drop column body_by_unknown;
-                 alter table run drop column issue_text;
+                 alter table run drop column request_written;
                  alter table run drop column extra_read;
                  update project set allowed_read = 'not a list' where id = 'bad';",
             )
@@ -3316,7 +3320,7 @@ mod tests {
                     workflow: "[]".into(),
                     language: "en".into(),
                     source_issue: None,
-                    issue_text: None,
+                    request_written: None,
                     workflow_id: None,
                     workflow_name: None,
                     started_by: None,
@@ -3522,7 +3526,7 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
-                issue_text: None,
+                request_written: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,
@@ -3630,7 +3634,7 @@ mod tests {
                     workflow: "[]".into(),
                     language: "en".into(),
                     source_issue: None,
-                    issue_text: None,
+                    request_written: None,
                     workflow_id: workflow.map(|w| w.0.into()),
                     workflow_name: workflow.map(|w| w.1.into()),
                     started_by: None,
@@ -3743,7 +3747,7 @@ mod tests {
                     workflow: "[]".into(),
                     language: "en".into(),
                     source_issue: None,
-                    issue_text: None,
+                    request_written: None,
                     workflow_id: Some("w".into()),
                     workflow_name: Some("W".into()),
                     started_by: None,
@@ -3817,7 +3821,7 @@ mod tests {
                     workflow: "[]".into(),
                     language: "en".into(),
                     source_issue: None,
-                    issue_text: None,
+                    request_written: None,
                     workflow_id: Some("w".into()),
                     workflow_name: Some("W".into()),
                     started_by: None,
@@ -4388,7 +4392,7 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
-                issue_text: None,
+                request_written: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,
@@ -4409,7 +4413,7 @@ mod tests {
             workflow: "[]".into(),
             language: "en".into(),
             source_issue: None,
-            issue_text: None,
+            request_written: None,
             workflow_id: None,
             workflow_name: None,
             started_by: None,
@@ -4560,11 +4564,14 @@ mod tests {
     }
 
     #[test]
-    fn what_an_issue_said_is_kept_for_keel_and_not_shown_with_the_run() {
+    fn who_wrote_a_run_s_request_is_kept_for_keel_and_not_shown_with_the_run() {
         let (_dir, store) = store();
         seeded(&store);
         let issue = serde_json::json!({ "number": 7, "title": "Broken", "author": "alice", "url": "https://github.com/acme/app/issues/7" });
-        let said = serde_json::json!({ "body": "Decided:\n- Old threads stay.", "added": "Keep it small." });
+        let written = serde_json::json!([
+            { "text": "Decided:\n- Old threads stay.", "githubAccount": "alice" },
+            { "text": "Keep it small.", "assistant": "Claude Code" },
+        ]);
         store
             .add_run(&NewRun {
                 id: "from-issue".into(),
@@ -4574,7 +4581,7 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: Some(issue.to_string()),
-                issue_text: Some(said.to_string()),
+                request_written: Some(written.to_string()),
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,
@@ -4585,8 +4592,9 @@ mod tests {
         assert!(!shown.to_string().contains("Old threads stay"), "{shown}");
         let listed = serde_json::to_string(&store.runs(10).unwrap()).unwrap();
         assert!(!listed.contains("Old threads stay"), "{listed}");
-        assert_eq!(store.issue_text("from-issue").unwrap(), Some(said));
-        assert_eq!(store.issue_text("r").unwrap(), None);
+        assert_eq!(store.request_written("from-issue").unwrap(), Some(written));
+        // A run from before Keel kept it has none.
+        assert_eq!(store.request_written("r").unwrap(), None);
     }
 
     #[test]
@@ -4632,7 +4640,7 @@ mod tests {
                         workflow: "[]".into(),
                         language: "en".into(),
                         source_issue: None,
-                        issue_text: None,
+                        request_written: None,
                         workflow_id: None,
                         workflow_name: None,
                         started_by: None,
@@ -4964,7 +4972,7 @@ mod tests {
                 "pragma user_version = 8;
                  alter table card drop column body_by;
                  alter table card drop column body_by_unknown;
-                 alter table run drop column issue_text;
+                 alter table run drop column request_written;
                  alter table run drop column extra_read;
                  alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;
@@ -5157,7 +5165,7 @@ mod tests {
                     workflow: "[]".into(),
                     language: "en".into(),
                     source_issue: None,
-                    issue_text: None,
+                    request_written: None,
                     workflow_id: None,
                     workflow_name: None,
                     started_by: None,
@@ -5297,7 +5305,7 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
-                issue_text: None,
+                request_written: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,

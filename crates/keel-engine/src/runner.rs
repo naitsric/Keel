@@ -8,11 +8,12 @@ use std::time::{Duration, Instant};
 
 use keel_core::{AttemptState, Reason, StepSpec, ToolProfile, WorkflowStep};
 use keel_harness::auth::{self, AuthStatus};
+use keel_harness::github::Issue;
 use keel_harness::process::{self, SIGINT, SIGTERM, Tail};
 use keel_harness::stream::ResultEvent;
 use keel_harness::{Parsed, StepCommand, home, parse_line, settings};
 use keel_store::rusqlite_value::Value;
-use keel_store::{Attempt, Writer, now};
+use keel_store::{Attempt, Card, Writer, now};
 use serde_json::json;
 
 use crate::git::{Git, RUN_CACHE};
@@ -1344,29 +1345,42 @@ impl Inner {
         }
     }
 
-    /// What the person wrote in a run's request, or an assistant they allowed to start it, which is
-    /// where Keel finds what they already decided. Who wrote what comes from how the run started,
-    /// never from what the request says, and Keel's own words around it never count. With nothing
-    /// to tell by, nothing counts.
+    /// What the person wrote in a run's request, or an assistant they allowed to start it, or an
+    /// issue written with the project's GitHub account, which is where Keel finds what they already
+    /// decided. It's what Keel knew when the run started: see [`Inner::written_at_start`]. A run
+    /// from before Keel kept that has nothing to tell by, so nothing counts.
     pub(crate) fn written_in_request(&self, run_id: &str) -> Vec<specs::Written> {
-        let (Ok(run), Ok(part)) = (self.store.run(run_id), self.is_part(run_id)) else {
-            return Vec::new();
-        };
+        self.store
+            .request_written(run_id)
+            .ok()
+            .flatten()
+            .and_then(|written| serde_json::from_value(written).ok())
+            .unwrap_or_default()
+    }
+
+    /// Who wrote each piece of a run's request, as Keel knows when it starts, from how it starts,
+    /// never from what the request says: the assistant that started it, if one did, the card it
+    /// came from, the issue, and the project's GitHub account. Keel's own words around it never
+    /// count. It's kept with the run, so neither the card nor the project can change it afterwards.
+    pub(crate) fn written_at_start(
+        &self,
+        request: &str,
+        started_by: Option<&str>,
+        issue: Option<&Issue>,
+        card: Option<&Card>,
+        account: Option<&str>,
+    ) -> Result<Vec<specs::Written>> {
         // A part's request is the one its change was agreed from, and what was agreed for it is an
         // agent's.
-        if part {
-            return self.asked_written(run_id);
+        if let Some(part) = card.filter(|card| card.joint_position.is_some()) {
+            return self.asked_written_of(part);
         }
         // An assistant that started it wrote what it asks. Started from a card, it's in the words
-        // of whoever wrote the card, which a person rerunning it doesn't change.
-        let writer = match (&run.started_by, self.store.card_of_run(run_id)) {
-            (Some(assistant), _) => Writer::Assistant(assistant.clone()),
-            (None, Ok(None)) => Writer::Person,
-            (None, Ok(Some(card))) => match self.store.card(&card) {
-                Ok(card) => card.body_by,
-                Err(_) => return Vec::new(),
-            },
-            (None, Err(_)) => return Vec::new(),
+        // of whoever wrote the card, which a person running it again doesn't change.
+        let writer = match (started_by, card) {
+            (Some(assistant), _) => Writer::Assistant(assistant.to_owned()),
+            (None, None) => Writer::Person,
+            (None, Some(card)) => card.body_by.clone(),
         };
         let by_writer = |text: &str| {
             let assistant = match &writer {
@@ -1378,32 +1392,32 @@ impl Inner {
             Some(specs::Written {
                 text: text.to_owned(),
                 assistant,
+                github_account: None,
             })
         };
-        let Some(issue) = &run.source_issue else {
-            return by_writer(&run.request).into_iter().collect();
+        let Some(issue) = issue else {
+            return Ok(by_writer(request).into_iter().collect());
         };
-        let Ok(said) = self.store.issue_text(run_id) else {
-            return Vec::new();
-        };
-        let text = |key: &str| said.as_ref()?.get(key)?.as_str();
-        let account = self
-            .store
-            .project(&run.project_id)
-            .ok()
-            .and_then(|project| project.github_account);
         let mut written = Vec::new();
-        // An issue is the person's only if they wrote it, by the rule for a small change.
-        if sizing::why_from_issue(Some(issue), account.as_deref()).is_none()
-            && let Some(body) = text("body")
+        // Someone else's issue counts for no one. One written with the project's account is that
+        // account's: an assistant may have written it through `gh`, and anyone who can edit it
+        // may have changed it, with its author still the account.
+        let author = json!({ "author": issue.author });
+        if let Some(account) = account
+            && sizing::why_from_issue(Some(&author), Some(account)).is_none()
         {
             written.push(specs::Written {
-                text: body.to_owned(),
+                text: issue.body.clone(),
                 assistant: None,
+                github_account: Some(account.trim().to_owned()),
             });
         }
-        written.extend(text("added").and_then(by_writer));
-        written
+        written.extend(
+            prompts::added_to_issue(request, issue)
+                .as_deref()
+                .and_then(by_writer),
+        );
+        Ok(written)
     }
 
     /// What it answered, without anything an agent added beyond the structure. The whole answer as

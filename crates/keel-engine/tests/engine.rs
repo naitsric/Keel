@@ -975,7 +975,7 @@ fn reopening_with_a_lost_step_leaves_the_turn_with_the_one_still_running() {
             .unwrap(),
             language: "en".into(),
             source_issue: None,
-            issue_text: None,
+            request_written: None,
             workflow_id: None,
             workflow_name: None,
             started_by: None,

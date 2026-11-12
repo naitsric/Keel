@@ -399,6 +399,7 @@
     "decidedYouChose": "You chose this.",
     "decidedInRequest": "Decided in the request",
     "decidedWrittenBy": "{{client}} wrote it",
+    "decidedWrittenWithAccount": "Written with the project's GitHub account",
     "decidedKeelTook": "The rounds of questions ran out, so Keel stopped asking and took the recommended option.",
     "decidedQuestioned": "A review questions this, and it's yours to decide: {{why}}",
     "decidedQuestionedElsewhere": "A review questions “{{decided}}”, and it's yours to decide: {{why}}",

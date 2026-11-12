@@ -509,6 +509,7 @@ function DecidedList({ attemptId, decided, only, questioned, elsewhere, canChang
           </div>
           {item.taken === "person" && <p className="text-[11.5px] text-subtle">{t("run.decidedYouChose")}</p>}
           {item.taken === "request" && item.assistant && <p className="text-[11.5px] text-subtle">{t("run.decidedWrittenBy", { client: item.assistant })}</p>}
+          {item.taken === "request" && !item.assistant && item.githubAccount && <p className="text-[11.5px] text-subtle">{t("run.decidedWrittenWithAccount")}</p>}
           {item.taken === "roundsLimit" && <p className="text-[11.5px] text-warning">{t("run.decidedKeelTook")}</p>}
           {questioned
             .filter((q) => q.lines.includes(index))

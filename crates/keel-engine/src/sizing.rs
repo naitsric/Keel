@@ -336,7 +336,8 @@ fn why_from_fact(fact: &CheckFact, wanted: usize) -> Option<WhyNotSmall> {
 }
 
 /// A run a person typed has no issue. Anyone can write one, and an unknown author could be anyone.
-/// What such an issue says can't settle anything for the person either.
+/// What such an issue says settles nothing for the person, and one by the account settles only as
+/// the account's, since it isn't proven to be theirs.
 pub(crate) fn why_from_issue(issue: Option<&Value>, account: Option<&str>) -> Option<WhyNotSmall> {
     let issue = issue?;
     let author = issue
