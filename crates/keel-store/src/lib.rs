@@ -331,6 +331,11 @@ const MIGRATIONS: &[&str] = &[
     r#"
     alter table project add column allow_localhost integer not null default 0;
 "#,
+    // 18: Whether a run opens localhost to its check though its project doesn't: what a person was
+    // trying, before saving it. Never for a run from before.
+    r#"
+    alter table run add column extra_localhost integer not null default 0;
+"#,
 ];
 
 /// Whether the card a query calls `card` can start as far as other cards go: it waits for none,
@@ -547,6 +552,10 @@ pub struct Run {
     /// it. Empty for any other run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extra_read: Vec<String>,
+    /// Its check gets localhost though the project doesn't open it: what a person was trying,
+    /// before saving it. False for any other run.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub extra_localhost: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -564,7 +573,7 @@ pub struct NewRun {
     pub started_by: Option<String>,
 }
 
-const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by, workflow_id, workflow_name, pr_state, pr_state_at, pr_checked_at, pr_head, extra_read";
+const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by, workflow_id, workflow_name, pr_state, pr_state_at, pr_checked_at, pr_head, extra_read, extra_localhost";
 
 fn pr_state_from(text: Option<String>) -> Option<PrState> {
     text.as_deref().and_then(PrState::parse)
@@ -596,6 +605,7 @@ fn run_from(r: &Row) -> rusqlite::Result<Run> {
         pr_checked_at: r.get(19)?,
         pr_head: r.get(20)?,
         extra_read: serde_json::from_str(&r.get::<_, String>(21)?).unwrap_or_default(),
+        extra_localhost: r.get(22)?,
     })
 }
 
@@ -1537,16 +1547,18 @@ impl Store {
         Ok(insert_run(&self.lock(), run)?)
     }
 
-    /// A run whose steps may also read these folders, in one go, so no step starts without them.
-    pub fn add_run_reading(&self, run: &NewRun, read: &[String]) -> Result<()> {
+    /// A run whose steps may also read these folders, and whose check gets localhost if `localhost`,
+    /// in one go, so no step starts without them.
+    pub fn add_run_reading(&self, run: &NewRun, read: &[String], localhost: bool) -> Result<()> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         insert_run(&tx, run)?;
         tx.execute(
-            "update run set extra_read = ?2 where id = ?1",
+            "update run set extra_read = ?2, extra_localhost = ?3 where id = ?1",
             params![
                 run.id,
-                serde_json::to_string(read).unwrap_or_else(|_| "[]".into())
+                serde_json::to_string(read).unwrap_or_else(|_| "[]".into()),
+                localhost
             ],
         )?;
         tx.commit()?;
@@ -2875,6 +2887,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 alter table run drop column extra_localhost;
                  alter table project drop column allow_localhost;
                  alter table run drop column extra_read;
                  alter table attempt drop column skipped_tests;
@@ -3200,6 +3213,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 15;
+                 alter table run drop column extra_localhost;
                  alter table project drop column allow_localhost;
                  alter table run drop column extra_read;
                  update project set allowed_read = 'not a list' where id = 'bad';",
@@ -3246,6 +3260,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 16;
+                 alter table run drop column extra_localhost;
                  alter table project drop column allow_localhost;",
             )
             .unwrap();
@@ -3268,33 +3283,64 @@ mod tests {
         assert!(!store.project("new").unwrap().allow_localhost);
     }
 
-    /// Trying commands before saving them, a person can let them read more than the project does.
-    /// Only that run gets it.
+    /// Trying commands before saving them, a person can let them read more than the project does,
+    /// and open localhost to them. Only that run gets it.
     #[test]
     fn a_run_can_read_folders_of_its_own_and_the_project_is_left_as_it_was() {
         let (_dir, store) = store();
         seeded(&store);
-        assert!(store.run("r").unwrap().extra_read.is_empty());
+        let run = store.run("r").unwrap();
+        assert!(run.extra_read.is_empty());
+        assert!(!run.extra_localhost);
+        let trial = |id: &str| NewRun {
+            id: id.into(),
+            project_id: "p".into(),
+            title: "try".into(),
+            request: "try".into(),
+            workflow: "[]".into(),
+            language: "en".into(),
+            source_issue: None,
+            workflow_id: None,
+            workflow_name: None,
+            started_by: None,
+        };
         store
-            .add_run_reading(
-                &NewRun {
-                    id: "t".into(),
-                    project_id: "p".into(),
-                    title: "try".into(),
-                    request: "try".into(),
-                    workflow: "[]".into(),
-                    language: "en".into(),
-                    source_issue: None,
-                    workflow_id: None,
-                    workflow_name: None,
-                    started_by: None,
-                },
-                &["~/.nvm".to_owned()],
+            .add_run_reading(&trial("t"), &["~/.nvm".to_owned()], false)
+            .unwrap();
+        let run = store.run("t").unwrap();
+        assert_eq!(run.extra_read, ["~/.nvm"]);
+        assert!(!run.extra_localhost);
+        store.add_run_reading(&trial("u"), &[], true).unwrap();
+        let run = store.run("u").unwrap();
+        assert!(run.extra_read.is_empty());
+        assert!(run.extra_localhost);
+        let project = store.project("p").unwrap();
+        assert!(project.allowed_read.is_empty());
+        assert!(!project.allow_localhost);
+        let run = store.run("r").unwrap();
+        assert!(run.extra_read.is_empty());
+        assert!(!run.extra_localhost);
+    }
+
+    /// #124: a run from before opens no localhost of its own.
+    #[test]
+    fn runs_from_before_open_no_localhost_of_their_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        {
+            let store = Store::open(&path).unwrap();
+            seeded(&store);
+        }
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "pragma user_version = 17;
+                 alter table run drop column extra_localhost;",
             )
             .unwrap();
-        assert_eq!(store.run("t").unwrap().extra_read, ["~/.nvm"]);
-        assert!(store.project("p").unwrap().allowed_read.is_empty());
-        assert!(store.run("r").unwrap().extra_read.is_empty());
+        }
+        let store = Store::open(&path).unwrap();
+        assert!(!store.run("r").unwrap().extra_localhost);
     }
 
     fn card(store: &Store, id: &str) -> String {
@@ -4769,6 +4815,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table run drop column extra_localhost;
                  alter table project drop column allow_localhost;
                  alter table run drop column extra_read;
                  alter table attempt drop column skipped_tests;

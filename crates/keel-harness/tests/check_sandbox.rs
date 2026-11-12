@@ -148,6 +148,29 @@ fn a_check_cannot_change_what_git_will_run() {
     assert!(s.allowed("git add -A && git commit -qm work && git branch other && git status"));
 }
 
+/// Gradle asks whether the folder it builds in can be written to, and won't build if it can't.
+/// macOS answers that by the rules for the folder itself, which a check can't move, remove or
+/// replace. It's told yes, and the folder still stays where it is.
+#[test]
+fn a_check_can_tell_its_workspace_is_writable_and_still_cannot_move_it() {
+    keel_harness::needs!(sandbox);
+    let s = sandbox();
+    // `test -w` asks as Java does, with access(2).
+    assert!(s.allowed("test -w ."), "the workspace says it's read-only");
+    let elsewhere = tempfile::tempdir().unwrap();
+    let away = elsewhere.path().join("moved");
+    for attack in [
+        format!("mv \"$PWD\" {}", quoted(&away)),
+        "rmdir \"$PWD\"".to_owned(),
+        "touch \"$PWD\"".to_owned(),
+        "xattr -w keel.probe 1 \"$PWD\"".to_owned(),
+    ] {
+        assert!(!s.allowed(&attack), "{attack}");
+    }
+    assert!(s.workspace.path().join("ok.txt").exists());
+    assert!(!away.exists());
+}
+
 #[test]
 fn git_works_when_the_home_folder_has_a_git_config() {
     keel_harness::needs!(sandbox);

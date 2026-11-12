@@ -28,10 +28,19 @@ const TOOLCHAINS: [(&str, &str); 8] = [
 /// who from. The run's clone says who in its own settings, which win over these.
 const GIT_SETTINGS: &str = "[user]\n\tname = Keel\n\temail = keel@localhost\n";
 
+/// `path` as one of Java's options reads it: split at spaces, with quotes and no escapes. So it goes
+/// in double quotes, and each double quote in it in single ones.
+fn java_quoted(path: &str) -> String {
+    format!("\"{}\"", path.replace('"', r#""'"'""#))
+}
+
 /// The variables that put a command in `home`: the home folder itself, where tools keep their
-/// settings, caches, data and state, git's settings, and the toolchains in `real_home`.
+/// settings, caches, data and state, git's settings, and the toolchains in `real_home`. Two
+/// runtimes ask the system for the home folder and not `HOME`, and each is told on its own: Java,
+/// for Maven, Gradle and every other tool on it, and Foundation, for Swift's.
 pub fn env(home: &Path, real_home: &Path) -> Vec<(String, String)> {
     let inside = |folder: &str| home.join(folder).to_string_lossy().into_owned();
+    let home_text = home.to_string_lossy().into_owned();
     let mut env: Vec<(String, String)> = [
         ("XDG_CONFIG_HOME", ".config"),
         ("XDG_CACHE_HOME", ".cache"),
@@ -42,7 +51,12 @@ pub fn env(home: &Path, real_home: &Path) -> Vec<(String, String)> {
     .iter()
     .map(|(name, folder)| ((*name).to_owned(), inside(folder)))
     .collect();
-    env.insert(0, ("HOME".to_owned(), home.to_string_lossy().into_owned()));
+    env.insert(0, ("HOME".to_owned(), home_text.clone()));
+    env.push((
+        "JAVA_TOOL_OPTIONS".to_owned(),
+        format!("-Duser.home={}", java_quoted(&home_text)),
+    ));
+    env.push(("CFFIXED_USER_HOME".to_owned(), home_text));
     if real_home.is_absolute() {
         env.extend(TOOLCHAINS.iter().map(|(name, folder)| {
             (
@@ -172,6 +186,95 @@ mod tests {
             let values: Vec<&str> = env.iter().map(|(_, value)| value.as_str()).collect();
             assert_eq!(said.lines().collect::<Vec<_>>(), values, "{shell}");
         }
+    }
+
+    /// A home folder like a project's, with what would end a quote in each of the ways it's written.
+    fn awkward_home(dir: &Path) -> std::path::PathBuf {
+        let home = dir.join("Application Support/it's \"here\"/home");
+        std::fs::create_dir_all(&home).unwrap();
+        home
+    }
+
+    /// Java takes its home folder from the system and not from `HOME` (JDK-8280357), so Maven and
+    /// Gradle would keep what they download in the real one, which the sandbox refuses. So would
+    /// Swift and anything else built on Foundation.
+    #[test]
+    fn java_and_foundation_are_told_where_the_home_is() {
+        let home = Path::new("/h/Application Support/it's \"here\"/home");
+        let env = env(home, Path::new("/Users/me"));
+        assert_eq!(var(&env, "CFFIXED_USER_HOME"), Some(home.to_str().unwrap()));
+        // Java splits the variable at spaces, and reads quotes, with no way to escape one.
+        assert_eq!(
+            var(&env, "JAVA_TOOL_OPTIONS"),
+            Some(r#"-Duser.home="/h/Application Support/it's "'"'"here"'"'"/home""#)
+        );
+    }
+
+    /// Where a JDK is, if this Mac has one: `/usr/bin/java` is only a stub without one.
+    fn java() -> Option<std::path::PathBuf> {
+        let registered = std::process::Command::new("/usr/libexec/java_home")
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned());
+        registered
+            .into_iter()
+            .map(|jdk| Path::new(&jdk).join("bin/java"))
+            .chain(
+                [
+                    "/opt/homebrew/opt/openjdk/bin/java",
+                    "/usr/local/opt/openjdk/bin/java",
+                ]
+                .map(std::path::PathBuf::from),
+            )
+            .find(|java| java.is_file())
+    }
+
+    #[test]
+    fn java_finds_its_home_folder_in_the_home_whatever_the_path() {
+        let Some(java) = java() else {
+            crate::testing::skipped("there's no Java on this Mac");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let home = awkward_home(dir.path());
+        let output = std::process::Command::new(java)
+            .args(["-XshowSettings:properties", "-version"])
+            .env_clear()
+            .envs(env(&home, Path::new("/Users/me")))
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{said}");
+        let user_home = said
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("user.home = "))
+            .expect(&said);
+        assert_eq!(user_home, home.to_str().unwrap(), "{said}");
+    }
+
+    #[test]
+    fn foundation_finds_its_home_folder_in_the_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = awkward_home(dir.path());
+        let output = std::process::Command::new("/usr/bin/osascript")
+            .args([
+                "-l",
+                "JavaScript",
+                "-e",
+                "ObjC.import('Foundation'); $.NSHomeDirectory().js",
+            ])
+            .env_clear()
+            .envs(env(&home, Path::new("/Users/me")))
+            .output()
+            .unwrap();
+        let said = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(said.trim(), home.to_str().unwrap());
     }
 
     #[test]

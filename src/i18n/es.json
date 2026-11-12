@@ -1068,6 +1068,8 @@
     "addOption": "Agregar {{option}}",
     "folders": "Estos comandos usan programas de tu carpeta personal, que les queda oculta. Dejar que lean:",
     "folderFor": "para {{programs}}",
+    "localhost": "Abrir localhost a la verificación y a los comandos del builder",
+    "localhostWhy": "Su herramienta de compilación habla con los procesos que levanta en localhost, así que la verificación no puede correr con localhost cerrado. Las pruebas y los comandos del builder podrán llegar a cualquier servicio que corra en este Mac, y un servidor que escuche en todas las direcciones se ve desde tu red local mientras corre. Puedes cambiarlo después en los ajustes del proyecto.",
     "guessed": "Deducido de {{files}}.",
     "fromCi": "Sacado de tu CI: {{files}}.",
     "noGuess": "Keel no pudo saber cómo se prueba este proyecto, así que esto queda vacío.",

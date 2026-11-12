@@ -1068,6 +1068,8 @@
     "addOption": "Add {{option}}",
     "folders": "These commands use programs from your home folder, which is hidden from them. Let them read:",
     "folderFor": "for {{programs}}",
+    "localhost": "Open localhost to the check and to the builder's commands",
+    "localhostWhy": "Its build tool talks to the processes it starts on localhost, so the check can't run with it closed. Tests and the builder's commands can then reach any service running on this Mac, and a server that listens on all addresses can be seen from your local network while it runs. You can change it later in the project's settings.",
     "guessed": "Guessed from {{files}}.",
     "fromCi": "Taken from your CI: {{files}}.",
     "noGuess": "Keel couldn't tell how this project tests itself, so these are empty.",
