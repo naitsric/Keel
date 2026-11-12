@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { Attempt, AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, agentCouldHaveWritten, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, agentCouldHaveWritten, answersIn, approvalOutcome, askedText, breakableIds, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, findingsOf, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -375,6 +375,52 @@ describe("what the reviews couldn't check by reading the code", () => {
       { stepId: "builder", role: "worker", round: 0, output: { unchecked: ["Not a review"] } },
     ];
     expect(uncheckedInRound(attempts, 0)).toEqual([]);
+  });
+});
+
+describe("what a review found", () => {
+  const breakable = breakableIds({ summary: "s", criteria: [{ id: "C1", when: "w", then: "t" }, { id: "C2", when: "w", then: "t" }], changes: [], limits: ["Its signature stays"], decided: [], questions: [] });
+
+  it("can break each criterion of the specification, and each of its limits from L1", () => {
+    expect(breakable).toEqual(["C1", "C2", "L1"]);
+    expect(breakableIds(null)).toEqual([]);
+  });
+
+  it("reads text from before Keel asked, and where it is and what it breaks now", () => {
+    const output = {
+      verdict: "changes",
+      findings: [
+        "app/api.py:42 doesn't call require_role",
+        { file: "calc.py", line: 3, text: "Subtracts when one is negative", breaks: "C2" },
+        { file: " test_calc.py ", line: null, text: "The test name could say more", breaks: " " },
+        { file: null, line: null, text: "Touches the public API", breaks: "L1" },
+        7,
+        null,
+      ],
+    };
+    expect(findingsOf(output, breakable)).toEqual([
+      { where: null, text: "app/api.py:42 doesn't call require_role", breaks: null },
+      { where: "calc.py:3", text: "Subtracts when one is negative", breaks: "C2" },
+      { where: "test_calc.py", text: "The test name could say more", breaks: null },
+      { where: null, text: "Touches the public API", breaks: "L1" },
+    ]);
+  });
+
+  it("says nothing breaks when the specification has no such criterion or limit, as Keel does", () => {
+    const output = { findings: [{ file: "a.py", line: 1, text: "Something", breaks: "C9" }, { file: "a.py", line: 2, text: "Past the last limit", breaks: "L2" }, { file: "a.py", line: 3, text: "Words", breaks: "none" }] };
+    expect(findingsOf(output, breakable).map((finding) => finding.breaks)).toEqual([null, null, null]);
+    expect(findingsOf({ findings: [{ file: "a.py", line: 1, text: "Something", breaks: "C1" }] }, []).map((finding) => finding.breaks)).toEqual([null]);
+  });
+
+  it("leaves out a line that isn't a whole number from 0, as Keel does", () => {
+    const output = { findings: [-3, 2.5, "7", 0].map((line) => ({ file: "a.py", line, text: "Something", breaks: null })) };
+    expect(findingsOf(output, breakable).map((finding) => finding.where)).toEqual(["a.py", "a.py", "a.py", "a.py:0"]);
+  });
+
+  it("is nothing for an answer it can't read", () => {
+    expect(findingsOf(null, breakable)).toEqual([]);
+    expect(findingsOf({ verdict: "approved" }, breakable)).toEqual([]);
+    expect(findingsOf({ findings: "Not a list" }, breakable)).toEqual([]);
   });
 });
 

@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CommandChange, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, breakableIds, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, type FindingShown, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -300,6 +300,7 @@ function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { atte
 function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number }) {
   const { t } = useTranslation();
   const { reviewers, approver } = reviewsOfRound(attempts, round);
+  const breakable = breakableOf(attempts);
   const latest = latestOfEachStep(reviewers);
   const ran = latest.filter((review) => review.state !== "skipped");
   // Those it skipped for being small are on a line of their own, with what can be done about it.
@@ -311,7 +312,7 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
           {ran.map((review) => (
             <li key={review.id} className="flex items-baseline gap-1.5">
               <span className="font-mono text-[12px] font-medium">{review.stepId}</span>
-              <ReviewVerdict review={review} />
+              <ReviewVerdict review={review} findings={findingsOf(review.output, breakable)} />
             </li>
           ))}
         </ul>
@@ -1267,6 +1268,8 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       return line(t("activity.reviewIncomplete", { files: (data.unread ?? []).join(", ") }), "text-warning");
     case "contractReplaced":
       return line(t("activity.contractReplaced", { ids: (data.replaced ?? []).join(", ") }));
+    case "reviewBreaks":
+      return line(t("activity.reviewBreaks", { ids: (data.breaks ?? []).join(", ") }), "text-warning");
     case "verificationCorrected":
       return (
         <div>
@@ -1490,10 +1493,19 @@ function ProposalsCard({ runId, revision }: { runId: string; revision: number })
   );
 }
 
-function ReviewVerdict({ review }: { review: Attempt }) {
+/** What a finding can say the change breaks in this run: what its specification has. */
+function breakableOf(attempts: Attempt[]): string[] {
+  const asked = specifyingAttempt(attempts);
+  return breakableIds(asked ? specOf(asked) : null);
+}
+
+/** What became of a review. When Keel doesn't count it as an approval, it says why: its summary can still say all is fine. */
+function ReviewVerdict({ review, findings }: { review: Attempt; findings: FindingShown[] }) {
   const { t } = useTranslation();
   if (!review.output) return <StateBadge state={review.state} label={t(`states.${review.state}`)} />;
   if ((review.output.unread ?? []).length > 0) return <span className="text-warning">{t("run.verdictUnread")}</span>;
+  const broken = [...new Set(findings.flatMap((finding) => (finding.breaks ? [finding.breaks] : [])))];
+  if (broken.length > 0) return <span className="text-warning">{t("run.verdictBreaks", { ids: broken.join(", ") })}</span>;
   return <span className={review.output.verdict === "approved" ? "text-success" : "text-warning"}>{review.output.verdict === "approved" ? t("run.verdictApproved") : t("run.verdictChanges")}</span>;
 }
 
@@ -1513,29 +1525,38 @@ function ApproverVerdict({ output, riskClass = "text-subtle" }: { output: NonNul
 function ReviewsList({ attempts, round }: { attempts: Attempt[]; round: number }) {
   const { t } = useTranslation();
   const { reviewers, approver } = reviewsOfRound(attempts, round);
+  const breakable = breakableOf(attempts);
   // A person can ask for a review that was skipped, and then that's what became of it.
   return (
     <>
       <ul className="space-y-2">
-        {latestOfEachStep(reviewers).map((review) => (
-          <li key={review.id} className="text-[12.5px]">
-            <div className="flex flex-wrap items-baseline gap-2">
-              <span className="font-mono text-[12px] font-medium">{review.stepId}</span>
-              <ReviewVerdict review={review} />
-            </div>
-            {review.state === "skipped" && review.reason && <p className="selectable mt-0.5 text-muted">{reasonText(t, review.reason)}</p>}
-            {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
-            {(review.output?.unread ?? []).length > 0 && <p className="selectable mt-0.5 text-warning">{t("run.unreadFiles", { files: review.output?.unread?.join(", ") })}</p>}
-            {uncheckedOf(review.output).length > 0 && <p className="selectable mt-0.5 text-muted">{t("run.reviewUnchecked", { items: uncheckedOf(review.output).join("; ") })}</p>}
-            {(review.output?.findings ?? []).length > 0 && (
-              <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 text-muted">
-                {review.output?.findings.map((finding, index) => (
-                  <li key={index}>{finding}</li>
-                ))}
-              </ul>
-            )}
-          </li>
-        ))}
+        {latestOfEachStep(reviewers).map((review) => {
+          const findings = findingsOf(review.output, breakable);
+          return (
+            <li key={review.id} className="text-[12.5px]">
+              <div className="flex flex-wrap items-baseline gap-2">
+                <span className="font-mono text-[12px] font-medium">{review.stepId}</span>
+                <ReviewVerdict review={review} findings={findings} />
+              </div>
+              {review.state === "skipped" && review.reason && <p className="selectable mt-0.5 text-muted">{reasonText(t, review.reason)}</p>}
+              {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
+              {(review.output?.unread ?? []).length > 0 && <p className="selectable mt-0.5 text-warning">{t("run.unreadFiles", { files: review.output?.unread?.join(", ") })}</p>}
+              {uncheckedOf(review.output).length > 0 && <p className="selectable mt-0.5 text-muted">{t("run.reviewUnchecked", { items: uncheckedOf(review.output).join("; ") })}</p>}
+              {findings.length > 0 && (
+                <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 text-muted">
+                  {findings.map((finding, index) => (
+                    // A review's list, in its order: two findings can say the same.
+                    <li key={index}>
+                      {finding.breaks && <span className="font-medium text-warning">{t("run.findingBreaks", { id: finding.breaks })} </span>}
+                      {finding.where && <span className="font-mono text-[12px]">{finding.where} </span>}
+                      {finding.text}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          );
+        })}
       </ul>
       {approver?.output && (
         <div className="mt-3 border-t border-border pt-2.5 text-[12.5px]">

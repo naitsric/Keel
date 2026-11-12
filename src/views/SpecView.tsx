@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 import type { SpecOutput } from "../lib/api";
+import { limitId } from "../lib/audit";
 
 function SpecList({ title, items }: { title: string; items: React.ReactNode[] }) {
   if (items.length === 0) return null;
@@ -49,7 +50,15 @@ export function SpecView({ spec }: { spec: SpecOutput }) {
         ))}
       />
       <SpecList title={t("run.specChanges")} items={spec.changes.map((change) => `${t(kinds[change.kind])}: ${change.text}`)} />
-      <SpecList title={t("run.specLimits")} items={spec.limits} />
+      <SpecList
+        title={t("run.specLimits")}
+        items={spec.limits.map((limit, index) => (
+          // Reviews name a limit the change breaks by this id, as they do a criterion.
+          <>
+            <span className="font-mono text-[12px] text-muted">{limitId(index)}</span> {limit}
+          </>
+        ))}
+      />
       <SpecList title={t("run.specTogether")} items={spec.together ?? []} />
       <SpecList title={t("run.specContract")} items={(spec.contract ?? []).map((point) => <ContractLine point={point} />)} />
       <SpecList

@@ -257,6 +257,41 @@ export function uncheckedOf(output: unknown): string[] {
   return unchecked.filter((text): text is string => typeof text === "string" && text.trim() !== "").map((text) => text.trim());
 }
 
+/** A finding as the app shows it: where, what, and the criterion or limit it breaks. One from an older answer is only text. */
+export interface FindingShown {
+  where: string | null;
+  text: string;
+  breaks: string | null;
+}
+
+/** The id of a specification's limit at `index`, from `L1`, in the order the person sees them. Limits have no id of their own, and a review names the one a change breaks by this one, as it does a criterion. */
+export function limitId(index: number): string {
+  return `L${index + 1}`;
+}
+
+/** What a finding can say the change breaks: each criterion of the specification, and each of its limits from `L1`. */
+export function breakableIds(spec: SpecOutput | null): string[] {
+  if (!spec) return [];
+  return [...spec.criteria.map((criterion) => criterion.id), ...spec.limits.map((_, index) => limitId(index))];
+}
+
+/** What one review found, old text included. Anything else is left out. As for Keel, only what's in `breakable` breaks anything. */
+export function findingsOf(output: unknown, breakable: string[]): FindingShown[] {
+  const findings = (output as { findings?: unknown } | null)?.findings;
+  if (!Array.isArray(findings)) return [];
+  const filled = (value: unknown) => (typeof value === "string" && value.trim() !== "" ? value.trim() : null);
+  return findings.flatMap((finding): FindingShown[] => {
+    if (typeof finding === "string") return [{ where: null, text: finding, breaks: null }];
+    if (!finding || typeof finding !== "object") return [];
+    const { file, line, text, breaks } = finding as Record<string, unknown>;
+    const at = filled(file);
+    const id = filled(breaks);
+    // A line is a whole number from 0, or none, as Keel reads it.
+    const lineKept = typeof line === "number" && Number.isInteger(line) && line >= 0;
+    return [{ where: at && lineKept ? `${at}:${line}` : at, text: typeof text === "string" ? text : "", breaks: id && breakable.includes(id) ? id : null }];
+  });
+}
+
 export type ApprovalOutcome = "delivers" | "deliversLater" | "noDelivery" | "nothingToDeliver";
 
 /**

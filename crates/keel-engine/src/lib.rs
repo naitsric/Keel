@@ -60,7 +60,10 @@ pub use specs::of_attempt as spec_of_attempt;
 pub use specs::{Answer, AnswerChoice, Spec};
 pub use verification::of_attempt as verification_of_attempt;
 pub use verification::{Outcome, Verification};
-pub use workflows::{Workflow, WorkflowDraft, can_send_back, files_changed};
+pub use workflows::{
+    Finding, Workflow, WorkflowDraft, breakable_ids, can_send_back, files_changed, findings_of,
+    limits_with_ids,
+};
 
 const RESUME_PROMPT: &str = "Continue where you left off.";
 
@@ -2316,6 +2319,15 @@ impl Inner {
                 if !text.contains(&rework) {
                     text.push_str(&format!("\n\n{rework}"));
                 }
+            }
+        }
+        // A review can call what breaks a criterion minor and approve, so the approver hears it
+        // apart, whatever a saved workflow's prompt leaves out.
+        if matches!(spec.role, StepRole::Approver { .. }) {
+            let attempts = self.store.attempts_of_run(&run.id)?;
+            let broken = workflows::broken_text(&attempts, &run.language);
+            if !broken.is_empty() {
+                text.push_str(&format!("\n\n{broken}"));
             }
         }
         Ok(text)

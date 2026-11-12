@@ -551,6 +551,53 @@ describe("the approval card", () => {
     });
   });
 
+  describe("what the reviews found", () => {
+    const found = (stepId: string, findings: unknown[]) => attempt({ id: stepId, stepId, role: "reviewer", output: { verdict: "changes", findings, summary: "Two things.", unread: [], unchecked: [] } as unknown as Attempt["output"] });
+    const asked = specifier({ criteria: [{ id: "C2", when: "one is negative", then: "it still adds" }] });
+    const both = () => [asked, builder(["calc.py"]), check, found("security", ["app/api.py:42 doesn't call require_role"]), found("code", [{ file: "calc.py", line: 3, text: "Subtracts when one is negative", breaks: "C2" }, { file: "test_calc.py", line: null, text: "The test name could say more", breaks: null }, { file: "calc.py", line: 9, text: "Names what isn't there", breaks: "C9" }]), human];
+    const items = () => [...document.querySelectorAll('[role="dialog"] li li')].map((li) => li.textContent);
+
+    it("shows text from before Keel asked as it was, and what a finding breaks before where it is", () => {
+      show(both(), ["calc.py"]);
+      press("See the reviews");
+      expect(items()).toEqual(["app/api.py:42 doesn't call require_role", "Breaks C2. calc.py:3 Subtracts when one is negative", "test_calc.py The test name could say more", "calc.py:9 Names what isn't there"]);
+    });
+
+    it("says it in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      show(both(), ["calc.py"]);
+      press("Ver las revisiones");
+      expect(items()).toContain("Rompe C2. calc.py:3 Subtracts when one is negative");
+    });
+
+    // Keel keeps a review that approved what breaks a criterion as asking for changes, and its own summary can still say all is fine.
+    const keptAsChanges = () => [
+      asked,
+      builder(["calc.py"]),
+      check,
+      found("security", ["app/api.py:42 doesn't call require_role"]),
+      attempt({ id: "code", stepId: "code", role: "reviewer", output: { verdict: "changes", findings: [{ file: "calc.py", line: 3, text: "Subtracts when one is negative", breaks: "C2" }], summary: "Minor things, nothing that blocks.", unread: [], unchecked: [] } as unknown as Attempt["output"] }),
+      attempt({ id: "ux", stepId: "ux", role: "reviewer", output: { verdict: "approved", findings: [{ file: "calc.py", line: 9, text: "Names what isn't there", breaks: "C9" }], summary: "Fine.", unread: [], unchecked: [] } as unknown as Attempt["output"] }),
+      human,
+    ];
+    const verdicts = () => [...([...document.querySelectorAll("dt")].find((dt) => dt.textContent?.startsWith("Revi"))?.nextElementSibling?.querySelectorAll("li") ?? [])].map((li) => li.textContent);
+
+    it("says at a glance why a review whose summary sounds fine doesn't count as an approval", () => {
+      show(keptAsChanges(), ["calc.py"]);
+      expect(verdicts()).toEqual(["securityAsks for changes", "codeBreaks C2, so Keel doesn't count it as an approval", "uxNo problems"]);
+      expect(page()).toContain("code: Minor things, nothing that blocks.");
+      // The same in the full reviews.
+      press("See the reviews");
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain("codeBreaks C2, so Keel doesn't count it as an approval");
+    });
+
+    it("says why in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      show(keptAsChanges(), ["calc.py"]);
+      expect(verdicts()).toContain("codeRompe C2, así que Keel no lo cuenta como aprobación");
+    });
+  });
+
   // In a short window, "What proves it" can be far down the list, or out of it.
   describe("how much wasn't proven, where it can't scroll out of view", () => {
     const looked = (stepId: string, unchecked: string[]) => attempt({ id: stepId, stepId, role: "reviewer", output: { verdict: "approved", findings: [], summary: "Fine.", unread: [], unchecked } as unknown as Attempt["output"] });
@@ -775,6 +822,8 @@ describe("the approval card", () => {
       expect(dialog).toContain("add(1, 2) → it returns 3");
       expect(dialog).toContain("Changes: add stops subtracting");
       expect(dialog).toContain("What stays as it is");
+      // By the id a review names it by when it says the change breaks it.
+      expect(dialog).toContain("L1 Its signature stays");
       expect(dialog).not.toContain("{");
     });
 
@@ -1787,5 +1836,33 @@ describe("starting over a step whose command the project changed", () => {
     const event: AuditEvent = { seq: 1, attemptId: "setup-2", at: "2026-01-01T00:00:00Z", kind: "setupLimited", data: {} };
     act(() => root.render(<ActivityTab events={[event]} role="worker" />));
     expect(page()).toContain("Runs with no more permissions than the agents, because an agent that can change the code ran before it: no internet, and not the project's shared cache. An install that needs to download something may fail for it. Only a setup before any such agent, as at the start of a new run, gets the internet.");
+  });
+});
+
+describe("a review that approved what breaks a criterion", () => {
+  let root: Root;
+  const page = () => document.body.textContent ?? "";
+  const events: AuditEvent[] = [{ seq: 1, attemptId: "code", at: "2026-01-01T00:00:00Z", kind: "reviewBreaks", data: { breaks: ["C5", "L2"] } }];
+  const inActivity = () => act(() => root.render(<ActivityTab events={events} role="reviewer" />));
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    mockIPC(() => null);
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("says why Keel doesn't count it as an approval", () => {
+    inActivity();
+    expect(page()).toContain("It says the change breaks C5, L2, so Keel doesn't count it as an approval.");
+  });
+
+  it("says it in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    inActivity();
+    expect(page()).toContain("Dice que el cambio rompe C5, L2, así que Keel no lo cuenta como aprobación.");
   });
 });

@@ -11,9 +11,9 @@ use keel_core::{
     WorkflowStep, mask_secrets, mask_value,
 };
 use keel_engine::{
-    Error, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
-    can_send_back, files_changed, request_from_issue, skipped_steps, spec_of_attempt,
-    verification_of_attempt,
+    Error, Finding, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
+    breakable_ids, can_send_back, files_changed, findings_of, limits_with_ids, request_from_issue,
+    skipped_steps, spec_of_attempt, verification_of_attempt,
 };
 use keel_store::{Attempt, Card, MAX_OPEN_RUNS_CEILING, McpClient, NewMcpCall, Project, Run};
 use schemars::JsonSchema;
@@ -2082,8 +2082,10 @@ fn not_proven(attempts: &[Attempt]) -> Json {
 }
 
 /// Each reviewer's verdict and each approver's decision, from the latest of each. As in the
-/// builder's rework prompt, an approver's instructions only count when it sent the work back.
+/// builder's rework prompt, an approver's instructions only count when it sent the work back. As
+/// for the engine, a finding breaks only what the specification has.
 fn reviews(attempts: &[Attempt]) -> Vec<Json> {
+    let breakable = breakable_ids(attempts);
     latest_of_each_step(attempts)
         .into_iter()
         .filter(|a| a.kind == "agent" && a.state == AttemptState::Succeeded.as_str())
@@ -2097,14 +2099,24 @@ fn reviews(attempts: &[Attempt]) -> Vec<Json> {
             };
             match a.role.as_str() {
                 "reviewer" => {
-                    let findings: Vec<String> = output
-                        .get("findings")
-                        .and_then(Json::as_array)
+                    // Text, as reviews wrote them before, or where, what and what it breaks.
+                    let findings: Vec<Finding> = findings_of(output, &breakable)
                         .into_iter()
-                        .flatten()
-                        .filter_map(Json::as_str)
                         .take(MAX_FINDINGS)
-                        .map(|finding| capped(finding, MAX_FINDING))
+                        .map(|finding| match finding {
+                            Finding::Text(text) => Finding::Text(capped(&text, MAX_FINDING)),
+                            Finding::Found {
+                                file,
+                                line,
+                                text,
+                                breaks,
+                            } => Finding::Found {
+                                file: file.map(|file| capped(&file, MAX_FINDING)),
+                                line,
+                                text: capped(&text, MAX_FINDING),
+                                breaks: breaks.map(|id| capped(&id, MAX_FINDING)),
+                            },
+                        })
                         .collect();
                     Some(json!({
                         "step": a.step_id,
@@ -2228,9 +2240,8 @@ fn step_overview(attempt: &Attempt, long: &LongParts) -> Json {
     view["brainReceived"] = attempt.system_prompt_sources.clone();
     let mut left_out = serde_json::Map::new();
     // Its structured answer as Keel read it, which Keel may have corrected, or else what it wrote.
-    match &attempt.output {
+    match answer_of(attempt) {
         Some(output) => {
-            let output = mask_value(output.clone());
             if output.to_string().len() <= MAX_ANSWER {
                 view["output"] = output;
             } else {
@@ -2295,13 +2306,23 @@ fn step_overview(attempt: &Attempt, long: &LongParts) -> Json {
     view
 }
 
+/// An attempt's structured answer, masked. A specification's limits come with the id a finding
+/// names them by, as agents get them.
+fn answer_of(attempt: &Attempt) -> Option<Json> {
+    let output = attempt.output.clone()?;
+    let output = if attempt.role == "specifier" {
+        limits_with_ids(output)
+    } else {
+        output
+    };
+    Some(mask_value(output))
+}
+
 /// What an attempt answered, as text: its structured answer as Keel read it, laid out, or else
 /// what it wrote. Masked.
 fn answer_text(attempt: &Attempt) -> String {
-    match &attempt.output {
-        Some(output) => {
-            serde_json::to_string_pretty(&mask_value(output.clone())).unwrap_or_default()
-        }
+    match answer_of(attempt) {
+        Some(output) => serde_json::to_string_pretty(&output).unwrap_or_default(),
         None => attempt
             .result_text
             .as_deref()
@@ -3124,6 +3145,103 @@ mod tests {
 
         let (views, left_out) = steps_view(&attempts[..8]);
         assert_eq!((views.len(), left_out), (8, 0));
+    }
+
+    /// A specifier's answer with these criteria and limits.
+    fn specified(criteria: &[&str], limits: &[&str]) -> Attempt {
+        let mut spec = attempt("spec", 1);
+        spec.role = "specifier".into();
+        let criteria: Vec<Json> = criteria
+            .iter()
+            .map(|id| json!({ "id": id, "when": "w", "then": "t" }))
+            .collect();
+        spec.output = Some(json!({ "summary": "s", "criteria": criteria, "limits": limits }));
+        spec
+    }
+
+    #[test]
+    fn the_report_says_a_finding_breaks_only_what_the_specification_has() {
+        let mut review = attempt("code", 1);
+        review.output = Some(json!({ "verdict": "approved", "findings": [
+            { "file": "a.py", "line": 1, "text": "Names what isn't there", "breaks": "C9" },
+            { "file": "a.py", "line": 2, "text": "Past the last limit", "breaks": "L2" },
+            { "file": "a.py", "line": 3, "text": "Subtracts", "breaks": "C2" },
+            { "file": "a.py", "line": 4, "text": "Changes the signature", "breaks": "L1" },
+        ]}));
+        let breaks = |attempts: &[Attempt]| {
+            let report = reviews(attempts);
+            let findings = report[0]["findings"].as_array().unwrap().clone();
+            findings
+                .into_iter()
+                .map(|finding| finding["breaks"].clone())
+                .collect::<Vec<_>>()
+        };
+        let spec = specified(&["C1", "C2"], &["Its signature stays"]);
+        assert_eq!(
+            breaks(&[spec, review.clone()]),
+            [Json::Null, Json::Null, json!("C2"), json!("L1")]
+        );
+        // Without a specification, nothing can be broken.
+        assert_eq!(breaks(&[review]), vec![Json::Null; 4]);
+    }
+
+    #[test]
+    fn the_report_shows_findings_written_as_text_before_and_with_what_they_break_now() {
+        let long = "x".repeat(MAX_FINDING + 10);
+        let mut old = attempt("security", 1);
+        old.output = Some(json!({ "verdict": "changes", "findings": ["Line 3 divides by zero"] }));
+        let mut new = attempt("code", 1);
+        new.output = Some(json!({ "verdict": "changes", "findings": [
+            { "file": "src/jobs.py", "line": 42, "text": "Sends the notice twice", "breaks": "C5" },
+            { "file": null, "line": null, "text": long, "breaks": null },
+        ]}));
+        let report = reviews(&[specified(&["C5"], &[]), old.clone(), new.clone()]);
+        assert_eq!(report[0]["findings"], json!(["Line 3 divides by zero"]));
+        let findings = &report[1]["findings"];
+        assert_eq!(
+            findings[0],
+            json!({ "file": "src/jobs.py", "line": 42, "text": "Sends the notice twice", "breaks": "C5" })
+        );
+        assert_eq!(findings[1]["breaks"], Json::Null);
+        assert_eq!(findings[1]["text"], json!(capped(&long, MAX_FINDING)));
+        // get_step has each as it was kept.
+        let parts = LongParts {
+            prompt: String::new(),
+            diff: None,
+            printed: None,
+        };
+        assert_eq!(
+            step_overview(&old, &parts)["output"]["findings"],
+            json!(["Line 3 divides by zero"])
+        );
+        assert_eq!(
+            step_overview(&new, &parts)["output"]["findings"][0]["breaks"],
+            "C5"
+        );
+    }
+
+    #[test]
+    fn get_step_shows_the_specifications_limits_by_the_id_a_finding_names_them_by() {
+        let mut spec = attempt("spec", 1);
+        spec.role = "specifier".into();
+        spec.output =
+            Some(json!({ "summary": "s", "criteria": [], "limits": ["Stays", "Also stays"] }));
+        let parts = LongParts {
+            prompt: String::new(),
+            diff: None,
+            printed: None,
+        };
+        let limits = json!([{ "id": "L1", "text": "Stays" }, { "id": "L2", "text": "Also stays" }]);
+        assert_eq!(step_overview(&spec, &parts)["output"]["limits"], limits);
+        let whole: Json = serde_json::from_str(&answer_text(&spec)).unwrap();
+        assert_eq!(whole["limits"], limits);
+        // Anything else's answer is as it was kept.
+        let mut other = attempt("spec", 1);
+        other.output = spec.output.clone();
+        assert_eq!(
+            step_overview(&other, &parts)["output"]["limits"],
+            json!(["Stays", "Also stays"])
+        );
     }
 
     #[test]
