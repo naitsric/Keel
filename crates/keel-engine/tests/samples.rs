@@ -656,6 +656,33 @@ fn yarn() {
     });
 }
 
+#[test]
+fn poetry() {
+    try_sample(Sample {
+        name: "poetry",
+        programs: &["poetry", "python3"],
+        path: &[],
+        finds: &[],
+        commands: Commands {
+            setup: "poetry install",
+            check: "poetry run pytest",
+        },
+        guessed: true,
+        downloads: Some(".cache/pypoetry"),
+        needs_download: Some((
+            "poetry add six",
+            "All attempts to connect to pypi.org failed",
+        )),
+        // Poetry has no way to work offline: it retries each request for about 7.5 s, fixed in its
+        // code (#121).
+        fails_within: 15,
+        env: &[],
+        starts_servers: false,
+        proposes_localhost: false,
+        reads_above: false,
+    });
+}
+
 /// #94: Keel's own check, from a clone with no `target/`. The app needs its frontend built to compile,
 /// as in CI.
 #[test]
