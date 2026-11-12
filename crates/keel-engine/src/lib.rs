@@ -58,8 +58,8 @@ use serde_json::json;
 pub use sizing::skipped_steps;
 pub use specs::of_attempt as spec_of_attempt;
 pub use specs::{Answer, AnswerChoice, Spec};
-pub use verification::of_attempt as verification_of_attempt;
-pub use verification::{Outcome, Verification};
+pub use verification::in_round as verifications_in_round;
+pub use verification::{Outcome, Verification, WhyNotProven};
 pub use workflows::{
     Finding, Workflow, WorkflowDraft, breakable_ids, can_send_back, files_changed, findings_of,
     limits_with_ids,

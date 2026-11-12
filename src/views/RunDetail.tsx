@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CommandChange, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, breakableIds, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, type FindingShown, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, breakableIds, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, type FindingShown, focusAttempt, gist, latestOfEachStep, notProvenInRound, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf, whyNotProven } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -191,7 +191,9 @@ function VerificationItems({ verification }: { verification: VerificationOutput 
   return (
     <ul className="space-y-1.5">
       {verification.criteria.map((item) => {
-        const why = item.corrected ? `run.verifyWhy.${item.corrected}` : item.result === "unverified" && !item.evidence ? "run.verifyWhy.noProof" : null;
+        // Without saying why, what it pointed at speaks for itself.
+        const said = whyNotProven(item);
+        const why = said && said !== "seeEvidence" ? `run.verifyWhy.${said}` : null;
         return (
           <li key={item.id} className="min-w-0">
             <p className="selectable break-words">
@@ -642,9 +644,9 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const hiddenFiles = files.length - SHOWN_FILES;
   const sentBack = sentBackByAssistant(attempts, run.round);
   // What nobody could prove, the same as in "What proves it". In a short window that row can be far
-  // down the list, so how much of it there is shows by the note, which never scrolls away.
-  const verification = verificationInRound(attempts, run.round);
-  const notProven = uncheckedInRound(attempts, run.round).length + (verification ? verificationCounts(verification).unverified : 0);
+  // down the list, so how much of it there is, and why, shows by the note, which never scrolls away.
+  const notProvenWhy = notProvenInRound(attempts, run.round);
+  const notProven = notProvenWhy.reduce((sum, group) => sum + group.count, 0);
   const showWhatProves = () => provesRow.current?.scrollIntoView({ block: "nearest" });
 
   return (
@@ -806,9 +808,16 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
       )}
       {/* Right above the note and the buttons: the focus starts there, so this is in view with them. */}
       {notProven > 0 && (
-        <div className="mt-2 flex items-center gap-2 rounded-md border border-border-strong bg-inset py-1 pr-1 pl-2 text-[12.5px]">
-          <CircleQuestionMark size={14} className="shrink-0 text-muted" />
-          <p className="min-w-0 flex-1 font-medium">{t("run.notProvenCount", { count: notProven })}</p>
+        <div className="mt-2 flex items-start gap-2 rounded-md border border-border-strong bg-inset py-1 pr-1 pl-2 text-[12.5px]">
+          <CircleQuestionMark size={14} className="mt-[7px] shrink-0 text-muted" />
+          <div className="min-w-0 flex-1 py-1">
+            <p className="font-medium">{t("run.notProvenCount", { count: notProven })}</p>
+            <ul className="text-muted">
+              {notProvenWhy.map((group) => (
+                <li key={group.why}>{t(`run.notProvenWhy.${group.why}`, { count: group.count, where: t("run.whatProves") })}</li>
+              ))}
+            </ul>
+          </div>
           <Button variant="ghost" onClick={showWhatProves}>
             {t("run.notProvenSee", { count: notProven })}
           </Button>

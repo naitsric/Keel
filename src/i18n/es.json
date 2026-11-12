@@ -349,6 +349,22 @@
     "notProvenCount_other": "{{count}} cosas quedaron sin probar",
     "notProvenSee_one": "Ver cuál",
     "notProvenSee_other": "Ver cuáles",
+    "notProvenWhy": {
+      "byReviews_one": "{{count}}: las revisiones no pudieron comprobarla leyendo el código",
+      "byReviews_other": "{{count}}: las revisiones no pudieron comprobarlas leyendo el código",
+      "notRun_one": "{{count}}: su prueba existe, pero no corrió aquí",
+      "notRun_other": "{{count}}: sus pruebas existen, pero no corrieron aquí",
+      "noTest_one": "{{count}}: ninguna prueba la demuestra",
+      "noTest_other": "{{count}}: ninguna prueba las demuestra",
+      "noCheckPassed_one": "{{count}}: se dijo que se cumple, pero ninguna verificación pasó en esta ronda",
+      "noCheckPassed_other": "{{count}}: se dijo que se cumplen, pero ninguna verificación pasó en esta ronda",
+      "noEvidence_one": "{{count}}: se dijo que se cumple, pero no qué lo demuestra",
+      "noEvidence_other": "{{count}}: se dijo que se cumplen, pero no qué lo demuestra",
+      "leftOut_one": "{{count}}: no se dijo nada sobre ella",
+      "leftOut_other": "{{count}}: no se dijo nada sobre ellas",
+      "seeEvidence_one": "{{count}}: mira qué se dijo de ella en «{{where}}»",
+      "seeEvidence_other": "{{count}}: mira qué se dijo de cada una en «{{where}}»"
+    },
     "approvalSkipped": "{{names}}: omitidas, no cambió nada de lo que cubren",
     "approvalSkippedRisks": "{{names}}: omitidas, lo pedido no nombra ninguno de los riesgos que revisan",
     "workflowWarning": "Este cambio edita `.github/workflows`. Esos archivos pueden correr con los secretos del repo en cuanto se suba la rama. Léelos primero.",
@@ -451,7 +467,8 @@
       "noEvidence": "Dijo que se cumple, pero no qué lo demuestra.",
       "noCheckPassed": "Dijo que se cumple, pero ninguna verificación pasó en esta ronda.",
       "leftOut": "No dijo nada sobre esto.",
-      "noProof": "No encontró nada que lo demuestre."
+      "noTest": "No encontró nada que lo demuestre.",
+      "notRun": "Su prueba existe, pero no corrió aquí."
     }
   },
   "tabs": {

@@ -81,7 +81,8 @@ const agentStep = (id: string, model: string, tools: "readOnly" | "build") => ({
 const reviewerStep = (id: string, paths: string[]) => ({ id, model: "sonnet", tools: "readOnly" as const, effort: null, prompt: "Review {{diff}}", maxTurns: null, maxBudgetUsd: null, paths, role: { kind: "reviewer" as const } });
 // What the verifier found: verify=all|some|none|unmet with flow=approval|delivered, flow=verifying and
 // flow=verifyUnreadable for the step itself, and verify=old to see one from an earlier round, which
-// says nothing. node=verify opens what it found. long=1 has text at its limits.
+// says nothing. verify=notRun has a test that exists but didn't run here, one from before the verifier
+// said why apart, and one with no test, and the approval says why for each. node=verify opens what it found. long=1 has text at its limits.
 const verifyMode = params.get("verify");
 const verifyShown = verifyMode !== null || params.get("flow") === "verifying" || params.get("flow") === "verifyUnreadable";
 const verifyStep: WorkflowStep = { ...agentStep("verify", "sonnet", "readOnly"), role: { kind: "verifier" } };
@@ -276,7 +277,7 @@ const skippedReviewer = (id: string): Attempt => ({ ...attempt, id: `r-${id}`, s
 const approverAttempt = (decision: "approve" | "rework"): Attempt => ({ ...attempt, id: "r-approver", stepId: "approver", role: "approver", round, state: params.get("flow") === "limit" ? "blocked" : "succeeded", reason: params.get("flow") === "limit" ? { code: "reworkLimit", rounds: 2 } : null, tools: "readOnly", modelActual: "claude-opus-5-5", filesChanged: null, resultText: null, finishedAt: at(1), output: { decision, risk: params.get("risk") ?? "medium", reasons: long ? "The security finding is real: the new endpoint skips the role check, and the same pattern repeats in every handler. ".repeat(6) : "The security finding is real: the new endpoint skips the role check.", instructions: "Add the role check.", overriddenByPerson: params.get("override") === "1", ...(questionedShown ? { questioned: previewQuestioned } : {}) } as Attempt["output"] });
 const verifiedItems = () => {
   const longWords = (text: string, limit: number) => atLimit(text, limit);
-  const item = (id: string, when: string, then: string, result: "met" | "unmet" | "unverified", evidence: string, corrected?: string) => ({ id, when: longWords(when, 100), then: longWords(then, 100), result, evidence: long ? `${evidence} ${"x".repeat(140)}`.slice(0, 140) : evidence, ...(corrected ? { corrected } : {}) });
+  const item = (id: string, when: string, then: string, result: "met" | "unmet" | "unverified", evidence: string, corrected?: string, why?: string) => ({ id, when: longWords(when, 100), then: longWords(then, 100), result, evidence: long ? `${evidence} ${"x".repeat(140)}`.slice(0, 140) : evidence, ...(corrected ? { corrected } : {}), ...(why ? { why } : {}) });
   const C1 = [say("add(1, 2) is called", "se llama add(1, 2)"), say("it returns 3", "devuelve 3")] as const;
   const C2 = [say("one argument is negative", "un argumento es negativo"), say("it still returns the sum", "igual devuelve la suma")] as const;
   const C3 = [say("an argument is a decimal", "un argumento es decimal"), say("the rounding stays as it is today", "el redondeo sigue como hoy")] as const;
@@ -288,6 +289,14 @@ const verifiedItems = () => {
       return [item("C1", ...C1, "unverified", ""), item("C2", ...C2, "unverified", "test_calc.py:14", "noCheckPassed"), item("C3", ...C3, "unverified", "", "noEvidence"), item("C4", ...C4, "unverified", "", "leftOut")];
     case "unmet":
       return [item("C1", ...C1, "met", "test_calc.py::test_add"), item("C2", ...C2, "unmet", "calc.py:3"), item("C3", ...C3, "unverified", ""), item("C4", ...C4, "unverified", "", "leftOut")];
+    case "notRun":
+      return [
+        item("C1", ...C1, "met", "test_calc.py::test_add"),
+        item("C2", ...C2, "unverified", say("test_invoices.py:14 needs Postgres, which isn't here", "test_invoices.py:14 necesita Postgres, que no está aquí"), undefined, "notRun"),
+        // As from before the verifier said why apart: only what it pointed at says it.
+        item("C3", ...C3, "unverified", say("test_invoices.py:30 needs Postgres; skipped", "test_invoices.py:30 requiere Postgres; se salta")),
+        item("C4", ...C4, "unverified", "", undefined, "noTest"),
+      ];
     default:
       return [item("C1", ...C1, "met", "test_calc.py::test_add"), item("C2", ...C2, "met", "test_calc.py:14"), item("C3", ...C3, "met", "test_calc.py:21"), item("C4", ...C4, "unverified", "")];
   }

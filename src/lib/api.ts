@@ -342,6 +342,8 @@ export interface CheckedCriterion {
   evidence: string;
   /** Why it isn't what the verifier said. Only the engine writes this. */
   corrected?: "noEvidence" | "noCheckPassed" | "leftOut";
+  /** Why nothing proves it, as the verifier said. Answers from before it did don't say. */
+  why?: "noTest" | "notRun";
 }
 
 /** A verifier's answer, once the engine has corrected it. */

@@ -79,7 +79,8 @@ describe("what's said about a verifier", () => {
         say("run.verifyUnverified", { count: 1 }),
         say("run.verifyNone", { count: 4 }),
         ...["met", "unmet", "unverified"].map((result) => say(`run.verifyResult.${result}`)),
-        ...["noEvidence", "noCheckPassed", "leftOut", "noProof"].map((why) => say(`run.verifyWhy.${why}`)),
+        ...["noEvidence", "noCheckPassed", "leftOut", "noTest", "notRun"].map((why) => say(`run.verifyWhy.${why}`)),
+        ...["byReviews", "notRun", "noTest", "noCheckPassed", "noEvidence", "leftOut", "seeEvidence"].flatMap((why) => [1, 2].map((count) => say(`run.notProvenWhy.${why}`, { count, where: say("run.whatProves") }))),
         say("activity.verifyAnswer"),
         say("activity.verificationCorrected", { count: 2 }),
         say("activity.verificationDropped", { count: 2 }),
@@ -101,6 +102,8 @@ describe("what's said about a verifier", () => {
         say("workflows.roleVerifier"),
       ];
       for (const text of texts) expect(text).not.toMatch(JARGON);
+      // A key with no text would pass for plain words.
+      for (const text of texts) expect(text).not.toMatch(/^[a-z]\w*(\.\w+)+$/i);
     }
   });
 });
