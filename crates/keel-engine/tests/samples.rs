@@ -742,6 +742,31 @@ fn gradle() {
     });
 }
 
+/// Homebrew's Ruby, which it keeps off the PATH. The one macOS comes with is too old for Bundler 4.
+const RUBY: &str = "/opt/homebrew/opt/ruby/bin";
+
+#[test]
+fn bundler() {
+    try_sample(Sample {
+        name: "bundler",
+        programs: &["bundle", "ruby"],
+        path: &[RUBY],
+        finds: &[],
+        commands: Commands {
+            setup: "bundle install",
+            check: "bundle exec rspec",
+        },
+        guessed: true,
+        downloads: Some(".bundle/cache"),
+        needs_download: Some(("bundle add rake", "Could not find gem 'rake'")),
+        fails_within: 5,
+        env: &[],
+        starts_servers: false,
+        proposes_localhost: false,
+        reads_above: false,
+    });
+}
+
 /// #94: Keel's own check, from a clone with no `target/`. The app needs its frontend built to compile,
 /// as in CI.
 #[test]
