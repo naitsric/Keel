@@ -18,6 +18,7 @@ use keel_engine::{
 };
 use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
+use keel_harness::toolchains::Found;
 use keel_store::{
     Attempt, BrainNote, Decision, Event, Project, ProjectSettings, Run, RunRow, Store, Totals,
     WorkflowResults,
@@ -205,19 +206,34 @@ fn project_setup(state: State<'_, AppState>, project_id: String) -> CommandResul
     Ok(state.engine.project_setup(&project_id)?)
 }
 
-/// Returns the run. Its output is read the way any run's is, masked.
+/// Where in the home folder the programs these commands use are, for the person to let them be
+/// read. Only asks the shell where they are: nothing from the repo runs, and nothing is saved.
+#[tauri::command(async)]
+fn project_tool_folders(
+    state: State<'_, AppState>,
+    project_id: String,
+    setup: String,
+    check: String,
+) -> CommandResult<Vec<Found>> {
+    state.ready.wait();
+    Ok(state.engine.tool_folders(&project_id, &setup, &check)?)
+}
+
+/// Returns the run. Its output is read the way any run's is, masked. `read` is the folders the
+/// person is about to let the commands read, which only this run gets.
 #[tauri::command(async)]
 fn project_try_check(
     state: State<'_, AppState>,
     project_id: String,
     setup: String,
     check: String,
+    read: Vec<String>,
     language: String,
 ) -> CommandResult<String> {
     state.ready.wait();
     Ok(state
         .engine
-        .try_check(&project_id, &setup, &check, &language)?)
+        .try_check_reading(&project_id, &setup, &check, &read, &language)?)
 }
 
 #[tauri::command(async)]
@@ -993,6 +1009,7 @@ pub fn run() {
             overview,
             project_add,
             project_setup,
+            project_tool_folders,
             project_try_check,
             project_remove,
             run_start,

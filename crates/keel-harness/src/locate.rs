@@ -70,12 +70,14 @@ fn is_executable(path: &Path) -> bool {
 
 /// Asks the user's login shell for its PATH. Interactive too, since many people set PATH in
 /// `.zshrc`. A shell that hangs or prints noise must not break the app, so this has a deadline
-/// and looks for markers.
+/// and looks for markers. It starts in `/`, so a version manager's hook in it (mise, asdf, direnv)
+/// reads no repo's settings, wherever Keel was started from.
 fn login_shell_path() -> Option<String> {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into());
     let script = format!("printf '{START}%s{END}' \"$PATH\"");
     let mut child = Command::new(shell)
         .args(["-lic", &script])
+        .current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

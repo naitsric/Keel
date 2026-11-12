@@ -470,18 +470,24 @@ fn setup_runs_first_and_later_steps_use_their_own_cache() {
     let workspace = Path::new(&builder.workspace);
     let setup_cache = std::fs::read_to_string(workspace.join("setup-cache.txt")).unwrap();
     let check_cache = std::fs::read_to_string(workspace.join("check-cache.txt")).unwrap();
-    assert!(setup_cache.trim().ends_with("/cache"), "{setup_cache}");
+    // In the project's home, and in the run's copy of it.
     assert!(
-        check_cache
-            .trim()
-            .starts_with(&*workspace.to_string_lossy()),
-        "{check_cache}"
+        setup_cache.trim().ends_with("/cache/home/.cache"),
+        "{setup_cache}"
+    );
+    assert_eq!(
+        check_cache.trim(),
+        workspace.join(".keel-cache/home/.cache").to_string_lossy()
     );
     assert!(Path::new(setup_cache.trim()).join("from-setup").exists());
     assert!(!Path::new(setup_cache.trim()).join("from-check").exists());
 
     // What tools leave in the run's cache never gets committed.
-    assert!(workspace.join(".keel-cache/from-check").exists());
+    assert!(
+        workspace
+            .join(".keel-cache/home/.cache/from-check")
+            .exists()
+    );
     let tracked = Command::new("git")
         .current_dir(workspace)
         .args(["ls-files"])
@@ -499,8 +505,8 @@ fn a_setup_once_an_agent_has_run_gets_no_more_than_the_agent() {
     let setup = |name: &str| WorkflowStep::Setup {
         id: name.into(),
         run: format!(
-            "echo $XDG_CACHE_HOME > {name}-cache.txt; mkdir -p \"$XDG_CACHE_HOME\"; \
-             touch \"$XDG_CACHE_HOME/from-{name}\""
+            "echo $HOME > {name}-home.txt; touch \"$HOME/from-{name}\"; \
+             mkdir -p \"$XDG_CACHE_HOME\"; touch \"$XDG_CACHE_HOME/from-{name}\""
         ),
     };
     let run = w.run(vec![
@@ -522,22 +528,24 @@ fn a_setup_once_an_agent_has_run_gets_no_more_than_the_agent() {
             .trim()
             .to_owned()
     };
-    let shared = PathBuf::from(read("first-cache.txt"));
-    assert!(shared.ends_with("cache"), "{shared:?}");
-    assert!(shared.join("from-first").exists());
-    // The second works in the run's own cache.
-    assert!(
-        read("again-cache.txt").starts_with(&*workspace.to_string_lossy()),
-        "{}",
-        read("again-cache.txt")
-    );
-    assert!(!shared.join("from-again").exists());
+    // The first fills the project's home, in the cache its runs share.
+    let project_home = PathBuf::from(read("first-home.txt"));
+    assert!(project_home.ends_with("cache/home"), "{project_home:?}");
+    assert!(project_home.join("from-first").exists());
+    assert!(project_home.join(".cache/from-first").exists());
+    // The second works in the run's own copy of it, as a check does, and leaves nothing there.
+    let run_home = workspace.join(".keel-cache/home");
+    assert_eq!(read("again-home.txt"), run_home.to_string_lossy());
+    assert!(run_home.join("from-first").exists());
+    assert!(run_home.join("from-again").exists());
+    assert!(!project_home.join("from-again").exists());
+    assert!(!project_home.join(".cache/from-again").exists());
 
-    // Its sandbox has no way to the shared cache, so it can't leave anything there for the next
-    // run's setup to install (`check_sandbox` tries, with the cache in the home folder as it is in
-    // a real install: here it's in a temporary folder, which every command may write to). And no
-    // network: an agent's Bash reaches only the allowed domains, and a command Keel runs can't be
-    // held to those, so it gets none.
+    // Its sandbox has no way to the shared cache, home included, so it can't leave anything there
+    // for the next run to start from (`check_sandbox` tries, with the cache in the home folder as
+    // it is in a real install: here it's in a temporary folder, which every command may write to).
+    // And no network: an agent's Bash reaches only the allowed domains, and a command Keel runs
+    // can't be held to those, so it gets none.
     let events = |attempt: &keel_store::Attempt| w.store.events(&attempt.id, 0).unwrap();
     let profile = |attempt: &keel_store::Attempt| {
         events(attempt)
@@ -546,19 +554,36 @@ fn a_setup_once_an_agent_has_run_gets_no_more_than_the_agent() {
             .map(|e| e.data["profile"].as_str().unwrap_or_default().to_owned())
             .unwrap()
     };
-    let shared_text = shared.to_string_lossy();
-    assert!(profile(&first).contains(&*shared_text));
-    assert!(!profile(&again).contains(&*shared_text));
+    let shared = project_home
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(profile(&first).contains(&shared));
+    assert!(!profile(&again).contains(&shared));
     assert!(profile(&first).contains("(allow network*)"));
     assert!(profile(&again).contains("(deny network*)"));
     assert!(!profile(&again).contains("(allow network*)"));
     assert_eq!(first.settings["network"], "internet, nothing local");
     assert_eq!(again.settings["network"], "none");
+    assert_eq!(again.settings["home"], "the run's own copy");
     // The person sees why, in its activity.
     let limited =
         |attempt: &keel_store::Attempt| events(attempt).iter().any(|e| e.kind == "setupLimited");
     assert!(!limited(&first));
     assert!(limited(&again));
+
+    // The next run starts from the project's home, with what the first setup left and nothing
+    // from the second.
+    let next = w.run(vec![
+        check("look", "ls -a \"$HOME\" \"$XDG_CACHE_HOME\" > home.txt"),
+        WorkflowStep::Approval { id: "human".into() },
+    ]);
+    let look = w.wait_done(&next, "look");
+    assert_eq!(look.state, "succeeded", "{}", w.check_output(&look));
+    let listed = std::fs::read_to_string(Path::new(&look.workspace).join("home.txt")).unwrap();
+    assert!(listed.contains("from-first"), "{listed}");
+    assert!(!listed.contains("from-again"), "{listed}");
 }
 
 #[test]
@@ -569,28 +594,29 @@ fn what_setup_downloads_stays_in_the_project_cache_and_each_run_gets_its_own_cop
         .update_project(
             &w.project_id,
             &ProjectSettings {
+                // Where cargo and Go keep what they download, in the home folder.
                 setup_command: Some(
-                    "echo $CARGO_HOME > setup-cargo.txt; mkdir -p \"$CARGO_HOME/registry\" \"$GOPATH/pkg\"; \
-                     test -f \"$CARGO_HOME/registry/dep\" || echo downloaded >> \"$CARGO_HOME/registry/count\"; \
-                     touch \"$CARGO_HOME/registry/dep\" \"$GOPATH/pkg/mod\""
+                    "echo $HOME > setup-home.txt; mkdir -p ~/.cargo/registry ~/go/pkg; \
+                     test -f ~/.cargo/registry/dep || echo downloaded >> ~/.cargo/registry/count; \
+                     touch ~/.cargo/registry/dep ~/go/pkg/mod"
                         .into(),
                 ),
                 ..ProjectSettings::default()
             },
         )
         .unwrap();
-    let probe = "echo $CARGO_HOME > check-cargo.txt; echo \"[$CARGO_NET_OFFLINE][$GOPROXY]\" > check-offline.txt; \
-                 test -f \"$CARGO_HOME/registry/dep\" && test -f \"$GOPATH/pkg/mod\" || exit 7; \
-                 touch \"$CARGO_HOME/registry/changed-by-check\"";
+    let probe = "echo $HOME > check-home.txt; echo \"[$CARGO_NET_OFFLINE][$GOPROXY]\" > check-offline.txt; \
+                 test -f ~/.cargo/registry/dep && test -f ~/go/pkg/mod || exit 7; \
+                 touch ~/.cargo/registry/changed-by-check";
     let first = w.run(vec![check("after", probe)]);
     let after = w.wait_done(&first, "after");
     assert_eq!(after.state, "succeeded", "{}", w.check_output(&after));
     let workspace = Path::new(&after.workspace);
-    let shared = std::fs::read_to_string(workspace.join("setup-cargo.txt")).unwrap();
-    let shared = Path::new(shared.trim());
-    let own = std::fs::read_to_string(workspace.join("check-cargo.txt")).unwrap();
+    let shared = std::fs::read_to_string(workspace.join("setup-home.txt")).unwrap();
+    let shared = Path::new(shared.trim()).join(".cargo");
+    let own = std::fs::read_to_string(workspace.join("check-home.txt")).unwrap();
     assert!(
-        shared.starts_with(w.dir.path()) && shared.ends_with("cache/cargo"),
+        shared.starts_with(w.dir.path()) && shared.ends_with("cache/home/.cargo"),
         "{shared:?}"
     );
     assert!(

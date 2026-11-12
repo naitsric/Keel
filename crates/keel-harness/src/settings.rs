@@ -5,15 +5,10 @@ use std::path::Path;
 
 use serde_json::{Value, json};
 
-/// Claude Code's own install, which a Bash step may need to read, and where pnpm and Rust's
-/// installers put themselves. Only programs: Cargo's credentials are in `~/.cargo`, not in its `bin`.
-const TOOL_DIRS: [&str; 5] = [
-    "~/.local",
-    "~/.claude/local",
-    "~/Library/pnpm",
-    "~/.cargo/bin",
-    "~/.rustup",
-];
+/// Claude Code's own install, which a Bash step may need to read. Every project gets these and
+/// nothing else in the home folder: the toolchains a project uses are found for it, in
+/// `toolchains`, and a person lets them be read.
+pub const TOOL_DIRS: [&str; 2] = ["~/.local", "~/.claude/local"];
 
 /// `sockets` are the folders of the project's service sockets. Only these open up, and they're the
 /// only way a sandboxed command reaches a local server: TCP on localhost would expose all of them.

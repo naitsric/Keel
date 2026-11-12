@@ -39,7 +39,7 @@ pub fn system_prompt(
              Never run two test commands at the same time: they can share a database and block each other.\n\
              Create and change files with Edit and Write, not with cat, echo, sed or Python from Bash: Edit fails when the text does not match, while a replacement in a script can do nothing and say nothing.\n\
              Use Bash to run commands (tests, build, git). It is already in the project folder, so do not cd to its full path.\n\
-             There is no network except the domains the project allows, and the caches in the home folder are not available. Dependencies come from the cache Keel prepared for this run: if one is missing, the command fails with an error, so do not wait for a command that downloads things and do not retry it.\n",
+             There is no network except the domains the project allows. The home folder is this run's own, with the dependencies Keel prepared for it: if one is missing, the command fails with an error, so do not wait for a command that downloads things and do not retry it.\n",
         );
         text.push_str(&format!(
             "Write commit messages in {}, unless the project's instructions say otherwise.\n",
@@ -449,13 +449,14 @@ mod tests {
     }
 
     #[test]
-    fn who_runs_commands_is_told_there_is_no_network_nor_home_caches() {
+    fn who_runs_commands_is_told_there_is_no_network_and_the_home_is_the_runs() {
         let dir = tempfile::tempdir().unwrap();
         let empty = Block::default();
         for language in ["en", "es"] {
             let (builder, _) = system_prompt(dir.path(), language, ToolProfile::Build, &empty, "");
             assert!(builder.contains("There is no network except the domains the project allows"));
-            assert!(builder.contains("caches in the home folder are not available"));
+            assert!(builder.contains("The home folder is this run's own"));
+            assert!(!builder.contains("not available"));
             assert!(builder.contains("do not wait for a command that downloads things"));
             let (reader, _) =
                 system_prompt(dir.path(), language, ToolProfile::ReadOnly, &empty, "");

@@ -65,7 +65,15 @@ most about 4 KB, so when it's full, adding something means retiring something.
   internet access and the only one that fills the project's cache shared by its runs, and it
   still can't reach your home folder or anything else on your Mac. A setup that runs again once
   an agent has changed the code, like a retry with the project's new setup, gets no more than a
-  check: no network, and a cache of the run's own.
+  check: no network, and the run's own copy of the project's home instead of the project's.
+- Setup, the check and the agents' commands run in a home folder of the project's own. Setup fills
+  it with whatever its tools download, and each run works in a copy of it, so no step can change
+  what the next run gets. Toolchains such as rustup's stay in your home folder, where they can only
+  be read. Claude Code itself keeps your home folder, where your login is.
+- A project's commands can read only the folders of your home folder it lists. When you set up a
+  project, Keel asks your shell where the programs its commands use are, such as `~/.nvm` or
+  `~/.cargo/bin`, and proposes those folders for you to confirm. It runs nothing from the repo to
+  find them, and never proposes a folder with credentials in it.
 
 ## Secrets in what it shows
 
@@ -110,6 +118,11 @@ Inside a sandbox, as when Keel runs this project's check, macOS won't let a test
 of its own, open a local socket or run `ps`. The tests that need one of these print
 `skipped <test>: <why>` and stop, so they count as passed there. That's most of the engine's
 tests. Run `cargo test --workspace` outside Keel to run them all.
+
+`KEEL_SAMPLE_REPOS=all cargo test -p keel-engine --test samples -- --nocapture` has Keel guess the
+commands of small sample repos (pnpm, pip, uv, Rust) and run their setup and check in the sandbox.
+They download dependencies, so they only run when asked. `KEEL_SAMPLE_REPOS=keel` does the same
+with this repo, built from scratch.
 
 `pnpm dev`, then `/dev/preview.html`, shows the real screens with made-up data, for example
 `/dev/preview.html?view=run&state=stalled&lang=es`.

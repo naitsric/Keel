@@ -10,7 +10,7 @@ use keel_core::{AttemptState, Reason, StepSpec, ToolProfile, WorkflowStep};
 use keel_harness::auth::{self, AuthStatus};
 use keel_harness::process::{self, SIGINT, SIGTERM, Tail};
 use keel_harness::stream::ResultEvent;
-use keel_harness::{Parsed, StepCommand, parse_line, settings};
+use keel_harness::{Parsed, StepCommand, home, parse_line, settings};
 use keel_store::rusqlite_value::Value;
 use keel_store::{Attempt, now};
 use serde_json::json;
@@ -97,29 +97,25 @@ fn allows_host(domains: &[String], host: &str) -> bool {
     })
 }
 
-/// Points the usual tools at a cache a sandboxed command can write to, since theirs live in the
-/// home folder. Cargo and Go keep what they download in `tool_homes`: for a setup before any agent
-/// that's the project's own cache, which only such a setup writes, and for any other step it's the
-/// run's copy of it. `domains` are those the step may reach, or `None` when it has the whole
-/// network (a setup before any agent). With no way to crates.io cargo is told to work offline, and
-/// Go has no proxy, so a missing dependency is an error at once and not minutes of retries. A
-/// project that does allow them is left as it was.
+/// What a setup or check command runs with: the home it works in (see `home`), and the little Keel
+/// still tells tools one by one. uv copies into `.venv` rather than linking it to its cache, and Go
+/// doesn't fetch another toolchain. `domains` are those the step may reach, or `None` when it has
+/// the whole network (a setup before any agent). With no way to crates.io cargo is told to work
+/// offline, and Go has no proxy, so a missing dependency is an error at once and not minutes of
+/// retries. A project that does allow them is left as it was.
 fn cache_env(
-    cache: &std::path::Path,
-    tool_homes: &std::path::Path,
+    home: &std::path::Path,
+    real_home: &std::path::Path,
     domains: Option<&[String]>,
 ) -> Vec<(String, String)> {
-    let homes = tool_homes.to_string_lossy().into_owned();
-    let cache = cache.to_string_lossy().into_owned();
+    let mut env = home::env(home, real_home);
+    env.extend(tool_settings(domains));
+    env
+}
+
+fn tool_settings(domains: Option<&[String]>) -> Vec<(String, String)> {
     let mut env = vec![
-        ("XDG_CACHE_HOME".to_owned(), cache.clone()),
-        ("UV_CACHE_DIR".to_owned(), format!("{cache}/uv")),
         ("UV_LINK_MODE".to_owned(), "copy".to_owned()),
-        ("PIP_CACHE_DIR".to_owned(), format!("{cache}/pip")),
-        ("npm_config_cache".to_owned(), format!("{cache}/npm")),
-        ("CARGO_HOME".to_owned(), format!("{homes}/cargo")),
-        ("GOPATH".to_owned(), format!("{homes}/go")),
-        ("GOCACHE".to_owned(), format!("{cache}/go-build")),
         ("GOTOOLCHAIN".to_owned(), "local".to_owned()),
     ];
     if let Some(domains) = domains {
@@ -141,78 +137,69 @@ pub(crate) fn before_any_agent(attempts: &[Attempt]) -> bool {
         .any(|a| a.kind == "agent" && a.state != AttemptState::Skipped.as_str())
 }
 
-/// The sandbox a setup or check runs in, and the cache its tools use.
+/// The sandbox a setup or check runs in, and the home its tools work in.
 #[derive(Debug)]
 struct CommandSandbox {
     profile: String,
-    cache: PathBuf,
-    /// Whether it gets the internet and fills the project's cache, shared by its runs.
+    home: PathBuf,
+    /// Whether it gets the internet and writes to the project's cache, its home included, which
+    /// the project's runs share.
     shares_cache: bool,
 }
 
-/// Only a setup before any agent gets the internet and the cache the project's runs share. Once
-/// an agent has had the run's copy, a postinstall script, a Makefile target or a build backend may
-/// be its doing, so a setup then gets what a check gets: no network, the reads an agent has, and
-/// the run's own cache. Otherwise it could send out what it reads, or leave something in the
-/// shared cache for the next run's setup to install before any agent. `attempts` are the run's.
+/// Only a setup before any agent gets the internet and writes to what the project's runs share:
+/// its cache, and the project's home in it, which each run's home is a copy of. Once an agent has
+/// had the run's copy, a postinstall script, a Makefile target or a build backend may be its doing,
+/// so a setup then gets exactly what a check gets: no network, the reads an agent has, and the
+/// run's own copy of the project's home. Otherwise it could send out what it reads, or leave
+/// something in the project's home or cache for the next run to start from before any agent.
+/// `attempts` are the run's.
+#[allow(clippy::too_many_arguments)]
 fn command_sandbox(
     is_setup: bool,
     attempts: &[Attempt],
     workspace: &std::path::Path,
-    home: &std::path::Path,
+    real_home: &std::path::Path,
     read: &[String],
     sockets: &[String],
     shared_cache: &std::path::Path,
+    project_home: &std::path::Path,
 ) -> CommandSandbox {
     if is_setup && before_any_agent(attempts) {
         CommandSandbox {
-            profile: settings::setup_profile(workspace, home, read, sockets, shared_cache),
-            cache: shared_cache.to_owned(),
+            profile: settings::setup_profile(workspace, real_home, read, sockets, shared_cache),
+            home: project_home.to_owned(),
             shares_cache: true,
         }
     } else {
         CommandSandbox {
-            profile: settings::check_profile(workspace, home, read, sockets),
-            cache: workspace.join(RUN_CACHE),
+            profile: settings::check_profile(workspace, real_home, read, sockets),
+            home: run_home(workspace),
             shares_cache: false,
         }
     }
 }
 
-/// Gives a run its own copy of what setup downloaded for cargo and Go, once. It's a clone on APFS,
-/// which costs almost nothing, and a copy where that's not possible. It's never a link: whatever
-/// an agent changes stays in the run and can't reach the project's cache or the next run.
-fn copy_tool_caches(shared: &std::path::Path, run_cache: &std::path::Path) -> Result<()> {
-    std::fs::create_dir_all(run_cache)?;
-    for tool in ["cargo", "go"] {
-        let (from, to) = (shared.join(tool), run_cache.join(tool));
-        if to.exists() {
-            continue;
-        }
-        if !from.is_dir() {
-            std::fs::create_dir_all(&to)?;
-            continue;
-        }
-        let copy = |flags: &str| {
-            std::process::Command::new("/bin/cp")
-                .arg(flags)
-                .arg(&from)
-                .arg(&to)
-                .status()
-                .is_ok_and(|status| status.success())
-        };
-        if !copy("-cR") {
-            let _ = std::fs::remove_dir_all(&to);
-            if !copy("-R") {
-                let _ = std::fs::remove_dir_all(&to);
-                return Err(Error::Io(std::io::Error::other(format!(
-                    "could not copy {}",
-                    from.display()
-                ))));
-            }
+/// The run's own copy of the project's home, inside its private copy of the repo.
+fn run_home(workspace: &std::path::Path) -> PathBuf {
+    workspace.join(RUN_CACHE).join(home::FOLDER)
+}
+
+/// The home folder Keel itself runs with, where toolchains are.
+pub(crate) fn real_home() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+}
+
+/// What a run's steps may read in the home folder: the project's folders, and any the run was
+/// given of its own to try.
+pub(crate) fn readable(project: &keel_store::Project, run: &keel_store::Run) -> Vec<String> {
+    let mut read = project.allowed_read.clone();
+    for folder in &run.extra_read {
+        if !read.contains(folder) {
+            read.push(folder.clone());
         }
     }
-    Ok(())
+    read
 }
 
 fn runs_commands(kind: &str, tools: Option<ToolProfile>) -> bool {
@@ -401,6 +388,12 @@ impl Inner {
         self.mirror(project_id).with_file_name("cache")
     }
 
+    /// The home setup fills for a project, in its cache, before any agent of a run. Each run works
+    /// in a copy of it, and so does a setup once an agent has run: see `command_sandbox`.
+    fn project_home(&self, project_id: &str) -> PathBuf {
+        self.shared_cache(project_id).join(home::FOLDER)
+    }
+
     /// Makes sure the run has its private clone, and returns the commit the step starts from.
     fn prepare_workspace(&self, attempt: &Attempt, project_id: &str) -> Result<(Git, String)> {
         let tools = locked(&self.tools).clone();
@@ -528,6 +521,9 @@ impl Inner {
         std::fs::write(&system_prompt_file, &system_prompt)?;
         let prompt_file = dir.join(format!("{stem}.prompt.txt"));
         std::fs::write(&prompt_file, &attempt.prompt)?;
+        // Only steps that can run commands get services, a folder for screenshots, and the run's
+        // home. A read-only step has no way to use them.
+        let can_write = spec.tools == ToolProfile::Build;
 
         let command = StepCommand {
             claude: claude.clone(),
@@ -552,6 +548,8 @@ impl Inner {
                         && settings::is_read_only(&attempt.settings, &dir.to_string_lossy())
                 }))
                 .collect(),
+            // Beside the workspace, where the agent can't change it.
+            env_file: can_write.then(|| dir.join(format!("{stem}.env"))),
         };
         let args = command.args(spec);
         let version = auth::read_version(&claude, &tools.path_env);
@@ -576,6 +574,7 @@ impl Inner {
                 "systemPrompt": system_prompt,
                 "systemPromptSources": sources,
                 "resumedFrom": attempt.resumed_from,
+                "home": can_write.then(|| run_home(&workspace)),
             }),
         )?;
         if self.stop_requested(&attempt.id) {
@@ -584,9 +583,6 @@ impl Inner {
 
         let raw_path = PathBuf::from(&attempt.raw_path);
         let stderr_path = dir.join(format!("{stem}.stderr.txt"));
-        // Only steps that can run commands get services, or a folder for screenshots. A read-only
-        // step has no way to use them.
-        let can_write = spec.tools == ToolProfile::Build;
         let (service_set, service_env, project) = if can_write {
             screenshots::empty(&workspace, &dir)?;
             let project = store.project(project_id)?;
@@ -597,13 +593,14 @@ impl Inner {
         };
         let mut process_command = command.command(spec);
         if let Some(project) = project {
-            let run_cache = workspace.join(RUN_CACHE);
-            copy_tool_caches(&self.shared_cache(project_id), &run_cache)?;
-            process_command.envs(cache_env(
-                &run_cache,
-                &run_cache,
-                Some(&project.allowed_domains),
-            ));
+            // Its Bash commands work in the run's home, as the check does, and find what setup
+            // left. `claude` itself keeps the real home folder, where its login and sessions are.
+            let run_home = run_home(&workspace);
+            home::copy(&self.project_home(project_id), &run_home)?;
+            if let Some(file) = &command.env_file {
+                std::fs::write(file, home::script(&run_home, &real_home()))?;
+            }
+            process_command.envs(tool_settings(Some(&project.allowed_domains)));
         }
         process_command.envs(service_env);
         // After the project's own variables, as for a check, so the folder is always Keel's.
@@ -631,28 +628,31 @@ impl Inner {
         self.changed(&attempt.run_id);
         let (_git, sha_before) = self.prepare_workspace(attempt, project_id)?;
         let project = store.project(project_id)?;
+        let read = readable(&project, &store.run(&attempt.run_id)?);
         let tools = locked(&self.tools).clone();
         let workspace = PathBuf::from(&attempt.workspace);
         let dir = self.run_dir(&attempt.run_id);
-        let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        let real_home = real_home();
         let sockets = services::socket_dirs(&services::root_for(project_id), &project.services);
-        // A setup before any agent fills a cache shared by the project's runs. Everything else
-        // gets one of its own, inside the private copy, so nothing an agent wrote can reach the
-        // next run. Looked at here, as it starts, whatever started it.
+        // A setup before any agent fills a home shared by the project's runs, in its cache.
+        // Everything else works in the run's own copy, inside the private copy, so nothing an
+        // agent wrote can reach the next run. Looked at here, as it starts, whatever started it.
         let shared_cache = self.shared_cache(project_id);
         let attempts = store.attempts_of_run(&attempt.run_id)?;
         let sandbox = command_sandbox(
             is_setup,
             &attempts,
             &workspace,
-            &home,
-            &project.allowed_read,
+            &real_home,
+            &read,
             &sockets,
             &shared_cache,
+            &self.project_home(project_id),
         );
         if sandbox.shares_cache {
             std::fs::create_dir_all(&shared_cache)?;
         }
+        let home = sandbox.home;
         let stem = format!("{}-{}", attempt.step_id, attempt.number);
         let prompt_file = dir.join(format!("{stem}.stdin"));
         let raw_path = PathBuf::from(&attempt.raw_path);
@@ -667,7 +667,7 @@ impl Inner {
         store.append_event(
             &attempt.id,
             "started",
-            &json!({ "command": command_text, "shaBefore": sha_before, "profile": profile }),
+            &json!({ "command": command_text, "shaBefore": sha_before, "profile": profile, "home": home }),
         )?;
         if self.stop_requested(&attempt.id) {
             return Ok(None);
@@ -685,18 +685,18 @@ impl Inner {
             );
         screenshots::empty(&workspace, &dir)?;
         let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
-        // A setup before any agent writes to the project's cache. Anything else works on the run's
+        // A setup before any agent writes to the project's home. Anything else works on the run's
         // own copy of it.
-        let cache = sandbox.cache;
-        let cache_vars = if sandbox.shares_cache {
-            cache_env(&cache, &cache, None)
+        let home_vars = if sandbox.shares_cache {
+            home::create(&home)?;
+            cache_env(&home, &real_home, None)
         } else {
-            copy_tool_caches(&shared_cache, &cache)?;
-            cache_env(&cache, &cache, Some(&project.allowed_domains))
+            home::copy(&self.project_home(project_id), &home)?;
+            cache_env(&home, &real_home, Some(&project.allowed_domains))
         };
         // After the project's own variables, as for an agent, so the folder is always Keel's.
         command
-            .envs(cache_vars)
+            .envs(home_vars)
             .envs(service_env)
             .env(screenshots::VARIABLE, screenshots::folder(&workspace));
         let child = process::spawn_step(command, &prompt_file, &raw_path, &stderr_path)?;
@@ -1601,9 +1601,11 @@ mod tests {
 
     #[test]
     fn without_crates_io_cargo_and_go_work_offline() {
-        let env = cache_env(Path::new("/c"), Path::new("/h"), Some(&[]));
-        assert_eq!(var(&env, "CARGO_HOME"), Some("/h/cargo"));
-        assert_eq!(var(&env, "GOPATH"), Some("/h/go"));
+        let env = cache_env(Path::new("/w/.keel-cache/home"), Path::new("/u"), Some(&[]));
+        assert_eq!(var(&env, "HOME"), Some("/w/.keel-cache/home"));
+        // Cargo and Go find what setup left in the home itself.
+        assert_eq!(var(&env, "CARGO_HOME"), None);
+        assert_eq!(var(&env, "GOPATH"), None);
         assert_eq!(var(&env, "CARGO_NET_OFFLINE"), Some("true"));
         assert_eq!(var(&env, "GOPROXY"), Some("off"));
     }
@@ -1611,13 +1613,13 @@ mod tests {
     #[test]
     fn a_project_that_allows_them_is_not_forced_offline() {
         let domains = ["Index.crates.io".to_owned(), "proxy.golang.org".to_owned()];
-        let env = cache_env(Path::new("/c"), Path::new("/h"), Some(&domains));
+        let env = cache_env(Path::new("/h"), Path::new("/u"), Some(&domains));
         assert_eq!(var(&env, "CARGO_NET_OFFLINE"), None);
         assert_eq!(var(&env, "GOPROXY"), None);
         // A domain that merely ends in the same letters isn't it.
         let env = cache_env(
-            Path::new("/c"),
             Path::new("/h"),
+            Path::new("/u"),
             Some(&["notcrates.io".to_owned()]),
         );
         assert_eq!(var(&env, "CARGO_NET_OFFLINE"), Some("true"));
@@ -1625,7 +1627,8 @@ mod tests {
 
     #[test]
     fn setup_has_the_network_and_is_left_alone() {
-        let env = cache_env(Path::new("/c"), Path::new("/c"), None);
+        let env = cache_env(Path::new("/p/cache/home"), Path::new("/u"), None);
+        assert_eq!(var(&env, "HOME"), Some("/p/cache/home"));
         assert_eq!(var(&env, "CARGO_NET_OFFLINE"), None);
         assert_eq!(var(&env, "GOPROXY"), None);
     }
@@ -1670,15 +1673,26 @@ mod tests {
     fn a_setup_once_an_agent_has_had_the_workspace_gets_no_more_than_an_agent() {
         use AttemptState::{Failed, Queued, Skipped, Stopped, Succeeded};
         let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().to_owned();
-        let workspace = home.join("runs/r/workspace");
-        let shared = home.join("projects/p/cache");
+        let real_home = dir.path().to_owned();
+        let workspace = real_home.join("runs/r/workspace");
+        let shared = real_home.join("projects/p/cache");
+        let project_home = shared.join(home::FOLDER);
         let shared_text = shared.to_string_lossy().into_owned();
         let sandbox = |is_setup: bool, attempts: &[Attempt]| {
-            command_sandbox(is_setup, attempts, &workspace, &home, &[], &[], &shared)
+            command_sandbox(
+                is_setup,
+                attempts,
+                &workspace,
+                &real_home,
+                &[],
+                &[],
+                &shared,
+                &project_home,
+            )
         };
 
-        // Before any agent, what it runs is what's published: the internet and the shared cache.
+        // Before any agent, what it runs is what's published: the internet, and the project's
+        // cache and home, which its runs share.
         let before = [
             vec![],
             recorded(&[("setup", "setup", Failed)]),
@@ -1688,7 +1702,7 @@ mod tests {
         for attempts in &before {
             let setup = sandbox(true, attempts);
             assert!(setup.shares_cache, "{attempts:?}");
-            assert_eq!(setup.cache, shared);
+            assert_eq!(setup.home, project_home);
             assert!(setup.profile.contains("(allow network*)"));
             assert!(setup.profile.contains(&shared_text));
         }
@@ -1702,40 +1716,22 @@ mod tests {
             ]);
             let late = sandbox(true, &attempts);
             assert!(!late.shares_cache, "{state:?}");
-            assert_eq!(late.cache, workspace.join(RUN_CACHE));
+            // The run's own copy of the project's home, never the project's.
+            assert_eq!(late.home, run_home(&workspace));
+            assert!(late.home.starts_with(&workspace));
             assert!(late.profile.contains("(deny network*)"));
             assert!(!late.profile.contains("(allow network*)"));
             assert!(!late.profile.contains(&shared_text));
             // Exactly what a check gets.
-            assert_eq!(late.profile, sandbox(false, &attempts).profile);
+            let check = sandbox(false, &attempts);
+            assert_eq!(late.profile, check.profile);
+            assert_eq!(late.home, check.home);
         }
 
         // A check never gets them.
         let check = sandbox(false, &[]);
         assert!(!check.shares_cache);
-        assert_eq!(check.cache, workspace.join(RUN_CACHE));
+        assert_eq!(check.home, run_home(&workspace));
         assert!(check.profile.contains("(deny network*)"));
-    }
-
-    #[test]
-    fn a_run_copies_the_cache_once_and_never_writes_to_the_shared_one() {
-        let dir = tempfile::tempdir().unwrap();
-        let shared = dir.path().join("shared");
-        std::fs::create_dir_all(shared.join("cargo/registry")).unwrap();
-        std::fs::write(shared.join("cargo/registry/dep"), "x").unwrap();
-        let run = dir.path().join("run");
-        copy_tool_caches(&shared, &run).unwrap();
-        assert!(run.join("cargo/registry/dep").exists());
-        assert!(run.join("go").is_dir(), "an empty one when setup left none");
-        std::fs::write(run.join("cargo/registry/mine"), "y").unwrap();
-        std::fs::write(run.join("cargo/registry/dep"), "changed").unwrap();
-        // Another step of the same run keeps what the run has.
-        copy_tool_caches(&shared, &run).unwrap();
-        assert!(run.join("cargo/registry/mine").exists());
-        assert!(!shared.join("cargo/registry/mine").exists());
-        assert_eq!(
-            std::fs::read_to_string(shared.join("cargo/registry/dep")).unwrap(),
-            "x"
-        );
     }
 }

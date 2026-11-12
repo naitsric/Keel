@@ -1,6 +1,6 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { callsTo, hideApp, paletteRow, pressKey, pressMod, row, settle, showApp, view } from "../commands/testApp";
+import { callsTo, hideApp, paletteRow, pressKey, pressMod, row, setToolFolders, settle, showApp, view } from "../commands/testApp";
 import i18next from "../i18n";
 import type { Project } from "../lib/api";
 import { useApp } from "../lib/store";
@@ -88,6 +88,47 @@ describe("the Projects page", () => {
     await typeInto(filter, "P-B");
     expect(listText()).toContain("p-b");
     expect(listText()).not.toContain("p-e");
+  });
+
+  describe("the folders a project's commands need", () => {
+    const readBox = () => [...document.querySelectorAll("label")].find((l) => l.textContent?.startsWith(i18next.t("settings.readPaths")))?.querySelector("textarea") as HTMLTextAreaElement;
+    const checkBox = () => document.querySelector(`input[placeholder="${i18next.t("settings.checkCommandPlaceholder")}"]`) as HTMLInputElement;
+    const offer = (folder: string) => [...main().querySelectorAll("button")].find((b) => b.textContent === folder) ?? null;
+
+    it("offers what Keel found that the project doesn't read yet, and adds it to the list", async () => {
+      setToolFolders([
+        { folder: "~/.nvm", programs: ["node"] },
+        { folder: "~/Library/pnpm", programs: ["pnpm"] },
+      ]);
+      await showApp(RUNS, { name: "projects" }, [project("alpha", { allowedRead: ["~/.nvm/"] })]);
+      await settle(500);
+      expect(callsTo("project_tool_folders").at(-1)?.args).toEqual({ projectId: "alpha", setup: "", check: "make test" });
+      expect(main().textContent).toContain(i18next.t("settings.foundFolders"));
+      expect(offer("~/.nvm")).toBeNull();
+      await click(offer("~/Library/pnpm"));
+      expect(readBox().value).toBe("~/.nvm/\n~/Library/pnpm");
+      expect(offer("~/Library/pnpm")).toBeNull();
+      expect(callsTo("project_update")).toEqual([]);
+
+      await click(button(i18next.t("settings.save")));
+      expect((callsTo("project_update")[0].args as { settings: Project }).settings.allowedRead).toEqual(["~/.nvm/", "~/Library/pnpm"]);
+    });
+
+    it("starts over when the setup dialog adds folders, so saving here doesn't take them back out", async () => {
+      await showApp(RUNS, { name: "projects" }, [project("alpha", { allowedRead: ["~/.nvm"] })]);
+      act(() => useApp.setState({ overview: { ...useApp.getState().overview, projects: [project("alpha", { allowedRead: ["~/.nvm", "~/Library/pnpm"] })] } }));
+      await settle();
+      expect(readBox().value).toBe("~/.nvm\n~/Library/pnpm");
+    });
+
+    it("looks again when the commands change", async () => {
+      await showApp(RUNS, { name: "projects" }, [project("alpha")]);
+      await settle(500);
+      await typeInto(checkBox(), "pnpm test");
+      await settle(500);
+      expect(callsTo("project_tool_folders").at(-1)?.args).toEqual({ projectId: "alpha", setup: "", check: "pnpm test" });
+      expect(main().textContent).not.toContain(i18next.t("settings.foundFolders"));
+    });
   });
 
   it("refuses an env line without = and saves a valid one, saying so", async () => {
