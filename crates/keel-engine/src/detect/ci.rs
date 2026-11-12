@@ -38,14 +38,24 @@ const SPANS_LINES: [&str; 16] = [
 ];
 /// After one of these, the next line runs in another folder.
 const MOVES: [&str; 3] = ["cd", "pushd", "popd"];
+/// Templates a GitLab job is looked up through, since one can extend another.
+const MOST_EXTENDS: usize = 8;
+
+/// A command of a job, and whether the CI lets it fail.
+struct Line {
+    command: String,
+    may_fail: bool,
+}
 
 /// Jobs, each with its commands in the order they run.
-type Jobs = Vec<Vec<String>>;
+type Jobs = Vec<Vec<Line>>;
 
 #[derive(Default)]
 pub(super) struct Found {
     pub setup: Vec<String>,
     pub check: Vec<String>,
+    /// What the CI checks and lets fail.
+    pub may_fail: Vec<String>,
     pub from: Vec<String>,
 }
 
@@ -59,23 +69,37 @@ enum Kind {
 
 impl Found {
     /// A job counts if it tests something. What it runs before its last test prepares for it, and
-    /// what comes after, like reports, uploads and deploys, is left out.
-    fn add(&mut self, job: &[String]) -> bool {
-        let kinds: Vec<Kind> = job.iter().map(|command| kind(command)).collect();
+    /// what comes after, like reports, uploads and deploys, is left out. So is what the CI lets
+    /// fail: a check that required it would fail where the CI passes.
+    fn add(&mut self, job: &[Line]) -> bool {
+        let kinds: Vec<Kind> = job
+            .iter()
+            .map(|line| match kind(&line.command) {
+                Kind::Checks if line.may_fail => {
+                    push_new(&mut self.may_fail, &line.command);
+                    Kind::Neither
+                }
+                _ if line.may_fail => Kind::Neither,
+                kind => kind,
+            })
+            .collect();
         let Some(last) = kinds.iter().rposition(|kind| *kind == Kind::Checks) else {
             return false;
         };
-        for (at, command) in job.iter().enumerate() {
-            let list = match kinds[at] {
-                Kind::Checks => &mut self.check,
-                Kind::Prepares if at < last => &mut self.setup,
-                _ => continue,
-            };
-            if list.len() < MOST_OPTIONS && !list.contains(command) {
-                list.push(command.clone());
+        for (at, line) in job.iter().enumerate() {
+            match kinds[at] {
+                Kind::Checks => push_new(&mut self.check, &line.command),
+                Kind::Prepares if at < last => push_new(&mut self.setup, &line.command),
+                _ => {}
             }
         }
         true
+    }
+}
+
+fn push_new(list: &mut Vec<String>, command: &str) {
+    if list.len() < MOST_OPTIONS && !list.iter().any(|known| known == command) {
+        list.push(command.to_owned());
     }
 }
 
@@ -86,22 +110,30 @@ pub(super) struct Missing {
     pub add: Vec<String>,
     /// As the CI runs them, since Keel doesn't know how to run them with no network.
     pub left_out: Vec<String>,
+    /// As the CI runs them, though it lets them fail.
+    pub may_fail: Vec<String>,
     /// The files they're in.
     pub from: Vec<String>,
 }
 
 /// Each simple command of each line is judged on its own, so `ruff check . && curl …` gives only
 /// `ruff check .`. Two that run the same tool in the same mode are one, and a script or a Makefile
-/// target counts as what it runs.
+/// target counts as what it runs. What the CI lets fail is only said, and looked at last, so the
+/// same tool that another job requires is proposed rather than said.
 pub(super) fn missing_from(root: &Path, check: &str) -> Missing {
     let mut repo = calls::Repo::read(root);
     let mut checked = repo.checked(check);
-    let mut left_out_sigs = HashSet::new();
+    let mut said = HashSet::new();
     let mut missing = Missing::default();
-    for (file, jobs) in github(root).into_iter().chain(gitlab(root)) {
-        let mut used = false;
-        for line in jobs.iter().flatten() {
-            for command in calls::simple_commands(line) {
+    let files: Vec<(String, Jobs)> = github(root).into_iter().chain(gitlab(root)).collect();
+    let mut used = vec![false; files.len()];
+    for may_fail in [false, true] {
+        for (at, (_, jobs)) in files.iter().enumerate() {
+            let lines = jobs
+                .iter()
+                .flatten()
+                .filter(|line| line.may_fail == may_fail);
+            for command in lines.flat_map(|line| calls::simple_commands(&line.command)) {
                 if !runs_here(command) || kind(command) != Kind::Checks {
                     continue;
                 }
@@ -109,29 +141,31 @@ pub(super) fn missing_from(root: &Path, check: &str) -> Missing {
                 if calls::is_checked(&checked, &sigs) {
                     continue;
                 }
-                used = true;
-                if let Some(form) = repo.offline(command) {
+                used[at] = true;
+                if let Some(form) = repo.offline(command).filter(|_| !may_fail) {
                     checked.extend(repo.sigs(&form));
                     if missing.add.len() < MOST_OPTIONS {
                         missing.add.push(form);
                     }
                     continue;
                 }
-                let new = sigs
-                    .first()
-                    .is_none_or(|own| left_out_sigs.insert(own.clone()));
-                if new
-                    && missing.left_out.len() < MOST_OPTIONS
-                    && !missing.left_out.iter().any(|known| known == command)
-                {
-                    missing.left_out.push(command.to_owned());
+                let new = sigs.first().is_none_or(|own| said.insert(own.clone()));
+                if new {
+                    let list = if may_fail {
+                        &mut missing.may_fail
+                    } else {
+                        &mut missing.left_out
+                    };
+                    push_new(list, command);
                 }
             }
         }
-        if used {
-            missing.from.push(file);
-        }
     }
+    missing.from = files
+        .into_iter()
+        .zip(used)
+        .filter_map(|((file, _), used)| used.then_some(file))
+        .collect();
     missing
 }
 
@@ -150,7 +184,8 @@ pub(super) fn commands(root: &Path) -> Found {
     found
 }
 
-/// Jobs that run on Windows are left out, and so are steps in another shell or another folder.
+/// Jobs that run on Windows are left out, and so are steps in another shell or another folder. A
+/// job or a step with `continue-on-error` may fail.
 fn github(root: &Path) -> Vec<(String, Jobs)> {
     // Real folders, so a link can't send this to read somewhere else.
     if !is_dir(root, ".github") || !is_dir(root, ".github/workflows") {
@@ -172,19 +207,34 @@ fn github(root: &Path) -> Vec<(String, Jobs)> {
                         && !on_windows(&job["runs-on"])
                 })
                 .map(|job| {
+                    let job_may_fail = lets_fail(&job["continue-on-error"]);
                     job["steps"]
                         .as_sequence()
                         .into_iter()
                         .flatten()
                         .filter(|step| here(step))
-                        .filter_map(|step| step["run"].as_str())
-                        .flat_map(lines)
+                        .filter_map(|step| {
+                            let may_fail = job_may_fail || lets_fail(&step["continue-on-error"]);
+                            Some((step["run"].as_str()?, may_fail))
+                        })
+                        .flat_map(|(script, may_fail)| in_lines(script, may_fail))
                         .collect()
                 })
                 .collect();
             Some((file, jobs))
         })
         .collect()
+}
+
+/// Anything but `false` may let it fail, like `true` or `${{ matrix.experimental }}`.
+fn lets_fail(setting: &Value) -> bool {
+    !matches!(setting, Value::Null | Value::Bool(false))
+}
+
+fn in_lines(script: &str, may_fail: bool) -> impl Iterator<Item = Line> {
+    lines(script)
+        .into_iter()
+        .map(move |command| Line { command, may_fail })
 }
 
 /// A step, or the defaults for a job's steps, in bash or sh and in the project's own folder.
@@ -207,7 +257,7 @@ fn on_windows(runs_on: &Value) -> bool {
 }
 
 /// A job is any entry with a `script`, except a hidden one, whose name starts with a dot. Its own
-/// `before_script` replaces the one in `default`.
+/// `before_script` replaces the one in `default`. One with `allow_failure` may fail.
 fn gitlab(root: &Path) -> Option<(String, Jobs)> {
     let file = ".gitlab-ci.yml";
     let pipeline = yaml(&read(root, file)?)?;
@@ -223,13 +273,40 @@ fn gitlab(root: &Path) -> Option<(String, Jobs)> {
         })
         .map(|(_, job)| {
             let before = job.get("before_script").unwrap_or(before);
+            let may_fail = gitlab_lets_fail(&pipeline, job);
             scripts(before)
                 .chain(scripts(&job["script"]))
-                .flat_map(lines)
+                .flat_map(|script| in_lines(script, may_fail))
                 .collect()
         })
         .collect();
     Some((file.to_owned(), jobs))
+}
+
+/// `allow_failure` on a job, on any of its `rules` or on a template it `extends`, unless the job
+/// itself says `false`. Anything but `false` lets it fail, like a list of exit codes. A manual job
+/// may fail unless it says otherwise.
+fn gitlab_lets_fail(pipeline: &Value, job: &Value) -> bool {
+    let mut waiting = vec![job];
+    let mut looked = 0;
+    while let Some(job) = waiting.pop() {
+        looked += 1;
+        if looked > MOST_EXTENDS {
+            break;
+        }
+        let mut rules = job["rules"].as_sequence().into_iter().flatten();
+        if rules.any(|rule| lets_fail(&rule["allow_failure"])) {
+            return true;
+        }
+        if !job["allow_failure"].is_null() {
+            return lets_fail(&job["allow_failure"]);
+        }
+        if job["when"].as_str() == Some("manual") {
+            return true;
+        }
+        waiting.extend(scripts(&job["extends"]).filter_map(|name| pipeline.get(name)));
+    }
+    false
 }
 
 /// A script is a line or a list of them.
@@ -1035,6 +1112,7 @@ jobs:
                     "uv run --frozen pyright",
                 ]),
                 left_out: Vec::new(),
+                may_fail: Vec::new(),
                 from: vec![".github/workflows/ci.yml".to_owned()],
             }
         );
@@ -1072,5 +1150,276 @@ jobs:
         std::fs::write(dir.path().join(".github/workflows/ci.yml"), workflow).unwrap();
         assert!(guess(dir.path()).from_ci);
         assert!(!canary.exists());
+    }
+
+    #[test]
+    fn checks_the_ci_lets_fail_are_said_and_never_required() {
+        let tools = [
+            "pytest", "ruff", "mypy", "pyright", "pylint", "flake8", "black",
+        ];
+        let python = |files: &[(&str, &str)]| {
+            let lock = lock(&tools);
+            let pyproject = dev_group(&tools);
+            let mut all = vec![
+                ("uv.lock", lock.as_str()),
+                ("pyproject.toml", pyproject.as_str()),
+            ];
+            all.extend_from_slice(files);
+            repo(&all)
+        };
+        let workflow = r#"
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: uv run ruff check .
+      - run: uv run mypy .
+        continue-on-error: true
+      - run: uv run ruff format --check .
+        continue-on-error: false
+  types:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - run: uv run pyright
+  experimental:
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
+    steps:
+      - run: uv run flake8 src
+"#;
+        let found = guess(python(&[(CI_FILE, workflow)]).path());
+        assert_eq!(
+            found.ci_checks,
+            [
+                "uv run --frozen ruff check .",
+                "uv run --frozen ruff format --check ."
+            ]
+        );
+        assert_eq!(
+            found.ci_may_fail,
+            ["uv run mypy .", "uv run pyright", "uv run flake8 src"]
+        );
+        assert!(found.ci_left_out.is_empty(), "{:?}", found.ci_left_out);
+        let check = found.check.unwrap();
+        for never in ["mypy", "pyright", "flake8"] {
+            assert!(!check.contains(never), "{never} in {check}");
+        }
+
+        // The same tool required in another job is still proposed, and not said twice.
+        let workflow = "jobs:\n  a:\n    continue-on-error: true\n    steps:\n      - run: uv run mypy .\n  b:\n    steps:\n      - run: uv run mypy src\n";
+        let gap = ci_gap(python(&[(CI_FILE, workflow)]).path(), "");
+        assert_eq!(gap.commands, ["uv run --frozen mypy src"]);
+        assert!(gap.may_fail.is_empty() && gap.left_out.is_empty());
+
+        let pipeline = r#"
+lint:
+  script:
+    - uv run ruff check .
+types:
+  allow_failure: true
+  script:
+    - uv run mypy .
+pyright:
+  allow_failure:
+    exit_codes: [137]
+  script:
+    - uv run pyright
+.optional:
+  allow_failure: true
+slow:
+  extends: .optional
+  script:
+    - uv run pytest -m slow
+flake8:
+  when: manual
+  script:
+    - uv run flake8
+black:
+  rules:
+    - if: $CI_COMMIT_BRANCH
+      allow_failure: true
+  script:
+    - uv run black --check .
+format:
+  allow_failure: false
+  script:
+    - uv run ruff format --check .
+"#;
+        let gap = ci_gap(python(&[(".gitlab-ci.yml", pipeline)]).path(), "");
+        assert_eq!(
+            gap.commands,
+            [
+                "uv run --frozen ruff check .",
+                "uv run --frozen ruff format --check ."
+            ]
+        );
+        assert_eq!(
+            gap.may_fail,
+            [
+                "uv run mypy .",
+                "uv run pyright",
+                "uv run pytest -m slow",
+                "uv run flake8",
+                "uv run black --check .",
+            ]
+        );
+        assert_eq!(gap.from, [".gitlab-ci.yml"]);
+
+        // With nothing else known, what CI lets fail isn't the check, nor what only it prepares.
+        let workflow = "\
+jobs:
+  t:
+    steps:
+      - run: zig build
+      - run: zig build test
+      - run: zig build test-flaky
+        continue-on-error: true
+  nightly:
+    continue-on-error: true
+    steps:
+      - run: zig fetch --nightly
+      - run: zig build test-nightly
+";
+        let zig = guess(repo(&[("build.zig", ""), (CI_FILE, workflow)]).path());
+        assert_eq!(zig.check.as_deref(), Some("zig build test"));
+        assert_eq!(zig.setup.as_deref(), Some("zig build"));
+        assert_eq!(
+            zig.ci_may_fail,
+            ["zig build test-flaky", "zig build test-nightly"]
+        );
+    }
+
+    #[test]
+    fn a_tool_told_to_install_what_it_misses_is_left_out() {
+        for command in [
+            "uv run mypy --install-types --non-interactive src",
+            "uv run mypy --install-types=yes src",
+            "uv run mypy --install-ty src",
+            "go test -mod=mod ./...",
+        ] {
+            let workflow = format!("jobs:\n  t:\n    steps:\n      - run: {command}\n");
+            let dir = repo(&[
+                ("uv.lock", &lock(&["mypy"])),
+                ("pyproject.toml", &dev_group(&["mypy"])),
+                ("go.mod", "module x\n"),
+                (CI_FILE, &workflow),
+            ]);
+            let gap = ci_gap(dir.path(), "");
+            assert!(gap.commands.is_empty(), "{command}: {:?}", gap.commands);
+            assert_eq!(gap.left_out, [command]);
+        }
+    }
+
+    #[test]
+    fn a_runners_options_stay_only_when_the_setup_installs_what_they_name() {
+        let tools = ["pytest", "pytest-cov", "ruff"];
+        let pyproject = format!(
+            "{}lint = [\"ruff\"]\ncoverage = [\"pytest-cov\"]\n[tool.uv]\ndefault-groups = [\"dev\", \"coverage\"]\n",
+            dev_group(&tools)
+        );
+        let gap = |command: &str| {
+            let workflow = format!("jobs:\n  t:\n    steps:\n      - run: {command}\n");
+            let dir = repo(&[
+                ("uv.lock", &lock(&tools)),
+                ("pyproject.toml", &pyproject),
+                ("package.json", r#"{"devDependencies":{"typescript":"5"}}"#),
+                ("package-lock.json", "{}"),
+                (CI_FILE, &workflow),
+            ]);
+            ci_gap(dir.path(), "")
+        };
+        // What they add, what they install from, or where they run, has to come along, and can't.
+        for command in [
+            "uv run --with pytest-cov pytest --cov",
+            "uv run --with=pytest-cov pytest --cov",
+            "uv run --extra cov pytest --cov",
+            "uv run --all-extras pytest",
+            "uv run --group lint ruff check .",
+            "uv run --python 3.12 pytest",
+            "uv run --directory app pytest",
+            "uv run --env-file .env pytest",
+            "poetry run -q pytest",
+            "COVERAGE_CORE=sysmon uv run pytest --cov",
+            "PYTHONPATH=src pytest",
+            "npx -p typescript tsc --noEmit",
+        ] {
+            let gap = gap(command);
+            assert!(gap.commands.is_empty(), "{command}: {:?}", gap.commands);
+            assert_eq!(gap.left_out, [command]);
+        }
+        for (command, offline) in [
+            ("uv run --frozen pytest", "uv run --frozen pytest"),
+            ("uv run --locked pytest -x", "uv run --frozen pytest -x"),
+            (
+                "uv run --group coverage pytest --cov",
+                "uv run --frozen --group coverage pytest --cov",
+            ),
+            (
+                "uv run --group=coverage --frozen pytest --cov",
+                "uv run --frozen --group coverage pytest --cov",
+            ),
+            ("npx --yes tsc --noEmit", "node_modules/.bin/tsc --noEmit"),
+        ] {
+            let gap = gap(command);
+            assert_eq!(gap.commands, [offline], "{command}");
+            assert!(gap.left_out.is_empty(), "{command}: {:?}", gap.left_out);
+        }
+    }
+
+    #[test]
+    fn a_chain_with_an_or_is_left_out_whole() {
+        let tools = ["ruff", "mypy"];
+        for line in [
+            "uv run mypy src && echo ok || true",
+            "uv run ruff check . && uv run mypy src || true",
+        ] {
+            let workflow = format!("jobs:\n  t:\n    steps:\n      - run: {line}\n");
+            let dir = repo(&[
+                ("uv.lock", &lock(&tools)),
+                ("pyproject.toml", &dev_group(&tools)),
+                (CI_FILE, &workflow),
+            ]);
+            let gap = ci_gap(dir.path(), "");
+            assert!(gap.commands.is_empty(), "{line}: {:?}", gap.commands);
+            assert_eq!(gap.left_out, [line]);
+        }
+    }
+
+    #[test]
+    fn a_script_run_by_an_interpreter_is_told_apart_from_another() {
+        let workflow = "\
+jobs:
+  t:
+    steps:
+      - run: python manage.py test --keepdb
+      - run: python manage.py makemigrations --check
+      - run: bash scripts/test.sh
+      - run: bash scripts/lint.sh
+      - run: uv run python scripts/check_types.py
+      - run: ./ci/test.sh
+";
+        let dir = repo(&[(CI_FILE, workflow)]);
+        let gap = ci_gap(
+            dir.path(),
+            "python manage.py test && bash scripts/test.sh && ./test.sh",
+        );
+        assert_eq!(
+            gap.left_out,
+            [
+                "python manage.py makemigrations --check",
+                "bash scripts/lint.sh",
+                "uv run python scripts/check_types.py",
+                "./ci/test.sh",
+            ]
+        );
+        // What the script is told to do is what tells it apart, not which files or how.
+        let workflow =
+            "jobs:\n  t:\n    steps:\n      - run: python manage.py test app.tests --parallel\n";
+        let dir = repo(&[(CI_FILE, workflow)]);
+        assert_eq!(
+            ci_gap(dir.path(), "uv run python manage.py test"),
+            CiGap::default()
+        );
     }
 }

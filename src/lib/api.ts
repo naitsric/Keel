@@ -120,6 +120,8 @@ export interface Guess {
   ciChecks: string[];
   /** What else the CI checks, as it runs it, that Keel can't run with no network. */
   ciLeftOut: string[];
+  /** What else the CI checks, as it runs it, though it lets it fail, so the check doesn't require it. */
+  ciMayFail: string[];
 }
 
 /** What a project's CI checks and its saved check doesn't run. Keel never adds them by itself. */
@@ -128,6 +130,8 @@ export interface CiGap {
   commands: string[];
   /** As the CI runs them, since Keel can't run them with no network. */
   leftOut: string[];
+  /** As the CI runs them, though it lets them fail, so a check needn't run them. */
+  mayFail: string[];
   /** The CI's files they're in. */
   from: string[];
 }

@@ -187,6 +187,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
   const workflowGone = workflows !== null && !workflows.some((w) => w.id === workflow);
   const ciMissing = ciGap ? ciCommandsLeft(check, ciGap.commands) : [];
   const ciLeftOut = ciGap ? ciCommandsLeft(check, ciGap.leftOut) : [];
+  const ciMayFail = ciGap ? ciCommandsLeft(check, ciGap.mayFail) : [];
   const removeProject = () => setRemoving(true);
   return (
     <div className="space-y-4">
@@ -222,7 +223,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
           <Field label={t("settings.checkCommand")} hint={t("settings.checkCommandHint")}>
             <input value={check} onChange={(e) => setCheck(e.target.value)} placeholder={t("settings.checkCommandPlaceholder")} className={`${inputClass} font-mono`} />
           </Field>
-          {(ciMissing.length > 0 || ciLeftOut.length > 0) && (
+          {(ciMissing.length > 0 || ciLeftOut.length > 0 || ciMayFail.length > 0) && (
             <div className="space-y-2 rounded-md border border-border-strong bg-inset px-3 py-2.5">
               {ciMissing.length > 0 && (
                 <div>
@@ -241,6 +242,12 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
                 <div>
                   <p className="text-[12px] text-muted">{t("projects.ciLeftOut")}</p>
                   <CommandList commands={ciLeftOut} />
+                </div>
+              )}
+              {ciMayFail.length > 0 && (
+                <div>
+                  <p className="text-[12px] text-muted">{t("projects.ciMayFail")}</p>
+                  <CommandList commands={ciMayFail} />
                 </div>
               )}
             </div>

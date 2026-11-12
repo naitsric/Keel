@@ -102,11 +102,21 @@ pub struct GhError {
     pub detail: String,
 }
 
-/// What a failed push or `gh` call means, so the person gets something they can act on.
+/// GitHub says this when a token asks too much too fast, often with a 403 like a missing permission.
+const RATE_LIMITED: [&str; 3] = ["rate limit", "http 429", "abuse detection"];
+
+fn rate_limited(lower: &str) -> bool {
+    RATE_LIMITED.iter().any(|words| lower.contains(words))
+}
+
+/// What a failed push or `gh` call means, so the person gets something they can act on. Too many
+/// questions is none of these, and GitHub's own words say it best.
 pub fn classify_error(text: &str) -> &'static str {
     let lower = text.to_lowercase();
     let has = |needles: &[&str]| needles.iter().any(|n| lower.contains(n));
-    if has(&[
+    if rate_limited(&lower) {
+        "other"
+    } else if has(&[
         "refusing to allow",
         "without `workflow` scope",
         "workflow scope",
@@ -548,12 +558,14 @@ fn parse_pr_status(value: &serde_json::Value) -> Option<PrStatus> {
 fn about_the_checks(error: &GhError) -> bool {
     let detail = error.detail.to_ascii_lowercase();
     let says = |words: &[&str]| words.iter().any(|word| detail.contains(word));
-    says(&[
-        "statuscheckrollup",
-        "checksuite",
-        "checkrun",
-        "not accessible",
-    ]) || (error.kind == "noPermission" && !says(&["not found", "404", "could not resolve"]))
+    !rate_limited(&detail)
+        && (says(&[
+            "statuscheckrollup",
+            "checksuite",
+            "checkrun",
+            "not accessible",
+        ]) || (error.kind == "noPermission"
+            && !says(&["not found", "404", "could not resolve"])))
 }
 
 /// When a check started, or ended. GitHub's zero time, for one that hasn't, is none.
@@ -571,7 +583,9 @@ fn check_time(
 /// Of the runs of one check, those that say where it stands now. One that hasn't started is a rerun
 /// waiting its turn, so it's the newest. A run that starts two minutes or more after the ones
 /// before it ended runs them again. Runs that start closer together than that are siblings, like a
-/// push's and a pull request's, and a failure among them counts.
+/// push's and a pull request's, and a failure among them counts. The answer doesn't say which
+/// event started each run, so siblings and a run started again at once look the same here, and
+/// the run each one belongs to, in its `detailsUrl`, doesn't tell them apart either.
 fn latest_runs(all: &[serde_json::Value], runs: &[usize]) -> Vec<usize> {
     let waiting: Vec<usize> = runs
         .iter()
@@ -606,7 +620,8 @@ fn latest_runs(all: &[serde_json::Value], runs: &[usize]) -> Vec<usize> {
 /// Each check is a check run, with a status and, once it's done, a conclusion, or a commit status,
 /// with a state. They count the way `gh pr checks` counts them: cancelled is a failure, skipped and
 /// neutral are not, and anything unfinished is pending. A check run again is its latest run, by
-/// when it started: GitHub keeps the ones before.
+/// when it started. Re-running a job replaces it in GitHub's answer, but every other run of its
+/// workflow on the commit stays there.
 fn parse_checks(rollup: &serde_json::Value) -> Option<PrChecks> {
     let all = rollup.as_array()?;
     let text = |check: &serde_json::Value, key: &str| {
@@ -742,6 +757,15 @@ mod tests {
             (
                 "GraphQL: Could not resolve to a Repository with the name 'a/b'. (repository)",
                 "noPermission",
+            ),
+            // Too many questions isn't a missing permission, though GitHub says 403 for both.
+            (
+                "HTTP 403: API rate limit exceeded for user ID 1. (https://api.github.com/graphql)",
+                "other",
+            ),
+            (
+                "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
+                "other",
             ),
             ("something else entirely", "other"),
         ];
@@ -1115,12 +1139,18 @@ echo '{"state":"MERGED","isDraft":false,"mergedAt":"2026-11-06T10:00:00Z"}'"#,
             "GraphQL: Could not resolve to a PullRequest with the number of 12. (repository.pullRequest)",
             "HTTP 404: Not Found (https://api.github.com/graphql)",
             "GraphQL: API rate limit exceeded for user ID 1.",
+            // GitHub answers a token past its limit with a 403, like one that can't read something.
+            "HTTP 403: API rate limit exceeded for user ID 1. (https://api.github.com/graphql)",
+            "HTTP 403: You have exceeded a secondary rate limit. Please wait a few minutes before you try again. (https://api.github.com/graphql)",
+            "HTTP 403: You have exceeded a secondary rate limit (repository.pullRequest.statusCheckRollup)",
+            "HTTP 429: Too Many Requests (https://api.github.com/graphql)",
             "error connecting to api.github.com",
             "HTTP 502: Bad Gateway (https://api.github.com/graphql)",
         ] {
             let dir = tempfile::tempdir().unwrap();
             let gh = fake_gh(dir.path(), &format!("echo '{said}' >&2; exit 1"));
-            gh.pr_status(&Token("t".into()), "acme/app", 12)
+            // A token no word has in it, since it's taken out of what gh says.
+            gh.pr_status(&Token("gho_secret".into()), "acme/app", 12)
                 .unwrap_err();
             let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
             assert_eq!(calls.lines().count(), 1, "{said}: {calls}");

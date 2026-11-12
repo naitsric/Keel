@@ -37,6 +37,8 @@ pub struct Guess {
     pub ci_checks: Vec<String>,
     /// What else the CI checks, as it runs it, that Keel doesn't know how to run with no network.
     pub ci_left_out: Vec<String>,
+    /// What else the CI checks, as it runs it, though it lets it fail, so the check doesn't require it.
+    pub ci_may_fail: Vec<String>,
 }
 
 /// What a project's CI checks and its saved check doesn't run.
@@ -47,6 +49,8 @@ pub struct CiGap {
     pub commands: Vec<String>,
     /// As the CI runs them, since Keel doesn't know how to run them with no network.
     pub left_out: Vec<String>,
+    /// As the CI runs them, though it lets them fail, so a check needn't run them.
+    pub may_fail: Vec<String>,
     /// The CI's files they're in.
     pub from: Vec<String>,
 }
@@ -57,6 +61,7 @@ pub fn ci_gap(root: &Path, check: &str) -> CiGap {
     CiGap {
         commands: missing.add,
         left_out: missing.left_out,
+        may_fail: missing.may_fail,
         from: missing.from,
     }
 }
@@ -407,6 +412,18 @@ fn uv_installs(pyproject: &str) -> HashSet<String> {
     names.extend(listed(project.and_then(|p| p.get("dependencies"))));
     names.extend(listed(uv.and_then(|uv| uv.get("dev-dependencies"))));
     names
+}
+
+/// The groups a plain `uv sync` installs, by name.
+fn uv_default_groups(pyproject: &str) -> HashSet<String> {
+    let Ok(pyproject) = toml::from_str::<toml::Table>(pyproject) else {
+        return HashSet::new();
+    };
+    let (groups, default_groups) = uv_groups(&pyproject);
+    default_groups
+        .into_iter()
+        .filter(|name| groups.contains_key(name))
+        .collect()
 }
 
 /// What `poetry install` installs, by name: every group that isn't optional.
@@ -814,6 +831,7 @@ pub fn guess(root: &Path) -> Guess {
             check: chained(ci.check),
             from_ci: !ci.from.is_empty(),
             from: ci.from,
+            ci_may_fail: ci.may_fail,
             ..Guess::default()
         };
     }
@@ -832,6 +850,7 @@ pub fn guess(root: &Path) -> Guess {
     }
     guess.ci_checks = ci.add;
     guess.ci_left_out = ci.left_out;
+    guess.ci_may_fail = ci.may_fail;
     for stack in stacks {
         guess.from.extend(stack.from);
         guess.setup_options.extend(stack.setup_options);

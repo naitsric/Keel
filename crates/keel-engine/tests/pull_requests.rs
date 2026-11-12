@@ -906,6 +906,34 @@ fn a_pull_request_that_was_already_there_is_unknown_until_keel_looks() {
 }
 
 #[test]
+fn delivering_to_a_pull_request_already_there_forgets_what_its_ci_said() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    std::fs::write(w.flags.join("pr-exists"), "").unwrap();
+    let workflow = w.saved(delivering_steps());
+    let run = w.start(&workflow);
+    let human = w.wait_step(&run, "human", AttemptState::WaitingApproval);
+    // What a look said about the commit before this one.
+    w.store
+        .patch_run(
+            &run,
+            &[
+                ("pr_ci", Value::Text("failed".into())),
+                ("pr_ci_failed", Value::Text(r#"["lint"]"#.into())),
+            ],
+        )
+        .unwrap();
+    w.engine.answer_approval(&human.id, true, "").unwrap();
+    w.until("the run finishing", || {
+        w.store.run(&run).unwrap().finished_at.is_some()
+    });
+    let found = w.store.run(&run).unwrap();
+    assert_eq!(found.pr_number, Some(99));
+    assert_eq!(found.pr_ci, None, "it was about another commit");
+    assert!(found.pr_ci_failed.is_empty());
+}
+
+#[test]
 fn the_background_look_follows_a_pull_request_until_it_is_merged() {
     keel_harness::needs!(sandbox);
     let w = world_with(|config| config.pr_look_again = Duration::from_millis(30));

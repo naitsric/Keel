@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::{
-    dotnet, is_file, node_tool, normalized, pip, poetry_installs, read, requirement_name, scripts,
-    uv_installs,
+    dotnet, is_file, is_plain_name, node_tool, normalized, pip, poetry_installs, read,
+    requirement_name, scripts, uv_default_groups, uv_installs,
 };
 
 /// Programs whose first word after them says what they do: `cargo clippy`, `ruff format`.
@@ -16,6 +16,18 @@ const SUBCOMMANDS: [&str; 19] = [
     "cargo", "go", "ruff", "mix", "dotnet", "make", "zig", "deno", "biome", "gradle", "gradlew",
     "mvn", "mvnw", "swift", "flutter", "dart", "composer", "bun", "rake",
 ];
+/// Tools that check one way whatever they're given: `mypy src` and `mypy .` are one check.
+const ONE_MODE: [&str; 16] = [
+    "pytest", "mypy", "pyright", "flake8", "pylint", "black", "isort", "eslint", "tsc", "prettier",
+    "jest", "vitest", "mocha", "rspec", "phpunit", "rubocop",
+];
+/// For anything else, the first words that aren't options say what it's told to do:
+/// `python manage.py test` and `python manage.py makemigrations` are two checks, and so are
+/// `bash scripts/test.sh` and `bash scripts/lint.sh`.
+const MODE_WORDS: usize = 2;
+/// Options of `npx` that only say whether it may download what isn't installed. The offline form
+/// runs what is.
+const NPX_ASKS: [&str; 4] = ["--yes", "-y", "--no", "--no-install"];
 /// A binary whose package has another name.
 const PACKAGES: [(&str, &str); 3] = [
     ("tsc", "typescript"),
@@ -72,6 +84,11 @@ enum Called {
 struct Call {
     called: Called,
     args: Vec<String>,
+    /// What runs it, like `uv run` or `npx`, and the options given to that, like `--with pytest-cov`.
+    runner: String,
+    options: Vec<String>,
+    /// `FOO=1` in front sets a variable for it.
+    sets_env: bool,
 }
 
 /// A tool and what it's told to do. For a script, the tool is `script`, since every JavaScript tool
@@ -86,9 +103,9 @@ fn base(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-/// The words after a runner's options: `--flag`, `--flag=value`, and `--flag value` for those that
-/// take one.
-fn after_options<'a, 'b>(words: &'a [&'b str], valued: &[&str]) -> &'a [&'b str] {
+/// A runner's options, and the words after them: `--flag`, `--flag=value`, and `--flag value` for
+/// those that take one.
+fn split_options<'a, 'b>(words: &'a [&'b str], valued: &[&str]) -> (&'a [&'b str], &'a [&'b str]) {
     let mut at = 0;
     while let Some(word) = words.get(at) {
         if !word.starts_with('-') {
@@ -96,7 +113,33 @@ fn after_options<'a, 'b>(words: &'a [&'b str], valued: &[&str]) -> &'a [&'b str]
         }
         at += if valued.contains(word) { 2 } else { 1 };
     }
-    &words[at.min(words.len())..]
+    words.split_at(at.min(words.len()))
+}
+
+/// What a runner runs, and the options it's given.
+fn run_by(
+    runner: &str,
+    words: &[&str],
+    valued: &[&str],
+    then: fn(&[&str]) -> Option<Call>,
+) -> Option<Call> {
+    let (options, rest) = split_options(words, valued);
+    let mut call = then(rest)?;
+    call.runner = runner.to_owned();
+    call.options = options.iter().map(|option| (*option).to_owned()).collect();
+    Some(call)
+}
+
+fn sets_variable(word: &str) -> bool {
+    word.contains('=') && !word.starts_with('-')
+}
+
+/// mypy's `--install-types` installs the stubs it misses with pip, even cut short like
+/// `--install`, since Python's tools take that. go's `-mod=mod` downloads what go.mod lacks.
+fn fetches(word: &str) -> bool {
+    let flag = word.split('=').next().unwrap_or(word);
+    (flag.len() >= "--ins".len() && "--install-types".starts_with(flag))
+        || matches!(word, "-mod=mod" | "--mod=mod")
 }
 
 fn python(words: &[&str]) -> Option<Call> {
@@ -131,35 +174,49 @@ impl Call {
         Self {
             called,
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            runner: String::new(),
+            options: Vec::new(),
+            sets_env: false,
         }
     }
 
     /// What its first words say it calls. `FOO=1` in front only sets a variable for it.
     fn parse(command: &str) -> Option<Self> {
-        let words: Vec<&str> = command
+        let all: Vec<&str> = command
             .trim_matches(['(', ')'])
             .split_whitespace()
-            .skip_while(|word| word.contains('=') && !word.starts_with('-'))
             .collect();
+        let words: Vec<&str> = all
+            .iter()
+            .copied()
+            .skip_while(|word| sets_variable(word))
+            .collect();
+        let mut call = Self::called(&words)?;
+        call.sets_env = words.len() < all.len();
+        Some(call)
+    }
+
+    fn called(words: &[&str]) -> Option<Self> {
         let script = |name: &str, args: &[&str]| Some(Self::new(Called::Script(name.into()), args));
-        match words.as_slice() {
-            ["uv" | "poetry" | "pipenv" | "pdm", "run", rest @ ..] => {
-                python(after_options(rest, &VALUED))
-            }
-            ["pipx", "run", rest @ ..] => python(after_options(rest, &VALUED)),
-            ["uvx", rest @ ..] => python(after_options(rest, &VALUED)),
+        match words {
+            [
+                runner @ ("uv" | "poetry" | "pipenv" | "pdm" | "pipx"),
+                "run",
+                rest @ ..,
+            ] => run_by(&format!("{runner} run"), rest, &VALUED, python),
+            ["uvx", rest @ ..] => run_by("uvx", rest, &VALUED, python),
             [
                 "python" | "python3" | ".venv/bin/python",
                 "-m",
                 tool,
                 args @ ..,
             ] => python(&[&["python", "-m", *tool][..], args].concat()),
-            ["npx" | "bunx", rest @ ..] => {
+            [runner @ ("npx" | "bunx"), rest @ ..] => {
                 // `-c` runs a line of its own.
                 if rest.iter().any(|word| *word == "-c" || *word == "--call") {
                     return None;
                 }
-                node(after_options(rest, &NPX_VALUED))
+                run_by(runner, rest, &NPX_VALUED, node)
             }
             ["pnpm" | "yarn" | "bun", "exec" | "x" | "dlx", rest @ ..] => node(rest),
             ["npm", "test" | "t", args @ ..] => script("test", args),
@@ -213,17 +270,40 @@ impl Call {
             };
         }
         let tool = self.name();
-        let mode = if SUBCOMMANDS.contains(&tool.as_str()) {
-            self.subcommand().to_owned()
-        } else {
-            String::new()
+        if SUBCOMMANDS.contains(&tool.as_str()) {
+            let mode = self.subcommand().to_owned();
+            return Sig { tool, mode };
+        }
+        if ONE_MODE.contains(&tool.as_str()) {
+            return Sig {
+                tool,
+                mode: String::new(),
+            };
+        }
+        let mode: Vec<&str> = self
+            .args
+            .iter()
+            .filter(|arg| !arg.starts_with('-'))
+            .take(MODE_WORDS)
+            .map(String::as_str)
+            .collect();
+        // A script is where it is: `ci/test.sh` isn't `scripts/test.sh`.
+        let tool = match &self.called {
+            Called::Program(program) if program.contains('/') => {
+                program.trim_start_matches("./").to_owned()
+            }
+            _ => tool,
         };
-        Sig { tool, mode }
+        Sig {
+            tool,
+            mode: mode.join(" "),
+        }
     }
 }
 
 /// What a line runs one after the other: split at new lines, `;` and `&&`. A line in parentheses
-/// as a whole runs the same.
+/// as a whole runs the same. A chain with `||` is one: in `a && b || c`, `c` runs when `a` fails,
+/// so `a` doesn't have to pass.
 pub(super) fn simple_commands(line: &str) -> Vec<&str> {
     let line = line.trim();
     let line = match line
@@ -233,8 +313,16 @@ pub(super) fn simple_commands(line: &str) -> Vec<&str> {
         Some(inner) if !inner.contains(['(', ')']) => inner,
         _ => line,
     };
-    line.split(['\n', ';'])
-        .flat_map(|part| part.split("&&"))
+    let mut commands = Vec::new();
+    for part in line.split(['\n', ';']) {
+        if part.contains("||") {
+            commands.push(part);
+        } else {
+            commands.extend(part.split("&&"));
+        }
+    }
+    commands
+        .into_iter()
         .map(str::trim)
         .filter(|part| !part.is_empty())
         .collect()
@@ -293,6 +381,8 @@ struct PythonSetup {
     /// `uv run --frozen` or `poetry run`. None for the `.venv` that pip installs into.
     run: Option<&'static str>,
     installs: HashSet<String>,
+    /// uv's groups that it installs. None for another tool.
+    uv_groups: Option<HashSet<String>>,
 }
 
 impl PythonSetup {
@@ -300,15 +390,18 @@ impl PythonSetup {
     fn of(root: &Path) -> Option<Self> {
         let pyproject = || read(root, "pyproject.toml").unwrap_or_default();
         if read(root, "uv.lock").is_some() {
+            let pyproject = pyproject();
             return Some(Self {
                 run: Some("uv run --frozen"),
-                installs: uv_installs(&pyproject()),
+                installs: uv_installs(&pyproject),
+                uv_groups: Some(uv_default_groups(&pyproject)),
             });
         }
         if read(root, "poetry.lock").is_some() && is_file(root, "pyproject.toml") {
             return Some(Self {
                 run: Some("poetry run"),
                 installs: poetry_installs(&pyproject()),
+                uv_groups: None,
             });
         }
         let installs = pip(root)?
@@ -320,11 +413,43 @@ impl PythonSetup {
         Some(Self {
             run: None,
             installs,
+            uv_groups: None,
         })
     }
 
-    fn run(&self, tool: &str, module: bool) -> String {
-        match (self.run, module) {
+    /// The options a CI gives its runner, as this setup's runner takes them, or None when one can't
+    /// come along: it may fetch, or change what the tool gets, like `--with pytest-cov` adds what
+    /// `--cov` needs. `--frozen` and `--locked` are what the setup's runner does anyway, and uv's
+    /// `--group` stays when the setup installs that group.
+    fn options(&self, call: &Call) -> Option<Vec<String>> {
+        let group = |name: &str| {
+            let installed = self
+                .uv_groups
+                .as_ref()
+                .is_some_and(|groups| groups.contains(&normalized(name)));
+            (call.runner == "uv run" && installed && is_plain_name(name))
+                .then(|| format!("--group {name}"))
+        };
+        let mut kept = Vec::new();
+        let mut options = call.options.iter();
+        while let Some(option) = options.next() {
+            match option.as_str() {
+                "--frozen" | "--locked" | "--" => {}
+                "--group" => kept.push(group(options.next()?)?),
+                _ => kept.push(group(option.strip_prefix("--group=")?)?),
+            }
+        }
+        Some(kept)
+    }
+
+    fn run(&self, tool: &str, module: bool, options: &[String]) -> String {
+        let run = self.run.map(|run| {
+            std::iter::once(run)
+                .chain(options.iter().map(String::as_str))
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+        match (run, module) {
             (Some(run), true) => format!("{run} python -m {tool}"),
             (Some(run), false) => format!("{run} {tool}"),
             (None, true) => format!(".venv/bin/python -m {tool}"),
@@ -480,14 +605,20 @@ impl Repo {
 
     /// How Keel runs a simple command from a CI with no network: one on the list, whose tool the
     /// project's setup installs, in the form its stack runs it, like `uv run --frozen ruff check .`.
+    /// Never one that sets a variable, or whose runner's options can't come along, since what the
+    /// tool is told can depend on them.
     pub(super) fn offline(&self, command: &str) -> Option<String> {
         let changes =
             |word: &str| word.starts_with('+') || word.starts_with("--fix") || word == "--write";
-        if !is_plain(command) || command.split_whitespace().any(changes) {
+        let words: Vec<&str> = command.split_whitespace().collect();
+        if !is_plain(command)
+            || words.iter().any(|word| changes(word) || fetches(word))
+            || words.windows(2).any(|pair| pair == ["-mod", "mod"])
+        {
             return None;
         }
         let call = Call::parse(command)?;
-        if matches!(call.called, Called::Script(_)) {
+        if call.sets_env || matches!(call.called, Called::Script(_)) {
             return None;
         }
         let name = call.name();
@@ -503,16 +634,18 @@ impl Repo {
             Installer::Python => {
                 let python = self.python.as_ref()?;
                 let module = matches!(call.called, Called::Python { module: true, .. });
+                let options = python.options(&call)?;
                 python
                     .installs
                     .contains(&normalized(&name))
-                    .then(|| with(python.run(&name, module)))
+                    .then(|| with(python.run(&name, module, &options)))
             }
-            Installer::Node => self
-                .node
-                .as_ref()?
-                .contains(package_of(&name))
-                .then(|| with(format!("node_modules/.bin/{name}"))),
+            Installer::Node => (call
+                .options
+                .iter()
+                .all(|option| NPX_ASKS.contains(&option.as_str()))
+                && self.node.as_ref()?.contains(package_of(&name)))
+            .then(|| with(format!("node_modules/.bin/{name}"))),
             Installer::Own => (matches!(call.called, Called::Program(_))
                 && self.own.contains(&name.as_str()))
             .then(|| with(name.clone())),

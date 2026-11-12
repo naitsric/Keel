@@ -223,6 +223,9 @@ impl Inner {
                 ("pr_state_at", known(Value::Text(now()))),
                 ("pr_checked_at", known(Value::Text(now()))),
                 ("pr_head", head.map_or(Value::Null, Value::Text)),
+                // What its CI said was about another commit.
+                ("pr_ci", Value::Null),
+                ("pr_ci_failed", Value::Null),
             ],
         )?;
         store.patch_attempt(&attempt.id, &[("account", Value::Text(account.clone()))])?;
