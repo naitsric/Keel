@@ -19,8 +19,11 @@ export type AttemptState =
   | "skipped"
   | "abandoned";
 
-/** What the app calls a state. `corrected` is a failed answer that Keel had fixed at once: see `shownState`. */
-export type ShownState = AttemptState | "corrected";
+/**
+ * What the app calls a state. `corrected` is a failed answer that Keel had fixed at once, and
+ * `afterSetup` a step put off for a new setup to run first: see `shownState`.
+ */
+export type ShownState = AttemptState | "corrected" | "afterSetup";
 
 export type ToolProfile = "readOnly" | "build";
 
@@ -95,6 +98,13 @@ export interface ProjectSettings {
   sensitivePaths: string[];
 }
 
+/** A folder in the home folder where programs a project's commands use are installed. */
+export interface ToolFolder {
+  /** As a person writes it: `~/.nvm`. */
+  folder: string;
+  programs: string[];
+}
+
 /** What a project's files give away. Nothing is saved until a person says so. */
 export interface Guess {
   check: string | null;
@@ -141,7 +151,7 @@ export interface McpClient {
   name: string;
   tokenPrefix: string;
   canRun: boolean;
-  /** May send work back, retry and close the runs it started. Only with `canRun`. */
+  /** May send work back and retry on the runs it started, and add a note to their cards while they wait. Only with `canRun`. */
   canSteer: boolean;
   /** How many of its runs may be open at once, counting those that wait for the person. */
   maxOpenRuns: number;
@@ -250,6 +260,10 @@ export interface StepSpec {
   role?: StepRole;
   /** Runs only if this holds. Absent means always. */
   when?: StepCondition;
+  /** Runs only if what was asked names one of these risks. Absent means always. */
+  risks?: string[];
+  /** The model it runs with instead when the change is risky. Absent keeps `model`. */
+  modelWhenRisky?: string;
 }
 
 export type WorkflowStep =
@@ -315,6 +329,8 @@ export interface SpecOutput {
   parts?: { project: string; text: string }[];
   /** Only there too: what only works with every part in place, for a person to try. */
   together?: string[];
+  /** Only there too: what the parts agree on exactly. Keel numbers them K1, K2… and each part that a point names keeps it as one of its own. */
+  contract?: { id: string; when: string; then: string; projects: string[] }[];
 }
 
 /** One thing the specifier said has to be true, in its words, and what became of it. */
@@ -326,6 +342,8 @@ export interface CheckedCriterion {
   evidence: string;
   /** Why it isn't what the verifier said. Only the engine writes this. */
   corrected?: "noEvidence" | "noCheckPassed" | "leftOut";
+  /** Why nothing proves it, as the verifier said. Answers from before it did don't say. */
+  why?: "noTest" | "notRun";
 }
 
 /** A verifier's answer, once the engine has corrected it. */
@@ -355,10 +373,16 @@ export interface ProjectProposal {
   gone: boolean;
 }
 
+/**
+ * One problem a review found: where, what, and the id of the criterion it breaks, or `L<n>` for the
+ * specification's limit number n. Older answers wrote only text.
+ */
+export type Finding = string | { file: string | null; line: number | null; text: string; breaks: string | null };
+
 /** A reviewer's answer. */
 export interface Verdict {
   verdict: "approved" | "changes";
-  findings: string[];
+  findings: Finding[];
   summary: string;
   /** Files of the change it couldn't read. Keel never counts such a review as an approval. Older answers don't have it. */
   unread?: string[];
@@ -481,6 +505,14 @@ export interface Totals {
   tokens: number;
   durationMs: number;
   costUsd: number;
+}
+
+/** A run's setup or check whose command the project changed after the run started. */
+export interface CommandChange {
+  stepId: string;
+  kind: "setup" | "check";
+  before: string;
+  now: string;
 }
 
 export interface Overview {
@@ -643,6 +675,25 @@ export interface JointChange {
   /** What it touches that no part changes. */
   readOnly: { id: string; name: string }[];
   checks: JointCheck[];
+  /** What the parts agree on exactly, point by point. Empty until it's agreed, and for an agreement without any. */
+  contract: ContractPoint[];
+}
+
+/** A point the parts agree on exactly, and what each part that keeps it found. */
+export interface ContractPoint {
+  id: string;
+  when: string;
+  then: string;
+  /** First to last. */
+  parts: {
+    cardId: string;
+    position: number;
+    project: string;
+    /** What its verifier said of it in its run's latest round. Null until it said something. */
+    result: CheckedCriterion["result"] | null;
+    /** False once its run shows a workflow with no verifier, which never will. */
+    verifies: boolean;
+  }[];
 }
 
 /** What a run's page says about the change across projects it's in. */
@@ -696,7 +747,9 @@ export const api = {
   projectProposalAccept: (proposalId: string, language: string) => invoke<ProjectAdded>("project_proposal_accept", { proposalId, language }),
   projectProposalDiscard: (proposalId: string) => invoke<void>("project_proposal_discard", { proposalId }),
   projectSetup: (projectId: string) => invoke<ProjectSetup>("project_setup", { projectId }),
-  projectTryCheck: (projectId: string, setup: string, check: string, language: string) => invoke<string>("project_try_check", { projectId, setup, check, language }),
+  projectToolFolders: (projectId: string, setup: string, check: string) => invoke<ToolFolder[]>("project_tool_folders", { projectId, setup, check }),
+  /** `read` is the folders the commands may read on top of the project's, for this run only. */
+  projectTryCheck: (projectId: string, setup: string, check: string, read: string[], language: string) => invoke<string>("project_try_check", { projectId, setup, check, read, language }),
   projectRemove: (projectId: string) => invoke<void>("project_remove", { projectId }),
   githubAccounts: () => invoke<GithubAccount[]>("github_accounts"),
   openGithubLogin: () => invoke<void>("open_github_login"),
@@ -749,7 +802,9 @@ export const api = {
   attemptStop: (attemptId: string) => invoke<void>("attempt_stop", { attemptId }),
   attemptWait: (attemptId: string) => invoke<void>("attempt_wait", { attemptId }),
   attemptKillCommand: (attemptId: string) => invoke<void>("attempt_kill_command", { attemptId }),
-  attemptRetry: (attemptId: string, resume: boolean) => invoke<string>("attempt_retry", { attemptId, resume }),
+  /** With `currentCommands`, the run takes the project's setup and check as they are now. */
+  attemptRetry: (attemptId: string, resume: boolean, currentCommands = false) => invoke<string>("attempt_retry", { attemptId, resume, currentCommands }),
+  runCommandChanges: (runId: string) => invoke<CommandChange[]>("run_command_changes", { runId }),
   attemptAbandon: (attemptId: string) => invoke<void>("attempt_abandon", { attemptId }),
   languageGet: () => invoke<string | null>("language_get"),
   languageSet: (language: string) => invoke<void>("language_set", { language }),

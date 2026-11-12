@@ -3,10 +3,10 @@ import i18next from "../i18n";
 import en from "../i18n/en.json";
 import es from "../i18n/es.json";
 import type { AuditEvent, Reason } from "./api";
-import { latestSizeDecision, skippedAsSmall, skippedSteps, whyNotSmallText } from "./size";
+import { latestSizeDecision, skippedAsSmall, skippedForRisks, skippedSteps, whyNotSmallText } from "./size";
 
 const small = { code: "treatedAsSmall", lines: 3, files: 1 };
-const step = (stepId: string, state: string, reason: { code: string } | null = null) => ({ stepId, state, reason });
+const step = (stepId: string, state: string, reason: { code: string } | null = null, kind = "agent") => ({ stepId, state, reason, kind });
 const decided = (seq: number, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "", kind: "sizeDecided", data });
 
 describe("what was skipped for being small", () => {
@@ -17,6 +17,15 @@ describe("what was skipped for being small", () => {
     expect(skippedAsSmall(step("a", "skipped"))).toBe(false);
   });
 
+  it("isn't what was left out for the risks of what was asked, which has a check of its own", () => {
+    const risks = { code: "noMatchingRisks", risks: ["concurrency"] };
+    expect(skippedAsSmall(step("a", "skipped", risks))).toBe(false);
+    expect(skippedForRisks(step("a", "skipped", risks))).toBe(true);
+    expect(skippedForRisks(step("a", "skipped", small))).toBe(false);
+    expect(skippedForRisks(step("a", "succeeded", risks))).toBe(false);
+    expect(skippedSteps([step("a", "skipped", small), step("state", "skipped", risks)]).map((s) => s.stepId)).toEqual(["a"]);
+  });
+
   it("goes by each step's latest attempt, so what a person asked for no longer counts", () => {
     const attempts = [step("a", "skipped", small), step("b", "skipped", small), step("b", "succeeded"), step("c", "skipped", { code: "noMatchingPaths" })];
     expect(skippedSteps(attempts).map((s) => s.stepId)).toEqual(["a"]);
@@ -25,7 +34,12 @@ describe("what was skipped for being small", () => {
 
 describe("what stands skipped once a person has asked for it", () => {
   it("is nothing, even for what hasn't started yet", () => {
-    expect(skippedSteps([step("a", "skipped", small), step("human", "postponed"), step("b", "running")])).toEqual([]);
+    expect(skippedSteps([step("a", "skipped", small), step("human", "postponed", null, "approval"), step("b", "running")])).toEqual([]);
+  });
+
+  it("is still all of it when what was put off is a check, for a new setup to run first", () => {
+    const attempts = [step("check", "failed", null, "check"), step("check", "postponed", null, "check"), step("setup", "succeeded", null, "setup"), step("check", "succeeded", null, "check"), step("security", "skipped", small)];
+    expect(skippedSteps(attempts).map((s) => s.stepId)).toEqual(["security"]);
   });
 });
 

@@ -50,6 +50,8 @@ pub fn map_workflow(language: &str, model: &str) -> Vec<WorkflowStep> {
         max_budget_usd: None,
         paths: Vec::new(),
         when: None,
+        risks: Vec::new(),
+        model_when_risky: None,
         role: StepRole::Mapper,
     })]
 }
@@ -79,6 +81,8 @@ pub fn learner_step(id: &str, language: &str, model: &str, reviewers: &[&str]) -
         max_budget_usd: None,
         paths: Vec::new(),
         when: None,
+        risks: Vec::new(),
+        model_when_risky: None,
         role: StepRole::Learner,
     }
 }

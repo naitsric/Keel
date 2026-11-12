@@ -39,7 +39,7 @@ pub fn system_prompt(
              Never run two test commands at the same time: they can share a database and block each other.\n\
              Create and change files with Edit and Write, not with cat, echo, sed or Python from Bash: Edit fails when the text does not match, while a replacement in a script can do nothing and say nothing.\n\
              Use Bash to run commands (tests, build, git). It is already in the project folder, so do not cd to its full path.\n\
-             There is no network except the domains the project allows, and the caches in the home folder are not available. Dependencies come from the cache Keel prepared for this run: if one is missing, the command fails with an error, so do not wait for a command that downloads things and do not retry it.\n",
+             There is no network except the domains the project allows. The home folder is this run's own, with the dependencies Keel prepared for it: if one is missing, the command fails with an error, so do not wait for a command that downloads things and do not retry it.\n",
         );
         text.push_str(&format!(
             "Write commit messages in {}, unless the project's instructions say otherwise.\n",
@@ -223,6 +223,7 @@ const AGREEMENT_EN: &str = r#"This request touches several projects, and you're 
 - parts: one for each project that has to change, in the order they're done: what the others depend on first. `project` is its name exactly as it's listed below, and `text` says what changes there, in up to 200 characters. A project that's only read isn't a part. Up to 5.
 - together: up to 5 things that only work with every part in place, each in one line, for a person to try once they're all done. Nobody can prove them in a single project.
 - limits: also what has to stay the same between the projects for them to keep working together, such as a name, a route or a format the other side relies on.
+- contract: up to 7 points where the parts must match exactly: a route, a field and its type, a response code or a change of state. Each point is one side, what one project does, and `projects` names only the project or projects that make it true. A promise between two parts is two points, one for each side, such as what one sends and what the other answers. `when` and `then` say it as a criterion does, within the same limit. Keel numbers them K1, K2 and so on, and each part verifies those that name it like the rest of its criteria. Leave it empty if the parts share nothing.
 
 The projects:
 {{projects}}
@@ -233,6 +234,7 @@ const AGREEMENT_ES: &str = r#"Este pedido toca varios proyectos, y estás en uno
 - parts: una por cada proyecto que tiene que cambiar, en el orden en que se hacen: primero aquello de lo que dependen los demás. `project` es su nombre exactamente como aparece abajo, y `text` dice qué cambia ahí, en hasta 200 caracteres. Un proyecto que solo se lee no es una parte. Hasta 5.
 - together: hasta 5 cosas que solo funcionan con todas las partes hechas, cada una en una línea, para que una persona las pruebe cuando estén todas. Nadie puede demostrarlas en un solo proyecto.
 - limits: también lo que tiene que quedar igual entre los proyectos para que sigan funcionando juntos, como un nombre, una ruta o un formato del que depende el otro lado.
+- contract: hasta 7 puntos en los que las partes tienen que coincidir exactamente: una ruta, un campo y su tipo, un código de respuesta o un cambio de estado. Cada punto es un solo lado, lo que hace un proyecto, y `projects` nombra solo el proyecto o los proyectos que lo hacen cumplir. Una promesa entre dos partes son dos puntos, uno por cada lado, como lo que uno envía y lo que el otro responde. `when` y `then` lo dicen como un criterio, con el mismo límite. Keel los numera K1, K2 y así, y cada parte verifica los que la nombran como el resto de sus criterios. Déjalo vacío si las partes no comparten nada.
 
 Los proyectos:
 {{projects}}
@@ -255,7 +257,7 @@ const VERIFY_PROMPT_EN: &str = r#"You check whether a change really does what wa
 For each item in `criteria` below, find the test that really proves it, and read that test to be sure.
 - met: a test proves it, and it's a test that the command Keel ran this round executed (see below). `evidence` is that test's name, or its file and line.
 - unmet: the code shows it isn't so. `evidence` is the file and line that shows it.
-- unverified: no test proves it, or you can't tell. That's a normal answer, so give it rather than stretch a test that's only related. If the test exists but that command doesn't run it (another language, runner or package), it's unverified too: put that test in `evidence` and say in `evidence` that it didn't run. How something looks on screen is unverified too, unless a test that command ran looks at the screen, such as one that takes a screenshot.
+- unverified: no test proves it, or you can't tell. That's a normal answer, so give it rather than stretch a test that's only related. If the test exists but that command doesn't run it (another language, runner or package), it's unverified too: put that test in `evidence` and say in `evidence` that it didn't run. How something looks on screen is unverified too, unless a test that command ran looks at the screen, such as one that takes a screenshot. In `why`, say `notRun` if a test for it exists but didn't run here, and `noTest` if not.
 
 Each `evidence` is one line of up to 140 characters. `summary` is one sentence for the person who asked for the change. Answer for every item, using its `id`, and don't add any. If work was sent back below and that changes what an item asks for, what was sent back wins, so don't call the item `unmet` for following it.
 
@@ -275,7 +277,7 @@ const VERIFY_PROMPT_ES: &str = r#"Compruebas si un cambio de verdad hace lo que 
 Para cada elemento de `criteria` de abajo, busca la prueba que de verdad lo demuestra, y léela para estar seguro.
 - met: lo demuestra una prueba que el comando que Keel corrió en esta ronda ejecutó (ver abajo). `evidence` es el nombre de esa prueba, o su archivo y línea.
 - unmet: el código muestra que no es así. `evidence` es el archivo y la línea que lo muestran.
-- unverified: ninguna prueba lo demuestra, o no puedes saberlo. Es una respuesta normal, así que dala en vez de estirar una prueba que solo se relaciona. Si la prueba existe pero ese comando no la ejecuta (otro lenguaje, runner o paquete), también es unverified: pon esa prueba en `evidence` y di en `evidence` que no corrió. Cómo se ve algo en pantalla también es unverified, salvo que lo mire una prueba que ese comando ejecutó, como una que toma una captura.
+- unverified: ninguna prueba lo demuestra, o no puedes saberlo. Es una respuesta normal, así que dala en vez de estirar una prueba que solo se relaciona. Si la prueba existe pero ese comando no la ejecuta (otro lenguaje, runner o paquete), también es unverified: pon esa prueba en `evidence` y di en `evidence` que no corrió. Cómo se ve algo en pantalla también es unverified, salvo que lo mire una prueba que ese comando ejecutó, como una que toma una captura. En `why`, pon `notRun` si existe una prueba para eso pero no corrió aquí, y `noTest` si no.
 
 Cada `evidence` es una línea de hasta 140 caracteres. `summary` es una frase para la persona que pidió el cambio. Responde por cada elemento, usando su `id`, y no agregues ninguno. Si abajo se devolvió trabajo y eso cambia lo que pide un elemento, manda lo que se devolvió, así que no lo marques `unmet` por seguirlo.
 
@@ -354,6 +356,8 @@ pub fn full_workflow(
             max_budget_usd: None,
             paths: Vec::new(),
             when: None,
+            risks: Vec::new(),
+            model_when_risky: None,
             role,
         })
     };
@@ -475,13 +479,14 @@ mod tests {
     }
 
     #[test]
-    fn who_runs_commands_is_told_there_is_no_network_nor_home_caches() {
+    fn who_runs_commands_is_told_there_is_no_network_and_the_home_is_the_runs() {
         let dir = tempfile::tempdir().unwrap();
         let empty = Block::default();
         for language in ["en", "es"] {
             let (builder, _) = system_prompt(dir.path(), language, ToolProfile::Build, &empty, "");
             assert!(builder.contains("There is no network except the domains the project allows"));
-            assert!(builder.contains("caches in the home folder are not available"));
+            assert!(builder.contains("The home folder is this run's own"));
+            assert!(!builder.contains("not available"));
             assert!(builder.contains("do not wait for a command that downloads things"));
             let (reader, _) =
                 system_prompt(dir.path(), language, ToolProfile::ReadOnly, &empty, "");
@@ -731,6 +736,24 @@ mod tests {
             }
             // The rule sits before the fact it refers to.
             assert!(prompt.find(ran) < prompt.find("{{check}}"), "{language}");
+        }
+    }
+
+    #[test]
+    fn the_verifier_says_why_nothing_proves_what_it_left_unverified() {
+        for (language, why) in [
+            (
+                "en",
+                "In `why`, say `notRun` if a test for it exists but didn't run here, and `noTest` if not.",
+            ),
+            (
+                "es",
+                "En `why`, pon `notRun` si existe una prueba para eso pero no corrió aquí, y `noTest` si no.",
+            ),
+        ] {
+            let prompt = verify_prompt(language);
+            assert!(prompt.contains(why), "{language}");
+            assert!(prompt.find(why) < prompt.find("{{check}}"), "{language}");
         }
     }
 

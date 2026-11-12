@@ -1,11 +1,11 @@
 import { AlertTriangle, ExternalLink, GitPullRequest } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type AttemptState, type JointCard, type JointChange } from "../lib/api";
+import { api, type AttemptState, type ContractPoint, type JointCard, type JointChange } from "../lib/api";
 import { isLane, partText, partWarningText, waitsForText } from "../lib/board";
 import { errorText } from "../lib/reason";
 import { useApp, type View } from "../lib/store";
-import { Button, Modal, StateBadge } from "../ui/primitives";
+import { Button, Modal, StateBadge, VERIFY_TONES } from "../ui/primitives";
 import { SpecView } from "./SpecView";
 
 /** Its badge: what became of its pull request, or where its run stands, or which column it's in. */
@@ -60,9 +60,29 @@ function PartRow({ card, busy, onOpenRun, onOpenPr, onStopWaiting }: { card: Joi
   );
 }
 
+/** A point the parts agree on exactly, and what each part that keeps it found. */
+function ContractRow({ point }: { point: ContractPoint }) {
+  const { t } = useTranslation();
+  return (
+    <li data-contract={point.id} className="border-t border-border py-1.5 first:border-t-0">
+      <p className="selectable break-words">
+        <span className="font-mono text-[12px] text-muted">{point.id}</span> {point.when} → {point.then}
+      </p>
+      <ul className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11.5px]">
+        {point.parts.map((part) => (
+          <li key={part.cardId}>
+            {t("joint.contractPart", { position: part.position, project: part.project })}: <span className={part.result ? VERIFY_TONES[part.result] : "text-subtle"}>{part.result ? t(`run.verifyResult.${part.result}`) : t(part.verifies ? "joint.notChecked" : "joint.noVerifier")}</span>
+          </li>
+        ))}
+      </ul>
+    </li>
+  );
+}
+
 /**
  * A change across several projects in one place: its parts in order and where each stands, what
- * was agreed, and what only works with every part in place. Only here does a person mark that.
+ * the parts agree on exactly and what each found of it, what was agreed, and what only works with
+ * every part in place. Only here does a person mark that.
  */
 export function JointChangeDialog({ changeId, backTo, onClose }: { changeId: string; backTo: View; onClose: () => void }) {
   const { t } = useTranslation();
@@ -127,6 +147,17 @@ export function JointChangeDialog({ changeId, backTo, onClose }: { changeId: str
               {change.readOnly.length > 0 && <p className="mt-1 text-muted">{t("joint.readOnly", { projects: change.readOnly.map((project) => project.name).join(", ") })}</p>}
             </section>
           )}
+          {change.contract.length > 0 && (
+            <section>
+              <h3 className="text-[12px] font-semibold text-muted">{t("joint.contract")}</h3>
+              <p className="mt-0.5 text-[11.5px] text-muted">{t("joint.contractHint")}</p>
+              <ul className="mt-1">
+                {change.contract.map((point) => (
+                  <ContractRow key={point.id} point={point} />
+                ))}
+              </ul>
+            </section>
+          )}
           {change.checks.length > 0 && (
             <section>
               <h3 className="text-[12px] font-semibold text-muted">{t("joint.together")}</h3>
@@ -147,8 +178,8 @@ export function JointChangeDialog({ changeId, backTo, onClose }: { changeId: str
             <section>
               <h3 className="mb-1 text-[12px] font-semibold text-muted">{t("joint.agreed")}</h3>
               <div className="rounded-md border border-border bg-inset p-3">
-                {/* What's tried together is right above, where it's marked. */}
-                <SpecView spec={{ ...change.agreed, together: [] }} />
+                {/* What's tried together is right above, where it's marked, and so is what the parts agree on exactly, with what each found. */}
+                <SpecView spec={{ ...change.agreed, together: [], contract: [] }} />
               </div>
             </section>
           )}

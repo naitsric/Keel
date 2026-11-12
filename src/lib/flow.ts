@@ -1,4 +1,5 @@
 import type { Attempt, AttemptState, StepRole, WorkflowStep } from "./api";
+import { putOffForSetup } from "./audit";
 
 export type NodeState = AttemptState | "pending";
 
@@ -61,6 +62,9 @@ export interface Flow<T extends FlowAttempt = Attempt> {
 }
 
 const SETTLED: NodeState[] = ["succeeded", "skipped", "returned", "postponed"];
+
+/** Whether the run is past this attempt. A step put off for a new setup still has to run. */
+const settledAttempt = (attempt: FlowAttempt) => SETTLED.includes(attempt.state) && !putOffForSetup(attempt);
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
 const SINGLE_KINDS = ["agent", "setup", "check", "approval", "deliver"];
@@ -156,7 +160,7 @@ export function flowOf<T extends FlowAttempt = Attempt>(steps: WorkflowStep[], a
       attempt,
       round: attempt?.round ?? 0,
       // Only for what finished fine: anything under way or waiting has to say so, whatever the round.
-      outdated: attempt !== null && SETTLED.includes(attempt.state) && stage >= reruns && attempt.round < round,
+      outdated: attempt !== null && settledAttempt(attempt) && stage >= reruns && attempt.round < round,
     };
   };
 
@@ -287,7 +291,7 @@ export interface FlowLayout<T extends FlowAttempt> {
   items: FlowItem[];
 }
 
-const settled = <T extends FlowAttempt>(node: FlowNode<T>) => SETTLED.includes(node.state) && !node.outdated;
+const settled = <T extends FlowAttempt>(node: FlowNode<T>) => node.attempt !== null && settledAttempt(node.attempt) && !node.outdated;
 
 const leaving = (x: number, y: number, mid: number, cy: number) => {
   if (y === cy) return `M ${x} ${y} H ${mid}`;
