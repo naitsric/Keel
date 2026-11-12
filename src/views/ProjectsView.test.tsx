@@ -144,7 +144,7 @@ describe("the Projects page", () => {
   });
 
   it("says what the project's CI runs that its check doesn't, and only adds it when asked", async () => {
-    setCiGap("alpha", { commands: ["uv run --frozen ruff check .", "uv run --frozen pyright"], leftOut: ["semgrep ci"], mayFail: [], from: [".github/workflows/ci.yml"] });
+    setCiGap("alpha", { commands: ["uv run --frozen ruff check .", "uv run --frozen pyright"], leftOut: [{ command: "semgrep ci", why: "offline" }], from: [".github/workflows/ci.yml"] });
     await showApp(RUNS, { name: "projects" }, THREE);
     const checkBox = () => document.querySelector(`input[placeholder="${i18next.t("settings.checkCommandPlaceholder")}"]`) as HTMLInputElement;
     expect(callsTo("project_ci_gap").map((call) => call.args)).toEqual([{ projectId: "alpha" }]);
@@ -172,12 +172,15 @@ describe("the Projects page", () => {
     expect(main().textContent).not.toContain(i18next.t("projects.ciLeftOut"));
   });
 
-  it("says what the project's CI lets fail apart, and never offers to add it", async () => {
-    setCiGap("alpha", { commands: [], leftOut: [], mayFail: ["uv run mypy ."], from: [".github/workflows/ci.yml"] });
+  it("says why each command of the CI is left out, and never offers to add it", async () => {
+    const why = ["offline", "mayFail", "env", "sometimes", "installs", "template"] as const;
+    setCiGap("alpha", { commands: [], leftOut: why.map((reason) => ({ command: `run-${reason}`, why: reason })), from: [".github/workflows/ci.yml"] });
     await showApp(RUNS, { name: "projects" }, THREE);
-    expect(main().textContent).toContain(i18next.t("projects.ciMayFail"));
-    expect(main().textContent).toContain("uv run mypy .");
-    expect(main().textContent).not.toContain(i18next.t("projects.ciLeftOut"));
+    expect(main().textContent).toContain(i18next.t("projects.ciLeftOut"));
+    for (const reason of why) {
+      const row = [...main().querySelectorAll("li")].find((item) => item.textContent?.includes(`run-${reason}`));
+      expect(row?.textContent).toContain(i18next.t(`projects.ciWhy.${reason}`));
+    }
     expect(button(i18next.t("projects.ciMissingAdd"))).toBeUndefined();
   });
 
@@ -280,7 +283,7 @@ describe("what sends a person to fix a project", () => {
       case "github_status":
         return { repo: null, accounts: [], info: null, excessScopes: [], error: null };
       case "project_ci_gap":
-        return { commands: [], leftOut: [], mayFail: [], from: [] };
+        return { commands: [], leftOut: [], from: [] };
       case "attempt_raw_check":
         return "intact";
       case "run_adds_secret":

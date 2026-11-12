@@ -89,7 +89,7 @@ function backend(command: string, args: unknown) {
     case "project_tool_folders":
       return toolFolders;
     case "project_ci_gap":
-      return ciGaps[projectId ?? ""] ?? { commands: [], leftOut: [], mayFail: [], from: [] };
+      return ciGaps[projectId ?? ""] ?? { commands: [], leftOut: [], from: [] };
     case "overview":
       return useApp.getState().overview;
     case "max_agents_get":

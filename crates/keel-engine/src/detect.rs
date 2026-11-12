@@ -35,10 +35,34 @@ pub struct Guess {
     /// What the check runs because the project's CI does, though nothing else here names it, as
     /// Keel runs it with no network.
     pub ci_checks: Vec<String>,
-    /// What else the CI checks, as it runs it, that Keel doesn't know how to run with no network.
-    pub ci_left_out: Vec<String>,
-    /// What else the CI checks, as it runs it, though it lets it fail, so the check doesn't require it.
-    pub ci_may_fail: Vec<String>,
+    /// What else the CI checks, as it runs it, and why the check doesn't run it.
+    pub ci_left_out: Vec<CiLeftOut>,
+}
+
+/// Why a command the CI runs isn't one Keel adds to the check: it can't be sure the command runs
+/// in its sandbox, with no network, as it does in CI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CiWhy {
+    /// Keel doesn't know how to run it with no network as CI does.
+    Offline,
+    /// CI lets it fail.
+    MayFail,
+    /// CI sets variables for it.
+    Env,
+    /// CI runs it only for some events, or under a condition.
+    Sometimes,
+    /// Its job installs more than the project's setup does.
+    Installs,
+    /// It uses a GitLab template from another file.
+    Template,
+}
+
+/// A command the CI runs, as it runs it, and why the check doesn't.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CiLeftOut {
+    pub command: String,
+    pub why: CiWhy,
 }
 
 /// What a project's CI checks and its saved check doesn't run.
@@ -47,21 +71,18 @@ pub struct Guess {
 pub struct CiGap {
     /// As Keel runs them, with no network, for a person to add.
     pub commands: Vec<String>,
-    /// As the CI runs them, since Keel doesn't know how to run them with no network.
-    pub left_out: Vec<String>,
-    /// As the CI runs them, though it lets them fail, so a check needn't run them.
-    pub may_fail: Vec<String>,
+    /// As the CI runs them, and why a check doesn't.
+    pub left_out: Vec<CiLeftOut>,
     /// The CI's files they're in.
     pub from: Vec<String>,
 }
 
-/// Only reads the repo, like `guess`.
-pub fn ci_gap(root: &Path, check: &str) -> CiGap {
-    let missing = ci::missing_from(root, check);
+/// Only reads the repo, like `guess`. What the project's setup installs is what a command can use.
+pub fn ci_gap(root: &Path, setup: &str, check: &str) -> CiGap {
+    let missing = ci::missing_from(root, setup, check);
     CiGap {
         commands: missing.add,
         left_out: missing.left_out,
-        may_fail: missing.may_fail,
         from: missing.from,
     }
 }
@@ -414,16 +435,73 @@ fn uv_installs(pyproject: &str) -> HashSet<String> {
     names
 }
 
-/// The groups a plain `uv sync` installs, by name.
-fn uv_default_groups(pyproject: &str) -> HashSet<String> {
-    let Ok(pyproject) = toml::from_str::<toml::Table>(pyproject) else {
-        return HashSet::new();
-    };
-    let (groups, default_groups) = uv_groups(&pyproject);
-    default_groups
+/// What a `uv sync` installs: its packages by name, and the groups and extras it was told to.
+struct UvSync {
+    names: HashSet<String>,
+    groups: HashSet<String>,
+    extras: HashSet<String>,
+}
+
+/// What `uv sync` with these options installs. None when it's told something this doesn't follow,
+/// like leaving a group out or another Python.
+fn uv_sync(pyproject: &str, args: &[&str]) -> Option<UvSync> {
+    let table = toml::from_str::<toml::Table>(pyproject).unwrap_or_default();
+    let (groups, defaults) = uv_groups(&table);
+    let extras_table = table
+        .get("project")
+        .and_then(|project| project.get("optional-dependencies"))
+        .and_then(Value::as_table);
+    let mut chosen: Vec<String> = defaults
         .into_iter()
         .filter(|name| groups.contains_key(name))
-        .collect()
+        .collect();
+    let mut extras = HashSet::new();
+    let mut at = 0;
+    while let Some(arg) = args.get(at) {
+        at += 1;
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value)),
+            _ => (*arg, None),
+        };
+        let mut value = || {
+            inline.map(normalized).or_else(|| {
+                at += 1;
+                args.get(at - 1).map(|value| normalized(value))
+            })
+        };
+        match flag {
+            "--frozen" | "--locked" | "-q" | "--quiet" | "--no-progress" | "--inexact" => {}
+            "--group" => chosen.push(value()?),
+            "--all-groups" => chosen.extend(groups.keys().cloned()),
+            "--extra" => {
+                extras.insert(value()?);
+            }
+            "--all-extras" => extras.extend(
+                extras_table
+                    .into_iter()
+                    .flatten()
+                    .map(|(name, _)| normalized(name)),
+            ),
+            _ => return None,
+        }
+    }
+    let mut names = uv_installs(pyproject);
+    names.extend(group_names(&groups, chosen.clone()));
+    for (name, list) in extras_table.into_iter().flatten() {
+        if extras.contains(&normalized(name)) {
+            let listed = list
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str);
+            names.extend(listed.map(requirement_name));
+        }
+    }
+    Some(UvSync {
+        names,
+        groups: chosen.into_iter().collect(),
+        extras,
+    })
 }
 
 /// What `poetry install` installs, by name: every group that isn't optional.
@@ -804,6 +882,17 @@ fn elixir(root: &Path) -> Option<Stack> {
     })
 }
 
+/// Commands chained so that each has to pass. A command with a `#` or a new line in it is left
+/// out: under `sh -c` it could turn every command after it into a comment, or run without having
+/// to pass.
+fn chained(parts: Vec<String>) -> Option<String> {
+    let parts: Vec<String> = parts
+        .into_iter()
+        .filter(|part| !part.trim().is_empty() && !part.contains(['#', '\n']))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" && "))
+}
+
 /// A Makefile's `test` target is what the project itself calls testing, so it wins. Every stack found
 /// adds its setup and its check, chained so that each one has to pass, and then what else the CI
 /// checks, like a linter, goes after them. When nothing here is known, what the project's CI runs is
@@ -823,7 +912,6 @@ pub fn guess(root: &Path) -> Guess {
     .iter()
     .filter_map(|find| find(root))
     .collect();
-    let chained = |parts: Vec<String>| (!parts.is_empty()).then(|| parts.join(" && "));
     if stacks.is_empty() && makefile.is_none() {
         let ci = ci::commands(root);
         return Guess {
@@ -831,7 +919,7 @@ pub fn guess(root: &Path) -> Guess {
             check: chained(ci.check),
             from_ci: !ci.from.is_empty(),
             from: ci.from,
-            ci_may_fail: ci.may_fail,
+            ci_left_out: ci.left_out,
             ..Guess::default()
         };
     }
@@ -843,14 +931,17 @@ pub fn guess(root: &Path) -> Guess {
     if guess.check.is_none() {
         guess.check = check;
     }
-    let ci = ci::missing_from(root, guess.check.as_deref().unwrap_or_default());
+    let ci = ci::missing_from(
+        root,
+        guess.setup.as_deref().unwrap_or_default(),
+        guess.check.as_deref().unwrap_or_default(),
+    );
     if !ci.add.is_empty() {
         let own = guess.check.take().into_iter();
         guess.check = chained(own.chain(ci.add.iter().cloned()).collect());
     }
     guess.ci_checks = ci.add;
     guess.ci_left_out = ci.left_out;
-    guess.ci_may_fail = ci.may_fail;
     for stack in stacks {
         guess.from.extend(stack.from);
         guess.setup_options.extend(stack.setup_options);
@@ -891,6 +982,24 @@ mod tests {
 
     pub(super) fn both(check: &str, setup: &str) -> (Option<String>, Option<String>) {
         (Some(check.to_owned()), Some(setup.to_owned()))
+    }
+
+    #[test]
+    fn a_piece_that_could_hide_the_rest_is_never_joined() {
+        let parts = |list: &[&str]| list.iter().map(|part| (*part).to_owned()).collect();
+        assert_eq!(
+            chained(parts(&["make test # all of it", "cargo test"])),
+            Some("cargo test".to_owned())
+        );
+        assert_eq!(
+            chained(parts(&["make test\nmake lint", "cargo test"])),
+            Some("cargo test".to_owned())
+        );
+        assert_eq!(chained(parts(&["#", ""])), None);
+        assert_eq!(
+            chained(parts(&["make test", "cargo test"])),
+            Some("make test && cargo test".to_owned())
+        );
     }
 
     #[test]

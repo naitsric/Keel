@@ -65,7 +65,7 @@ function PrStatus({ state, at }: { state: PrState; at: string | null }) {
 function CiStatus({ run }: { run: Run }) {
   const { t } = useTranslation();
   if (run.prState !== "open" && run.prState !== "draft") return null;
-  if (run.prCi === "failed") return <span className="font-medium text-danger">{t("run.ci.failed", { checks: run.prCiFailed.join(", ") })}</span>;
+  if (run.prCi === "failed") return <span className="font-medium text-danger">{run.prCiFailed.length > 0 ? t("run.ci.failed", { checks: run.prCiFailed.join(", ") }) : t("run.ci.failedUnnamed")}</span>;
   if (run.prCi === "pending") return <span>{t("run.ci.pending")}</span>;
   if (run.prCi === "passed") return <span className="text-success">{t("run.ci.passed")}</span>;
   return null;

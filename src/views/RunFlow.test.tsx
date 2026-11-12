@@ -162,6 +162,11 @@ describe("the run page's flow", () => {
       delivered({ prState: "draft", prStateAt: "2026-11-06T10:00:00Z", prCi: "failed", prCiFailed: ["lint", "pyright"] });
       await open();
       expect(page()).toContain("CI failed: lint, pyright");
+      // Red with no check named says only that.
+      delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z", prCi: "failed", prCiFailed: [] });
+      await update();
+      expect(page()).toContain("CI failed");
+      expect(page()).not.toContain("CI failed:");
       delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z", prCi: "pending", prCiFailed: [] });
       await update();
       expect(page()).toContain("CI running");

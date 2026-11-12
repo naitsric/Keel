@@ -399,8 +399,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
           {fromGuess && `${t(guess?.fromCi ? "setup.fromCi" : "setup.guessed", { files: guess?.from.join(", ") })} `}
           {fromCiChecks.length > 0 && `${t("setup.fromCiChecks", { commands: fromCiChecks.join(", ") })} `}
           {needsNode(fromCiChecks) && `${t("projects.pyrightNode")} `}
-          {guess && guess.ciLeftOut.length > 0 && `${t("setup.ciLeftOut", { commands: guess.ciLeftOut.join(", ") })} `}
-          {guess && guess.ciMayFail.length > 0 && `${t("setup.ciMayFail", { commands: guess.ciMayFail.join(", ") })} `}
+          {guess && guess.ciLeftOut.length > 0 && `${t("setup.ciLeftOut", { commands: guess.ciLeftOut.map((left) => `${left.command} (${t(`projects.ciWhy.${left.why}`)})`).join(", ") })} `}
           {nothingToGo && `${t("setup.noGuess")} `}
           {t("setup.tryNote")}
         </p>

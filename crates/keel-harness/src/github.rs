@@ -19,9 +19,6 @@ use crate::process::{SIGKILL, signal_group};
 const LOOK_LIMIT: Duration = Duration::from_secs(30);
 /// How a `gh` that went past its limit starts saying so.
 const TOOK_TOO_LONG: &str = "gh took longer than";
-/// How long after a check's runs ended another run of it is a rerun, and not a sibling, for a check
-/// that doesn't say which event it ran for.
-const RERUN_AFTER_SECS: i64 = 120;
 /// What Keel reads of a pull request.
 const PR_FIELDS: &str = "state isDraft mergedAt closedAt updatedAt headRefOid";
 /// Its head commit's CI: GitHub's own word on it, and its checks, each with the workflow and the
@@ -609,8 +606,9 @@ fn check_time(
         .filter(|time| time.year() > 1)
 }
 
-/// Of the runs of one check for one event, the newest, as `gh pr checks` counts them, however soon
-/// after the others it started. One that hasn't started is newer than any that has.
+/// Of the runs of one check, the newest, as `gh pr checks` counts them, however soon after the
+/// others it started: a push's and a pull request's runs are two checks, since their events differ.
+/// One that hasn't started is newer than any that has.
 fn newest_run(all: &[serde_json::Value], runs: &[usize]) -> Vec<usize> {
     let waiting: Vec<usize> = runs
         .iter()
@@ -625,41 +623,6 @@ fn newest_run(all: &[serde_json::Value], runs: &[usize]) -> Vec<usize> {
         .max_by_key(|&at| check_time(&all[at], "startedAt"))
         .into_iter()
         .collect()
-}
-
-/// Of the runs of a check that doesn't say which event it ran for, like a commit status, those
-/// that say where it stands now. One that hasn't started is a rerun waiting its turn, so it's the
-/// newest. A run that starts two minutes or more after the ones before it ended runs them again.
-/// Runs that start closer together than that are siblings, and a failure among them counts.
-fn latest_runs(all: &[serde_json::Value], runs: &[usize]) -> Vec<usize> {
-    let waiting: Vec<usize> = runs
-        .iter()
-        .copied()
-        .filter(|&at| check_time(&all[at], "startedAt").is_none())
-        .collect();
-    if !waiting.is_empty() {
-        return waiting;
-    }
-    let mut timed: Vec<_> = runs
-        .iter()
-        .filter_map(|&at| {
-            let start = check_time(&all[at], "startedAt")?;
-            let end = check_time(&all[at], "completedAt").map_or(start, |end| end.max(start));
-            Some((start, end, at))
-        })
-        .collect();
-    timed.sort();
-    let mut latest = Vec::new();
-    let mut until: Option<chrono::DateTime<chrono::FixedOffset>> = None;
-    for (start, end, at) in timed {
-        if until.is_some_and(|until| start >= until + chrono::Duration::seconds(RERUN_AFTER_SECS)) {
-            latest.clear();
-            until = None;
-        }
-        latest.push(at);
-        until = Some(until.map_or(end, |until| until.max(end)));
-    }
-    latest
 }
 
 /// A check with the name of its workflow, the event it ran for, and when it started, next to the
@@ -724,14 +687,8 @@ fn parse_checks(commit: &serde_json::Value) -> PrChecks {
         runs.entry(key(check)).or_default().push(at);
     }
     let kept: HashSet<usize> = runs
-        .iter()
-        .flat_map(|((_, _, event, _), runs)| {
-            if event.is_empty() {
-                latest_runs(&all, runs)
-            } else {
-                newest_run(&all, runs)
-            }
-        })
+        .values()
+        .flat_map(|runs| newest_run(&all, runs))
         .collect();
     let checks: Vec<&serde_json::Value> = all
         .iter()
@@ -1305,23 +1262,27 @@ mod tests {
     }
 
     #[test]
-    fn checks_that_say_no_event_go_by_when_they_ran() {
+    fn checks_that_say_no_event_also_count_their_newest_run() {
         let broken = |checks: serde_json::Value| ci_of("FAILURE", checks).map(|(_, failed)| failed);
         let status = |state: &str, created: &str| serde_json::json!({ "__typename": "StatusContext", "context": "deploy", "state": state, "createdAt": created });
-        // Commit statuses set together all count. One set well after is set again.
+        // Set again seconds later or minutes later, the newest is where it stands, as gh's
+        // `eliminateDuplicates` keeps it.
+        for later in ["2026-11-06T10:00:02Z", "2026-11-06T10:05:00Z"] {
+            assert_eq!(
+                broken(serde_json::json!([
+                    status("FAILURE", "2026-11-06T10:00:00Z"),
+                    status("SUCCESS", later),
+                ])),
+                Some(vec![]),
+                "{later}"
+            );
+        }
         assert_eq!(
             broken(serde_json::json!([
-                status("FAILURE", "2026-11-06T10:00:00Z"),
-                status("SUCCESS", "2026-11-06T10:00:02Z"),
+                status("SUCCESS", "2026-11-06T10:00:00Z"),
+                status("FAILURE", "2026-11-06T10:00:02Z"),
             ])),
             Some(names(&["deploy"]))
-        );
-        assert_eq!(
-            broken(serde_json::json!([
-                status("FAILURE", "2026-11-06T10:00:00Z"),
-                status("SUCCESS", "2026-11-06T10:05:00Z"),
-            ])),
-            Some(vec![])
         );
         // A check run of an app that isn't GitHub Actions has no workflow run.
         let app = |conclusion: &str, started: &str| {
@@ -1331,7 +1292,7 @@ mod tests {
         assert_eq!(
             broken(serde_json::json!([
                 app("FAILURE", "2026-11-06T10:00:00Z"),
-                app("SUCCESS", "2026-11-06T10:10:00Z"),
+                app("SUCCESS", "2026-11-06T10:00:03Z"),
             ])),
             Some(vec![])
         );

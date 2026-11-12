@@ -118,20 +118,25 @@ export interface Guess {
   fromCi: boolean;
   /** What the check runs because the project's CI does, though nothing else here names it, as Keel runs it with no network. */
   ciChecks: string[];
-  /** What else the CI checks, as it runs it, that Keel can't run with no network. */
-  ciLeftOut: string[];
-  /** What else the CI checks, as it runs it, though it lets it fail, so the check doesn't require it. */
-  ciMayFail: string[];
+  /** What else the CI checks, as it runs it, and why the check doesn't. */
+  ciLeftOut: CiLeftOut[];
+}
+
+/** Why a command the CI runs isn't added to the check: Keel can't be sure it runs in its sandbox, with no network, as in CI. */
+export type CiWhy = "offline" | "mayFail" | "env" | "sometimes" | "installs" | "template";
+
+/** A command the CI runs, as it runs it, and why the check doesn't. */
+export interface CiLeftOut {
+  command: string;
+  why: CiWhy;
 }
 
 /** What a project's CI checks and its saved check doesn't run. Keel never adds them by itself. */
 export interface CiGap {
   /** As Keel runs them with no network, for a person to add. */
   commands: string[];
-  /** As the CI runs them, since Keel can't run them with no network. */
-  leftOut: string[];
-  /** As the CI runs them, though it lets them fail, so a check needn't run them. */
-  mayFail: string[];
+  /** As the CI runs them, and why a check doesn't. */
+  leftOut: CiLeftOut[];
   /** The CI's files they're in. */
   from: string[];
 }

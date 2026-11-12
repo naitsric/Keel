@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use keel_core::{BoardColumn, CardLane, Reason, WorkflowStep};
 use keel_engine::{
-    AddOutcome, Config, Engine, Error, MAX_PROJECT_PROPOSALS, MapStart, ProjectProposal,
-    ProposedProject, StartRun, Workflow,
+    AddOutcome, CiLeftOut, CiWhy, Config, Engine, Error, MAX_PROJECT_PROPOSALS, MapStart,
+    ProjectProposal, ProposedProject, StartRun, Workflow,
 };
 use keel_harness::Tools;
 use keel_store::{Attempt, NewBrainNote, ProjectSettings, Store};
@@ -335,7 +335,7 @@ fn a_saved_check_that_misses_what_ci_runs_is_told_and_left_as_it_is() {
     std::fs::create_dir_all(w.repo.join(".github/workflows")).unwrap();
     std::fs::write(
         w.repo.join(".github/workflows/ci.yml"),
-        "jobs:\n  t:\n    steps:\n      - run: uv run pyright\n      - run: semgrep ci\n      - run: uv run pytest\n",
+        "on: pull_request\njobs:\n  t:\n    steps:\n      - run: uv run pyright\n      - run: semgrep ci\n      - run: uv run pytest\n",
     )
     .unwrap();
     std::fs::write(
@@ -352,29 +352,50 @@ fn a_saved_check_that_misses_what_ci_runs_is_told_and_left_as_it_is() {
     // Nothing saved yet: finishing the setup is what that needs.
     assert!(w.engine.project_ci_gap(&id).unwrap().commands.is_empty());
 
-    let saved = |check: &str| {
+    let saved = |setup: &str, check: &str| {
         w.engine
             .update_project(
                 &id,
                 &ProjectSettings {
+                    setup_command: Some(setup.to_owned()),
                     check_command: Some(check.to_owned()),
                     ..ProjectSettings::default()
                 },
             )
             .unwrap();
     };
-    saved("uv run --frozen pytest");
+    saved("uv sync --frozen", "uv run --frozen pytest");
     let gap = w.engine.project_ci_gap(&id).unwrap();
     assert_eq!(gap.commands, ["uv run --frozen pyright"]);
-    assert_eq!(gap.left_out, ["semgrep ci"], "it needs the network");
+    assert_eq!(
+        gap.left_out,
+        [CiLeftOut {
+            command: "semgrep ci".into(),
+            why: CiWhy::Offline
+        }],
+        "it needs the network"
+    );
     assert_eq!(gap.from, [".github/workflows/ci.yml"]);
     assert_eq!(
         w.store.project(&id).unwrap().check_command.as_deref(),
         Some("uv run --frozen pytest")
     );
 
-    saved("uv run --frozen pytest && uv run --frozen pyright");
+    saved(
+        "uv sync --frozen",
+        "uv run --frozen pytest && uv run --frozen pyright",
+    );
     assert!(w.engine.project_ci_gap(&id).unwrap().commands.is_empty());
+
+    // A setup that installs nothing installs no pyright for the check to run.
+    saved("", "uv run --frozen pytest");
+    let gap = w.engine.project_ci_gap(&id).unwrap();
+    assert!(gap.commands.is_empty(), "{:?}", gap.commands);
+    assert!(
+        gap.left_out
+            .iter()
+            .any(|left| left.command == "uv run pyright")
+    );
 }
 
 #[test]

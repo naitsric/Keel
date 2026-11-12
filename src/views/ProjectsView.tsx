@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { useTranslation } from "react-i18next";
 import { api, type CiGap, type EnvVar, type GithubStatus, type Project, type Service, type Workflow } from "../lib/api";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
-import { ciCommandsLeft, foldersToOffer, needsNode, needsSetup, withCheckOption, withFolders } from "../lib/projects";
+import { ciCommandsLeft, ciLeftOutLeft, foldersToOffer, needsNode, needsSetup, withCheckOption, withFolders } from "../lib/projects";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass } from "../ui/primitives";
@@ -186,8 +186,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
   const needsAccess = selected !== null && (access === "none" || access === "readOnly");
   const workflowGone = workflows !== null && !workflows.some((w) => w.id === workflow);
   const ciMissing = ciGap ? ciCommandsLeft(check, ciGap.commands) : [];
-  const ciLeftOut = ciGap ? ciCommandsLeft(check, ciGap.leftOut) : [];
-  const ciMayFail = ciGap ? ciCommandsLeft(check, ciGap.mayFail) : [];
+  const ciLeftOut = ciGap ? ciLeftOutLeft(check, ciGap.leftOut) : [];
   const removeProject = () => setRemoving(true);
   return (
     <div className="space-y-4">
@@ -223,7 +222,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
           <Field label={t("settings.checkCommand")} hint={t("settings.checkCommandHint")}>
             <input value={check} onChange={(e) => setCheck(e.target.value)} placeholder={t("settings.checkCommandPlaceholder")} className={`${inputClass} font-mono`} />
           </Field>
-          {(ciMissing.length > 0 || ciLeftOut.length > 0 || ciMayFail.length > 0) && (
+          {(ciMissing.length > 0 || ciLeftOut.length > 0) && (
             <div className="space-y-2 rounded-md border border-border-strong bg-inset px-3 py-2.5">
               {ciMissing.length > 0 && (
                 <div>
@@ -241,13 +240,14 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
               {ciLeftOut.length > 0 && (
                 <div>
                   <p className="text-[12px] text-muted">{t("projects.ciLeftOut")}</p>
-                  <CommandList commands={ciLeftOut} />
-                </div>
-              )}
-              {ciMayFail.length > 0 && (
-                <div>
-                  <p className="text-[12px] text-muted">{t("projects.ciMayFail")}</p>
-                  <CommandList commands={ciMayFail} />
+                  <ul className="mt-1 space-y-0.5 pl-5 text-[11.5px] text-muted">
+                    {ciLeftOut.map((left) => (
+                      <li key={left.command} className="break-all">
+                        <span className="selectable font-mono">{left.command}</span>
+                        <span className="text-subtle"> · {t(`projects.ciWhy.${left.why}`)}</span>
+                      </li>
+                    ))}
+                  </ul>
                 </div>
               )}
             </div>

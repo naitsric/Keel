@@ -117,8 +117,8 @@ describe("a path as a person says it", () => {
 });
 
 describe("what the repo offers to add to a command", () => {
-  const uv: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: [], setupOptions: ["--group stubs", "--group test", "--group test-uv"], checkOptions: [], fromCi: false, ciChecks: [], ciLeftOut: [], ciMayFail: [] };
-  const pnpm: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: [], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false, ciChecks: [], ciLeftOut: [], ciMayFail: [] };
+  const uv: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: [], setupOptions: ["--group stubs", "--group test", "--group test-uv"], checkOptions: [], fromCi: false, ciChecks: [], ciLeftOut: [] };
+  const pnpm: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: [], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false, ciChecks: [], ciLeftOut: [] };
 
   it("leaves out what the command already has, as whole words", () => {
     expect(setupOptionsLeft("uv sync --frozen --group test", uv)).toEqual(["--group stubs", "--group test-uv"]);
@@ -159,5 +159,14 @@ describe("what the repo offers to add to a command", () => {
     expect(checkOptionsLeft("pnpm test && pnpm run lint", pnpm)).toEqual([]);
     expect(withCheckOption("pnpm test ", "pnpm run lint")).toBe("pnpm test && pnpm run lint");
     expect(withCheckOption("", "pnpm run lint")).toBe("pnpm run lint");
+  });
+
+  it("never adds a check where a comment would hide it", () => {
+    // Under `sh -c`, what follows a `#` is a comment, so the new check goes before it.
+    expect(withCheckOption("make test  # everything", "uv run --frozen mypy .")).toBe("make test && uv run --frozen mypy . # everything");
+    expect(withCheckOption("# nothing yet", "uv run --frozen mypy .")).toBe("uv run --frozen mypy . # nothing yet");
+    // A `#` inside a word or quotes isn't one.
+    expect(withCheckOption("echo a#b", "x")).toBe("echo a#b && x");
+    expect(withCheckOption('pytest -k "not #slow"', "x")).toBe('pytest -k "not #slow" && x');
   });
 });

@@ -12,7 +12,7 @@ import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
 import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
-import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, CiState, Issue, JointChange, JointCheck, PartOf, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunJoint, RunRow, SpecOutput, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
+import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, CiLeftOut, CiState, Issue, JointChange, JointCheck, PartOf, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunJoint, RunRow, SpecOutput, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
 import { useApp, type View } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -564,12 +564,12 @@ const freshProject: Project = { ...otherProject, id: "p3", name: "shop", path: "
 const manyProjects = params.get("projects") === "many";
 const moreProjects: Project[] = manyProjects ? ["mobile", "billing-api", "docs", "infra", "website", "analytics"].map((name, i) => ({ ...otherProject, id: `p${i + 4}`, name, path: `/Users/you/www/${name}`, githubRepo: `acme/${name}` })) : [];
 let listedProjects: Project[] = params.get("empty") === "1" ? [] : [...projects, ...(params.get("projects") === "mixed" || manyProjects || params.get("dialog") === "setup" ? [freshProject] : []), ...moreProjects];
-const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[]; setupOptions: string[]; checkOptions: string[]; fromCi?: boolean; ciChecks?: string[]; ciLeftOut?: string[]; ciMayFail?: string[] }> = {
+const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[]; setupOptions: string[]; checkOptions: string[]; fromCi?: boolean; ciChecks?: string[]; ciLeftOut?: CiLeftOut[] }> = {
   pnpm: { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run check:i18n", "pnpm run lint", "pnpm test", "pnpm run typecheck"] },
   npm: { check: "npm test", setup: "npm ci", from: ["package.json", "package-lock.json"], setupOptions: [], checkOptions: [] },
   yarn: { check: "yarn test", setup: "yarn install --frozen-lockfile", from: ["package.json", "yarn.lock"], setupOptions: [], checkOptions: [] },
   uv: { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: ["uv.lock", "pyproject.toml"], setupOptions: ["--group notebook", "--group stubs", "--group test", "--group test-uv"], checkOptions: [] },
-  uvci: { check: "uv run --frozen pytest && uv run --frozen ruff check . && uv run --frozen pyright", setup: "uv sync --frozen", from: ["uv.lock", ".github/workflows/ci.yml"], setupOptions: [], checkOptions: [], ciChecks: ["uv run --frozen ruff check .", "uv run --frozen pyright"], ciLeftOut: ["semgrep ci"], ciMayFail: ["uv run mypy ."] },
+  uvci: { check: "uv run --frozen pytest && uv run --frozen ruff check . && uv run --frozen pyright", setup: "uv sync --frozen", from: ["uv.lock", ".github/workflows/ci.yml"], setupOptions: [], checkOptions: [], ciChecks: ["uv run --frozen ruff check .", "uv run --frozen pyright"], ciLeftOut: [{ command: "semgrep ci", why: "offline" }, { command: "uv run mypy .", why: "mayFail" }] },
   cargo: { check: "cargo test", setup: "cargo fetch", from: ["Cargo.toml"], setupOptions: [], checkOptions: [] },
   go: { check: "go test ./...", setup: "go mod download", from: ["go.mod"], setupOptions: [], checkOptions: [] },
   make: { check: "make test", setup: null, from: ["Makefile"], setupOptions: [], checkOptions: [] },
@@ -757,9 +757,9 @@ mockIPC((command, args) => {
       if (!listedProjects.some((p) => p.id === freshProject.id)) listedProjects = [...listedProjects, freshProject];
       return addedAnswer();
     case "project_setup":
-      return { project: listedProjects.find((p) => p.id === (args as { projectId: string }).projectId) ?? freshProject, guess: { fromCi: false, ciChecks: [], ciLeftOut: [], ciMayFail: [], ...(GUESSES[params.get("setup") ?? "pnpm"] ?? GUESSES.unknown) } };
+      return { project: listedProjects.find((p) => p.id === (args as { projectId: string }).projectId) ?? freshProject, guess: { fromCi: false, ciChecks: [], ciLeftOut: [], ...(GUESSES[params.get("setup") ?? "pnpm"] ?? GUESSES.unknown) } };
     case "project_ci_gap":
-      return params.get("cigap") === "1" && (args as { projectId: string }).projectId === "p1" ? { commands: ["uv run --frozen ruff check .", "uv run --frozen pyright"], leftOut: ["semgrep ci", "npx playwright test"], mayFail: ["uv run mypy ."], from: [".github/workflows/ci.yml"] } : { commands: [], leftOut: [], mayFail: [], from: [] };
+      return params.get("cigap") === "1" && (args as { projectId: string }).projectId === "p1" ? { commands: ["uv run --frozen ruff check .", "uv run --frozen pyright"], leftOut: [{ command: "semgrep ci", why: "offline" }, { command: "uv run mypy .", why: "mayFail" }, { command: "RUSTFLAGS=-Dwarnings cargo clippy", why: "env" }], from: [".github/workflows/ci.yml"] } : { commands: [], leftOut: [], from: [] };
     // folders=none: the commands need nothing from the home folder.
     case "project_tool_folders":
       return params.get("folders") === "none"

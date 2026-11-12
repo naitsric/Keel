@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::{
-    dotnet, is_file, is_plain_name, node_tool, normalized, pip, poetry_installs, read,
-    requirement_name, scripts, uv_default_groups, uv_installs,
+    CiWhy, dotnet, is_file, is_plain_name, node_tool, normalized, poetry_installs, read,
+    requirement_name, scripts, uv_sync,
 };
 
 /// Programs whose first word after them says what they do: `cargo clippy`, `ruff format`.
@@ -28,6 +28,12 @@ const MODE_WORDS: usize = 2;
 /// Options of `npx` that only say whether it may download what isn't installed. The offline form
 /// runs what is.
 const NPX_ASKS: [&str; 4] = ["--yes", "-y", "--no", "--no-install"];
+/// Python's packaging tools themselves, which a CI upgrades before installing anything.
+const PACKAGING: [&str; 4] = ["pip", "setuptools", "wheel", "uv"];
+/// The machine's package managers.
+const SYSTEM_PACKAGES: [&str; 10] = [
+    "apt", "apt-get", "brew", "choco", "yum", "dnf", "zypper", "snap", "port", "apk",
+];
 /// A binary whose package has another name.
 const PACKAGES: [(&str, &str); 3] = [
     ("tsc", "typescript"),
@@ -212,8 +218,12 @@ impl Call {
                 args @ ..,
             ] => python(&[&["python", "-m", *tool][..], args].concat()),
             [runner @ ("npx" | "bunx"), rest @ ..] => {
-                // `-c` runs a line of its own.
-                if rest.iter().any(|word| *word == "-c" || *word == "--call") {
+                // Its own `-c` runs a line of its own. The tool's `-c` is the tool's.
+                let (options, _) = split_options(rest, &NPX_VALUED);
+                if options
+                    .iter()
+                    .any(|word| *word == "-c" || *word == "--call")
+                {
                     return None;
                 }
                 run_by(runner, rest, &NPX_VALUED, node)
@@ -329,9 +339,10 @@ pub(super) fn simple_commands(line: &str) -> Vec<&str> {
 }
 
 /// Nothing a shell does besides running it: no pipe, redirection, substitution, variable,
-/// background, `||`, subshell, escape or home folder, and quotes that close.
+/// background, `||`, subshell, escape, home folder or comment, and quotes that close. Chained after
+/// another with `&&`, a comment would hide every command after it.
 fn is_plain(command: &str) -> bool {
-    !command.contains(['|', '<', '>', '$', '`', '&', '(', ')', ';', '\\', '~'])
+    !command.contains(['|', '<', '>', '$', '`', '&', '(', ')', ';', '\\', '~', '#'])
         && command.matches('"').count().is_multiple_of(2)
         && command.matches('\'').count().is_multiple_of(2)
 }
@@ -376,44 +387,148 @@ fn on_the_list(call: &Call) -> Option<Installer> {
     listed.then_some(installer)
 }
 
-/// How a project's Python setup runs what it installs, and what that is when nothing more is asked.
+/// Whether a command runs a tool on the list, whatever its name says, like `go vet` or `pylint`.
+pub(super) fn listed(command: &str) -> bool {
+    Call::parse(command).is_some_and(|call| on_the_list(&call).is_some())
+}
+
+/// Whether a command rewrites the code: a formatter that isn't told only to check, like
+/// `cargo fmt`, `ruff format .`, `black .` or `prettier --write`, or a script or recipe named for
+/// one, like `npm run format` or `just fmt`. `eslint --format stylish` only picks how it prints.
+pub(super) fn rewrites(command: &str) -> bool {
+    let Some(call) = Call::parse(command) else {
+        return false;
+    };
+    let only_checks = call.args.iter().any(|arg| {
+        let flag = arg.trim_start_matches('-');
+        arg.starts_with('-')
+            && (flag.starts_with("check")
+                || flag.starts_with("verify")
+                || flag.starts_with("set-exit-if-changed")
+                || matches!(flag, "diff" | "dry-run" | "l" | "list-different"))
+    });
+    let formats = |name: &str| {
+        let stem = name.split(['.', ':', '-', '_']).next().unwrap_or(name);
+        matches!(stem, "fmt" | "format") && !name.contains("check") && !name.contains("verify")
+    };
+    match &call.called {
+        Called::Script(name) => formats(name),
+        _ => match call.name().as_str() {
+            "black" | "isort" | "rustfmt" => !only_checks && !call.has("-c"),
+            "prettier" => call.has("--write") || call.has("-w"),
+            "gofmt" | "goimports" => call.has("-w"),
+            // A tool that only checks takes files where others take a subcommand.
+            name => {
+                let told = !ONE_MODE.contains(&name) && formats(call.subcommand());
+                (told || formats(name)) && !only_checks
+            }
+        },
+    }
+}
+
+/// The commands of a setup, each as its words, without the variables it sets.
+fn steps(setup: &str) -> Vec<Vec<&str>> {
+    simple_commands(setup)
+        .into_iter()
+        .map(|command| {
+            command
+                .split_whitespace()
+                .skip_while(|word| sets_variable(word))
+                .collect()
+        })
+        .collect()
+}
+
+/// A path in the repo, not one that leaves it.
+fn in_repo(path: &str) -> bool {
+    !path.starts_with('/') && path.split('/').all(|part| !part.is_empty() && part != "..")
+}
+
+/// The project itself, which installing changes nothing a check can use.
+fn is_the_project(what: &str) -> bool {
+    matches!(what, "." | "./") || what.starts_with(".[")
+}
+
+/// What the project's own Python setup installs, and how it runs that. Only what the setup itself
+/// says counts: a setup that doesn't install the project's packages, or is told something this
+/// doesn't follow, installs nothing a check can count on.
 struct PythonSetup {
     /// `uv run --frozen` or `poetry run`. None for the `.venv` that pip installs into.
     run: Option<&'static str>,
     installs: HashSet<String>,
-    /// uv's groups that it installs. None for another tool.
-    uv_groups: Option<HashSet<String>>,
+    /// For uv: its project file, and the groups and extras the setup installs.
+    uv: Option<(String, HashSet<String>, HashSet<String>)>,
+    /// For pip: the lists of requirements the setup installs.
+    pip_lists: Vec<String>,
 }
 
 impl PythonSetup {
     /// One tool per project, in the order `python` picks it.
-    fn of(root: &Path) -> Option<Self> {
+    fn of(root: &Path, setup: &[Vec<&str>]) -> Option<Self> {
         let pyproject = || read(root, "pyproject.toml").unwrap_or_default();
         if read(root, "uv.lock").is_some() {
+            let args = setup.iter().find_map(|words| match words.as_slice() {
+                ["uv", "sync", args @ ..] => Some(args),
+                _ => None,
+            })?;
             let pyproject = pyproject();
+            let sync = uv_sync(&pyproject, args)?;
             return Some(Self {
                 run: Some("uv run --frozen"),
-                installs: uv_installs(&pyproject),
-                uv_groups: Some(uv_default_groups(&pyproject)),
+                installs: sync.names,
+                uv: Some((pyproject, sync.groups, sync.extras)),
+                pip_lists: Vec::new(),
             });
         }
         if read(root, "poetry.lock").is_some() && is_file(root, "pyproject.toml") {
-            return Some(Self {
+            let args = setup.iter().find_map(|words| match words.as_slice() {
+                ["poetry", "install", args @ ..] => Some(args),
+                _ => None,
+            })?;
+            let understood = |arg: &&str| {
+                matches!(
+                    *arg,
+                    "--no-root" | "--sync" | "-q" | "--quiet" | "-n" | "--no-interaction"
+                )
+            };
+            return args.iter().all(understood).then(|| Self {
                 run: Some("poetry run"),
                 installs: poetry_installs(&pyproject()),
-                uv_groups: None,
+                uv: None,
+                pip_lists: Vec::new(),
             });
         }
-        let installs = pip(root)?
-            .from
+        let mut lists = Vec::new();
+        for words in setup {
+            let args = match words.as_slice() {
+                [".venv/bin/pip" | ".venv/bin/pip3", "install", args @ ..]
+                | [
+                    ".venv/bin/python" | ".venv/bin/python3",
+                    "-m",
+                    "pip",
+                    "install",
+                    args @ ..,
+                ] => args,
+                _ => continue,
+            };
+            let mut args = args.iter();
+            while let Some(arg) = args.next() {
+                if matches!(*arg, "-r" | "--requirement") {
+                    lists.extend(args.next().map(|list| (*list).to_owned()));
+                }
+            }
+        }
+        let installs: HashSet<String> = lists
             .iter()
+            .filter(|list| in_repo(list))
             .filter_map(|list| read(root, list))
             .flat_map(|text| text.lines().map(requirement_name).collect::<Vec<_>>())
             .collect();
-        Some(Self {
+        (!lists.is_empty()).then_some(Self {
             run: None,
             installs,
-            uv_groups: None,
+            uv: None,
+            pip_lists: lists,
         })
     }
 
@@ -424,9 +539,9 @@ impl PythonSetup {
     fn options(&self, call: &Call) -> Option<Vec<String>> {
         let group = |name: &str| {
             let installed = self
-                .uv_groups
+                .uv
                 .as_ref()
-                .is_some_and(|groups| groups.contains(&normalized(name)));
+                .is_some_and(|(_, groups, _)| groups.contains(&normalized(name)));
             (call.runner == "uv run" && installed && is_plain_name(name))
                 .then(|| format!("--group {name}"))
         };
@@ -456,6 +571,17 @@ impl PythonSetup {
             (None, false) => format!(".venv/bin/{tool}"),
         }
     }
+}
+
+/// Whether a setup installs a JavaScript project's packages, and only those.
+fn installs_node(setup: &[Vec<&str>]) -> bool {
+    setup.iter().any(|words| match words.as_slice() {
+        ["npm", "ci", ..] | ["yarn"] => true,
+        ["npm" | "pnpm" | "bun", "install" | "i", args @ ..] | ["yarn", "install", args @ ..] => {
+            args.iter().all(|arg| arg.starts_with('-'))
+        }
+        _ => false,
+    })
 }
 
 /// The packages `package.json` depends on, which its lock installs.
@@ -519,7 +645,9 @@ pub(super) struct Repo {
 }
 
 impl Repo {
-    pub(super) fn read(root: &Path) -> Self {
+    /// What the repo says, and what the project's setup installs for its checks.
+    pub(super) fn read(root: &Path, setup: &str) -> Self {
+        let setup = steps(setup);
         let package = read(root, "package.json").unwrap_or_default();
         let scripts = scripts(&package, "scripts")
             .into_iter()
@@ -541,8 +669,10 @@ impl Repo {
         Self {
             scripts,
             targets: targets(&makefile),
-            python: PythonSetup::of(root),
-            node: node_tool(root).map(|_| node_packages(&package)),
+            python: PythonSetup::of(root, &setup),
+            node: node_tool(root)
+                .filter(|_| installs_node(&setup))
+                .map(|_| node_packages(&package)),
             own,
             expanded: HashMap::new(),
         }
@@ -605,9 +735,10 @@ impl Repo {
 
     /// How Keel runs a simple command from a CI with no network: one on the list, whose tool the
     /// project's setup installs, in the form its stack runs it, like `uv run --frozen ruff check .`.
-    /// Never one that sets a variable, or whose runner's options can't come along, since what the
-    /// tool is told can depend on them.
-    pub(super) fn offline(&self, command: &str) -> Option<String> {
+    /// Never one that sets a variable, whose runner's options can't come along, since what the tool
+    /// is told can depend on them, or that runs a version of its own, as `uvx` does.
+    pub(super) fn offline(&self, command: &str) -> Result<String, CiWhy> {
+        let not = CiWhy::Offline;
         let changes =
             |word: &str| word.starts_with('+') || word.starts_with("--fix") || word == "--write";
         let words: Vec<&str> = command.split_whitespace().collect();
@@ -615,11 +746,16 @@ impl Repo {
             || words.iter().any(|word| changes(word) || fetches(word))
             || words.windows(2).any(|pair| pair == ["-mod", "mod"])
         {
-            return None;
+            return Err(not);
         }
-        let call = Call::parse(command)?;
-        if call.sets_env || matches!(call.called, Called::Script(_)) {
-            return None;
+        let call = Call::parse(command).ok_or(not)?;
+        if call.sets_env {
+            return Err(CiWhy::Env);
+        }
+        if matches!(call.called, Called::Script(_))
+            || matches!(call.runner.as_str(), "uvx" | "pipx run")
+        {
+            return Err(not);
         }
         let name = call.name();
         let args = call.args.join(" ");
@@ -630,11 +766,11 @@ impl Repo {
                 format!("{head} {args}")
             }
         };
-        match on_the_list(&call)? {
+        let form = match on_the_list(&call).ok_or(not)? {
             Installer::Python => {
-                let python = self.python.as_ref()?;
+                let python = self.python.as_ref().ok_or(not)?;
                 let module = matches!(call.called, Called::Python { module: true, .. });
-                let options = python.options(&call)?;
+                let options = python.options(&call).ok_or(not)?;
                 python
                     .installs
                     .contains(&normalized(&name))
@@ -644,12 +780,116 @@ impl Repo {
                 .options
                 .iter()
                 .all(|option| NPX_ASKS.contains(&option.as_str()))
-                && self.node.as_ref()?.contains(package_of(&name)))
+                && self
+                    .node
+                    .as_ref()
+                    .is_some_and(|node| node.contains(package_of(&name))))
             .then(|| with(format!("node_modules/.bin/{name}"))),
             Installer::Own => (matches!(call.called, Called::Program(_))
                 && self.own.contains(&name.as_str()))
             .then(|| with(name.clone())),
+        };
+        form.ok_or(not)
+    }
+
+    /// Whether a job's script installs more than the project's setup does: a package by name, a
+    /// tool for the whole machine, or a group or extra the setup leaves out. A check may need it,
+    /// and Keel's runs without it.
+    pub(super) fn installs_more(&self, script: &str) -> bool {
+        script
+            .lines()
+            .flat_map(|line| line.split(['&', ';', '|']))
+            .any(|command| self.installs_beyond(command))
+    }
+
+    fn installs_beyond(&self, command: &str) -> bool {
+        let words: Vec<&str> = command
+            .split_whitespace()
+            .skip_while(|word| {
+                sets_variable(word)
+                    || word.starts_with('-')
+                    || matches!(*word, "sudo" | "then" | "do" | "else" | "{" | "(" | "!")
+            })
+            .collect();
+        let Some((first, rest)) = words.split_first() else {
+            return false;
+        };
+        let program = base(first);
+        if SYSTEM_PACKAGES.contains(&program) {
+            return rest.iter().any(|word| matches!(*word, "install" | "add"));
         }
+        match (program, rest) {
+            ("pip" | "pip3", ["install", args @ ..]) | ("uv", ["pip", "install", args @ ..]) => {
+                self.pip_beyond(args)
+            }
+            (python, ["-m", "pip", "install", args @ ..]) if python.starts_with("python") => {
+                self.pip_beyond(args)
+            }
+            ("uv", ["sync", args @ ..]) => self.uv_sync_beyond(args),
+            ("poetry", ["install", args @ ..]) => args.iter().any(|arg| {
+                ["--with", "-E", "--extras", "--all-extras", "--all-groups"]
+                    .iter()
+                    .any(|flag| arg.starts_with(flag))
+            }),
+            ("npm", ["install" | "i" | "add", args @ ..])
+            | ("pnpm" | "bun", ["install" | "i", args @ ..]) => args
+                .iter()
+                .any(|arg| !arg.starts_with('-') || matches!(*arg, "-g" | "--global")),
+            ("uv", ["add" | "tool", ..])
+            | ("pipx", ["install" | "inject", ..])
+            | ("poetry", ["add" | "self", ..])
+            | ("pnpm" | "yarn" | "bun", ["add", ..])
+            | ("yarn", ["global", ..])
+            | ("cargo", ["install" | "binstall", ..])
+            | ("go", ["install" | "get", ..])
+            | ("gem", ["install", ..])
+            | ("dotnet", ["tool", "install", ..])
+            | ("composer", ["require" | "global", ..]) => true,
+            _ => false,
+        }
+    }
+
+    /// pip told to install anything but the setup's own lists, the project itself, or pip and
+    /// the like.
+    fn pip_beyond(&self, args: &[&str]) -> bool {
+        let lists = self
+            .python
+            .as_ref()
+            .map_or(&[][..], |python| &python.pip_lists[..]);
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            let beyond = match *arg {
+                "-r" | "--requirement" => args
+                    .next()
+                    .is_none_or(|list| !lists.iter().any(|known| known == list)),
+                "-e" | "--editable" => args.next().is_none_or(|what| !is_the_project(what)),
+                "-c" | "--constraint" | "-i" | "--index-url" | "--extra-index-url" | "-f"
+                | "--find-links" => {
+                    args.next();
+                    false
+                }
+                flag if flag.starts_with('-') => false,
+                what => {
+                    !is_the_project(what) && !PACKAGING.contains(&requirement_name(what).as_str())
+                }
+            };
+            if beyond {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// `uv sync` told to install a group or an extra the setup's doesn't, or told something this
+    /// doesn't follow.
+    fn uv_sync_beyond(&self, args: &[&str]) -> bool {
+        let Some((pyproject, groups, extras)) =
+            self.python.as_ref().and_then(|python| python.uv.as_ref())
+        else {
+            return true;
+        };
+        uv_sync(pyproject, args)
+            .is_none_or(|sync| !sync.groups.is_subset(groups) || !sync.extras.is_subset(extras))
     }
 }
 

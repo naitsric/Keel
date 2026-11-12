@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 
 pub use board::{Board, BoardCard, BoardIssue};
 pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
-pub use detect::{CiGap, Guess};
+pub use detect::{CiGap, CiLeftOut, CiWhy, Guess};
 pub use git::{ChangeSize, Git, GitError, Snapshot};
 pub use joint::{JointCard, JointChangeView, Named, Neighbour, PartOf, PartWarning, RunJoint};
 use keel_core::{AttemptState, CardLane, Reason, StepCondition, StepRole, StepSpec, WorkflowStep};
@@ -631,9 +631,11 @@ impl Engine {
     pub fn project_ci_gap(&self, id: &str) -> Result<CiGap> {
         let project = self.inner.store.project(id)?;
         Ok(match project.check_command {
-            Some(check) if !check.trim().is_empty() => {
-                detect::ci_gap(Path::new(&project.path), &check)
-            }
+            Some(check) if !check.trim().is_empty() => detect::ci_gap(
+                Path::new(&project.path),
+                project.setup_command.as_deref().unwrap_or_default(),
+                &check,
+            ),
             _ => CiGap::default(),
         })
     }
