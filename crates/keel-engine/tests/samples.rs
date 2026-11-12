@@ -683,6 +683,35 @@ fn poetry() {
     });
 }
 
+/// Homebrew's Java, which it keeps off the PATH. `/usr/bin/java` is only a stub without a JDK.
+const JAVA: &str = "/opt/homebrew/opt/openjdk/bin";
+
+#[test]
+fn maven() {
+    try_sample(Sample {
+        name: "maven",
+        programs: &["mvn", "java"],
+        path: &[JAVA],
+        finds: &[],
+        commands: Commands {
+            setup: "mvn dependency:go-offline test -Dtest='#keel-setup-runs-no-tests' \
+                    -Dsurefire.failIfNoSpecifiedTests=false",
+            check: "mvn test",
+        },
+        guessed: true,
+        downloads: Some(".m2/repository"),
+        needs_download: Some((
+            "mvn dependency:get -Dartifact=org.apache.commons:commons-lang3:3.17.0",
+            "in offline mode",
+        )),
+        fails_within: 5,
+        env: &[],
+        starts_servers: false,
+        proposes_localhost: false,
+        reads_above: false,
+    });
+}
+
 /// #94: Keel's own check, from a clone with no `target/`. The app needs its frontend built to compile,
 /// as in CI.
 #[test]
