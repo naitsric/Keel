@@ -105,7 +105,7 @@ fn allows_host(domains: &[String], host: &str) -> bool {
 /// minute with npm and pnpm. With it, the command fails at once. Variables and not files, so
 /// nothing is written in the home the builder and the check share, and a project's own variables
 /// still win.
-const OFFLINE: [(&str, &str, &str); 6] = [
+const OFFLINE: [(&str, &str, &str); 7] = [
     ("crates.io", "CARGO_NET_OFFLINE", "true"),
     ("golang.org", "GOPROXY", "off"),
     ("npmjs.org", "npm_config_offline", "true"),
@@ -113,6 +113,8 @@ const OFFLINE: [(&str, &str, &str); 6] = [
     ("npmjs.org", "pnpm_config_offline", "true"),
     ("pypi.org", "PIP_NO_INDEX", "1"),
     ("pypi.org", "UV_OFFLINE", "1"),
+    // Maven 3.9 on. Maven Central is repo.maven.apache.org.
+    ("maven.apache.org", "MAVEN_ARGS", "--offline"),
 ];
 
 /// What a setup or check command runs with: the home it works in (see `home`), and the little Keel
@@ -1606,13 +1608,14 @@ mod tests {
     }
 
     /// What keeps each tool off the network, and the registry that decides it.
-    const KEPT_OFFLINE: [(&str, &str, &str); 6] = [
+    const KEPT_OFFLINE: [(&str, &str, &str); 7] = [
         ("index.crates.io", "CARGO_NET_OFFLINE", "true"),
         ("proxy.golang.org", "GOPROXY", "off"),
         ("registry.npmjs.org", "npm_config_offline", "true"),
         ("registry.npmjs.org", "pnpm_config_offline", "true"),
         ("pypi.org", "PIP_NO_INDEX", "1"),
         ("pypi.org", "UV_OFFLINE", "1"),
+        ("repo.maven.apache.org", "MAVEN_ARGS", "--offline"),
     ];
 
     #[test]
@@ -1634,7 +1637,7 @@ mod tests {
             .into();
         let env = cache_env(Path::new("/h"), Path::new("/u"), Some(&domains));
         for (domain, name, value) in KEPT_OFFLINE {
-            let allowed = domain != "pypi.org";
+            let allowed = !["pypi.org", "repo.maven.apache.org"].contains(&domain);
             assert_eq!(var(&env, name), (!allowed).then_some(value), "{name}");
         }
         // A domain that merely ends in the same letters isn't it.
