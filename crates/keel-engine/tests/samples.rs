@@ -712,6 +712,36 @@ fn maven() {
     });
 }
 
+/// With the wrapper, which setup uses to download Gradle itself.
+#[test]
+fn gradle() {
+    try_sample(Sample {
+        name: "gradle",
+        programs: &["java"],
+        path: &[JAVA],
+        finds: &[],
+        commands: Commands {
+            setup: "./gradlew test --test-dry-run",
+            check: "./gradlew test",
+        },
+        guessed: true,
+        downloads: Some(".gradle/caches"),
+        needs_download: Some((
+            "echo \"dependencies { implementation 'org.apache.commons:commons-lang3:3.17.0' }\" \
+             >> build.gradle && ./gradlew compileJava",
+            "Could not resolve org.apache.commons:commons-lang3:3.17.0",
+        )),
+        // About half is Gradle starting, as long as a check that passes takes, and half its
+        // retries. Only `--offline` stops those, from the command line or an init script in the
+        // home, and no variable.
+        fails_within: 15,
+        env: &[],
+        starts_servers: false,
+        proposes_localhost: true,
+        reads_above: false,
+    });
+}
+
 /// #94: Keel's own check, from a clone with no `target/`. The app needs its frontend built to compile,
 /// as in CI.
 #[test]
