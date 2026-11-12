@@ -171,7 +171,10 @@ fn profile(
         .collect();
     let workspace = quote(&workspace.to_string_lossy());
     // Git would run whatever these name, so nothing here gets to change them. Moving `.git` away
-    // and making another would get around that, so `.git` itself stays put as well.
+    // and making another would get around that, so `.git` itself stays put as well. So does the
+    // workspace, but asked whether it can be written to, it says yes: macOS answers that by the
+    // folder itself, Gradle won't build in a folder it's told is read-only, and the answer moves
+    // nothing.
     let git_rules = format!(
         "(literal \"{workspace}\") (literal \"{workspace}/.git\") (literal \"{workspace}/.git/config\") \
          (literal \"{workspace}/.git/config.worktree\") (literal \"{workspace}/.git/commondir\") \
@@ -215,6 +218,7 @@ fn profile(
          (deny file-write*)\n\
          (allow file-write* {write_rules} (subpath \"/private/tmp\") (subpath \"/private/var/folders\") (literal \"/dev/null\") (literal \"/dev/stdout\") (literal \"/dev/stderr\") (literal \"/dev/tty\") (regex #\"^/dev/fd/\"))\n\
          (deny file-write* {git_rules})\n\
+         (allow file-write-data (literal \"{workspace}\"))\n\
          (deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd\") (global-name \"com.apple.secd\") (global-name \"com.apple.securityd.xpc\"))\n"
     )
 }
