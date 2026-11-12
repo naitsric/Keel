@@ -1,16 +1,27 @@
 //! Whether a check failed because the sandbox refused its tests a server on localhost (#123). A
 //! project opens localhost to its tests with a setting of its own, closed until a person opens it,
-//! and a check that needed it says so, so the person knows where to look. Only what Node, Python
-//! and Go print when that happens counts: a refused connection elsewhere has nothing to do with it.
+//! and a check that needed it says so, so the person knows where to look. Only what Node, Python,
+//! Go, Java and Gradle print when that happens counts: a refused connection elsewhere has nothing to
+//! do with it.
+
+/// How far below Java's error the call that failed is named.
+const JAVA_FRAMES: usize = 3;
 
 /// Whether what a check printed says a server on localhost was refused.
 pub fn refused(text: &str) -> bool {
+    let lines: Vec<String> = text.lines().map(str::to_ascii_lowercase).collect();
     // Python names the call before the error: the line the failing call is on, and in 3.11 and
     // later the marks under it.
     let mut bind_before = false;
-    for line in text.lines() {
-        let line = line.to_ascii_lowercase();
-        if refused_in(&line) || (bind_before && python_refused(&line)) {
+    for (at, line) in lines.iter().enumerate() {
+        if refused_in(line)
+            || (bind_before && python_refused(line))
+            || (java_refused(line)
+                && lines[at + 1..]
+                    .iter()
+                    .take(JAVA_FRAMES)
+                    .any(|frame| java_binds(frame)))
+        {
             return true;
         }
         let marks = line.trim();
@@ -33,6 +44,21 @@ fn refused_in(line: &str) -> bool {
             && line.contains("operation not permitted"))
         // Go: `listen tcp 127.0.0.1:0: bind: operation not permitted`.
         || line.contains("bind: operation not permitted")
+        // Gradle, which needs a socket on localhost to start at all.
+        || line.contains("could not create service of type filelockcontentionhandler")
+}
+
+/// Java's error, which says nothing of where: the call under it does.
+fn java_refused(line: &str) -> bool {
+    ["java.net.socketexception", "java.net.bindexception"]
+        .iter()
+        .any(|error| line.contains(&format!("{error}: operation not permitted")))
+}
+
+/// A call that binds a socket, which is always on this Mac.
+fn java_binds(frame: &str) -> bool {
+    let frame = frame.trim_start();
+    frame.starts_with("at ") && (frame.contains(".bind0(") || frame.contains(".bind("))
 }
 
 fn loopback(address: &str) -> bool {
@@ -93,6 +119,19 @@ mod tests {
         }
     }
 
+    /// Gradle, which can't start without a socket on localhost, and a server Java starts: what it
+    /// binds is always on this Mac.
+    #[test]
+    fn gradle_and_a_server_java_were_refused_on_localhost() {
+        for text in [
+            "* What went wrong:\nGradle could not start your build.\n> Could not create service of type FileLockContentionHandler using BasicGlobalScopeServices.createFileLockContentionHandler().\n   > java.net.SocketException: Operation not permitted\n",
+            "Caused by: java.net.SocketException: Operation not permitted\n\tat java.base/sun.nio.ch.Net.bind0(Native Method)\n\tat java.base/sun.nio.ch.Net.bind(Net.java:525)\n",
+            "java.net.BindException: Operation not permitted\n    at java.base/sun.nio.ch.Net.bind0(Native Method)\n",
+        ] {
+            assert!(refused(text), "{text}");
+        }
+    }
+
     #[test]
     fn a_server_go_was_refused_on_localhost() {
         assert!(refused(
@@ -113,6 +152,9 @@ mod tests {
             "    sock.connect(sa)\nPermissionError: [Errno 1] Operation not permitted\n",
             "s.bind((\"127.0.0.1\", 0))\nall fine\nPermissionError: [Errno 1] Operation not permitted\n",
             "npm error code ENOTCACHED",
+            // A connection Java was refused could be to anywhere too.
+            "java.net.SocketException: Operation not permitted\n\tat java.base/sun.nio.ch.Net.connect0(Native Method)\n\tat java.base/sun.nio.ch.Net.connect(Net.java:589)\n",
+            "java.net.UnknownHostException: repo.maven.apache.org",
             "test result: FAILED. 3 passed; 1 failed",
             "",
         ] {
