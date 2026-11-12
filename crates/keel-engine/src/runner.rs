@@ -127,15 +127,39 @@ fn cache_env(
     env
 }
 
-/// uv copies into `.venv` rather than linking it to its cache, and Go doesn't fetch another
-/// toolchain. `domains` are those the step may reach, or `None` when it has the whole network
-/// (setup). Each tool whose registry isn't among them works offline (see `OFFLINE`).
+/// What each tool is told in every step. A run keeps its copy of the repo from setup to its check,
+/// while the check works on a copy of the home, at another path, so what a tool installs with
+/// paths in it goes in the repo, as pip's and uv's `.venv` does.
+const SETTINGS: [(&str, &str); 5] = [
+    // uv copies into `.venv` rather than linking it to its cache.
+    ("UV_LINK_MODE", "copy"),
+    // Go doesn't fetch another toolchain.
+    ("GOTOOLCHAIN", "local"),
+    // Poetry's environment in the home has programs that name the project's home.
+    ("POETRY_VIRTUALENVS_IN_PROJECT", "true"),
+    // Bundler would install in Ruby's own folder, which no step can write to.
+    ("BUNDLE_PATH", ".bundle"),
+    // Gradle's daemon outlives the step, out of its process group, for hours. Without it, a
+    // build's process ends with the build.
+    ("GRADLE_OPTS", "-Dorg.gradle.daemon=false"),
+];
+
+/// Java reaches localhost on IPv4-mapped addresses (`::ffff:127.0.0.1`), which the sandbox doesn't
+/// count as localhost, so a check with localhost open still refused Gradle its own processes and a
+/// test its server. Not for setup: its rule that closes localhost misses those addresses just the
+/// same, and they're the only way Gradle's setup reaches the processes it starts.
+const JAVA_ON_IPV4: (&str, &str) = ("JDK_JAVA_OPTIONS", "-Djava.net.preferIPv4Stack=true");
+
+/// `SETTINGS`, and for a step with `domains`, those it may reach, rather than the whole network as
+/// setup has with `None`: Java on IPv4, and each tool whose registry isn't among them offline (see
+/// `OFFLINE`).
 fn tool_settings(domains: Option<&[String]>) -> Vec<(String, String)> {
-    let mut env = vec![
-        ("UV_LINK_MODE".to_owned(), "copy".to_owned()),
-        ("GOTOOLCHAIN".to_owned(), "local".to_owned()),
-    ];
+    let mut env: Vec<(String, String)> = SETTINGS
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+        .collect();
     if let Some(domains) = domains {
+        env.push((JAVA_ON_IPV4.0.to_owned(), JAVA_ON_IPV4.1.to_owned()));
         env.extend(
             OFFLINE
                 .iter()
@@ -1621,6 +1645,32 @@ mod tests {
         );
         assert_eq!(var(&env, "CARGO_NET_OFFLINE"), Some("true"));
         assert_eq!(var(&env, "UV_OFFLINE"), Some("1"));
+    }
+
+    /// Each tool installs in the repo, which a run keeps from setup to its check, and not in a home
+    /// whose copy the check works on. And a tool leaves nothing running once its step ends.
+    #[test]
+    fn tools_install_in_the_repo_and_leave_nothing_running_in_every_step() {
+        for domains in [None, Some(&[][..])] {
+            let env = cache_env(Path::new("/h"), Path::new("/u"), domains);
+            assert_eq!(var(&env, "UV_LINK_MODE"), Some("copy"));
+            assert_eq!(var(&env, "POETRY_VIRTUALENVS_IN_PROJECT"), Some("true"));
+            assert_eq!(var(&env, "BUNDLE_PATH"), Some(".bundle"));
+            assert_eq!(var(&env, "GRADLE_OPTS"), Some("-Dorg.gradle.daemon=false"));
+        }
+    }
+
+    /// Java reaches localhost on IPv4-mapped addresses, which the sandbox doesn't count as
+    /// localhost, so a check with localhost open still refused Gradle its own processes.
+    #[test]
+    fn java_reaches_localhost_where_a_check_can_open_it() {
+        let check = cache_env(Path::new("/h"), Path::new("/u"), Some(&[]));
+        assert_eq!(
+            var(&check, "JDK_JAVA_OPTIONS"),
+            Some("-Djava.net.preferIPv4Stack=true")
+        );
+        let setup = cache_env(Path::new("/h"), Path::new("/u"), None);
+        assert_eq!(var(&setup, "JDK_JAVA_OPTIONS"), None);
     }
 
     #[test]
