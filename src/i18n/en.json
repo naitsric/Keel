@@ -294,6 +294,12 @@
       "mergedAt": "Pull request merged on {{when}}",
       "closedAt": "Pull request closed without merging on {{when}}"
     },
+    "ci": {
+      "failed": "CI failed: {{checks}}",
+      "failedUnnamed": "CI failed",
+      "pending": "CI running",
+      "passed": "CI passed"
+    },
     "fromIssue": "From issue #{{number}}",
     "base": "Based on {{base}}",
     "decideApproval": "Approve or reject above.",
@@ -946,6 +952,8 @@
       "merged": "Merged",
       "closed": "Closed without merging"
     },
+    "ciFailed": "CI failed: {{checks}}",
+    "ciFailedUnnamed": "CI failed",
     "needed": {
       "waitingApproval": "Open it to approve or reject.",
       "waitingAnswers": "Open it to answer.",
@@ -1067,6 +1075,18 @@
     "dangerTitle": "Danger zone",
     "dangerHint": "Takes the project out of Keel. Your folder isn't touched.",
     "finishSetup": "Finish setup",
+    "ciMissing": "Your CI runs this and your check doesn't:",
+    "ciMissingAdd": "Add to the check",
+    "ciLeftOut": "Left out of the check, though your CI runs them:",
+    "ciWhy": {
+      "offline": "Keel can't run it offline as CI does",
+      "mayFail": "CI lets it fail",
+      "env": "CI sets variables for it",
+      "sometimes": "CI runs it only sometimes",
+      "installs": "its job installs more first",
+      "template": "it uses a template from another file"
+    },
+    "pyrightNode": "pyright needs Node available offline.",
     "proposalBanner_one": "{{client}} proposes adding {{name}}",
     "proposalBanner_other": "{{client}} proposes adding {{name}}, and {{more}} more are waiting",
     "proposalReview": "Review",
@@ -1113,6 +1133,8 @@
     "folderFor": "for {{programs}}",
     "guessed": "Guessed from {{files}}.",
     "fromCi": "Taken from your CI: {{files}}.",
+    "fromCiChecks": "From your CI: {{commands}}.",
+    "ciLeftOut": "Left out of the check, though your CI runs them: {{commands}}.",
     "noGuess": "Keel couldn't tell how this project tests itself, so these are empty.",
     "tryNote": "Trying it uses no tokens.",
     "noCheckNote": "Without a check, runs go out unverified.",

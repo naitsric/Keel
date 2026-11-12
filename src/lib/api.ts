@@ -30,6 +30,9 @@ export type ToolProfile = "readOnly" | "build";
 /** What became of a pull request after Keel opened it, as of the last time it looked. */
 export type PrState = "open" | "draft" | "merged" | "closed";
 
+/** What a pull request's CI said about its latest commit, as of the last time Keel looked. */
+export type CiState = "pending" | "passed" | "failed" | "noCi";
+
 /** A code with its data. The backend sends no sentences; `reasonText` writes them. */
 export type Reason = { code: string } & Record<string, unknown>;
 
@@ -116,6 +119,29 @@ export interface Guess {
   checkOptions: string[];
   /** It's what the project's CI runs, since nothing else here says how it installs and tests. */
   fromCi: boolean;
+  /** What the check runs because the project's CI does, though nothing else here names it, as Keel runs it with no network. */
+  ciChecks: string[];
+  /** What else the CI checks, as it runs it, and why the check doesn't. */
+  ciLeftOut: CiLeftOut[];
+}
+
+/** Why a command the CI runs isn't added to the check: Keel can't be sure it runs in its sandbox, with no network, as in CI. */
+export type CiWhy = "offline" | "mayFail" | "env" | "sometimes" | "installs" | "template";
+
+/** A command the CI runs, as it runs it, and why the check doesn't. */
+export interface CiLeftOut {
+  command: string;
+  why: CiWhy;
+}
+
+/** What a project's CI checks and its saved check doesn't run. Keel never adds them by itself. */
+export interface CiGap {
+  /** As Keel runs them with no network, for a person to add. */
+  commands: string[];
+  /** As the CI runs them, and why a check doesn't. */
+  leftOut: CiLeftOut[];
+  /** The CI's files they're in. */
+  from: string[];
 }
 
 export interface ProjectSetup {
@@ -440,6 +466,10 @@ export interface Run {
   /** When that happened, going by GitHub. */
   prStateAt: string | null;
   prCheckedAt: string | null;
+  /** Null until Keel knows. */
+  prCi: CiState | null;
+  /** The checks that failed, by name. */
+  prCiFailed: string[];
 }
 
 /** How a workflow's runs in a project have gone. */
@@ -613,6 +643,8 @@ export interface BoardCard {
   prUrl: string | null;
   prState: PrState | null;
   prStateAt: string | null;
+  prCi: CiState | null;
+  prCiFailed: string[];
   /** What the person wrote when rejecting. It may be empty. */
   rejection: string | null;
   startBlocked: Reason | null;
@@ -747,6 +779,8 @@ export const api = {
   projectProposalAccept: (proposalId: string, language: string) => invoke<ProjectAdded>("project_proposal_accept", { proposalId, language }),
   projectProposalDiscard: (proposalId: string) => invoke<void>("project_proposal_discard", { proposalId }),
   projectSetup: (projectId: string) => invoke<ProjectSetup>("project_setup", { projectId }),
+  /** Only reads the repo. */
+  projectCiGap: (projectId: string) => invoke<CiGap>("project_ci_gap", { projectId }),
   projectToolFolders: (projectId: string, setup: string, check: string) => invoke<ToolFolder[]>("project_tool_folders", { projectId, setup, check }),
   /** `read` is the folders the commands may read on top of the project's, for this run only. */
   projectTryCheck: (projectId: string, setup: string, check: string, read: string[], language: string) => invoke<string>("project_try_check", { projectId, setup, check, read, language }),

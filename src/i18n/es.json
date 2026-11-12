@@ -294,6 +294,12 @@
       "mergedAt": "Pull request mergeado el {{when}}",
       "closedAt": "Pull request cerrado sin mergear el {{when}}"
     },
+    "ci": {
+      "failed": "CI en rojo: {{checks}}",
+      "failedUnnamed": "CI en rojo",
+      "pending": "CI corriendo",
+      "passed": "CI en verde"
+    },
     "fromIssue": "Del issue #{{number}}",
     "base": "Basado en {{base}}",
     "decideApproval": "Aprueba o rechaza arriba.",
@@ -946,6 +952,8 @@
       "merged": "Mergeado",
       "closed": "Cerrado sin mergear"
     },
+    "ciFailed": "CI en rojo: {{checks}}",
+    "ciFailedUnnamed": "CI en rojo",
     "needed": {
       "waitingApproval": "Ábrela para aprobar o rechazar.",
       "waitingAnswers": "Ábrela para responder.",
@@ -1067,6 +1075,18 @@
     "dangerTitle": "Zona de peligro",
     "dangerHint": "Saca el proyecto de Keel. Tu carpeta no se toca.",
     "finishSetup": "Terminar de configurar",
+    "ciMissing": "Tu CI corre esto y tu verificación no:",
+    "ciMissingAdd": "Agregar a la verificación",
+    "ciLeftOut": "Fuera del check, aunque tu CI los corre:",
+    "ciWhy": {
+      "offline": "Keel no puede correrlo sin red como en CI",
+      "mayFail": "CI deja que falle",
+      "env": "CI le define variables",
+      "sometimes": "CI lo corre solo a veces",
+      "installs": "su job instala más cosas antes",
+      "template": "usa una plantilla de otro archivo"
+    },
+    "pyrightNode": "pyright necesita Node disponible sin red.",
     "proposalBanner_one": "{{client}} propone agregar {{name}}",
     "proposalBanner_other": "{{client}} propone agregar {{name}}, y hay {{more}} más esperando",
     "proposalReview": "Revisar",
@@ -1113,6 +1133,8 @@
     "folderFor": "para {{programs}}",
     "guessed": "Deducido de {{files}}.",
     "fromCi": "Sacado de tu CI: {{files}}.",
+    "fromCiChecks": "De tu CI: {{commands}}.",
+    "ciLeftOut": "Fuera del check, aunque tu CI los corre: {{commands}}.",
     "noGuess": "Keel no pudo saber cómo se prueba este proyecto, así que esto queda vacío.",
     "tryNote": "Probarlo no gasta tokens.",
     "noCheckNote": "Sin una verificación, las ejecuciones salen sin verificar.",

@@ -6,7 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { vi } from "vitest";
 import App from "../App";
 import i18next from "../i18n";
-import type { Attempt, AttemptState, BoardCard, Project, Run, RunRow, ToolFolder } from "../lib/api";
+import type { Attempt, AttemptState, BoardCard, CiGap, Project, Run, RunRow, ToolFolder } from "../lib/api";
 import { useApp, type View } from "../lib/store";
 import { useCommands } from "./registry";
 import { useSearchEverywhere } from "./SearchEverywhere";
@@ -38,6 +38,12 @@ export let calls: { command: string; args: unknown }[] = [];
 
 let root: Root | null = null;
 let shownRuns: RunRow[] = [];
+let ciGaps: Record<string, CiGap> = {};
+
+/** What a project's CI checks and its check doesn't, until `hideApp`. */
+export const setCiGap = (projectId: string, gap: CiGap) => {
+  ciGaps = { ...ciGaps, [projectId]: gap };
+};
 
 export const callsTo = (command: string) => calls.filter((call) => call.command === command);
 
@@ -82,6 +88,8 @@ function backend(command: string, args: unknown) {
       return { repo: "acme/demo", accounts: [], info: null, excessScopes: [], error: null };
     case "project_tool_folders":
       return toolFolders;
+    case "project_ci_gap":
+      return ciGaps[projectId ?? ""] ?? { commands: [], leftOut: [], from: [] };
     case "overview":
       return useApp.getState().overview;
     case "max_agents_get":
@@ -114,6 +122,7 @@ export async function hideApp() {
   await act(async () => root?.unmount());
   root = null;
   toolFolders = [];
+  ciGaps = {};
   await settle();
   document.body.replaceChildren();
   // Radix leaves this for a dialog that closes with the page; the next test starts clean.

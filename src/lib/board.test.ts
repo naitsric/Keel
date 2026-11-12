@@ -23,6 +23,8 @@ const card = (id: string, column: BoardColumn, extra: Partial<BoardCard> = {}): 
   prUrl: null,
   prState: null,
   prStateAt: null,
+  prCi: null,
+  prCiFailed: [],
   rejection: null,
   startBlocked: null,
   createdAt: "2026-11-05T00:00:00Z",
@@ -64,6 +66,25 @@ describe("what a done card says about its pull request", () => {
   it("speaks Spanish too", () => {
     expect(cardLabel(t("es"), card("d", "done", { prState: "merged", prStateAt: null }))?.label).toBe("Mergeado");
     expect(cardLabel(t("es"), card("d", "done", { prState: "closed", prStateAt: null }))?.label).toBe("Cerrado sin mergear");
+  });
+
+  it("turns red when its CI fails, and says which checks", () => {
+    for (const prState of ["open", "draft"] as const) {
+      const red = done({ prState, prCi: "failed", prCiFailed: ["lint", "pyright"] });
+      expect(red?.state).toBe("failed");
+      expect(red?.label).toBe(en(`board.pr.${prState}`));
+      expect(red?.detail).toBe("CI failed: lint, pyright");
+    }
+    expect(cardLabel(t("es"), card("d", "done", { prState: "open", prCi: "failed", prCiFailed: ["lint"] }))?.detail).toBe("CI en rojo: lint");
+    // GitHub can say it failed without Keel knowing which check: no colon and nothing after it.
+    expect(done({ prState: "open", prCi: "failed", prCiFailed: [] })?.detail).toBe("CI failed");
+    expect(cardLabel(t("es"), card("d", "done", { prState: "open", prCi: "failed", prCiFailed: [] }))?.detail).toBe("CI en rojo");
+    // Anything else about the CI stays off the card, and so does a failure once it's merged or closed.
+    for (const extra of [{ prState: "open", prCi: "pending" }, { prState: "open", prCi: "passed" }, { prState: "open", prCi: "noCi" }, { prState: "merged", prCi: "failed", prCiFailed: ["lint"] }] as Partial<BoardCard>[]) {
+      const label = done(extra);
+      expect(label?.state).not.toBe("failed");
+      expect(label?.detail ?? "").not.toContain("CI");
+    }
   });
 
   it("only shows on a card that's done: its column still comes from the run", () => {

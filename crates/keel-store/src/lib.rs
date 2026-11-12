@@ -9,7 +9,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use keel_core::{
-    AttemptState, BoardColumn, CardLane, EnvVar, PrState, Reason, Service, card_column,
+    AttemptState, BoardColumn, CardLane, CiState, EnvVar, PrState, Reason, Service, card_column,
 };
 pub use rusqlite::types as rusqlite_value;
 use rusqlite::types::Value;
@@ -347,6 +347,12 @@ const MIGRATIONS: &[&str] = &[
           and part.todo_at = part.created_at
           and c.tool = 'propose_change' and c.ok = 1
         order by c.seq limit 1);
+"#,
+    // 18: What a run's pull request's CI said, as of `pr_checked_at`, and the checks that failed.
+    // Null until Keel looks, and on older runs.
+    r#"
+    alter table run add column pr_ci text;
+    alter table run add column pr_ci_failed text;
 "#,
 ];
 
@@ -723,6 +729,10 @@ pub struct Run {
     /// it. Empty for any other run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub extra_read: Vec<String>,
+    /// What its pull request's CI said, as of `pr_checked_at`. None until Keel knows.
+    pub pr_ci: Option<CiState>,
+    /// The checks that failed, by name, when some did.
+    pub pr_ci_failed: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -740,10 +750,19 @@ pub struct NewRun {
     pub started_by: Option<String>,
 }
 
-const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by, workflow_id, workflow_name, pr_state, pr_state_at, pr_checked_at, pr_head, extra_read";
+const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by, workflow_id, workflow_name, pr_state, pr_state_at, pr_checked_at, pr_head, extra_read, pr_ci, pr_ci_failed";
 
 fn pr_state_from(text: Option<String>) -> Option<PrState> {
     text.as_deref().and_then(PrState::parse)
+}
+
+fn ci_state_from(text: Option<String>) -> Option<CiState> {
+    text.as_deref().and_then(CiState::parse)
+}
+
+fn names_from(text: Option<String>) -> Vec<String> {
+    text.and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
 }
 
 fn run_from(r: &Row) -> rusqlite::Result<Run> {
@@ -772,6 +791,8 @@ fn run_from(r: &Row) -> rusqlite::Result<Run> {
         pr_checked_at: r.get(19)?,
         pr_head: r.get(20)?,
         extra_read: serde_json::from_str(&r.get::<_, String>(21)?).unwrap_or_default(),
+        pr_ci: ci_state_from(r.get(22)?),
+        pr_ci_failed: names_from(r.get(23)?),
     })
 }
 
@@ -1070,6 +1091,8 @@ pub struct Card {
     pub pr_url: Option<String>,
     pub pr_state: Option<PrState>,
     pub pr_state_at: Option<String>,
+    pub pr_ci: Option<CiState>,
+    pub pr_ci_failed: Vec<String>,
     /// What the person wrote when rejecting it. Empty if they wrote nothing.
     pub rejection: Option<String>,
     /// The change across several projects it belongs to, as the card where it's agreed or as one
@@ -1181,6 +1204,8 @@ fn card_from(r: &Row) -> rusqlite::Result<Card> {
         pr_url: r.get("run_pr_url")?,
         pr_state: pr_state_from(r.get("run_pr_state")?),
         pr_state_at: r.get("run_pr_state_at")?,
+        pr_ci: ci_state_from(r.get("run_pr_ci")?),
+        pr_ci_failed: names_from(r.get("run_pr_ci_failed")?),
         // A rejection with nothing written leaves no decision, and is still a rejection.
         rejection: (run_state == Some(AttemptState::Rejected))
             .then(|| rejection.unwrap_or_default()),
@@ -1204,6 +1229,7 @@ fn read_cards<P: rusqlite::Params>(
     let mut stmt = conn.prepare(&format!(
         "select c.*, r.created_at as run_started_at, r.finished_at as run_finished_at, r.pr_url as run_pr_url,
                 r.pr_state as run_pr_state, r.pr_state_at as run_pr_state_at,
+                r.pr_ci as run_pr_ci, r.pr_ci_failed as run_pr_ci_failed,
                 a.state as attempt_state, a.reason as attempt_reason, {ready} as is_ready,
                 (select d.text from decision d where d.attempt_id = a.id and d.answer = 'reject'
                  order by d.seq desc limit 1) as rejection
@@ -3268,6 +3294,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 alter table run drop column pr_ci_failed;
+                 alter table run drop column pr_ci;
                  alter table run drop column started_for_client;
                  alter table run drop column extra_read;
                  alter table attempt drop column skipped_tests;
@@ -3590,6 +3618,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 15;
+                 alter table run drop column pr_ci_failed;
+                 alter table run drop column pr_ci;
                  alter table card drop column rerun_of;
                  alter table card drop column queued_by_client;
                  alter table run drop column started_for_client;
@@ -5250,6 +5280,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table run drop column pr_ci_failed;
+                 alter table run drop column pr_ci;
                  alter table card drop column rerun_of;
                  alter table card drop column queued_by_client;
                  alter table run drop column started_for_client;
@@ -6079,6 +6111,8 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "pragma user_version = 16;
+             alter table run drop column pr_ci_failed;
+             alter table run drop column pr_ci;
              alter table card drop column rerun_of;
              alter table card drop column queued_by_client;
              alter table run drop column started_for_client;",
@@ -6891,5 +6925,58 @@ mod tests {
             serde_json::to_value(store.attempt("a").unwrap()).unwrap()["skippedTests"],
             385
         );
+    }
+
+    #[test]
+    fn a_pull_requests_ci_is_unknown_on_runs_from_before_keel_looked_at_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        // What the version before left: a delivered run on a card.
+        let before = 17;
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..before] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.pragma_update(None, "user_version", before as i64)
+                .unwrap();
+            conn.execute_batch(
+                "insert into project (id, name, path, created_at) values ('p', 'demo', '/demo', 'then');
+                 insert into run (id, project_id, title, created_at, pr_url, pr_number, pr_state, finished_at)
+                     values ('r', 'p', 'old', 'then', 'https://github.com/acme/app/pull/3', 3, 'open', 'then');
+                 insert into card (id, project_id, title, lane, position, run_id, created_at)
+                     values ('done', 'p', 'old', 'started', 0, 'r', 'then');",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let run = store.run("r").unwrap();
+        assert_eq!(run.pr_ci, None);
+        assert!(run.pr_ci_failed.is_empty());
+        let card = store.card("done").unwrap();
+        assert_eq!(card.pr_ci, None);
+        assert!(card.pr_ci_failed.is_empty());
+
+        store
+            .patch_run(
+                "r",
+                &[
+                    ("pr_ci", Value::Text("failed".into())),
+                    ("pr_ci_failed", Value::Text(r#"["lint","pyright"]"#.into())),
+                ],
+            )
+            .unwrap();
+        let run = store.run("r").unwrap();
+        assert_eq!(run.pr_ci, Some(CiState::Failed));
+        assert_eq!(run.pr_ci_failed, ["lint", "pyright"]);
+        let as_sent = serde_json::to_value(&run).unwrap();
+        assert_eq!(as_sent["prCi"], "failed");
+        assert_eq!(
+            as_sent["prCiFailed"],
+            serde_json::json!(["lint", "pyright"])
+        );
+        let card = store.card("done").unwrap();
+        assert_eq!(card.pr_ci, Some(CiState::Failed));
+        assert_eq!(card.pr_ci_failed, ["lint", "pyright"]);
     }
 }

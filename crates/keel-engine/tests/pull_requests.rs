@@ -8,7 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use keel_core::{
-    AttemptState, BoardColumn, CardLane, PrState, StepRole, StepSpec, ToolProfile, WorkflowStep,
+    AttemptState, BoardColumn, CardLane, CiState, PrState, StepRole, StepSpec, ToolProfile,
+    WorkflowStep,
 };
 use keel_engine::{Config, Engine, StartRun, Workflow};
 use keel_harness::Tools;
@@ -90,8 +91,8 @@ echo "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\
     )
 }
 
-/// `pr view` answers with what's in `pr-view`, and fails without it. `pr create` refuses a
-/// description GitHub would refuse.
+/// `api graphql` answers with what's in `pr-view`, and fails without it, or when asked about the
+/// checks with `no-checks` there. `pr create` refuses a description GitHub would refuse.
 fn fake_gh(log: &Path, flags: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -108,7 +109,10 @@ case "$1 $2" in
   for a in "$@"; do [ "$prev" = "--body-file" ] && cp "$a" "{log}/pr-body.md"; prev="$a"; done
   if [ "$(wc -m < "{log}/pr-body.md")" -gt 65536 ]; then echo "Body is too long (maximum is 65536 characters)" >&2; exit 1; fi
   echo "https://github.com/acme/app/pull/12"; exit 0;;
-"pr view")
+"api graphql")
+  case "$*" in *statusCheckRollup*)
+    if [ -f "{flags}/no-checks" ]; then echo "gh: Resource not accessible by personal access token" >&2; exit 1; fi;;
+  esac
   if [ -f "{flags}/pr-view" ]; then cat "{flags}/pr-view"; exit 0; fi
   echo "HTTP 502: Bad Gateway (https://api.github.com/graphql)" >&2; exit 1;;
 esac
@@ -212,10 +216,15 @@ fn delivering_steps() -> Vec<WorkflowStep> {
     ]
 }
 
+/// How GitHub's GraphQL answers about a pull request, as `gh api graphql` prints it.
+fn answer(pull_request: &str) -> String {
+    format!(r#"{{"data":{{"repository":{{"pullRequest":{pull_request}}}}}}}"#)
+}
+
 fn pr_view(state: &str, draft: bool, at: &str) -> String {
-    format!(
+    answer(&format!(
         r#"{{"state":"{state}","isDraft":{draft},"mergedAt":"{at}","closedAt":"{at}","updatedAt":"{at}"}}"#
-    )
+    ))
 }
 
 impl World {
@@ -223,8 +232,9 @@ impl World {
         std::fs::read_to_string(self.log.join("gh.log")).unwrap_or_default()
     }
 
+    /// Every call, including one asked again without the checks.
     fn asked_about_prs(&self) -> usize {
-        self.gh_log().matches("gh pr view").count()
+        self.gh_log().matches("gh api graphql").count()
     }
 
     fn body(&self) -> String {
@@ -736,16 +746,16 @@ fn opening_a_run_finds_out_what_became_of_its_pull_request_and_only_reads() {
     });
     let gh = w.gh_log();
     assert!(
-        gh.contains(
-            "gh pr view 12 --repo acme/app --json state,isDraft,mergedAt,closedAt,updatedAt,headRefOid"
-        ),
+        gh.contains(" -f owner=acme -f name=app -F number=12"),
         "{gh}"
     );
-    let on_prs: Vec<&str> = gh.lines().filter(|l| l.starts_with("gh pr ")).collect();
+    let on_prs: Vec<&str> = gh
+        .lines()
+        .filter(|l| l.starts_with("gh pr ") || l.starts_with("gh api graphql"))
+        .collect();
     assert!(
-        on_prs
-            .iter()
-            .all(|l| l.starts_with("gh pr view") || l.starts_with("gh pr create")),
+        on_prs.iter().all(|l| l.starts_with("gh pr create")
+            || (l.starts_with("gh api graphql -f query=query(") && !l.contains("mutation"))),
         "after opening it, nothing writes to it: {on_prs:?}"
     );
 }
@@ -900,10 +910,39 @@ fn a_pull_request_that_was_already_there_is_unknown_until_keel_looks() {
     w.engine.look_at_pr(&run);
     w.wait_pr_state(&run, PrState::Open);
     assert!(
-        w.gh_log().contains("gh pr view 99 --repo acme/app"),
+        w.gh_log()
+            .contains(" -f owner=acme -f name=app -F number=99"),
         "{}",
         w.gh_log()
     );
+}
+
+#[test]
+fn delivering_to_a_pull_request_already_there_forgets_what_its_ci_said() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    std::fs::write(w.flags.join("pr-exists"), "").unwrap();
+    let workflow = w.saved(delivering_steps());
+    let run = w.start(&workflow);
+    let human = w.wait_step(&run, "human", AttemptState::WaitingApproval);
+    // What a look said about the commit before this one.
+    w.store
+        .patch_run(
+            &run,
+            &[
+                ("pr_ci", Value::Text("failed".into())),
+                ("pr_ci_failed", Value::Text(r#"["lint"]"#.into())),
+            ],
+        )
+        .unwrap();
+    w.engine.answer_approval(&human.id, true, "").unwrap();
+    w.until("the run finishing", || {
+        w.store.run(&run).unwrap().finished_at.is_some()
+    });
+    let found = w.store.run(&run).unwrap();
+    assert_eq!(found.pr_number, Some(99));
+    assert_eq!(found.pr_ci, None, "it was about another commit");
+    assert!(found.pr_ci_failed.is_empty());
 }
 
 #[test]
@@ -1011,6 +1050,174 @@ fn a_card_shows_what_became_of_its_pull_request_and_stays_done_either_way() {
     let as_sent = serde_json::to_value(card()).unwrap();
     assert_eq!(as_sent["prState"], "merged");
     assert_eq!(as_sent["prStateAt"], "2026-11-06T10:00:00Z");
+}
+
+/// An open pull request whose CI GitHub sums up as `verdict`, with these checks.
+fn pr_view_with_checks(verdict: &str, checks: &str) -> String {
+    answer(&format!(
+        r#"{{"state":"OPEN","isDraft":false,"mergedAt":null,"closedAt":null,"updatedAt":"2026-11-06T09:00:00Z",{}}}"#,
+        head_ci(verdict, checks)
+    ))
+}
+
+/// What the query asks of the head commit's CI.
+fn head_ci(verdict: &str, checks: &str) -> String {
+    format!(
+        r#""commits":{{"nodes":[{{"commit":{{"verdict":{{"state":"{verdict}"}},"checks":{{"contexts":{{"nodes":[{checks}]}}}}}}}}]}}"#
+    )
+}
+
+const LINT_FAILED: &str = r#"{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}"#;
+
+#[test]
+fn a_pull_request_whose_ci_fails_says_so_on_its_run_and_its_card() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let workflow = w.saved(delivering_steps());
+    let run = w
+        .engine
+        .start_run_on_board(StartRun {
+            project_id: w.project_id.clone(),
+            title: None,
+            request: "Fix the bug".into(),
+            workflow: workflow.steps.clone(),
+            saved_workflow: Some(workflow.reference()),
+            language: "en".into(),
+            source_issue: None,
+            started_by: None,
+        })
+        .unwrap();
+    let human = w.wait_step(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&human.id, true, "").unwrap();
+    w.until("the run finishing", || {
+        w.store.run(&run).unwrap().finished_at.is_some()
+    });
+    assert_eq!(w.store.run(&run).unwrap().pr_ci, None, "nobody has looked");
+    let ci = || {
+        let found = w.store.run(&run).unwrap();
+        (found.pr_ci, found.pr_ci_failed)
+    };
+
+    std::fs::write(
+        w.flags.join("pr-view"),
+        pr_view_with_checks("FAILURE", LINT_FAILED),
+    )
+    .unwrap();
+    w.forget_looking(&run);
+    let told = w.changes.lock().unwrap().len();
+    w.engine.look_at_pr(&run);
+    w.until("the CI reading failed", || ci().0 == Some(CiState::Failed));
+    assert_eq!(ci().1, ["lint"]);
+    w.until("the app hearing of it", || {
+        w.changes.lock().unwrap()[told..].contains(&run)
+    });
+    let card = w.engine.board(&w.project_id).unwrap().cards.remove(0);
+    assert_eq!(card.pr_ci, Some(CiState::Failed));
+    let as_sent = serde_json::to_value(card).unwrap();
+    assert_eq!(as_sent["prCi"], "failed");
+    assert_eq!(as_sent["prCiFailed"], serde_json::json!(["lint"]));
+
+    // Fixed and pushed: the next look says so.
+    let passed = LINT_FAILED.replace("FAILURE", "SUCCESS");
+    std::fs::write(
+        w.flags.join("pr-view"),
+        pr_view_with_checks("SUCCESS", &passed),
+    )
+    .unwrap();
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.until("the CI reading passed", || ci().0 == Some(CiState::Passed));
+    assert!(ci().1.is_empty());
+
+    // GitHub's word wins over a failed run that a later one replaced, as in psf/black#5677.
+    std::fs::write(
+        w.flags.join("pr-view"),
+        pr_view_with_checks("PENDING", &passed),
+    )
+    .unwrap();
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.until("the CI reading pending", || {
+        ci().0 == Some(CiState::Pending)
+    });
+    std::fs::write(
+        w.flags.join("pr-view"),
+        pr_view_with_checks("SUCCESS", LINT_FAILED),
+    )
+    .unwrap();
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.until("the CI reading passed again", || {
+        ci().0 == Some(CiState::Passed)
+    });
+    assert!(ci().1.is_empty());
+
+    // An answer that doesn't say what the CI says leaves it unknown, since it may be about another
+    // commit by now.
+    w.set_pr_view("OPEN", false, "2026-11-06T09:30:00Z");
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.until("the new time arriving", || {
+        w.store.run(&run).unwrap().pr_state_at.as_deref() == Some("2026-11-06T09:30:00Z")
+    });
+    assert_eq!(ci(), (None, Vec::new()));
+}
+
+#[test]
+fn a_new_commit_read_without_its_checks_leaves_the_ci_unknown() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.delivered();
+    let view = |head: &str, checks: &str| {
+        answer(&format!(
+            r#"{{"state":"OPEN","isDraft":false,"updatedAt":"2026-11-06T09:00:00Z","headRefOid":"{head}"{checks}}}"#
+        ))
+    };
+    std::fs::write(
+        w.flags.join("pr-view"),
+        view("aaa", &format!(",{}", head_ci("FAILURE", LINT_FAILED))),
+    )
+    .unwrap();
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.until("the CI reading failed", || {
+        w.store.run(&run).unwrap().pr_ci == Some(CiState::Failed)
+    });
+
+    // Someone pushes, and this time the checks can't be read.
+    std::fs::write(w.flags.join("no-checks"), "").unwrap();
+    std::fs::write(w.flags.join("pr-view"), view("bbb", "")).unwrap();
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.until("the new commit arriving", || {
+        w.store.run(&run).unwrap().pr_head.as_deref() == Some("bbb")
+    });
+    let found = w.store.run(&run).unwrap();
+    assert_eq!(found.pr_ci, None, "what failed was another commit");
+    assert!(found.pr_ci_failed.is_empty());
+}
+
+#[test]
+fn a_token_that_cannot_read_the_checks_still_follows_the_pull_request() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.delivered();
+    std::fs::write(w.flags.join("no-checks"), "").unwrap();
+    w.set_pr_view("MERGED", false, "2026-11-06T10:00:00Z");
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.wait_pr_state(&run, PrState::Merged);
+    let found = w.store.run(&run).unwrap();
+    assert_eq!(found.pr_state_at.as_deref(), Some("2026-11-06T10:00:00Z"));
+    assert_eq!(found.pr_ci, None, "what its CI says stays unknown");
+    let asked: Vec<String> = w
+        .gh_log()
+        .lines()
+        .filter(|line| line.starts_with("gh api graphql"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(asked.len(), 2, "{asked:?}");
+    assert!(!asked[1].contains("statusCheckRollup"), "{asked:?}");
 }
 
 #[test]

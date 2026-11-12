@@ -1,4 +1,4 @@
-import { type Attempt, type Guess, isActive, type Project, type ProjectSettings, type ToolFolder } from "./api";
+import { type Attempt, type CiGap, type CiLeftOut, type Guess, isActive, type Project, type ProjectSettings, type ToolFolder } from "./api";
 
 /**
  * Whether a project still has setup to finish, worked out from the project so it clears itself
@@ -86,7 +86,35 @@ export function checkOptionsLeft(check: string, guess: Guess): string[] {
   return guess.checkOptions.filter((option) => !hasOption(check, option));
 }
 
-/** Each one has to pass, so a failure anywhere fails the check. */
+/** Where a comment starts under `sh -c`: a `#` that begins a word. After a quote one could be quoted, so none is looked for. */
+function commentAt(command: string): number {
+  for (let at = 0; at < command.length; at++) {
+    const c = command[at];
+    if (c === "'" || c === '"') return -1;
+    if (c === "#" && (at === 0 || /\s/.test(command[at - 1]))) return at;
+  }
+  return -1;
+}
+
+/** Each one has to pass, so a failure anywhere fails the check. It goes before a comment, which would hide it. */
 export function withCheckOption(check: string, option: string): string {
-  return check.trim() ? `${check.trim()} && ${option}` : option;
+  const trimmed = check.trim();
+  if (!trimmed) return option;
+  const at = commentAt(trimmed);
+  if (at < 0) return `${trimmed} && ${option}`;
+  const before = trimmed.slice(0, at).trim();
+  return `${before ? `${before} && ` : ""}${option} ${trimmed.slice(at)}`;
+}
+
+/** pyright from PyPI fetches Node the first time unless it's already installed, which a check with no network can't. */
+export const needsNode = (commands: string[]) => commands.some((command) => /\bpyright\b/.test(command));
+
+/** What the CI runs that isn't in this check yet, as it's being typed. */
+export function ciCommandsLeft(check: string, commands: CiGap["commands"]): string[] {
+  return commands.filter((command) => !hasOption(check, command));
+}
+
+/** What the CI runs that Keel left out, unless the check runs it anyway. */
+export function ciLeftOutLeft(check: string, leftOut: CiLeftOut[]): CiLeftOut[] {
+  return leftOut.filter((left) => !hasOption(check, left.command));
 }

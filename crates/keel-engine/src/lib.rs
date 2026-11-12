@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 pub use board::{Board, BoardCard, BoardIssue};
 pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
-pub use detect::Guess;
+pub use detect::{CiGap, CiLeftOut, CiWhy, Guess};
 pub use git::{ChangeSize, Git, GitError, Snapshot};
 pub use joint::{
     ContractPart, ContractView, JointCard, JointChangeView, Named, Neighbour, PartOf, PartWarning,
@@ -655,6 +655,20 @@ impl Engine {
             .collect();
         let path_env = locked(&self.inner.tools).path_env.clone();
         Ok(toolchains::find(&commands, &path_env, &runner::real_home()))
+    }
+
+    /// What the project's CI checks and its saved check doesn't run, for a person to add. Only
+    /// reads the repo. A project with no check saved has its setup to finish instead.
+    pub fn project_ci_gap(&self, id: &str) -> Result<CiGap> {
+        let project = self.inner.store.project(id)?;
+        Ok(match project.check_command {
+            Some(check) if !check.trim().is_empty() => detect::ci_gap(
+                Path::new(&project.path),
+                project.setup_command.as_deref().unwrap_or_default(),
+                &check,
+            ),
+            _ => CiGap::default(),
+        })
     }
 
     /// Tries commands before anyone saves them, in the real sandbox and with no model. Saved
