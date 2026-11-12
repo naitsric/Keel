@@ -1325,7 +1325,7 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
     case "stallCleared":
       return line(t("activity.stallCleared"));
     case "stopRequested":
-      return line(t("activity.stopRequested"));
+      return line(data.by ? t("activity.stopRequestedBy", { client: data.by }) : t("activity.stopRequested"));
     case "waitLonger":
       return line(t("activity.waitLonger"));
     case "commandKilled":

@@ -474,6 +474,16 @@ pub enum Reason {
     /// Only a setup or a check takes the project's commands as they are now. Any other step, a
     /// delivery included, retries as it is.
     NewCommandsNeedSetupOrCheck,
+    /// An assistant put the card back in Todo, and the person has since revoked it or taken away
+    /// its leave to start runs, so the card is back with them. `client` is its name.
+    AssistantMayNotRun {
+        client: String,
+    },
+    /// An assistant put the card back in Todo to run its last run again, and the saved workflow
+    /// that run used, called `workflow`, was deleted meanwhile.
+    RerunWorkflowMissing {
+        workflow: String,
+    },
 }
 
 /// Why a run doesn't count as small. Each is a fact the engine checked for itself, and any one is
@@ -732,7 +742,9 @@ impl Reason {
             | Self::NothingSkippedToRun
             | Self::KeptAsking { .. }
             | Self::PartsNotOpened { .. }
-            | Self::StartsOnTheBoard => false,
+            | Self::StartsOnTheBoard
+            | Self::AssistantMayNotRun { .. }
+            | Self::RerunWorkflowMissing { .. } => false,
             // One project that's only read. Its account being signed out must not hold up the rest.
             Self::ReadCopyFailed { .. } => false,
             Self::NewCommandsNeedSetupOrCheck => false,
@@ -1059,6 +1071,8 @@ mod tests {
                 false,
             ),
             (Reason::NewCommandsNeedSetupOrCheck, false),
+            (Reason::AssistantMayNotRun { client: text() }, false),
+            (Reason::RerunWorkflowMissing { workflow: text() }, false),
         ]
     }
 
@@ -1114,6 +1128,8 @@ mod tests {
             Reason::ReadCopyFailed { .. } => 46,
             Reason::SpecNotChecked { .. } => 47,
             Reason::NewCommandsNeedSetupOrCheck => 48,
+            Reason::AssistantMayNotRun { .. } => 49,
+            Reason::RerunWorkflowMissing { .. } => 50,
         }
     }
 
@@ -1127,7 +1143,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=48).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=50).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]

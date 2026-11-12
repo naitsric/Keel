@@ -7,15 +7,15 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use keel_core::{
-    AttemptState, Reason, StepCondition, StepRole, StepSpec, ToolProfile, WorkflowStep,
-    mask_secrets, mask_value,
+    AttemptState, BoardColumn, Reason, StepCondition, StepRole, StepSpec, ToolProfile,
+    WorkflowStep, mask_secrets, mask_value,
 };
 use keel_engine::{
     Error, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
     can_send_back, files_changed, request_from_issue, skipped_steps, spec_of_attempt,
     verification_of_attempt,
 };
-use keel_store::{Attempt, MAX_OPEN_RUNS_CEILING, McpClient, NewMcpCall, Project, Run};
+use keel_store::{Attempt, Card, MAX_OPEN_RUNS_CEILING, McpClient, NewMcpCall, Project, Run};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
@@ -272,6 +272,26 @@ pub struct RetryStepArgs {
 pub struct CloseRunArgs {
     /// A run's id.
     pub run: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendToCardArgs {
+    /// A card's id: a run's `cardId` from get_run, or a part's in `jointChange.parts`.
+    pub card: String,
+    /// What to add, plainly, in up to 16 KB. The card's next run gets it with the rest of what the
+    /// card says.
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveCardToTodoArgs {
+    /// A card's id: a run's `cardId` from get_run, or a part's in `jointChange.parts`.
+    pub card: String,
+    /// `en` or `es`, for what agents write. The app's language by default.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 // Nothing here can make it edit, reach the network or deliver. Anything else is refused rather than
@@ -1035,7 +1055,11 @@ impl McpServer {
                 ));
             }
             for attempt in working {
-                server.0.engine.stop(&attempt.id).map_err(engine_error)?;
+                server
+                    .0
+                    .engine
+                    .stop_by(&attempt.id, &client.name)
+                    .map_err(engine_error)?;
             }
             Ok((server.run_view(client, &args.run)?, Some(args.run)))
         })
@@ -1141,6 +1165,57 @@ impl McpServer {
                 .abandon_by(&target.id, &client.name)
                 .map_err(changed_meanwhile)?;
             Ok((server.run_view(client, &args.run)?, Some(args.run)))
+        })
+        .await
+    }
+
+    /// A note at the end of a card of the client's own that waits, as the person could edit it.
+    /// It's feedback, so it needs the person's leave as send_back does.
+    pub(crate) async fn append_to_card(
+        &self,
+        client: McpClient,
+        args: AppendToCardArgs,
+    ) -> Result<Json, ToolError> {
+        self.call(client, "append_to_card", args, |server, client, args| {
+            may_steer(client)?;
+            let card = server.own_card(client, &args.card)?;
+            server.note_target(client, &card)?;
+            let text = args.text.trim();
+            if text.is_empty() || text.len() > MAX_TEXT {
+                return Err(ToolError::new("Say what to add in `text`, in up to 16 KB."));
+            }
+            let language = server.language(None)?;
+            server
+                .0
+                .engine
+                .card_append_by(&card.id, text, &client.id, &client.name, &language)
+                .map_err(card_changed_meanwhile)?;
+            Ok((server.card_view(client, &card.id)?, None))
+        })
+        .await
+    }
+
+    /// Puts a card of the client's own back in Todo, which starts a run as start_run does, so it
+    /// counts toward the client's open runs from now on.
+    pub(crate) async fn move_card_to_todo(
+        &self,
+        client: McpClient,
+        args: MoveCardToTodoArgs,
+    ) -> Result<Json, ToolError> {
+        self.call(client, "move_card_to_todo", args, |server, client, args| {
+            if !client.can_run {
+                return Err(may_only_read());
+            }
+            let card = server.own_card(client, &args.card)?;
+            server.queue_target(client, &card)?;
+            let language = server.language(args.language.as_deref())?;
+            server.room_for_another_run(client)?;
+            server
+                .0
+                .engine
+                .card_queue_by(&card.id, &language, &client.id)
+                .map_err(card_changed_meanwhile)?;
+            Ok((server.card_view(client, &card.id)?, None))
         })
         .await
     }
@@ -1308,7 +1383,7 @@ impl McpServer {
             .map_err(store_error)?;
         if open >= client.max_open_runs.clamp(1, MAX_OPEN_RUNS_CEILING) {
             return Err(ToolError::new(format!(
-                "This client has as many runs open as the person allows it ({open}). A run that waits for the person stays open until they decide in Keel, or until you close it with close_run if you won't take it further. list_runs with `mine` finds them. The person can also raise the limit in Keel's settings."
+                "This client has as many runs open as the person allows it ({open}). A run that waits for the person stays open until they decide in Keel, or until you close it with close_run if you won't take it further. A card you put back in Todo counts from when it can start, and then as its run, which close_run closes once it has started. list_runs with `mine` finds them. The person can also raise the limit in Keel's settings."
             )));
         }
         Ok(())
@@ -1341,6 +1416,158 @@ impl McpServer {
         }
         let run = store.run(run_id).map_err(store_error)?;
         Ok((run, attempts))
+    }
+
+    /// A card of a run or a change this client started, or why it may not act on it.
+    fn own_card(&self, client: &McpClient, card_id: &str) -> Result<Card, ToolError> {
+        let store = &self.0.store;
+        let card = store.card(card_id).map_err(|_| {
+            ToolError::new(
+                "Keel has no card with that id. get_run has a run's `cardId`, and `jointChange.parts` each part's.",
+            )
+        })?;
+        if !store
+            .card_of_mcp_client(card_id, &client.id)
+            .map_err(store_error)?
+        {
+            return Err(ToolError::new(
+                "Only the person acts on a card of a run or change this client didn't start, in Keel.",
+            ));
+        }
+        Ok(card)
+    }
+
+    /// The tools this client may use on a card right now, by the same rules the tools follow.
+    fn card_you_can(
+        &self,
+        client: &McpClient,
+        card: &Card,
+    ) -> Result<Vec<&'static str>, ToolError> {
+        let mut tools = Vec::new();
+        if !client.can_run
+            || !self
+                .0
+                .store
+                .card_of_mcp_client(&card.id, &client.id)
+                .map_err(store_error)?
+        {
+            return Ok(tools);
+        }
+        if may_steer(client).is_ok() && self.note_target(client, card).is_ok() {
+            tools.push("append_to_card");
+        }
+        if self.queue_target(client, card).is_ok() && self.room_for_another_run(client).is_ok() {
+            tools.push("move_card_to_todo");
+        }
+        Ok(tools)
+    }
+
+    /// Whether a client could add a note to a card of its own: one it put in Todo, a part waiting
+    /// there as its change opened it, or one in the Backlog whose last run it closed itself. Its
+    /// run gets the note when it starts. A card the person put in Todo, ended or held back is
+    /// theirs, and a note on it would ride along in their run. The store looks again as it writes.
+    fn note_target(&self, client: &McpClient, card: &Card) -> Result<(), ToolError> {
+        match card.column() {
+            BoardColumn::Todo
+                if card.queued_by_client.as_deref() == Some(client.id.as_str())
+                    || card.waits_as_opened() =>
+            {
+                Ok(())
+            }
+            BoardColumn::Todo => Err(ToolError::new(
+                "The person put this card in Todo, so what its run is asked is theirs, in Keel.",
+            )),
+            BoardColumn::Backlog => self.closed_by_client(client, card),
+            BoardColumn::Done => Err(ToolError::new(
+                "This card's run has finished, so a note would reach nothing.",
+            )),
+            BoardColumn::InProgress | BoardColumn::HumanReview => Err(ToolError::new(
+                "This card's run is underway, so what it was asked can't change now. A note goes on a card waiting in Todo, or in the Backlog once this client closed its run.",
+            )),
+        }
+    }
+
+    /// Whether a client could put a card back in Todo: only one in the Backlog whose last run it
+    /// closed itself, and that can start again as start_run or start_task would start it today.
+    /// The store looks again as the card moves.
+    fn queue_target(&self, client: &McpClient, card: &Card) -> Result<(), ToolError> {
+        match card.column() {
+            BoardColumn::Backlog => {
+                self.closed_by_client(client, card)?;
+                let run_id = card.run_id.as_deref().unwrap_or_default();
+                let language = self.language(None)?;
+                if !self
+                    .0
+                    .engine
+                    .can_run_again(run_id, &language)
+                    .map_err(engine_error)?
+                {
+                    let run = self.0.store.run(run_id).map_err(store_error)?;
+                    return Err(ToolError::new(match run.workflow_id {
+                        Some(_) => {
+                            "The workflow this card's last run used isn't in Keel anymore, so only the person can start it again, in Keel."
+                        }
+                        None => {
+                            "This card's last run was neither a saved workflow nor a task that only reads, so only the person can start it again, in Keel."
+                        }
+                    }));
+                }
+                Ok(())
+            }
+            BoardColumn::Todo => Err(ToolError::new(
+                "This card is already in Todo, waiting to start.",
+            )),
+            BoardColumn::Done => Err(ToolError::new("This card's run has finished.")),
+            BoardColumn::InProgress | BoardColumn::HumanReview => Err(ToolError::new(
+                "This card's run is still open. Close it with close_run first, after stop_run if something in it is working.",
+            )),
+        }
+    }
+
+    /// Whether a card waits in the Backlog because this client closed its last run itself, with
+    /// nothing the person did ending it or holding the card back.
+    fn closed_by_client(&self, client: &McpClient, card: &Card) -> Result<(), ToolError> {
+        if card.joint_change_id.as_deref() == Some(card.id.as_str()) {
+            return Err(ToolError::new(
+                "This card is where a change across projects is agreed. To agree on one again, use propose_change.",
+            ));
+        }
+        if card.rejection.is_some() {
+            return Err(ToolError::new(
+                "The person rejected this card's run. What happens to it is theirs to decide, in Keel.",
+            ));
+        }
+        let Some(run) = card.run_id.as_deref() else {
+            return Err(ToolError::new(
+                "This card has no run this client closed: the person is holding it in the Backlog, or it couldn't start. Either way it's the person's to decide, in Keel.",
+            ));
+        };
+        if !self
+            .0
+            .store
+            .run_closed_by_mcp_client(run, &client.id)
+            .map_err(store_error)?
+        {
+            return Err(ToolError::new(
+                "The person ended this card's last run, closing or stopping it, or tried it again after this client closed it, so whether it runs again is theirs to decide, in Keel.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A card as the card tools return it. What it says ends with the latest note, so a long one
+    /// keeps its end.
+    fn card_view(&self, client: &McpClient, card_id: &str) -> Result<Json, ToolError> {
+        let card = self.0.store.card(card_id).map_err(store_error)?;
+        Ok(json!({
+            "cardId": card.id,
+            "projectId": card.project_id,
+            "title": card.title,
+            "body": capped_end(&card.body, MAX_TEXT),
+            "column": card.column(),
+            "runId": card.run_id,
+            "youCan": self.card_you_can(client, &card)?,
+        }))
     }
 
     /// Whether this client may still use a feedback tool on one of its runs.
@@ -1433,14 +1660,23 @@ impl McpServer {
                 .map_err(store_error)?;
         let steps = steps_of(run);
         let (state, waiting) = run_state(run, attempts);
+        let joint = self.joint_view(client, run)?;
         let waiting_for = match waiting {
             Some(attempt) => {
+                let mut you_can = self.you_can(client, mine, run, &steps, attempts)?;
+                // What it may do on the other cards of the change, like a part waiting its turn.
+                // Each part in jointChange says which.
+                for tool in joint.iter().flat_map(|(_, tools)| tools) {
+                    if !you_can.contains(tool) {
+                        you_can.push(tool);
+                    }
+                }
                 let mut view = json!({
                     "step": attempt.step_id,
                     "attemptId": attempt.id,
                     "state": attempt.state,
                     "reason": attempt.reason,
-                    "youCan": self.you_can(client, mine, run, &steps, attempts)?,
+                    "youCan": you_can,
                     "who": who_decides(&attempt.state),
                 });
                 if attempt.state == AttemptState::WaitingAnswers.as_str() {
@@ -1495,7 +1731,7 @@ impl McpServer {
                 .map(|c| json!({ "step": c.step_id, "kind": c.kind, "before": c.before, "now": c.now }))
                 .collect();
         }
-        if let Some(joint) = self.joint_view(run)? {
+        if let Some((joint, _)) = joint {
             view["jointChange"] = joint;
         }
         Ok(view)
@@ -1503,9 +1739,15 @@ impl McpServer {
 
     /// What a run says about the change across projects it's in, if it's in one: whether it's where
     /// the change is agreed or one of its parts, which part it is and what it waits for, and every
-    /// part with its project, its order and the run it started, if it has. So a client that follows
-    /// the agreement finds each part's run, and one that follows a part sees where it stands.
-    fn joint_view(&self, run: &Run) -> Result<Option<Json>, ToolError> {
+    /// part with its project, its order, its card, the run it started, if it has, and what this
+    /// client may do on its card now. So a client that follows the agreement finds each part's run,
+    /// and one that follows a part sees where it stands. Also every tool this client may use on
+    /// any of those cards.
+    fn joint_view(
+        &self,
+        client: &McpClient,
+        run: &Run,
+    ) -> Result<Option<(Json, Vec<&'static str>)>, ToolError> {
         let engine = &self.0.engine;
         let Some(here) = engine.run_joint(&run.id).map_err(engine_error)? else {
             return Ok(None);
@@ -1517,28 +1759,38 @@ impl McpServer {
             .project(&run.project_id)
             .map_err(store_error)?
             .name;
-        let parts: Vec<Json> = change
-            .parts
-            .iter()
-            .map(|card| {
-                let part = card.part.as_ref();
-                let position = part.map(|part| part.position);
-                let waits_for = part
-                    .and_then(|part| part.waits_for.as_ref())
-                    .map(neighbour_view);
-                json!({
-                    "position": position,
-                    "project": card.project,
-                    "projectId": card.project_id,
-                    "column": card.column,
-                    "runId": card.run_id,
-                    "runState": card.run_state,
-                    "waitsFor": waits_for,
-                    "prUrl": card.pr_url,
-                    "prState": card.pr_state,
-                })
-            })
-            .collect();
+        let mut card_tools: Vec<&'static str> = Vec::new();
+        let mut parts: Vec<Json> = Vec::new();
+        for card in &change.parts {
+            let part = card.part.as_ref();
+            let position = part.map(|part| part.position);
+            let waits_for = part
+                .and_then(|part| part.waits_for.as_ref())
+                .map(neighbour_view);
+            // A part deleted a moment ago has nothing left to do on it.
+            let you_can = match self.0.store.card(&card.card_id) {
+                Ok(stored) => self.card_you_can(client, &stored)?,
+                Err(_) => Vec::new(),
+            };
+            for tool in &you_can {
+                if !card_tools.contains(tool) {
+                    card_tools.push(tool);
+                }
+            }
+            parts.push(json!({
+                "position": position,
+                "project": card.project,
+                "projectId": card.project_id,
+                "cardId": card.card_id,
+                "column": card.column,
+                "runId": card.run_id,
+                "runState": card.run_state,
+                "waitsFor": waits_for,
+                "prUrl": card.pr_url,
+                "prState": card.pr_state,
+                "youCan": you_can,
+            }));
+        }
         let role = if here.agrees { "agreement" } else { "part" };
         let mut view = json!({
             "changeId": here.change_id,
@@ -1557,7 +1809,7 @@ impl McpServer {
                 "warnings": part.warnings,
             });
         }
-        Ok(Some(view))
+        Ok(Some((view, card_tools)))
     }
 
     /// What the run did, in short, the way a subagent answers: what an orchestrator reads first.
@@ -1667,8 +1919,9 @@ fn who_decides(state: &str) -> &'static str {
     }
 }
 
-/// Whether the person lets this client give feedback at all: send back or retry. Both ask this
-/// first, in this order, so the refusal says what's missing. The run also has to be the client's own.
+/// Whether the person lets this client give feedback at all: send back, retry or add a note to a
+/// card. Each asks this first, in this order, so the refusal says what's missing. The run or card
+/// also has to be the client's own.
 fn may_steer(client: &McpClient) -> Result<(), ToolError> {
     if !client.can_run {
         return Err(may_only_read());
@@ -2582,6 +2835,16 @@ fn changed_meanwhile(error: Error) -> ToolError {
     match error {
         Error::InvalidState => ToolError::new(
             "The run changed in the meantime, so Keel did nothing. Look at it again with get_run.",
+        ),
+        other => engine_error(other),
+    }
+}
+
+/// The person, or the board, can move a card between a client looking and the engine acting on it.
+fn card_changed_meanwhile(error: Error) -> ToolError {
+    match error {
+        Error::InvalidState => ToolError::new(
+            "The card changed in the meantime, so Keel did nothing. Look at it again with get_run.",
         ),
         other => engine_error(other),
     }

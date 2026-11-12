@@ -151,7 +151,7 @@ export interface McpClient {
   name: string;
   tokenPrefix: string;
   canRun: boolean;
-  /** May send work back, retry and close the runs it started. Only with `canRun`. */
+  /** May send work back and retry on the runs it started, and add a note to their cards while they wait. Only with `canRun`. */
   canSteer: boolean;
   /** How many of its runs may be open at once, counting those that wait for the person. */
   maxOpenRuns: number;

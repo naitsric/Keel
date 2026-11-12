@@ -117,7 +117,7 @@ pub fn mcp_client_set_can_run(
     can_run: bool,
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
-    state.store.set_mcp_client_can_run(&id, can_run)?;
+    state.engine.set_mcp_client_can_run(&id, can_run)?;
     // Feedback only works with this on. It goes off with it, so it can't come back on unasked.
     if !can_run {
         state.store.set_mcp_client_can_steer(&id, false)?;
@@ -149,7 +149,7 @@ pub fn mcp_client_set_max_open_runs(
 
 #[tauri::command(async)]
 pub fn mcp_client_revoke(id: String, state: State<'_, AppState>) -> CommandResult<()> {
-    let client = state.store.revoke_mcp_client(&id)?;
+    let client = state.engine.revoke_mcp_client(&id)?;
     // So Claude Code stops trying a token that no longer works.
     if client.name == CLAUDE_CLIENT {
         let _ = claude_mcp(&state, &["remove", SERVER_NAME, "--scope", "user"]);
@@ -187,7 +187,7 @@ pub fn mcp_connect_claude(
         ],
     );
     if let Err(detail) = added {
-        state.store.revoke_mcp_client(&client.id)?;
+        state.engine.revoke_mcp_client(&client.id)?;
         return Err(failed("mcpConnectFailed", Some(detail)));
     }
     for previous in state.store.mcp_clients()? {
@@ -195,7 +195,7 @@ pub fn mcp_connect_claude(
             && previous.id != client.id
             && previous.revoked_at.is_none()
         {
-            state.store.revoke_mcp_client(&previous.id)?;
+            state.engine.revoke_mcp_client(&previous.id)?;
         }
     }
     overview(&state, &mcp)
