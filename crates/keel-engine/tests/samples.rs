@@ -581,6 +581,31 @@ fn rust() {
     });
 }
 
+#[test]
+fn go() {
+    try_sample(Sample {
+        name: "go",
+        programs: &["go"],
+        path: &[],
+        finds: &[],
+        commands: Commands {
+            setup: "go mod download",
+            check: "go test ./...",
+        },
+        guessed: true,
+        downloads: Some("go/pkg/mod"),
+        needs_download: Some((
+            "go get golang.org/x/text@v0.20.0",
+            "module lookup disabled by GOPROXY=off",
+        )),
+        fails_within: 5,
+        env: &[],
+        starts_servers: false,
+        proposes_localhost: false,
+        reads_above: false,
+    });
+}
+
 /// #94: Keel's own check, from a clone with no `target/`. The app needs its frontend built to compile,
 /// as in CI.
 #[test]
