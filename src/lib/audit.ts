@@ -331,7 +331,8 @@ export function shownState(attempt: Pick<Attempt, "id" | "state" | "reason"> & {
 export const putOffForSetup = (attempt: { state: string; kind?: string }) => attempt.state === "postponed" && attempt.kind !== undefined && attempt.kind !== "approval";
 
 /**
- * Whether an agent has had the run's copy, as `runner::before_any_agent` says: from then on, a setup
- * gets no more than the agents do. A skipped one never had it.
+ * Whether an agent that can change files has had the run's copy, as `runner::before_any_agent_could_write`
+ * says: from then on, a setup gets no more than the agents do. One that only reads has no Bash, Edit or
+ * Write, and a skipped one never had it. Tools Keel doesn't know may write.
  */
-export const agentHasRun = (attempts: Pick<Attempt, "kind" | "state">[]) => attempts.some((attempt) => attempt.kind === "agent" && attempt.state !== "skipped");
+export const agentCouldHaveWritten = (attempts: Pick<Attempt, "kind" | "state" | "tools">[]) => attempts.some((attempt) => attempt.kind === "agent" && attempt.state !== "skipped" && attempt.tools !== "readOnly");

@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, type CommandChange, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, agentHasRun, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -1060,10 +1060,11 @@ function CommandChanges({ changes, setupFirst, limited }: { changes: CommandChan
 }
 
 /**
- * What can be done with a step that stopped. `agentsRan` says whether an agent has had the run's copy:
- * a setup started then gets no more than the agents do, and the person is told before choosing.
+ * What can be done with a step that stopped. `agentsWrote` says whether an agent that can change files
+ * has had the run's copy: a setup started then gets no more than the agents do, and the person is told
+ * before choosing.
  */
-export function Actions({ attempt, projectId, agentsRan, onError }: { attempt: Attempt; projectId: string; agentsRan: boolean; onError: (message: string) => void }) {
+export function Actions({ attempt, projectId, agentsWrote, onError }: { attempt: Attempt; projectId: string; agentsWrote: boolean; onError: (message: string) => void }) {
   const { t } = useTranslation();
   const navigate = useApp((s) => s.navigate);
   const changes = useCommandChanges(attempt, projectId);
@@ -1119,11 +1120,11 @@ export function Actions({ attempt, projectId, agentsRan, onError }: { attempt: A
   const commandChanged = startsOverDifferently(attempt, changes);
   const setupFirst = attempt.kind !== "setup" && changes.some((change) => change.kind === "setup");
   // Starting a setup over, with new commands or not, runs what agents may have changed.
-  const setupLimited = attempt.kind === "setup" && agentsRan;
+  const setupLimited = attempt.kind === "setup" && agentsWrote;
   return (
     <Card className="p-4">
       {attempt.reason && <p className="selectable text-[12.5px] text-warning">{reasonText(t, attempt.reason)}</p>}
-      {commandChanged && <CommandChanges changes={changes} setupFirst={setupFirst} limited={agentsRan} />}
+      {commandChanged && <CommandChanges changes={changes} setupFirst={setupFirst} limited={agentsWrote} />}
       {setupLimited && <p className={cx("text-[12px] text-warning", (attempt.reason || commandChanged) && "mt-2.5")}>{t("run.setupLimited")}</p>}
       <div className={cx("flex flex-wrap gap-2", (attempt.reason || commandChanged || setupLimited) && "mt-2.5")}>
         {needsSignIn(attempt.reason) && <Button onClick={() => void act(() => api.openClaudeLogin())}>{t("run.signIn")}</Button>}
@@ -1809,7 +1810,7 @@ export function RunDetail({ runId }: { runId: string }) {
           <QuestionsCard key={latest.id} attempt={latest} attempts={attempts} onError={setError} />
         ) : (
           <>
-            <Actions attempt={latest} projectId={run.projectId} agentsRan={agentHasRun(attempts)} onError={setError} />
+            <Actions attempt={latest} projectId={run.projectId} agentsWrote={agentCouldHaveWritten(attempts)} onError={setError} />
             {!going && outcome}
           </>
         )}

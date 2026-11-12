@@ -261,8 +261,8 @@ pub struct RetryStepArgs {
     pub resume: Option<bool>,
     /// For a setup or check: run the project's setup and check as they are now, not as they were
     /// when the run started. get_run's `commandsChanged` says which differ. A new setup runs before
-    /// the step, with no network once an agent has run. Refused for any other step, and when it
-    /// would run nothing new. False by default.
+    /// the step, with no network after an agent that can edit files or run commands. Refused for
+    /// any other step, and when it would run nothing new. False by default.
     #[serde(default)]
     pub use_current_commands: Option<bool>,
 }
@@ -1094,7 +1094,13 @@ impl McpServer {
                     .command_changes_of(&run)
                     .map_err(engine_error)?;
                 if !keel_engine::retry_runs_something_new(&changes, &step.step_id, &step.kind) {
-                    return Err(ToolError::new(nothing_new_to_run(&run, step)));
+                    return Err(ToolError::new(nothing_new_to_run(
+                        &step.step_id,
+                        &step.kind,
+                        keel_engine::Engine::follows_project(&run, &step.step_id),
+                        run.workflow_name.as_deref(),
+                        &changes,
+                    )));
                 }
             }
             if !server.feedback_left(client, &run.id, "retry_step")? {
@@ -1104,13 +1110,16 @@ impl McpServer {
             }
             // As the app's Retry button: the step starts over unless asked to go on.
             let resume = args.resume.unwrap_or(false);
-            let engine = &server.0.engine;
-            if current_commands {
-                engine.retry_with_current_commands_by(&step.id, resume, &client.name)
-            } else {
-                engine.retry_by(&step.id, resume, &client.name)
-            }
-            .map_err(changed_meanwhile)?;
+            let options = keel_engine::RetryOptions {
+                resume,
+                by: Some(&client.name),
+                current_commands,
+            };
+            server
+                .0
+                .engine
+                .retry_with(&step.id, options)
+                .map_err(changed_meanwhile)?;
             Ok((server.run_view(client, &args.run)?, Some(args.run)))
         })
         .await
@@ -1725,16 +1734,39 @@ fn retry_target<'a>(run: &Run, attempts: &'a [Attempt]) -> Result<&'a Attempt, T
 }
 
 /// Why retrying this step with the project's current commands would run nothing a plain retry
-/// doesn't. See `keel_engine::retry_runs_something_new`.
-fn nothing_new_to_run(run: &Run, step: &Attempt) -> String {
-    if keel_engine::Engine::follows_project(run, &step.step_id) {
+/// doesn't. See `keel_engine::retry_runs_something_new`. `follows_project` says whether the step
+/// takes its command from the project, `workflow` is the saved workflow's name, and `changes` are
+/// the run's, which get_run lists.
+fn nothing_new_to_run(
+    step_id: &str,
+    kind: &str,
+    follows_project: bool,
+    workflow: Option<&str>,
+    changes: &[keel_engine::CommandChange],
+) -> String {
+    if !follows_project {
+        let workflow = workflow.unwrap_or("its workflow");
+        return format!(
+            "Step {step_id:?} is a {kind} of the saved workflow {workflow:?}, which keeps its command whatever the project's is, and the run has no new setup to run before it, so there's nothing new to run. Retry without `useCurrentCommands`. Changing that {kind} is the person's, in the workflow, for a new run."
+        );
+    }
+    if changes.is_empty() {
         return "The commands this run takes from the project are the same as the project's now, so there's nothing new to run. Retry without `useCurrentCommands`, or ask the person to change the project's commands in Keel first.".to_owned();
     }
-    let workflow = run.workflow_name.as_deref().unwrap_or("its workflow");
+    // Only another step's command changed, which this one doesn't run: a setup's, when only the
+    // check did.
+    let name = |kind: keel_engine::CommandKind| match kind {
+        keel_engine::CommandKind::Setup => "setup",
+        keel_engine::CommandKind::Check => "check",
+    };
+    let other = name(changes[0].kind);
+    let steps: Vec<String> = changes
+        .iter()
+        .map(|change| format!("step {:?}", change.step_id))
+        .collect();
     format!(
-        "Step {:?} is a {kind} of the saved workflow {workflow:?}, which keeps its command whatever the project's is, and the run has no new setup to run before it, so there's nothing new to run. Retry without `useCurrentCommands`. Changing that {kind} is the person's, in the workflow, for a new run.",
-        step.step_id,
-        kind = step.kind
+        "Step {step_id:?} runs the same command as the project's {kind} now, so retrying it with `useCurrentCommands` runs nothing new. Only the project's {other} changed ({}), and this step doesn't run it. Retry without `useCurrentCommands`: when the {other} comes round, it runs what this run started with, and if it fails, retrying it with `useCurrentCommands` takes the project's.",
+        steps.join(", ")
     )
 }
 
@@ -2694,6 +2726,50 @@ mod tests {
         assert_eq!(mask_secrets(&cut), cut);
         assert!(!cut.contains("ghp_"), "{cut}");
         assert!(cut.starts_with("the token is\n"), "{cut}");
+    }
+
+    #[test]
+    fn a_retry_with_nothing_new_to_run_says_what_changed_and_what_did_not() {
+        use keel_engine::{CommandChange, CommandKind};
+        let change = |step: &str, kind, before: &str, now: &str| CommandChange {
+            step_id: step.into(),
+            kind,
+            before: before.into(),
+            now: now.into(),
+        };
+        let check = change("check", CommandKind::Check, "make test", "make check");
+
+        // The setup failed before the builder, and the person then changed only the project's
+        // check, which get_run lists.
+        let text = nothing_new_to_run("setup", "setup", true, None, std::slice::from_ref(&check));
+        assert!(
+            text.contains("Step \"setup\" runs the same command as the project's setup now"),
+            "{text}"
+        );
+        assert!(text.contains("Only the project's check changed"), "{text}");
+        assert!(text.contains("when the check comes round"), "{text}");
+        assert!(
+            !text.contains("are the same as the project's now"),
+            "{text}"
+        );
+
+        // Nothing changed at all.
+        let text = nothing_new_to_run("check", "check", true, None, &[]);
+        assert!(
+            text.contains(
+                "The commands this run takes from the project are the same as the project's now"
+            ),
+            "{text}"
+        );
+
+        // A saved workflow's own check, whatever changed in the project.
+        for changes in [vec![], vec![check]] {
+            let text = nothing_new_to_run("check", "check", false, Some("Mine"), &changes);
+            assert!(
+                text.contains("Step \"check\" is a check of the saved workflow \"Mine\""),
+                "{text}"
+            );
+        }
     }
 
     /// An agent's attempt that answered with a verdict, also as its text.

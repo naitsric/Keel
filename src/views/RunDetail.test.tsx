@@ -1654,11 +1654,11 @@ describe("starting over a step whose command the project changed", () => {
   const newSetup: CommandChange = { stepId: "setup", kind: "setup", before: "uv sync", now: "uv sync --group test" };
   const newCheck: CommandChange = { stepId: "check", kind: "check", before: "uv run pytest", now: "uv run --group test pytest" };
   const offered = () => button("Start over with the new commands") !== undefined;
-  const show = async (shown: Attempt, agentsRan = false) => {
-    act(() => root.render(<Actions attempt={shown} projectId="p1" agentsRan={agentsRan} onError={() => {}} />));
+  const show = async (shown: Attempt, agentsWrote = false) => {
+    act(() => root.render(<Actions attempt={shown} projectId="p1" agentsWrote={agentsWrote} onError={() => {}} />));
     await settle();
   };
-  const limited = "This setup runs with no more permissions than the agents, because they have changed the code since the first one: no internet, and not the project's shared cache. An install that needs to download something may fail. If it does, start a new run.";
+  const limited = "This setup runs with no more permissions than the agents, because an agent that can change the code has run before it: no internet, and not the project's shared cache. An install that needs to download something may fail. If it does, start a new run.";
   const projectHas = (setupCommand: string, checkCommand: string) => useApp.setState({ overview: { ...useApp.getState().overview, projects: [{ id: "p1", setupCommand, checkCommand }] as never } });
 
   beforeEach(async () => {
@@ -1757,7 +1757,7 @@ describe("starting over a step whose command the project changed", () => {
     await show(failedCheck, true);
     expect(page()).toContain("Los comandos del proyecto cambiaron después de que empezó esta ejecución.");
     expect(page()).toContain("La preparación nueva corre primero, y después este paso otra vez.");
-    expect(page()).toContain("Esta preparación corre sin más permisos que los agentes, porque cambiaron el código desde la primera");
+    expect(page()).toContain("Esta preparación corre sin más permisos que los agentes, porque antes corrió un agente que puede cambiar el código");
     expect(button("Empezar de nuevo con los comandos nuevos")).toBeDefined();
   });
 
@@ -1771,6 +1771,6 @@ describe("starting over a step whose command the project changed", () => {
   it("says in a setup's activity when it ran with no more than the agents, and why", () => {
     const event: AuditEvent = { seq: 1, attemptId: "setup-2", at: "2026-01-01T00:00:00Z", kind: "setupLimited", data: {} };
     act(() => root.render(<ActivityTab events={[event]} role="worker" />));
-    expect(page()).toContain("Runs with no more permissions than the agents, because they changed the code after the first setup: no internet, and not the project's shared cache. An install that needs to download something may fail for it. A new run sets up from the published code.");
+    expect(page()).toContain("Runs with no more permissions than the agents, because an agent that can change the code ran before it: no internet, and not the project's shared cache. An install that needs to download something may fail for it. Only a setup before any such agent, as at the start of a new run, gets the internet.");
   });
 });

@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use keel_core::{AttemptState, MASK, Reason, WorkflowStep};
-use keel_engine::{Config, Engine, Error, StartRun, Workflow, full_workflow, request_from_issue};
+use keel_engine::{
+    Config, Engine, Error, RetryOptions, StartRun, Workflow, full_workflow, request_from_issue,
+};
 use keel_harness::Tools;
 use keel_harness::github::Issue;
 use keel_store::{ProjectSettings, Store};
@@ -523,6 +525,13 @@ impl World {
     }
 }
 
+/// A retry by the person, with the project's setup and check as they are now.
+const NEW_COMMANDS: RetryOptions<'static> = RetryOptions {
+    resume: false,
+    by: None,
+    current_commands: true,
+};
+
 fn ran(number: i64, command: &str, state: AttemptState) -> (i64, String, String) {
     (number, command.into(), state.as_str().into())
 }
@@ -544,9 +553,7 @@ fn a_retry_with_the_fixed_setup_runs_it_first_and_then_the_step_that_failed() {
         ])
     );
     let agents_before = w.log("claude.log").matches("=== CLAUDE").count();
-    w.engine
-        .retry_with_current_commands(&failed.id, false)
-        .unwrap();
+    w.engine.retry_with(&failed.id, NEW_COMMANDS).unwrap();
     w.wait(&run, "approval", AttemptState::WaitingApproval);
     use AttemptState::{Failed, Postponed, Succeeded};
     assert_eq!(
@@ -607,9 +614,7 @@ fn a_retry_takes_the_project_s_fixed_check_only_when_asked_to() {
     assert_eq!((again.number, again.prompt.as_str()), (2, "exit 3"));
 
     // Asked to, it runs the project's, and the run keeps it for what comes after.
-    w.engine
-        .retry_with_current_commands(&again.id, false)
-        .unwrap();
+    w.engine.retry_with(&again.id, NEW_COMMANDS).unwrap();
     w.wait(&run, "approval", AttemptState::WaitingApproval);
     use AttemptState::{Failed, Succeeded};
     assert_eq!(
@@ -663,9 +668,7 @@ fn a_saved_workflow_s_own_check_keeps_its_command() {
     let run = w.start_workflow(&mine);
     let failed = w.wait(&run, "check", AttemptState::Failed);
     assert_eq!(w.engine.command_changes(&run).unwrap(), vec![]);
-    w.engine
-        .retry_with_current_commands(&failed.id, false)
-        .unwrap();
+    w.engine.retry_with(&failed.id, NEW_COMMANDS).unwrap();
     let again = w.wait(&run, "check", AttemptState::Failed);
     assert_eq!((again.number, again.prompt.as_str()), (2, "exit 3"));
 }
@@ -684,7 +687,7 @@ fn only_a_setup_or_a_check_starts_over_with_new_commands() {
     // A failed delivery retries only the delivery: the setup, with its network, doesn't run again.
     w.set_commands("touch installed.txt", "true");
     assert_eq!(
-        blocked_reason(w.engine.retry_with_current_commands(&failed.id, false)),
+        blocked_reason(w.engine.retry_with(&failed.id, NEW_COMMANDS)),
         Reason::NewCommandsNeedSetupOrCheck
     );
     assert_eq!(w.ran(&run, "setup").len(), 1);
@@ -714,15 +717,17 @@ fn a_retry_that_cannot_start_leaves_the_run_s_commands_as_they_were() {
     let away = folder.with_extension("away");
     std::fs::rename(&folder, &away).unwrap();
     std::fs::write(&folder, "").unwrap();
-    assert!(
-        w.engine
-            .retry_with_current_commands(&failed.id, false)
-            .is_err()
-    );
+    assert!(w.engine.retry_with(&failed.id, NEW_COMMANDS).is_err());
     // Nor does a client's, which would say it asked.
     assert!(
         w.engine
-            .retry_with_current_commands_by(&failed.id, false, "Claude Code")
+            .retry_with(
+                &failed.id,
+                RetryOptions {
+                    by: Some("Claude Code"),
+                    ..NEW_COMMANDS
+                },
+            )
             .is_err()
     );
     assert!(w.engine.retry_by(&failed.id, false, "Claude Code").is_err());
@@ -746,9 +751,7 @@ fn a_retry_that_cannot_start_leaves_the_run_s_commands_as_they_were() {
 
     std::fs::remove_file(&folder).unwrap();
     std::fs::rename(&away, &folder).unwrap();
-    w.engine
-        .retry_with_current_commands(&failed.id, false)
-        .unwrap();
+    w.engine.retry_with(&failed.id, NEW_COMMANDS).unwrap();
     w.wait(&run, "approval", AttemptState::WaitingApproval);
 }
 

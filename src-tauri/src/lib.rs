@@ -14,7 +14,8 @@ use keel_core::{
 use keel_engine::{
     AddedProject, Answer, Board, BrainView, CommandChange, Config, Engine, Error as EngineError,
     GithubStatus, JointChangeView, Preflight, ProjectProposalReview, ProjectSetup, RawCheck,
-    RunJoint, StartRun, Workflow, WorkflowDraft, request_from_issue, title_from_issue,
+    RetryOptions, RunJoint, StartRun, Workflow, WorkflowDraft, request_from_issue,
+    title_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
@@ -759,12 +760,12 @@ fn attempt_retry(
     resume: bool,
     current_commands: bool,
 ) -> CommandResult<String> {
-    if current_commands {
-        return Ok(state
-            .engine
-            .retry_with_current_commands(&attempt_id, resume)?);
-    }
-    Ok(state.engine.retry(&attempt_id, resume)?)
+    let options = RetryOptions {
+        resume,
+        by: None,
+        current_commands,
+    };
+    Ok(state.engine.retry_with(&attempt_id, options)?)
 }
 
 /// The run's setup and check whose command the project changed after it started.

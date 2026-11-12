@@ -587,6 +587,54 @@ fn a_setup_once_an_agent_has_run_gets_no_more_than_the_agent() {
 }
 
 #[test]
+fn a_setup_after_an_agent_that_only_reads_still_installs_with_the_network() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // A saved workflow with a setup of its own gets none put first, so its spec, which only reads,
+    // comes before the setup on every run, not only on a retry. It has no way to change a file.
+    let run = w.run(vec![
+        agent("spec", ToolProfile::ReadOnly),
+        WorkflowStep::Setup {
+            id: "install".into(),
+            run: "echo $HOME > install-home.txt; touch \"$HOME/from-install\"".into(),
+        },
+        agent("builder", ToolProfile::Build),
+        check("after", "test -f \"$HOME/from-install\""),
+        WorkflowStep::Approval { id: "human".into() },
+    ]);
+    assert_eq!(w.wait_done(&run, "human").state, "waitingApproval");
+    let install = w.wait_done(&run, "install");
+    assert_eq!(install.state, "succeeded", "{}", w.check_output(&install));
+    let after = w.wait_done(&run, "after");
+    assert_eq!(after.state, "succeeded", "{}", w.check_output(&after));
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    assert_eq!(
+        attempts
+            .iter()
+            .map(|a| a.step_id.as_str())
+            .collect::<Vec<_>>(),
+        ["spec", "install", "builder", "after", "human"]
+    );
+
+    // It's a setup as any first one is: the internet, and the project's home, which it fills.
+    let workspace = Path::new(&install.workspace);
+    let home = std::fs::read_to_string(workspace.join("install-home.txt")).unwrap();
+    let home = PathBuf::from(home.trim());
+    assert!(home.ends_with("cache/home"), "{home:?}");
+    assert!(home.join("from-install").exists());
+    assert_eq!(install.settings["network"], "internet, nothing local");
+    assert_eq!(install.settings["home"], "the project's");
+    let events = w.store.events(&install.id, 0).unwrap();
+    assert!(!events.iter().any(|e| e.kind == "setupLimited"));
+    let profile = events
+        .iter()
+        .find(|e| e.kind == "started")
+        .and_then(|e| e.data["profile"].as_str())
+        .unwrap();
+    assert!(profile.contains("(allow network*)"));
+}
+
+#[test]
 fn what_setup_downloads_stays_in_the_project_cache_and_each_run_gets_its_own_copy() {
     keel_harness::needs!(sandbox);
     let w = world();

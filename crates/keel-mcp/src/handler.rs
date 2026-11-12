@@ -141,7 +141,8 @@ const RETRY_STEP: &str = "Try again the step of a run this client started that f
                           stopped. With `resume`, the agent goes on from where it stopped. With \
                           `useCurrentCommands`, a setup or check retries with the project's setup and check as \
                           they are now, which get_run's `commandsChanged` lists, and a new setup runs first, \
-                          refused when that runs nothing new. Once an agent has run, a setup gets no network and \
+                          refused when that runs nothing new. After an agent that can edit files or run commands, a \
+                          setup gets no network and \
                           not the project's shared cache, so an install that has to download may fail and a new \
                           run is the way out. A step that's blocked \
                           or stalled is the person's to decide. A failed delivery retries only the delivery, \

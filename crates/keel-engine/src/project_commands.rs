@@ -329,51 +329,16 @@ mod tests {
         assert_eq!(changed(&json!([]), BUILT_IN, Some("uv sync"), None), vec![]);
     }
 
-    /// Attempts as the store reads them back: step, kind and state.
-    fn recorded(rows: &[(&str, &str, AttemptState)]) -> Vec<keel_store::Attempt> {
-        let dir = tempfile::tempdir().unwrap();
-        let store = keel_store::Store::open(&dir.path().join("keel.db")).unwrap();
-        for (index, (step, kind, state)) in rows.iter().enumerate() {
-            let id = format!("a{index}");
-            store
-                .add_attempt(&keel_store::NewAttempt {
-                    id: id.clone(),
-                    run_id: "r".into(),
-                    step_id: (*step).into(),
-                    kind: (*kind).into(),
-                    role: "worker".into(),
-                    round: 0,
-                    number: index as i64 + 1,
-                    state: *state,
-                    model_requested: String::new(),
-                    effort: None,
-                    tools: (*kind).into(),
-                    max_turns: None,
-                    max_budget_usd: None,
-                    language: "en".into(),
-                    prompt: String::new(),
-                    system_prompt_sources: "[]".into(),
-                    settings: "{}".into(),
-                    session_id: id.clone(),
-                    resumed_from: None,
-                    workspace: String::new(),
-                    raw_path: String::new(),
-                    started_at: keel_store::now(),
-                })
-                .unwrap();
-        }
-        store.attempts_of_run("r").unwrap()
-    }
-
     #[test]
     fn a_step_put_off_for_a_new_setup_comes_round_again_and_is_not_a_person_asking_for_more() {
         use crate::sizing::{due_again, person_asked, put_off_for_setup};
+        use crate::testing::recorded;
         use AttemptState::{Failed, Postponed, Running, Succeeded};
         let put_off = recorded(&[
-            ("setup", "setup", Succeeded),
-            ("check", "check", Failed),
-            ("check", "check", Postponed),
-            ("setup", "setup", Running),
+            ("setup", "setup", "setup", Succeeded),
+            ("check", "check", "check", Failed),
+            ("check", "check", "check", Postponed),
+            ("setup", "setup", "setup", Running),
         ]);
         assert!(!put_off_for_setup(&put_off[1]));
         assert!(put_off_for_setup(&put_off[2]));
@@ -381,7 +346,7 @@ mod tests {
         // So nothing skipped for being small runs because of it, and the run isn't counted as one
         // where a person asked.
         assert!(!person_asked(&put_off));
-        let asked = recorded(&[("approval", "approval", Postponed)]);
+        let asked = recorded(&[("approval", "approval", "none", Postponed)]);
         assert!(!put_off_for_setup(&asked[0]));
         assert!(person_asked(&asked));
         assert!(due_again(&asked[0], &asked));
