@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { Attempt, AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, agentHasRun, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -29,6 +29,16 @@ describe("what an attempt's state reads as", () => {
     const putOff = (kind: Attempt["kind"]) => ({ id: "c1", kind, state: "postponed", reason: null, resumedFrom: null }) as Attempt;
     expect(shownState(putOff("check"), [putOff("check")])).toBe("afterSetup");
     expect(shownState(putOff("approval"), [putOff("approval")])).toBe("postponed");
+    // The attempt that ran before it keeps how it ended.
+    const failed = { id: "c0", kind: "check", state: "failed", reason: { code: "checkFailed", exitCode: 1 }, resumedFrom: null } as unknown as Attempt;
+    expect(shownState(failed, [failed, putOff("check")])).toBe("failed");
+  });
+
+  it("knows when an agent has had the run's copy, which a skipped one never did", () => {
+    const of = (kind: Attempt["kind"], state: Attempt["state"]) => ({ kind, state }) as Attempt;
+    expect(agentHasRun([])).toBe(false);
+    expect(agentHasRun([of("setup", "succeeded"), of("check", "failed"), of("agent", "skipped")])).toBe(false);
+    for (const state of ["succeeded", "failed", "stopped", "queued"] as const) expect(agentHasRun([of("setup", "succeeded"), of("agent", state)])).toBe(true);
   });
 });
 

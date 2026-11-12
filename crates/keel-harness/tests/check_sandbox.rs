@@ -475,6 +475,25 @@ fn setup_can_reach_the_internet_and_its_cache() {
     );
 }
 
+/// What a check gets, and so does a setup once an agent has run: the cache the project's runs
+/// share is out of reach, so nothing can be left there for the next run's setup to install.
+#[test]
+fn only_setup_before_any_agent_reaches_the_cache_runs_share() {
+    keel_harness::needs!(sandbox);
+    let s = sandbox();
+    let cache = tempfile::Builder::new()
+        .prefix(".keel-sandbox-cache")
+        .tempdir_in(&s.home)
+        .unwrap();
+    std::fs::write(cache.path().join("dep"), "x").unwrap();
+    let plant = format!("echo x > {}", quoted(&cache.path().join("planted")));
+    assert!(!s.allowed(&plant));
+    assert!(!cache.path().join("planted").exists());
+    assert!(!s.allowed(&format!("cat {}", quoted(&cache.path().join("dep")))));
+    assert!(run_setup(&s, cache.path(), &plant));
+    assert!(cache.path().join("planted").exists());
+}
+
 #[test]
 fn setup_still_cannot_reach_anything_on_this_machine() {
     keel_harness::needs!(sandbox);

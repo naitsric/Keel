@@ -98,11 +98,12 @@ fn allows_host(domains: &[String], host: &str) -> bool {
 }
 
 /// Points the usual tools at a cache a sandboxed command can write to, since theirs live in the
-/// home folder. Cargo and Go keep what they download in `tool_homes`: for setup that's the
-/// project's own cache, which only setup writes, and for any other step it's the run's copy of it.
-/// `domains` are those the step may reach, or `None` when it has the whole network (setup). With no
-/// way to crates.io cargo is told to work offline, and Go has no proxy, so a missing dependency is
-/// an error at once and not minutes of retries. A project that does allow them is left as it was.
+/// home folder. Cargo and Go keep what they download in `tool_homes`: for a setup before any agent
+/// that's the project's own cache, which only such a setup writes, and for any other step it's the
+/// run's copy of it. `domains` are those the step may reach, or `None` when it has the whole
+/// network (a setup before any agent). With no way to crates.io cargo is told to work offline, and
+/// Go has no proxy, so a missing dependency is an error at once and not minutes of retries. A
+/// project that does allow them is left as it was.
 fn cache_env(
     cache: &std::path::Path,
     tool_homes: &std::path::Path,
@@ -130,6 +131,52 @@ fn cache_env(
         }
     }
     env
+}
+
+/// Whether nothing an agent did can be in the run's copy yet: no agent attempt of the run exists,
+/// other than one skipped. Only then does a setup run what's published. `attempts` are the run's.
+pub(crate) fn before_any_agent(attempts: &[Attempt]) -> bool {
+    !attempts
+        .iter()
+        .any(|a| a.kind == "agent" && a.state != AttemptState::Skipped.as_str())
+}
+
+/// The sandbox a setup or check runs in, and the cache its tools use.
+#[derive(Debug)]
+struct CommandSandbox {
+    profile: String,
+    cache: PathBuf,
+    /// Whether it gets the internet and fills the project's cache, shared by its runs.
+    shares_cache: bool,
+}
+
+/// Only a setup before any agent gets the internet and the cache the project's runs share. Once
+/// an agent has had the run's copy, a postinstall script, a Makefile target or a build backend may
+/// be its doing, so a setup then gets what a check gets: no network, the reads an agent has, and
+/// the run's own cache. Otherwise it could send out what it reads, or leave something in the
+/// shared cache for the next run's setup to install before any agent. `attempts` are the run's.
+fn command_sandbox(
+    is_setup: bool,
+    attempts: &[Attempt],
+    workspace: &std::path::Path,
+    home: &std::path::Path,
+    read: &[String],
+    sockets: &[String],
+    shared_cache: &std::path::Path,
+) -> CommandSandbox {
+    if is_setup && before_any_agent(attempts) {
+        CommandSandbox {
+            profile: settings::setup_profile(workspace, home, read, sockets, shared_cache),
+            cache: shared_cache.to_owned(),
+            shares_cache: true,
+        }
+    } else {
+        CommandSandbox {
+            profile: settings::check_profile(workspace, home, read, sockets),
+            cache: workspace.join(RUN_CACHE),
+            shares_cache: false,
+        }
+    }
 }
 
 /// Gives a run its own copy of what setup downloaded for cargo and Go, once. It's a clone on APFS,
@@ -348,7 +395,8 @@ impl Inner {
         }
     }
 
-    /// What setup downloads for a project, shared by its runs. Only setup writes there.
+    /// What setup downloads for a project, shared by its runs. Only a setup before any agent writes
+    /// there: see `command_sandbox`.
     fn shared_cache(&self, project_id: &str) -> PathBuf {
         self.mirror(project_id).with_file_name("cache")
     }
@@ -569,7 +617,8 @@ impl Inner {
     }
 
     /// A check is Keel running a command, with no model. It's sandboxed like an agent's commands,
-    /// because tests and Makefiles are files an agent may have just edited.
+    /// because tests and Makefiles are files an agent may have just edited. So is a setup once an
+    /// agent has run in the run, for the same reason: see `command_sandbox`.
     fn spawn_command(
         &self,
         attempt: &Attempt,
@@ -587,33 +636,34 @@ impl Inner {
         let dir = self.run_dir(&attempt.run_id);
         let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
         let sockets = services::socket_dirs(&services::root_for(project_id), &project.services);
-        // Setup fills a cache shared by the project's runs. Everything after it gets one of its
-        // own, inside the private copy, so nothing an agent wrote can reach the next run.
+        // A setup before any agent fills a cache shared by the project's runs. Everything else
+        // gets one of its own, inside the private copy, so nothing an agent wrote can reach the
+        // next run. Looked at here, as it starts, whatever started it.
         let shared_cache = self.shared_cache(project_id);
-        let (profile, cache) = if is_setup {
+        let attempts = store.attempts_of_run(&attempt.run_id)?;
+        let sandbox = command_sandbox(
+            is_setup,
+            &attempts,
+            &workspace,
+            &home,
+            &project.allowed_read,
+            &sockets,
+            &shared_cache,
+        );
+        if sandbox.shares_cache {
             std::fs::create_dir_all(&shared_cache)?;
-            (
-                settings::setup_profile(
-                    &workspace,
-                    &home,
-                    &project.allowed_read,
-                    &sockets,
-                    &shared_cache,
-                ),
-                shared_cache.clone(),
-            )
-        } else {
-            (
-                settings::check_profile(&workspace, &home, &project.allowed_read, &sockets),
-                workspace.join(RUN_CACHE),
-            )
-        };
+        }
         let stem = format!("{}-{}", attempt.step_id, attempt.number);
         let prompt_file = dir.join(format!("{stem}.stdin"));
         let raw_path = PathBuf::from(&attempt.raw_path);
         let stderr_path = dir.join(format!("{stem}.stderr.txt"));
-        let profile = settings::with_own_output(profile, &[&prompt_file, &raw_path, &stderr_path]);
+        let profile =
+            settings::with_own_output(sandbox.profile, &[&prompt_file, &raw_path, &stderr_path]);
 
+        // So the person sees why an install that needs the internet failed here.
+        if is_setup && !sandbox.shares_cache {
+            store.append_event(&attempt.id, "setupLimited", &json!({}))?;
+        }
         store.append_event(
             &attempt.id,
             "started",
@@ -635,8 +685,10 @@ impl Inner {
             );
         screenshots::empty(&workspace, &dir)?;
         let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
-        // Setup writes to the project's cache. Any other step works on the run's own copy of it.
-        let cache_vars = if is_setup {
+        // A setup before any agent writes to the project's cache. Anything else works on the run's
+        // own copy of it.
+        let cache = sandbox.cache;
+        let cache_vars = if sandbox.shares_cache {
             cache_env(&cache, &cache, None)
         } else {
             copy_tool_caches(&shared_cache, &cache)?;
@@ -1576,6 +1628,93 @@ mod tests {
         let env = cache_env(Path::new("/c"), Path::new("/c"), None);
         assert_eq!(var(&env, "CARGO_NET_OFFLINE"), None);
         assert_eq!(var(&env, "GOPROXY"), None);
+    }
+
+    /// Attempts as the store reads them back: step, kind and state.
+    fn recorded(rows: &[(&str, &str, AttemptState)]) -> Vec<Attempt> {
+        let dir = tempfile::tempdir().unwrap();
+        let store = keel_store::Store::open(&dir.path().join("keel.db")).unwrap();
+        for (index, (step, kind, state)) in rows.iter().enumerate() {
+            let id = format!("a{index}");
+            store
+                .add_attempt(&keel_store::NewAttempt {
+                    id: id.clone(),
+                    run_id: "r".into(),
+                    step_id: (*step).into(),
+                    kind: (*kind).into(),
+                    role: "worker".into(),
+                    round: 0,
+                    number: index as i64 + 1,
+                    state: *state,
+                    model_requested: String::new(),
+                    effort: None,
+                    tools: (*kind).into(),
+                    max_turns: None,
+                    max_budget_usd: None,
+                    language: "en".into(),
+                    prompt: String::new(),
+                    system_prompt_sources: "[]".into(),
+                    settings: "{}".into(),
+                    session_id: id.clone(),
+                    resumed_from: None,
+                    workspace: String::new(),
+                    raw_path: String::new(),
+                    started_at: now(),
+                })
+                .unwrap();
+        }
+        store.attempts_of_run("r").unwrap()
+    }
+
+    #[test]
+    fn a_setup_once_an_agent_has_had_the_workspace_gets_no_more_than_an_agent() {
+        use AttemptState::{Failed, Queued, Skipped, Stopped, Succeeded};
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_owned();
+        let workspace = home.join("runs/r/workspace");
+        let shared = home.join("projects/p/cache");
+        let shared_text = shared.to_string_lossy().into_owned();
+        let sandbox = |is_setup: bool, attempts: &[Attempt]| {
+            command_sandbox(is_setup, attempts, &workspace, &home, &[], &[], &shared)
+        };
+
+        // Before any agent, what it runs is what's published: the internet and the shared cache.
+        let before = [
+            vec![],
+            recorded(&[("setup", "setup", Failed)]),
+            recorded(&[("check", "check", Succeeded)]),
+            recorded(&[("security", "agent", Skipped)]),
+        ];
+        for attempts in &before {
+            let setup = sandbox(true, attempts);
+            assert!(setup.shares_cache, "{attempts:?}");
+            assert_eq!(setup.cache, shared);
+            assert!(setup.profile.contains("(allow network*)"));
+            assert!(setup.profile.contains(&shared_text));
+        }
+
+        // Once one has, a postinstall script or a Makefile may be its doing, however it ended.
+        for state in [Succeeded, Failed, Stopped, Queued] {
+            let attempts = recorded(&[
+                ("setup", "setup", Succeeded),
+                ("builder", "agent", state),
+                ("check", "check", Failed),
+            ]);
+            let late = sandbox(true, &attempts);
+            assert!(!late.shares_cache, "{state:?}");
+            assert_eq!(late.cache, workspace.join(RUN_CACHE));
+            assert!(late.profile.contains("(deny network*)"));
+            assert!(!late.profile.contains("(allow network*)"));
+            assert!(!late.profile.contains(&shared_text));
+            // Exactly what a check gets.
+            assert_eq!(late.profile, sandbox(false, &attempts).profile);
+        }
+
+        // A check never gets them.
+        let check = sandbox(false, &[]);
+        assert!(!check.shares_cache);
+        assert_eq!(check.cache, workspace.join(RUN_CACHE));
+        assert!(check.profile.contains("(deny network*)"));
     }
 
     #[test]

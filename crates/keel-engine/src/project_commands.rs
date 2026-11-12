@@ -78,23 +78,13 @@ pub fn changed(
         command.map(str::trim).filter(|c| !c.is_empty())
     }
     let steps = workflow.as_array().map(Vec::as_slice).unwrap_or_default();
-    let any_marked = steps.iter().any(|step| step.get(MARK).is_some());
-    let builtin = is_builtin(workflow_id);
     steps
         .iter()
         .filter_map(|step| {
             let kind = kind_of(step)?;
             let id = step.get("id")?.as_str()?;
             let before = step.get("run")?.as_str()?;
-            let from_project = if any_marked {
-                step.get(MARK) == Some(&Value::Bool(true))
-            } else {
-                builtin
-                    && match kind {
-                        CommandKind::Setup => SETUP_IDS.contains(&id),
-                        CommandKind::Check => id == CHECK_ID,
-                    }
-            };
+            let from_project = from_project(steps, workflow_id, step);
             let now = match kind {
                 CommandKind::Setup => current(setup),
                 CommandKind::Check => current(check),
@@ -107,6 +97,41 @@ pub fn changed(
             })
         })
         .collect()
+}
+
+/// Whether Keel took this step's command from the project, by its mark, or for a run from before
+/// the marks, by its name in a built-in workflow. `steps` are the run's copy.
+fn from_project(steps: &[Value], workflow_id: Option<&str>, step: &Value) -> bool {
+    let (Some(kind), Some(id)) = (kind_of(step), step.get("id").and_then(Value::as_str)) else {
+        return false;
+    };
+    if steps.iter().any(|step| step.get(MARK).is_some()) {
+        return step.get(MARK) == Some(&Value::Bool(true));
+    }
+    is_builtin(workflow_id)
+        && match kind {
+            CommandKind::Setup => SETUP_IDS.contains(&id),
+            CommandKind::Check => id == CHECK_ID,
+        }
+}
+
+/// Whether this step of the run's copy takes its command from the project, so a retry with the
+/// project's current commands can change it. A saved workflow's own setup or check never does.
+pub fn follows_project(workflow: &Value, workflow_id: Option<&str>, step_id: &str) -> bool {
+    let steps = workflow.as_array().map(Vec::as_slice).unwrap_or_default();
+    steps
+        .iter()
+        .find(|step| step.get("id").and_then(Value::as_str) == Some(step_id))
+        .is_some_and(|step| from_project(steps, workflow_id, step))
+}
+
+/// Whether retrying this step with the project's current commands runs anything a plain retry
+/// wouldn't: its own command changed, or, for a check, the setup, which then runs first. `kind` is
+/// the attempt's.
+pub fn retry_runs_something_new(changes: &[CommandChange], step_id: &str, kind: &str) -> bool {
+    changes.iter().any(|change| {
+        change.step_id == step_id || (kind == "check" && change.kind == CommandKind::Setup)
+    })
 }
 
 /// The run's copy with those commands in place of the ones they had, and its marks as they were.
@@ -238,6 +263,34 @@ mod tests {
     }
 
     #[test]
+    fn a_retry_runs_something_new_only_when_its_command_or_the_setup_before_a_check_changed() {
+        let workflow = marked(&steps(), Some("setup"), BUILT_IN);
+        assert!(follows_project(&workflow, BUILT_IN, "setup"));
+        assert!(follows_project(&workflow, BUILT_IN, "check"));
+        assert!(!follows_project(&workflow, BUILT_IN, "lint"));
+        assert!(!follows_project(&workflow, BUILT_IN, "approval"));
+        let saved = marked(&steps(), Some("setup"), SAVED);
+        assert!(!follows_project(&saved, SAVED, "check"));
+
+        let setup = [change("setup", CommandKind::Setup, "uv sync", "make deps")];
+        let check = [change(
+            "check",
+            CommandKind::Check,
+            "uv run pytest",
+            "make test",
+        )];
+        assert!(retry_runs_something_new(&setup, "setup", "setup"));
+        // A check, its own or the project's, runs after the new setup.
+        assert!(retry_runs_something_new(&setup, "check", "check"));
+        assert!(retry_runs_something_new(&setup, "lint", "check"));
+        assert!(retry_runs_something_new(&check, "check", "check"));
+        // A setup runs as it did, and a workflow's own check, which keeps its command.
+        assert!(!retry_runs_something_new(&check, "setup", "setup"));
+        assert!(!retry_runs_something_new(&check, "lint", "check"));
+        assert!(!retry_runs_something_new(&[], "check", "check"));
+    }
+
+    #[test]
     fn a_run_from_before_the_marks_goes_by_name_only_in_a_built_in_workflow() {
         let old = serde_json::to_value(vec![
             setup("project-setup", "npm ci"),
@@ -314,18 +367,24 @@ mod tests {
 
     #[test]
     fn a_step_put_off_for_a_new_setup_comes_round_again_and_is_not_a_person_asking_for_more() {
-        use AttemptState::{Postponed, Running, Succeeded};
+        use crate::sizing::{due_again, person_asked, put_off_for_setup};
+        use AttemptState::{Failed, Postponed, Running, Succeeded};
         let put_off = recorded(&[
             ("setup", "setup", Succeeded),
+            ("check", "check", Failed),
             ("check", "check", Postponed),
             ("setup", "setup", Running),
         ]);
-        assert!(crate::sizing::due_again(&put_off[1], &put_off));
+        assert!(!put_off_for_setup(&put_off[1]));
+        assert!(put_off_for_setup(&put_off[2]));
+        assert!(due_again(&put_off[2], &put_off));
         // So nothing skipped for being small runs because of it, and the run isn't counted as one
         // where a person asked.
-        assert!(!crate::sizing::person_asked(&put_off));
+        assert!(!person_asked(&put_off));
         let asked = recorded(&[("approval", "approval", Postponed)]);
-        assert!(crate::sizing::person_asked(&asked));
+        assert!(!put_off_for_setup(&asked[0]));
+        assert!(person_asked(&asked));
+        assert!(due_again(&asked[0], &asked));
     }
 
     #[test]

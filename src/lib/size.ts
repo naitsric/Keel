@@ -1,6 +1,6 @@
 import type { TFunction } from "i18next";
 import { type AuditEvent, type Reason } from "./api";
-import { latestOfEachStep } from "./audit";
+import { latestOfEachStep, putOffForSetup } from "./audit";
 
 /** Whether the engine found a change small, on the record. It writes this, and only ever from facts. */
 export interface SizeDecision {
@@ -19,7 +19,7 @@ export const skippedAsSmall = (attempt: { state: string; reason?: { code: string
  * Whether a person asked for what was skipped to run, as `sizing::person_asked` says: that puts off
  * their approval. A step put off for a new setup to run first is something else.
  */
-const personAsked = (attempts: { state: string; kind?: string }[]) => attempts.some((attempt) => attempt.state === "postponed" && attempt.kind === "approval");
+const personAsked = (attempts: { state: string; kind?: string }[]) => attempts.some((attempt) => attempt.state === "postponed" && !putOffForSetup(attempt));
 
 /** The steps that stand skipped for being a small change: what a person can ask for. Once they've asked, all of it is on its way. */
 export const skippedSteps = <T extends { stepId: string; state: string; kind?: string; reason?: { code: string } | null }>(attempts: T[]): T[] => (personAsked(attempts) ? [] : latestOfEachStep(attempts).filter(skippedAsSmall));

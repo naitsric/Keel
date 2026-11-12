@@ -323,5 +323,15 @@ export function shownState(attempt: Pick<Attempt, "id" | "state" | "reason"> & {
   return putOffForSetup(attempt) ? "afterSetup" : attempt.state;
 }
 
-/** Only an approval is put off because the person asked for more. Any other step waits for a new setup to run first. */
+/**
+ * Whether this stands for a step a retry with the project's new commands put off for a new setup to
+ * run first, as `sizing::put_off_for_setup` says. It never ran, and the step comes round again once
+ * the setup is through. The only other thing put off is an approval, by a person who asked for more.
+ */
 export const putOffForSetup = (attempt: { state: string; kind?: string }) => attempt.state === "postponed" && attempt.kind !== undefined && attempt.kind !== "approval";
+
+/**
+ * Whether an agent has had the run's copy, as `runner::before_any_agent` says: from then on, a setup
+ * gets no more than the agents do. A skipped one never had it.
+ */
+export const agentHasRun = (attempts: Pick<Attempt, "kind" | "state">[]) => attempts.some((attempt) => attempt.kind === "agent" && attempt.state !== "skipped");

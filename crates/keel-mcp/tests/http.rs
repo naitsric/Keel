@@ -2723,7 +2723,7 @@ async fn a_client_retries_with_the_project_s_current_commands_only_when_it_asks(
     set_setup("touch installed.txt");
     assert_eq!(
         view_of(&client, &run).await["commandsChanged"],
-        json!([{ "step": "setup", "before": "true", "now": "touch installed.txt" }])
+        json!([{ "step": "setup", "kind": "setup", "before": "true", "now": "touch installed.txt" }])
     );
     // Without asking, it runs what the run started with.
     ok(&call(&client, "retry_step", json!({ "run": run })).await);
@@ -2752,15 +2752,109 @@ async fn a_client_retries_with_the_project_s_current_commands_only_when_it_asks(
             at(2, "touch installed.txt", "succeeded")
         ]
     );
+    // What ran keeps how it ended. The check put off for the setup says so, and came round again.
     assert_eq!(
         ran("check"),
         vec![
             at(1, "test -f installed.txt", "failed"),
-            at(2, "test -f installed.txt", "postponed"),
-            at(3, "test -f installed.txt", "succeeded"),
+            at(2, "test -f installed.txt", "failed"),
+            at(3, "test -f installed.txt", "postponed"),
+            at(4, "test -f installed.txt", "succeeded"),
         ]
     );
+    let second = attempts
+        .iter()
+        .find(|a| a.step_id == "check" && a.number == 2)
+        .unwrap();
+    assert_eq!(second.reason.as_ref().unwrap()["code"], "checkFailed");
     assert_eq!(ran("builder").len(), 1, "the agent didn't run again");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_asking_for_new_commands_when_there_are_none_is_told_so() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let set_commands = |setup: &str, check: &str| {
+        let settings = keel_store::ProjectSettings {
+            setup_command: Some(setup.into()),
+            check_command: Some(check.into()),
+            ..keel_store::ProjectSettings::default()
+        };
+        w.engine.update_project(&w.project_id, &settings).unwrap();
+    };
+    // Keel puts the project's setup first. The check is the workflow's own.
+    set_commands("exit 4", "make test");
+    let checked = w.saved(
+        "Checked",
+        vec![
+            WorkflowStep::Agent(agent("builder", ToolProfile::Build, StepRole::Worker)),
+            WorkflowStep::Check {
+                id: "check".into(),
+                run: "exit 3".into(),
+            },
+            WorkflowStep::Approval { id: "human".into() },
+        ],
+    );
+    let run = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.args_for(&checked, "Fix it"),
+    )
+    .await));
+    let failed = settled(&client, &run).await;
+    assert_eq!(failed["waitingFor"]["step"], "setup", "{failed}");
+    let asked = json!({ "run": run, "useCurrentCommands": true });
+    let mut refusals = 0;
+
+    // The project's setup is the run's.
+    let refusal = refused(&call(&client, "retry_step", asked.clone()).await);
+    refusals += 1;
+    assert!(refusal.contains("nothing new to run"), "{refusal}");
+    assert!(
+        refusal.contains("the same as the project's now"),
+        "{refusal}"
+    );
+    let view = view_of(&client, &run).await;
+    assert_eq!(
+        view["waitingFor"]["attemptId"],
+        failed["waitingFor"]["attemptId"]
+    );
+
+    // Once it's fixed, the new setup runs, and the run goes on to the workflow's check.
+    set_commands("true", "make test");
+    ok(&call(&client, "retry_step", asked.clone()).await);
+    let failed = settled(&client, &run).await;
+    assert_eq!(failed["waitingFor"]["step"], "check", "{failed}");
+    assert_eq!(failed["waitingFor"]["state"], "failed", "{failed}");
+
+    // The project's commands are the run's, and this check is the workflow's own. Changing the
+    // project's check doesn't change that: it never follows it.
+    for check in ["make test", "echo fixed"] {
+        set_commands("true", check);
+        let refusal = refused(&call(&client, "retry_step", asked.clone()).await);
+        refusals += 1;
+        assert!(refusal.contains("nothing new to run"), "{refusal}");
+        assert!(
+            refusal.contains("a check of the saved workflow \"Checked\""),
+            "{refusal}"
+        );
+    }
+    let view = view_of(&client, &run).await;
+    assert_eq!(
+        view["waitingFor"]["attemptId"],
+        failed["waitingFor"]["attemptId"]
+    );
+
+    // None of the refusals used up one of the client's 3 retries: one went on the setup.
+    assert_eq!(refusals, 3);
+    for _ in 0..2 {
+        ok(&call(&client, "retry_step", json!({ "run": run })).await);
+        let again = settled(&client, &run).await;
+        assert_eq!(again["waitingFor"]["state"], "failed", "{again}");
+    }
+    refused(&call(&client, "retry_step", json!({ "run": run })).await);
     client.cancel().await.unwrap();
 }
 

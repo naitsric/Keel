@@ -491,6 +491,77 @@ fn setup_runs_first_and_later_steps_use_their_own_cache() {
 }
 
 #[test]
+fn a_setup_once_an_agent_has_run_gets_no_more_than_the_agent() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // A workflow can set up again after its builder, as a retry with a new setup does. What it
+    // runs then may be the agent's doing: a postinstall script, a Makefile, a build backend.
+    let setup = |name: &str| WorkflowStep::Setup {
+        id: name.into(),
+        run: format!(
+            "echo $XDG_CACHE_HOME > {name}-cache.txt; mkdir -p \"$XDG_CACHE_HOME\"; \
+             touch \"$XDG_CACHE_HOME/from-{name}\""
+        ),
+    };
+    let run = w.run(vec![
+        setup("first"),
+        agent("builder", ToolProfile::Build),
+        setup("again"),
+        WorkflowStep::Approval { id: "human".into() },
+    ]);
+    assert_eq!(w.wait_done(&run, "human").state, "waitingApproval");
+    let first = w.wait_done(&run, "first");
+    let again = w.wait_done(&run, "again");
+    assert_eq!(first.state, "succeeded", "{}", w.check_output(&first));
+    assert_eq!(again.state, "succeeded", "{}", w.check_output(&again));
+
+    let workspace = Path::new(&again.workspace);
+    let read = |file: &str| {
+        std::fs::read_to_string(workspace.join(file))
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    let shared = PathBuf::from(read("first-cache.txt"));
+    assert!(shared.ends_with("cache"), "{shared:?}");
+    assert!(shared.join("from-first").exists());
+    // The second works in the run's own cache.
+    assert!(
+        read("again-cache.txt").starts_with(&*workspace.to_string_lossy()),
+        "{}",
+        read("again-cache.txt")
+    );
+    assert!(!shared.join("from-again").exists());
+
+    // Its sandbox has no way to the shared cache, so it can't leave anything there for the next
+    // run's setup to install (`check_sandbox` tries, with the cache in the home folder as it is in
+    // a real install: here it's in a temporary folder, which every command may write to). And no
+    // network: an agent's Bash reaches only the allowed domains, and a command Keel runs can't be
+    // held to those, so it gets none.
+    let events = |attempt: &keel_store::Attempt| w.store.events(&attempt.id, 0).unwrap();
+    let profile = |attempt: &keel_store::Attempt| {
+        events(attempt)
+            .into_iter()
+            .find(|e| e.kind == "started")
+            .map(|e| e.data["profile"].as_str().unwrap_or_default().to_owned())
+            .unwrap()
+    };
+    let shared_text = shared.to_string_lossy();
+    assert!(profile(&first).contains(&*shared_text));
+    assert!(!profile(&again).contains(&*shared_text));
+    assert!(profile(&first).contains("(allow network*)"));
+    assert!(profile(&again).contains("(deny network*)"));
+    assert!(!profile(&again).contains("(allow network*)"));
+    assert_eq!(first.settings["network"], "internet, nothing local");
+    assert_eq!(again.settings["network"], "none");
+    // The person sees why, in its activity.
+    let limited =
+        |attempt: &keel_store::Attempt| events(attempt).iter().any(|e| e.kind == "setupLimited");
+    assert!(!limited(&first));
+    assert!(limited(&again));
+}
+
+#[test]
 fn what_setup_downloads_stays_in_the_project_cache_and_each_run_gets_its_own_copy() {
     keel_harness::needs!(sandbox);
     let w = world();

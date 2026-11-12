@@ -41,7 +41,7 @@ use keel_store::rusqlite_value::Value;
 use keel_store::{
     Decision, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
 };
-pub use project_commands::{CommandChange, CommandKind};
+pub use project_commands::{CommandChange, CommandKind, retry_runs_something_new};
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
 pub use prompts::full_workflow;
 pub use screenshots::{Screenshot, Screenshots};
@@ -1182,7 +1182,9 @@ impl Engine {
     }
 
     /// `retry`, with the project's setup and check as they are now. The run keeps them for the rest
-    /// of its steps and rounds. See `command_changes`.
+    /// of its steps and rounds. See `command_changes`. A new setup runs first, and the step comes
+    /// round again once it's through. Once an agent has run, that setup gets what a check gets: see
+    /// `runner::command_sandbox`.
     pub fn retry_with_current_commands(&self, attempt_id: &str, resume: bool) -> Result<String> {
         self.retry_as(attempt_id, resume, None, true)
     }
@@ -1204,7 +1206,8 @@ impl Engine {
         self.command_changes_of(&run)
     }
 
-    fn command_changes_of(&self, run: &keel_store::Run) -> Result<Vec<CommandChange>> {
+    /// `command_changes`, for a run already read.
+    pub fn command_changes_of(&self, run: &keel_store::Run) -> Result<Vec<CommandChange>> {
         if is_trial(run) {
             return Ok(Vec::new());
         }
@@ -1215,6 +1218,12 @@ impl Engine {
             project.setup_command.as_deref(),
             project.check_command.as_deref(),
         ))
+    }
+
+    /// Whether this step of the run takes its command from the project. A saved workflow's own
+    /// setup or check keeps its command whatever the project's is.
+    pub fn follows_project(run: &keel_store::Run, step_id: &str) -> bool {
+        project_commands::follows_project(&run.workflow, run.workflow_id.as_deref(), step_id)
     }
 
     fn retry_as(
@@ -1285,7 +1294,8 @@ impl Engine {
         let steps: Vec<WorkflowStep> = serde_json::from_value(workflow.clone()).unwrap_or_default();
         let step = workflows::find_step(&steps, &attempt.step_id).ok_or(Error::InvalidState)?;
         // What a new setup installs, the steps after it need: it runs first, and this step comes
-        // round again once it's through, with nothing in between run again.
+        // round again once it's through, with nothing in between run again. Once agents have had
+        // the run's copy, that setup gets no more than they do: see `runner::command_sandbox`.
         let setup_first = changes
             .iter()
             .filter(|change| change.kind == CommandKind::Setup && change.step_id != step.id())
@@ -1295,40 +1305,40 @@ impl Engine {
             from: attempt.id.clone(),
             prompt: resumed_prompt(&attempt),
         });
-        // What really happens: a step that isn't an agent has no session to continue.
-        if let Some(by) = by {
-            store.append_event(
-                attempt_id,
-                "retryRequested",
-                &json!({ "by": by, "resume": resume.is_some() }),
-            )?;
-        }
-        // Before the step starts: a quick one can be over, and have closed the run, by the time
-        // `start_step` returns.
-        if run.finished_at.is_some() {
-            store.patch_run(&attempt.run_id, &[("finished_at", Value::Null)])?;
-        }
-        // Recorded with the attempt it starts, so a run that couldn't retry stays as it was, and
-        // nobody sees one without the other. Every later step and round reads the run's copy, so
-        // they run the same commands, and each attempt keeps the one it ran.
+        // Recorded with the attempt it starts, all at once, so a retry that can't start leaves the
+        // run as it was, and nobody sees one part without the rest. Every later step and round
+        // reads the run's copy, so they run the same commands, and each attempt keeps the one it
+        // ran.
         let workflow = workflow.to_string();
-        let event = json!({ "changes": changes });
-        let retry = (!changes.is_empty()).then(|| keel_store::RetryCommands {
+        let changed = json!({ "changes": changes });
+        // What really happens: a step that isn't an agent has no session to continue.
+        let requested = by.map(|by| json!({ "by": by, "resume": resume.is_some() }));
+        let put_off = setup_first
+            .as_ref()
+            .map(|_| put_off_attempt(&attempt, &step, &run, number));
+        let retry = keel_store::Retry {
             run_id: &attempt.run_id,
-            workflow: &workflow,
             retried: attempt_id,
-            put_off_from: setup_first.is_some().then_some(state),
-            event: &event,
-        });
+            found: state,
+            requested: requested.as_ref(),
+            // Before the step starts: a quick one can be over, and have closed the run, by the
+            // time `start_step` returns.
+            reopens: run.finished_at.is_some(),
+            commands: (!changes.is_empty()).then_some(keel_store::RetryCommands {
+                workflow: &workflow,
+                event: &changed,
+            }),
+            put_off: put_off.as_ref(),
+        };
         match &setup_first {
             Some(setup) => {
                 let number = workflows::next_number(&attempts, setup.id());
                 self.inner
-                    .start_step_with(&attempt.run_id, setup, number, None, retry.as_ref())
+                    .start_step_with(&attempt.run_id, setup, number, None, Some(&retry))
             }
             None => {
                 self.inner
-                    .start_step_with(&attempt.run_id, &step, number, resume, retry.as_ref())
+                    .start_step_with(&attempt.run_id, &step, number, resume, Some(&retry))
             }
         }
     }
@@ -1714,6 +1724,45 @@ impl Engine {
     }
 }
 
+/// The step a retry puts off for a new setup to run first, as an attempt of its own that says so.
+/// It never runs: the step comes round again once the setup is through, as `sizing::due_again`
+/// says. The attempt that ran keeps how it ended.
+fn put_off_attempt(
+    attempt: &keel_store::Attempt,
+    step: &WorkflowStep,
+    run: &keel_store::Run,
+    number: i64,
+) -> NewAttempt {
+    let command = match step {
+        WorkflowStep::Setup { run, .. } | WorkflowStep::Check { run, .. } => run.clone(),
+        _ => String::new(),
+    };
+    NewAttempt {
+        id: new_id(),
+        run_id: attempt.run_id.clone(),
+        step_id: attempt.step_id.clone(),
+        kind: attempt.kind.clone(),
+        role: attempt.role.clone(),
+        round: run.round,
+        number,
+        state: AttemptState::Postponed,
+        model_requested: String::new(),
+        effort: None,
+        tools: attempt.tools.clone(),
+        max_turns: None,
+        max_budget_usd: None,
+        language: run.language.clone(),
+        prompt: command,
+        system_prompt_sources: "[]".to_owned(),
+        settings: "{}".to_owned(),
+        session_id: new_id(),
+        resumed_from: None,
+        workspace: attempt.workspace.clone(),
+        raw_path: String::new(),
+        started_at: now(),
+    }
+}
+
 /// What an attempt being resumed by hand is told. A limit it broke has to be said again, and answers
 /// it may never have got shouldn't be lost to a bare "go on".
 fn resumed_prompt(attempt: &keel_store::Attempt) -> Option<String> {
@@ -1989,15 +2038,14 @@ impl Inner {
         self.start_step_with(run_id, step, number, resume, None)
     }
 
-    /// `start_step`, recording what a retry with the project's current commands changes along with
-    /// the attempt, in one go.
+    /// `start_step`, recording what a retry changes along with the attempt, in one go.
     fn start_step_with(
         self: &Arc<Self>,
         run_id: &str,
         step: &WorkflowStep,
         number: i64,
         resume: Option<Resume>,
-        retry: Option<&keel_store::RetryCommands>,
+        retry: Option<&keel_store::Retry>,
     ) -> Result<String> {
         let run = self.store.run(run_id)?;
         let project = self.store.project(&run.project_id)?;
@@ -2079,7 +2127,16 @@ impl Inner {
                 None,
                 None,
                 command.clone(),
-                json!({ "network": "internet, nothing local", "read": project.allowed_read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string(),
+                {
+                    // As the runner decides when it starts: once an agent has run, what a check gets.
+                    let (network, cache) =
+                        if runner::before_any_agent(&self.store.attempts_of_run(run_id)?) {
+                            ("internet, nothing local", "the project's")
+                        } else {
+                            ("none", "the run's own")
+                        };
+                    json!({ "network": network, "cache": cache, "read": project.allowed_read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string()
+                },
                 format!("{stem}.log"),
             ),
             WorkflowStep::Check { run: command, .. } => (

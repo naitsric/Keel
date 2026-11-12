@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, type CommandChange, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, agentHasRun, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -1034,7 +1034,7 @@ function startsOverDifferently(attempt: Attempt, changes: CommandChange[]): bool
 }
 
 /** Each command as the run started with it and as the project has it now. */
-function CommandChanges({ changes, setupFirst }: { changes: CommandChange[]; setupFirst: boolean }) {
+function CommandChanges({ changes, setupFirst, limited }: { changes: CommandChange[]; setupFirst: boolean; limited: boolean }) {
   const { t } = useTranslation();
   return (
     <div className="mt-2.5 rounded-md border border-border p-3">
@@ -1053,12 +1053,17 @@ function CommandChanges({ changes, setupFirst }: { changes: CommandChange[]; set
         ))}
       </dl>
       {setupFirst && <p className="mt-2 text-[11.5px] text-muted">{t("run.commandsSetupFirst")}</p>}
+      {setupFirst && limited && <p className="mt-2 text-[11.5px] text-warning">{t("run.setupLimited")}</p>}
       <p className="mt-2 text-[11.5px] text-subtle">{t("run.commandsChangedHint")}</p>
     </div>
   );
 }
 
-export function Actions({ attempt, projectId, onError }: { attempt: Attempt; projectId: string; onError: (message: string) => void }) {
+/**
+ * What can be done with a step that stopped. `agentsRan` says whether an agent has had the run's copy:
+ * a setup started then gets no more than the agents do, and the person is told before choosing.
+ */
+export function Actions({ attempt, projectId, agentsRan, onError }: { attempt: Attempt; projectId: string; agentsRan: boolean; onError: (message: string) => void }) {
   const { t } = useTranslation();
   const navigate = useApp((s) => s.navigate);
   const changes = useCommandChanges(attempt, projectId);
@@ -1113,11 +1118,14 @@ export function Actions({ attempt, projectId, onError }: { attempt: Attempt; pro
   // Only when what it would start over runs something else now.
   const commandChanged = startsOverDifferently(attempt, changes);
   const setupFirst = attempt.kind !== "setup" && changes.some((change) => change.kind === "setup");
+  // Starting a setup over, with new commands or not, runs what agents may have changed.
+  const setupLimited = attempt.kind === "setup" && agentsRan;
   return (
     <Card className="p-4">
       {attempt.reason && <p className="selectable text-[12.5px] text-warning">{reasonText(t, attempt.reason)}</p>}
-      {commandChanged && <CommandChanges changes={changes} setupFirst={setupFirst} />}
-      <div className={cx("flex flex-wrap gap-2", (attempt.reason || commandChanged) && "mt-2.5")}>
+      {commandChanged && <CommandChanges changes={changes} setupFirst={setupFirst} limited={agentsRan} />}
+      {setupLimited && <p className={cx("text-[12px] text-warning", (attempt.reason || commandChanged) && "mt-2.5")}>{t("run.setupLimited")}</p>}
+      <div className={cx("flex flex-wrap gap-2", (attempt.reason || commandChanged || setupLimited) && "mt-2.5")}>
         {needsSignIn(attempt.reason) && <Button onClick={() => void act(() => api.openClaudeLogin())}>{t("run.signIn")}</Button>}
         {needsProjectSettings(attempt.reason) && <Button onClick={() => navigate({ name: "projects", projectId })}>{t("newRun.openProject")}</Button>}
         {canResume && <Button variant="primary" onClick={() => void act(() => api.attemptRetry(attempt.id, true))}>{t("run.resume")}</Button>}
@@ -1331,6 +1339,8 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
           </ul>
         </div>
       );
+    case "setupLimited":
+      return line(t("activity.setupLimited"), "text-warning");
     case "recovered":
       return line(t("activity.recovered"), "text-subtle");
     case "snapshotFailed":
@@ -1799,7 +1809,7 @@ export function RunDetail({ runId }: { runId: string }) {
           <QuestionsCard key={latest.id} attempt={latest} attempts={attempts} onError={setError} />
         ) : (
           <>
-            <Actions attempt={latest} projectId={run.projectId} onError={setError} />
+            <Actions attempt={latest} projectId={run.projectId} agentsRan={agentHasRun(attempts)} onError={setError} />
             {!going && outcome}
           </>
         )}

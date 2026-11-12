@@ -261,7 +261,8 @@ pub struct RetryStepArgs {
     pub resume: Option<bool>,
     /// For a setup or check: run the project's setup and check as they are now, not as they were
     /// when the run started. get_run's `commandsChanged` says which differ. A new setup runs before
-    /// the step. Refused for any other step. False by default.
+    /// the step, with no network once an agent has run. Refused for any other step, and when it
+    /// would run nothing new. False by default.
     #[serde(default)]
     pub use_current_commands: Option<bool>,
 }
@@ -1085,6 +1086,17 @@ impl McpServer {
                     step.step_id
                 )));
             }
+            // Or it would be a plain retry that the client thinks ran something new.
+            if current_commands {
+                let changes = server
+                    .0
+                    .engine
+                    .command_changes_of(&run)
+                    .map_err(engine_error)?;
+                if !keel_engine::retry_runs_something_new(&changes, &step.step_id, &step.kind) {
+                    return Err(ToolError::new(nothing_new_to_run(&run, step)));
+                }
+            }
             if !server.feedback_left(client, &run.id, "retry_step")? {
                 return Err(ToolError::new(format!(
                     "This client has retried this run {MAX_FEEDBACK_PER_RUN} times already, which is as many as it may. Bring it to the person, who decides in Keel."
@@ -1466,12 +1478,12 @@ impl McpServer {
         // Only while it can still be retried with them. It's extra, and not finding out mustn't
         // hide the run.
         if run.finished_at.is_none()
-            && let Ok(changes) = self.0.engine.command_changes(&run.id)
+            && let Ok(changes) = self.0.engine.command_changes_of(run)
             && !changes.is_empty()
         {
             view["commandsChanged"] = changes
                 .iter()
-                .map(|c| json!({ "step": c.step_id, "before": c.before, "now": c.now }))
+                .map(|c| json!({ "step": c.step_id, "kind": c.kind, "before": c.before, "now": c.now }))
                 .collect();
         }
         if let Some(joint) = self.joint_view(run)? {
@@ -1712,6 +1724,20 @@ fn retry_target<'a>(run: &Run, attempts: &'a [Attempt]) -> Result<&'a Attempt, T
     }
 }
 
+/// Why retrying this step with the project's current commands would run nothing a plain retry
+/// doesn't. See `keel_engine::retry_runs_something_new`.
+fn nothing_new_to_run(run: &Run, step: &Attempt) -> String {
+    if keel_engine::Engine::follows_project(run, &step.step_id) {
+        return "The commands this run takes from the project are the same as the project's now, so there's nothing new to run. Retry without `useCurrentCommands`, or ask the person to change the project's commands in Keel first.".to_owned();
+    }
+    let workflow = run.workflow_name.as_deref().unwrap_or("its workflow");
+    format!(
+        "Step {:?} is a {kind} of the saved workflow {workflow:?}, which keeps its command whatever the project's is, and the run has no new setup to run before it, so there's nothing new to run. Retry without `useCurrentCommands`. Changing that {kind} is the person's, in the workflow, for a new run.",
+        step.step_id,
+        kind = step.kind
+    )
+}
+
 /// The attempt a client could close the run on: the one the person would act on, or else the
 /// latest step that didn't go through. Never while something works, since closing doesn't stop it.
 /// The engine looks again as it closes, in case the run moved meanwhile.
@@ -1729,7 +1755,7 @@ fn close_target<'a>(run: &Run, attempts: &'a [Attempt]) -> Result<&'a Attempt, T
                 .rev()
                 .find(|a| !matches!(a.state.as_str(), "succeeded" | "skipped"))
         })
-        // On its way to the next round, or to what was skipped.
+        // On its way to the next round, to what was skipped, or to a new setup.
         .filter(|a| !matches!(a.state.as_str(), "returned" | "postponed"))
         .ok_or_else(|| {
             ToolError::new(

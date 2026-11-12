@@ -62,7 +62,10 @@ most about 4 KB, so when it's full, adding something means retiring something.
 - Services a project needs, like a test database, run outside the sandbox while a step uses
   them, and commands reach them only through a Unix socket.
 - A setup command installs dependencies once per run, before any agent. It's the one step with
-  internet access, and it still can't reach your home folder or anything else on your Mac.
+  internet access and the only one that fills the project's cache shared by its runs, and it
+  still can't reach your home folder or anything else on your Mac. A setup that runs again once
+  an agent has changed the code, like a retry with the project's new setup, gets no more than a
+  check: no network, and a cache of the run's own.
 
 ## Secrets in what it shows
 

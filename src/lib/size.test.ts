@@ -29,7 +29,7 @@ describe("what stands skipped once a person has asked for it", () => {
   });
 
   it("is still all of it when what was put off is a check, for a new setup to run first", () => {
-    const attempts = [step("check", "postponed", null, "check"), step("setup", "succeeded", null, "setup"), step("check", "succeeded", null, "check"), step("security", "skipped", small)];
+    const attempts = [step("check", "failed", null, "check"), step("check", "postponed", null, "check"), step("setup", "succeeded", null, "setup"), step("check", "succeeded", null, "check"), step("security", "skipped", small)];
     expect(skippedSteps(attempts).map((s) => s.stepId)).toEqual(["security"]);
   });
 });

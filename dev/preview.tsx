@@ -385,7 +385,9 @@ const nextRound = (a: Attempt): Attempt => ({ ...a, id: `${a.stepId}-1-2`, round
 // flow=commands is a check that failed, and the person changed the project's commands after the run
 // started: it can start over with the new ones. flow=newCommands is after that, with the new setup
 // running before the check comes round again, where node=check, then clickStart=Attempt 1 and
-// then=Activity, says which ones it took.
+// then=Activity, says which ones it took. The check that failed keeps how it ended, and attempt 2
+// stands for it being put off. node=setup then=Activity says the new setup gets no more than the
+// agents.
 const newCommands = [
   { stepId: "setup", kind: "setup", before: "uv sync --frozen", now: "uv sync --frozen --group test" },
   { stepId: "check", kind: "check", before: "make test", now: "uv run --group test pytest" },
@@ -405,7 +407,7 @@ const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Atte
   skipped: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), humanWaits] },
   failed: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("failed"), checkRan("failed", { number: 2 })] },
   commands: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("failed")] },
-  newCommands: { steps: withNewCommands(fullWorkflow), round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("postponed", { exitCode: 1 }), ran("setup", "running", { kind: "setup", tools: "setup", number: 2, modelRequested: "", modelActual: null, prompt: newCommands[0].now, finishedAt: null })] },
+  newCommands: { steps: withNewCommands(fullWorkflow), round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("failed"), checkRan("postponed", { number: 2, exitCode: null }), ran("setup", "running", { kind: "setup", tools: "setup", number: 2, modelRequested: "", modelActual: null, prompt: newCommands[0].now, finishedAt: null })] },
   many: { steps: manySteps, round: 0, attempts: [setupRan, ...Array.from({ length: 6 }, (_, i) => ran(`step-${i + 1}`, "succeeded", { modelRequested: i % 2 ? "sonnet" : "opus", modelActual: i % 2 ? "claude-sonnet-5-5" : "claude-opus-5-5" })), ran("a-step-whose-name-is-much-too-long-to-fit-in-any-node-at-all", "succeeded", { modelRequested: "claude-a-model-with-a-very-long-name-indeed", modelActual: "claude-a-model-with-a-very-long-name-indeed" }), checkRan(), reviewRan("security", "succeeded", verdict("approved")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", verdict("approved")), reviewRan("a-reviewer-with-a-very-long-name-as-well", "succeeded", verdict("approved")), decided("approve"), ran("after-the-reviews", "succeeded", { filesChanged: ["calc.py"], runFiles: ["calc.py"] }), checkRan("succeeded", { id: "check-again-0-1", stepId: "check-again" }), humanWaits] },
   unreadable: { steps: null, round: 0, attempts: [setupRan, specRan, builderRan(), reviewRan("security", "succeeded", verdict("approved")), checkRan("failed")] },
   try: { steps: [setupStep, { type: "check", id: "try-check", run: "pnpm test" }], round: 0, attempts: [setupRan, checkRan("failed", { id: "try-check-0-1", stepId: "try-check", prompt: "pnpm test" })] },
@@ -940,6 +942,12 @@ mockIPC((command, args) => {
         return [
           { seq: 100, attemptId: "check-0-1", at: at(3), kind: "checkResult", data: { kind: "check", exitCode: 1, stdout: "", stderr: "make: *** No rule to make target 'test'.  Stop.\n", truncated: false, leftWorkspaceDirty: false } },
           { seq: 101, attemptId: "check-0-1", at: at(1), kind: "commandsUpdated", data: { changes: newCommands } },
+        ];
+      }
+      if ((args as { attemptId?: string } | undefined)?.attemptId === "setup-0-2" && params.get("flow") === "newCommands") {
+        return [
+          { seq: 102, attemptId: "setup-0-2", at: at(1), kind: "setupLimited", data: {} },
+          { seq: 103, attemptId: "setup-0-2", at: at(1), kind: "started", data: { command: newCommands[0].now } },
         ];
       }
       if ((args as { attemptId?: string } | undefined)?.attemptId === returnedApproval.id && (params.get("flow") === "returned" || params.get("flow") === "sentBack")) {

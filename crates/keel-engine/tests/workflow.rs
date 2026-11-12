@@ -548,7 +548,7 @@ fn a_retry_with_the_fixed_setup_runs_it_first_and_then_the_step_that_failed() {
         .retry_with_current_commands(&failed.id, false)
         .unwrap();
     w.wait(&run, "approval", AttemptState::WaitingApproval);
-    use AttemptState::{Postponed, Succeeded};
+    use AttemptState::{Failed, Postponed, Succeeded};
     assert_eq!(
         w.ran(&run, "setup"),
         vec![
@@ -556,18 +556,30 @@ fn a_retry_with_the_fixed_setup_runs_it_first_and_then_the_step_that_failed() {
             ran(2, "touch installed.txt", Succeeded)
         ]
     );
+    // What ran keeps how it ended. The step put off for the setup says so, and comes round again.
     assert_eq!(
         w.ran(&run, "check"),
         vec![
-            ran(1, "test -f installed.txt", Postponed),
-            ran(2, "test -f installed.txt", Succeeded),
+            ran(1, "test -f installed.txt", Failed),
+            ran(2, "test -f installed.txt", Postponed),
+            ran(3, "test -f installed.txt", Succeeded),
         ]
+    );
+    let first = w.store.attempt(&failed.id).unwrap();
+    assert_eq!(
+        serde_json::from_value::<Reason>(first.reason.unwrap()).unwrap(),
+        Reason::CheckFailed { exit_code: Some(1) }
     );
     assert_eq!(
         w.log("claude.log").matches("=== CLAUDE").count(),
         agents_before,
         "nothing in between runs again"
     );
+    // Agents have had the code, so the new setup gets no more than they do, and says why.
+    let setup = w.step(&run, "setup").unwrap();
+    assert_eq!(setup.settings["network"], "none");
+    let events = w.store.events(&setup.id, 0).unwrap();
+    assert!(events.iter().any(|e| e.kind == "setupLimited"));
 }
 
 #[test]
@@ -707,11 +719,30 @@ fn a_retry_that_cannot_start_leaves_the_run_s_commands_as_they_were() {
             .retry_with_current_commands(&failed.id, false)
             .is_err()
     );
+    // Nor does a client's, which would say it asked.
+    assert!(
+        w.engine
+            .retry_with_current_commands_by(&failed.id, false, "Claude Code")
+            .is_err()
+    );
+    assert!(w.engine.retry_by(&failed.id, false, "Claude Code").is_err());
     assert_eq!(w.store.run(&run).unwrap().workflow, before);
     assert_eq!(w.engine.command_changes(&run).unwrap().len(), 1);
     assert_eq!(w.step(&run, "check").unwrap().state, "failed");
+    assert_eq!(w.step(&run, "check").unwrap().id, failed.id);
     let events = w.store.events(&failed.id, 0).unwrap();
-    assert!(!events.iter().any(|e| e.kind == "commandsUpdated"));
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == "commandsUpdated" || e.kind == "retryRequested"),
+        "{events:?}"
+    );
+
+    // A run the person left stays closed when trying it again can't start.
+    w.engine.abandon(&failed.id).unwrap();
+    assert!(w.store.run(&run).unwrap().finished_at.is_some());
+    assert!(w.engine.retry(&failed.id, false).is_err());
+    assert!(w.store.run(&run).unwrap().finished_at.is_some());
 
     std::fs::remove_file(&folder).unwrap();
     std::fs::rename(&away, &folder).unwrap();
