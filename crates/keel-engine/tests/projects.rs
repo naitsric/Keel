@@ -463,6 +463,46 @@ fn a_trial_reads_the_folders_being_tried_and_saves_none_of_them() {
     }
 }
 
+/// #124: trying commands with localhost open, as the setup dialog proposes for Gradle, before the
+/// person saves it. Only that run's check gets it, and setup never does.
+#[test]
+fn a_trial_opens_localhost_to_its_check_and_saves_nothing() {
+    keel_harness::needs!(sandbox);
+    let w = world(true);
+    let id = w.add();
+    let profile = |attempt: &Attempt| {
+        w.store
+            .events(&attempt.id, 0)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == "started")
+            .unwrap()
+            .data["profile"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let rule = "(local ip \"localhost:*\")";
+    let run = w
+        .engine
+        .try_check_opening(&id, "true", "true", &[], true, "en")
+        .unwrap();
+    w.wait_finished(&run);
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    let kinds: Vec<&str> = attempts.iter().map(|a| a.kind.as_str()).collect();
+    assert_eq!(kinds, ["setup", "check"]);
+    assert!(!profile(&attempts[0]).contains(rule), "setup stays closed");
+    assert!(profile(&attempts[1]).contains(rule));
+    assert_eq!(attempts[1].settings["localhost"], true);
+    assert!(!w.store.project(&id).unwrap().allow_localhost);
+
+    let other = w.engine.try_check(&id, "true", "true", "en").unwrap();
+    w.wait_finished(&other);
+    for attempt in w.store.attempts_of_run(&other).unwrap() {
+        assert!(!profile(&attempt).contains(rule), "{}", attempt.kind);
+    }
+}
+
 #[test]
 fn trying_saves_nothing() {
     keel_harness::needs!(sandbox);

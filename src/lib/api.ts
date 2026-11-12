@@ -116,6 +116,8 @@ export interface Guess {
   checkOptions: string[];
   /** It's what the project's CI runs, since nothing else here says how it installs and tests. */
   fromCi: boolean;
+  /** Its check can't run with localhost closed: its tool talks to the processes it starts there. */
+  localhost: boolean;
 }
 
 export interface ProjectSetup {
@@ -703,7 +705,7 @@ export const api = {
   projectSetup: (projectId: string) => invoke<ProjectSetup>("project_setup", { projectId }),
   projectToolFolders: (projectId: string, setup: string, check: string) => invoke<ToolFolder[]>("project_tool_folders", { projectId, setup, check }),
   /** `read` is the folders the commands may read on top of the project's, for this run only. */
-  projectTryCheck: (projectId: string, setup: string, check: string, read: string[], language: string) => invoke<string>("project_try_check", { projectId, setup, check, read, language }),
+  projectTryCheck: (projectId: string, setup: string, check: string, read: string[], localhost: boolean, language: string) => invoke<string>("project_try_check", { projectId, setup, check, read, localhost, language }),
   projectRemove: (projectId: string) => invoke<void>("project_remove", { projectId }),
   githubAccounts: () => invoke<GithubAccount[]>("github_accounts"),
   openGithubLogin: () => invoke<void>("open_github_login"),

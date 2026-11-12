@@ -62,7 +62,8 @@ most about 4 KB, so when it's full, adding something means retiring something.
 - Services a project needs, like a test database, run outside the sandbox while a step uses
   them, and commands reach them only through a Unix socket.
 - Localhost is closed as well. A project whose tests start their own servers can open it to its
-  check and its builder's commands, and then they can reach any service on your Mac. Setup stays
+  check and its builder's commands, and then they can reach any service on your Mac. Keel
+  proposes it for a Gradle project, since Gradle talks to its own processes there. Setup stays
   closed, and the approval says when a run had it open.
 - A setup command installs dependencies once per run, before any agent. It's the one step with
   internet access, and it still can't reach your home folder or anything else on your Mac.
