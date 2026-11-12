@@ -3,7 +3,7 @@ import type { ComponentProps, KeyboardEvent, ReactNode } from "react";
 import { twMerge } from "tailwind-merge";
 import { useKeymapHold } from "../commands/keymapHold";
 import { formatKeybinding } from "../commands/keys";
-import type { ShownState } from "../lib/api";
+import type { CheckedCriterion, ShownState } from "../lib/api";
 
 /** Joins class names; on conflicting Tailwind utilities the later one wins. */
 export const cx = (...classes: (string | false | null | undefined)[]) => twMerge(classes.filter(Boolean).join(" "));
@@ -49,6 +49,7 @@ const STATE_TONES: Record<ShownState, string> = {
   postponed: "text-muted",
   // Keel had it fixed straight away: nothing for the person to look into.
   corrected: "text-muted",
+  afterSetup: "text-muted",
   skipped: "text-subtle",
   abandoned: "text-subtle",
 };
@@ -69,8 +70,16 @@ const STATE_DOTS: Record<ShownState, string> = {
   returned: "bg-subtle",
   postponed: "bg-subtle",
   corrected: "bg-subtle",
+  afterSetup: "bg-subtle",
   skipped: "bg-subtle",
   abandoned: "bg-subtle",
+};
+
+/** The tone of what a verifier found of one thing that had to be true, wherever it shows. */
+export const VERIFY_TONES: Record<CheckedCriterion["result"], string> = {
+  met: "text-success",
+  unmet: "font-medium text-warning",
+  unverified: "text-muted",
 };
 
 export function StateBadge({ state, label }: { state: ShownState; label: string }) {

@@ -3,11 +3,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18next from "../i18n";
-import type { Attempt, AuditEvent, Run, Screenshot, Screenshots, SpecOutput } from "../lib/api";
+import type { Attempt, AuditEvent, CommandChange, Run, Screenshot, Screenshots, SpecOutput } from "../lib/api";
 import { type CommandRun, commandsFrom } from "../lib/audit";
 import { useApp } from "../lib/store";
 import type { SizeDecision } from "../lib/size";
-import { ActivityTab, ApprovalCard, CommandsTab, OutputTab, QuestionsCard, Summary } from "./RunDetail";
+import { Actions, ActivityTab, ApprovalCard, CommandsTab, OutputTab, QuestionsCard, Summary } from "./RunDetail";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -1057,6 +1057,12 @@ describe("the approval card", () => {
       expect(answers).toEqual([{ attemptId: "human", approve: true, text: "" }]);
     });
 
+    it("shows what the parts agree on exactly, so it's approved along with them", () => {
+      show([specifier({ parts, contract: [{ id: "K1", when: "valora posts /session", then: "app answers 201", projects: ["valora", "app"] }] }), human], [], agreement);
+      expect(page()).toContain("What the parts agree on exactly");
+      expect(page()).toContain("K1 (valora, app): valora posts /session → app answers 201");
+    });
+
     it("is an ordinary approval when nothing has parts", () => {
       show([specifier(), human], [], agreement);
       expect(page()).not.toContain("Approve what was agreed?");
@@ -1688,6 +1694,148 @@ describe("an answer Keel asked to fix", () => {
     expect(page()).not.toContain("Falló");
     expect(page()).toContain("Estado final: Keel pidió corregirlo");
     expect(page()).toContain("el punto 1 de lo que decidió por su cuenta tiene 141 caracteres y el límite es 140");
+  });
+
+  it("says which points of the contract a part's specifier wrote again, and that what was agreed stands", async () => {
+    const replaced = [event(1, "contractReplaced", { replaced: ["K1", "K3"] }), event(2, "finished", { state: "succeeded" })];
+    act(() => root.render(<ActivityTab events={replaced} role="specifier" corrected={false} />));
+    expect(page()).toContain("It wrote K1, K3 in its own words. Keel kept them as they were agreed.");
+    await i18next.changeLanguage("es");
+    act(() => root.render(<ActivityTab events={[...replaced]} role="specifier" corrected={false} />));
+    expect(page()).toContain("Escribió K1, K3 con sus propias palabras. Keel los dejó como se acordaron.");
+  });
+});
+
+describe("starting over a step whose command the project changed", () => {
+  let root: Root;
+  let changes: CommandChange[];
+  let retried: unknown[];
+  const page = () => document.body.textContent ?? "";
+  const button = (text: string) => [...document.querySelectorAll("button")].find((b) => b.textContent === text);
+  const settle = () => act(() => Promise.resolve());
+  const failedCheck = attempt({ id: "check-2", runId: "r1", stepId: "check", kind: "check", tools: "check", state: "failed", reason: { code: "checkFailed", exitCode: 1 }, prompt: "uv run pytest" });
+  const failedSetup = attempt({ id: "setup-1", runId: "r1", stepId: "setup", kind: "setup", tools: "setup", state: "failed", reason: { code: "setupFailed", exitCode: 1 }, prompt: "uv sync" });
+  const newSetup: CommandChange = { stepId: "setup", kind: "setup", before: "uv sync", now: "uv sync --group test" };
+  const newCheck: CommandChange = { stepId: "check", kind: "check", before: "uv run pytest", now: "uv run --group test pytest" };
+  const offered = () => button("Start over with the new commands") !== undefined;
+  const show = async (shown: Attempt, agentsWrote = false) => {
+    act(() => root.render(<Actions attempt={shown} projectId="p1" agentsWrote={agentsWrote} onError={() => {}} />));
+    await settle();
+  };
+  const limited = "This setup runs with no more permissions than the agents, because an agent that can change the code has run before it: no internet, and not the project's shared cache. An install that needs to download something may fail. If it does, start a new run.";
+  const projectHas = (setupCommand: string, checkCommand: string) => useApp.setState({ overview: { ...useApp.getState().overview, projects: [{ id: "p1", setupCommand, checkCommand }] as never } });
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    changes = [];
+    retried = [];
+    mockIPC((command, args) => {
+      if (command === "run_command_changes") return changes;
+      if (command === "attempt_retry") retried.push(args);
+      return null;
+    });
+    projectHas("uv sync", "uv run pytest");
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("offers the new commands, says which they were and which they are, and runs them only when chosen", async () => {
+    changes = [newSetup, newCheck];
+    await show(failedCheck);
+    expect(page()).toContain("The project's commands changed after this run started.");
+    for (const command of ["uv sync", "uv sync --group test", "uv run pytest", "uv run --group test pytest"]) expect(page()).toContain(command);
+    // The setup runs again first, so what it installs is there for the check.
+    expect(page()).toContain("The new setup runs first, then this step again.");
+    act(() => button("Start over")?.click());
+    await settle();
+    act(() => button("Start over with the new commands")?.click());
+    await settle();
+    expect(retried).toEqual([
+      { attemptId: "check-2", resume: false, currentCommands: false },
+      { attemptId: "check-2", resume: false, currentCommands: true },
+    ]);
+  });
+
+  it("offers them to a check when its setup changed, though the check didn't", async () => {
+    changes = [newSetup];
+    await show(failedCheck);
+    expect(offered()).toBe(true);
+    expect(page()).toContain("The new setup runs first, then this step again.");
+  });
+
+  it("offers them to a setup only when the setup changed", async () => {
+    changes = [newCheck];
+    await show(failedSetup);
+    expect(offered()).toBe(false);
+    changes = [newSetup];
+    await show({ ...failedSetup, id: "setup-2" });
+    expect(offered()).toBe(true);
+    // It is the setup, so nothing else runs before it.
+    expect(page()).not.toContain("runs first");
+  });
+
+  it("offers nothing new when what the step needs is still the project's", async () => {
+    await show(failedCheck);
+    expect(button("Start over")).toBeDefined();
+    expect(offered()).toBe(false);
+    expect(page()).not.toContain("changed after this run started");
+    // A check of the workflow's own runs the same either way.
+    changes = [newCheck];
+    await show({ ...failedCheck, id: "lint-1", stepId: "lint" });
+    expect(offered()).toBe(false);
+  });
+
+  it("asks again once the project's commands change, so what it says now is what the project has", async () => {
+    changes = [newCheck];
+    await show(failedCheck);
+    expect(page()).toContain("uv run --group test pytest");
+    changes = [{ ...newCheck, now: "uv run --group test --group dev pytest" }];
+    act(() => projectHas("uv sync", "uv run --group test --group dev pytest"));
+    await settle();
+    expect(page()).toContain("uv run --group test --group dev pytest");
+  });
+
+  it("says the new setup gets no more than the agents once they've changed the code, and that a new run is the way out", async () => {
+    changes = [newSetup];
+    await show(failedCheck, true);
+    expect(page()).toContain(limited);
+    // Before any agent, the setup runs what's published, as the first one did.
+    await show({ ...failedCheck, id: "check-3" }, false);
+    expect(page()).toContain("The new setup runs first, then this step again.");
+    expect(page()).not.toContain("no more permissions than the agents");
+  });
+
+  it("says it of a setup started over once agents have run, and not of a check started over as it was", async () => {
+    await show(failedSetup, true);
+    expect(page()).toContain(limited);
+    await show(failedCheck, true);
+    expect(page()).not.toContain("no more permissions than the agents");
+  });
+
+  it("is all in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    changes = [newSetup, newCheck];
+    await show(failedCheck, true);
+    expect(page()).toContain("Los comandos del proyecto cambiaron después de que empezó esta ejecución.");
+    expect(page()).toContain("La preparación nueva corre primero, y después este paso otra vez.");
+    expect(page()).toContain("Esta preparación corre sin más permisos que los agentes, porque antes corrió un agente que puede cambiar el código");
+    expect(button("Empezar de nuevo con los comandos nuevos")).toBeDefined();
+  });
+
+  it("says in the activity which commands the step started over with", async () => {
+    const event: AuditEvent = { seq: 1, attemptId: "check-2", at: "2026-01-01T00:00:00Z", kind: "commandsUpdated", data: { changes: [newCheck] } };
+    act(() => root.render(<ActivityTab events={[event]} role="worker" />));
+    expect(page()).toContain("Started over with the project's new commands");
+    expect(page()).toContain("check: uv run pytest → uv run --group test pytest");
+  });
+
+  it("says in a setup's activity when it ran with no more than the agents, and why", () => {
+    const event: AuditEvent = { seq: 1, attemptId: "setup-2", at: "2026-01-01T00:00:00Z", kind: "setupLimited", data: {} };
+    act(() => root.render(<ActivityTab events={[event]} role="worker" />));
+    expect(page()).toContain("Runs with no more permissions than the agents, because an agent that can change the code ran before it: no internet, and not the project's shared cache. An install that needs to download something may fail for it. Only a setup before any such agent, as at the start of a new run, gets the internet.");
   });
 });
 

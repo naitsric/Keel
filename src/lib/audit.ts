@@ -352,7 +352,22 @@ export function focusAttempt<T extends { stepId: string; state: string; role?: s
  * failed, but Keel went straight on with the same session to have it fixed: for the person that's
  * not a failure. Until that next attempt exists, nothing is fixing it, and it did fail.
  */
-export function shownState(attempt: Pick<Attempt, "id" | "state" | "reason">, attempts: Pick<Attempt, "resumedFrom">[]): ShownState {
+export function shownState(attempt: Pick<Attempt, "id" | "state" | "reason"> & { kind?: Attempt["kind"] }, attempts: Pick<Attempt, "resumedFrom">[]): ShownState {
   const fixed = attempt.state === "failed" && attempt.reason?.code === "specNotUsable" && attempts.some((a) => a.resumedFrom === attempt.id);
-  return fixed ? "corrected" : attempt.state;
+  if (fixed) return "corrected";
+  return putOffForSetup(attempt) ? "afterSetup" : attempt.state;
 }
+
+/**
+ * Whether this stands for a step a retry with the project's new commands put off for a new setup to
+ * run first, as `sizing::put_off_for_setup` says. It never ran, and the step comes round again once
+ * the setup is through. The only other thing put off is an approval, by a person who asked for more.
+ */
+export const putOffForSetup = (attempt: { state: string; kind?: string }) => attempt.state === "postponed" && attempt.kind !== undefined && attempt.kind !== "approval";
+
+/**
+ * Whether an agent that can change files has had the run's copy, as `runner::before_any_agent_could_write`
+ * says: from then on, a setup gets no more than the agents do. One that only reads has no Bash, Edit or
+ * Write, and a skipped one never had it. Tools Keel doesn't know may write.
+ */
+export const agentCouldHaveWritten = (attempts: Pick<Attempt, "kind" | "state" | "tools">[]) => attempts.some((attempt) => attempt.kind === "agent" && attempt.state !== "skipped" && attempt.tools !== "readOnly");

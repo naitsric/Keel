@@ -939,10 +939,11 @@ fn a_change_too_big_for_the_prompt_is_all_there_for_a_reviewer_to_read() {
         .args(["status", "--porcelain", "--ignored"])
         .output()
         .unwrap();
+    // Only the home the builder's tools had, which is Keel's and never committed.
+    let status = String::from_utf8_lossy(&status.stdout);
     assert!(
-        status.stdout.is_empty(),
-        "{}",
-        String::from_utf8_lossy(&status.stdout)
+        status.lines().all(|line| line == "!! .keel-cache/"),
+        "{status}"
     );
     assert!(!diff.contains(".diff b/") && !diff.contains("files.txt"));
 }

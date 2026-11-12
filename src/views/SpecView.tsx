@@ -17,7 +17,16 @@ function SpecList({ title, items }: { title: string; items: React.ReactNode[] })
   );
 }
 
-/** What a specifier understood, as text to read. Where a change across projects is agreed, also each part and what's tried together. */
+/** A point the parts agree on exactly: its id, the projects whose part keeps it, and what it says. */
+export function ContractLine({ point }: { point: NonNullable<SpecOutput["contract"]>[number] }) {
+  return (
+    <>
+      <span className="font-mono text-[12px] text-muted">{point.id}</span> ({point.projects.join(", ")}): {point.when} → {point.then}
+    </>
+  );
+}
+
+/** What a specifier understood, as text to read. Where a change across projects is agreed, also each part, what's tried together and what the parts agree on exactly. */
 export function SpecView({ spec }: { spec: SpecOutput }) {
   const { t } = useTranslation();
   const kinds = { adds: "run.specAdds", changes: "run.specAlters", removes: "run.specRemoves" };
@@ -51,6 +60,7 @@ export function SpecView({ spec }: { spec: SpecOutput }) {
         ))}
       />
       <SpecList title={t("run.specTogether")} items={spec.together ?? []} />
+      <SpecList title={t("run.specContract")} items={(spec.contract ?? []).map((point) => <ContractLine point={point} />)} />
       <SpecList
         title={t("run.decidedTitle")}
         items={spec.decided.map((decided) => (

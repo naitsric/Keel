@@ -226,16 +226,25 @@ pub fn skipped_as_small(attempt: &Attempt) -> bool {
         && attempt.reason.as_ref().and_then(|r| r.get("code")) == Some(&json!("treatedAsSmall"))
 }
 
-/// Whether a person asked for what was skipped to run, at any point in this run.
-pub fn person_asked(attempts: &[Attempt]) -> bool {
-    attempts
-        .iter()
-        .any(|attempt| attempt.state == AttemptState::Postponed.as_str())
+/// Whether this stands for a step that a retry with the project's current commands put off for a
+/// new setup to run first. It never ran, and the step comes round again once the setup is through.
+/// The only other thing put off is an approval, by a person who asked for what was skipped.
+pub fn put_off_for_setup(attempt: &Attempt) -> bool {
+    attempt.state == AttemptState::Postponed.as_str() && attempt.kind != "approval"
 }
 
-/// An approval a person put off comes round again, and what they asked for runs before it. Asking
-/// keeps the run from counting as small, so nothing gets skipped this way after that, and the attempts
-/// alone say what's due: a restart loses nothing.
+/// Whether a person asked for what was skipped to run, at any point in this run. That puts off
+/// their approval.
+pub fn person_asked(attempts: &[Attempt]) -> bool {
+    attempts.iter().any(|attempt| {
+        attempt.state == AttemptState::Postponed.as_str() && !put_off_for_setup(attempt)
+    })
+}
+
+/// What was put off comes round again: an approval a person put off, with what they asked for
+/// before it, and a step put off for a new setup, once that's through. Asking keeps the run from
+/// counting as small, so nothing gets skipped this way after that, and the attempts alone say
+/// what's due: a restart loses nothing.
 pub fn due_again(attempt: &Attempt, attempts: &[Attempt]) -> bool {
     attempt.state == AttemptState::Postponed.as_str()
         || (skipped_as_small(attempt) && person_asked(attempts))

@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import i18next from "../i18n";
-import type { Attempt, GithubStatus, Guess, Project, ProjectAdded } from "../lib/api";
+import type { Attempt, GithubStatus, Guess, Project, ProjectAdded, ToolFolder } from "../lib/api";
 import { useApp } from "../lib/store";
 import { ProjectSetupDialog } from "./ProjectSetupDialog";
 
@@ -39,6 +39,8 @@ interface Scene {
   added?: ProjectAdded | null;
   attempts?: Partial<Attempt>[];
   events?: unknown[];
+  /** What Keel finds the commands need, or that looking failed. */
+  folders?: ToolFolder[] | "fails";
 }
 
 describe("the setup dialog", () => {
@@ -49,7 +51,7 @@ describe("the setup dialog", () => {
     for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve));
   });
 
-  const show = async ({ project = PROJECT, guess = NO_GUESS, accounts = {}, gh, added = null, attempts = [], events = [] }: Scene) => {
+  const show = async ({ project = PROJECT, guess = NO_GUESS, accounts = {}, gh, added = null, attempts = [], events = [], folders = [] }: Scene) => {
     const logins = Object.keys(accounts);
     mockIPC((command, payload) => {
       const args = (payload ?? {}) as Record<string, unknown>;
@@ -69,6 +71,9 @@ describe("the setup dialog", () => {
           return project;
         case "project_try_check":
           return "r1";
+        case "project_tool_folders":
+          if (folders === "fails") throw { code: "internal", reason: null, detail: "no shell" };
+          return folders;
         case "run_attempts":
           return attempts;
         case "attempt_events":
@@ -310,6 +315,72 @@ describe("the setup dialog", () => {
     });
   });
 
+  describe("the folders the commands need", () => {
+    const NVM = { folder: "~/.nvm", programs: ["node"] };
+    const PNPM_HOME = { folder: "~/Library/pnpm", programs: ["pnpm"] };
+    const boxes = () => [...document.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')];
+    /** Keel looks a moment after the commands stop changing. */
+    const lookedUp = async () => {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 450));
+      });
+      await settle();
+    };
+
+    it("ticks each folder found that the project doesn't read yet, and saves it with the ones it does", async () => {
+      await show({ guess: PNPM, folders: [NVM, PNPM_HOME] });
+      await lookedUp();
+      expect(called("project_tool_folders").at(-1)?.args).toEqual({ projectId: "p1", setup: "pnpm install --frozen-lockfile", check: "pnpm test" });
+      expect(page()).toContain(i18next.t("setup.folders"));
+      expect(page()).toContain("~/Library/pnpm");
+      expect(page()).toContain(i18next.t("setup.folderFor", { programs: "pnpm" }));
+      expect(boxes().map((box) => box.checked)).toEqual([true]);
+      expect(called("project_update")).toEqual([]);
+
+      await click("Save");
+      expect((called("project_update")[0].args.settings as Project).allowedRead).toEqual(["~/.nvm", "~/Library/pnpm"]);
+    });
+
+    it("tries the commands with the folders ticked, and leaves out one the person unticks", async () => {
+      await show({ guess: PNPM, folders: [PNPM_HOME], attempts: [{ id: "a", kind: "check", state: "succeeded", exitCode: 0, reason: null }] });
+      await lookedUp();
+      await click("Try it");
+      expect(called("project_try_check")[0].args.read).toEqual(["~/Library/pnpm"]);
+
+      await act(async () => boxes()[0].click());
+      await settle();
+      expect(page()).not.toContain(i18next.t("setup.passed"));
+      await click("Try it");
+      expect(called("project_try_check")[1].args.read).toEqual([]);
+      await click("Save");
+      expect((called("project_update")[0].args.settings as Project).allowedRead).toEqual(["~/.nvm"]);
+    });
+
+    it("looks again when a command changes", async () => {
+      await show({ guess: PNPM, folders: [PNPM_HOME] });
+      await lookedUp();
+      await type(inputs()[0], "make test");
+      await lookedUp();
+      expect(called("project_tool_folders").at(-1)?.args).toEqual({ projectId: "p1", setup: "pnpm install --frozen-lockfile", check: "make test" });
+    });
+
+    it("shows nothing when the project reads all it needs already", async () => {
+      await show({ guess: PNPM, folders: [NVM] });
+      await lookedUp();
+      expect(called("project_tool_folders")).not.toEqual([]);
+      expect(boxes()).toEqual([]);
+      expect(page()).not.toContain(i18next.t("setup.folders"));
+    });
+
+    it("shows nothing when Keel couldn't look, and saves the list as it was", async () => {
+      await show({ guess: PNPM, folders: "fails" });
+      await lookedUp();
+      expect(boxes()).toEqual([]);
+      await click("Save");
+      expect((called("project_update")[0].args.settings as Project).allowedRead).toEqual(["~/.nvm"]);
+    });
+  });
+
   describe("trying it", () => {
     const check = (fields: Partial<Attempt>): Partial<Attempt> => ({ id: "a", kind: "check", state: "succeeded", exitCode: 0, reason: null, ...fields });
 
@@ -317,7 +388,7 @@ describe("the setup dialog", () => {
       await show({ guess: PNPM, attempts: [check({})], events: [{ seq: 1, attemptId: "a", at: "", kind: "checkResult", data: { stdout: "all good", stderr: "" } }] });
       await type(inputs()[0], "pnpm test:unit");
       await click("Try it");
-      expect(called("project_try_check")[0].args).toEqual({ projectId: "p1", setup: "pnpm install --frozen-lockfile", check: "pnpm test:unit", language: "en" });
+      expect(called("project_try_check")[0].args).toEqual({ projectId: "p1", setup: "pnpm install --frozen-lockfile", check: "pnpm test:unit", read: [], language: "en" });
       expect(called("project_update")).toEqual([]);
       expect(page()).toContain(i18next.t("setup.passed"));
 
