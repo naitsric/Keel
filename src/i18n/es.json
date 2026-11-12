@@ -349,6 +349,7 @@
     "verdictApproved": "Sin problemas",
     "verdictChanges": "Pide cambios",
     "verdictUnread": "No lo leyó todo",
+    "verdictBreaks": "Rompe {{ids}}, así que Keel no lo cuenta como aprobación",
     "unreadFiles": "No leyó: {{files}}",
     "reviewUnchecked": "No pudo comprobarlo leyendo el código, así que está sin probar: {{items}}",
     "findingBreaks": "Rompe {{id}}.",

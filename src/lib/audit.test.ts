@@ -391,6 +391,11 @@ describe("what a review found", () => {
     expect(findingsOf({ findings: [{ file: "a.py", line: 1, text: "Something", breaks: "C1" }] }, []).map((finding) => finding.breaks)).toEqual([null]);
   });
 
+  it("leaves out a line that isn't a whole number from 0, as Keel does", () => {
+    const output = { findings: [-3, 2.5, "7", 0].map((line) => ({ file: "a.py", line, text: "Something", breaks: null })) };
+    expect(findingsOf(output, breakable).map((finding) => finding.where)).toEqual(["a.py", "a.py", "a.py", "a.py:0"]);
+  });
+
   it("is nothing for an answer it can't read", () => {
     expect(findingsOf(null, breakable)).toEqual([]);
     expect(findingsOf({ verdict: "approved" }, breakable)).toEqual([]);

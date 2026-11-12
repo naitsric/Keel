@@ -1,5 +1,6 @@
 import { useTranslation } from "react-i18next";
 import type { SpecOutput } from "../lib/api";
+import { limitId } from "../lib/audit";
 
 function SpecList({ title, items }: { title: string; items: React.ReactNode[] }) {
   if (items.length === 0) return null;
@@ -45,7 +46,7 @@ export function SpecView({ spec }: { spec: SpecOutput }) {
         items={spec.limits.map((limit, index) => (
           // Reviews name a limit the change breaks by this id, as they do a criterion.
           <>
-            <span className="font-mono text-[12px] text-muted">L{index + 1}</span> {limit}
+            <span className="font-mono text-[12px] text-muted">{limitId(index)}</span> {limit}
           </>
         ))}
       />

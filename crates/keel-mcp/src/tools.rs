@@ -12,8 +12,8 @@ use keel_core::{
 };
 use keel_engine::{
     Error, Finding, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
-    can_send_back, files_changed, findings_of, limits_with_ids, request_from_issue, skipped_steps,
-    spec_of_attempt, verification_of_attempt,
+    breakable_ids, can_send_back, files_changed, findings_of, limits_with_ids, request_from_issue,
+    skipped_steps, spec_of_attempt, verification_of_attempt,
 };
 use keel_store::{Attempt, MAX_OPEN_RUNS_CEILING, McpClient, NewMcpCall, Project, Run};
 use schemars::JsonSchema;
@@ -1746,8 +1746,10 @@ fn not_proven(attempts: &[Attempt]) -> Json {
 }
 
 /// Each reviewer's verdict and each approver's decision, from the latest of each. As in the
-/// builder's rework prompt, an approver's instructions only count when it sent the work back.
+/// builder's rework prompt, an approver's instructions only count when it sent the work back. As
+/// for the engine, a finding breaks only what the specification has.
 fn reviews(attempts: &[Attempt]) -> Vec<Json> {
+    let breakable = breakable_ids(attempts);
     latest_of_each_step(attempts)
         .into_iter()
         .filter(|a| a.kind == "agent" && a.state == AttemptState::Succeeded.as_str())
@@ -1762,7 +1764,7 @@ fn reviews(attempts: &[Attempt]) -> Vec<Json> {
             match a.role.as_str() {
                 "reviewer" => {
                     // Text, as reviews wrote them before, or where, what and what it breaks.
-                    let findings: Vec<Finding> = findings_of(output)
+                    let findings: Vec<Finding> = findings_of(output, &breakable)
                         .into_iter()
                         .take(MAX_FINDINGS)
                         .map(|finding| match finding {
@@ -1968,8 +1970,6 @@ fn step_overview(attempt: &Attempt, long: &LongParts) -> Json {
     view
 }
 
-/// What an attempt answered, as text: its structured answer as Keel read it, laid out, or else
-/// what it wrote. Masked.
 /// An attempt's structured answer, masked. A specification's limits come with the id a finding
 /// names them by, as agents get them.
 fn answer_of(attempt: &Attempt) -> Option<Json> {
@@ -1982,6 +1982,8 @@ fn answer_of(attempt: &Attempt) -> Option<Json> {
     Some(mask_value(output))
 }
 
+/// What an attempt answered, as text: its structured answer as Keel read it, laid out, or else
+/// what it wrote. Masked.
 fn answer_text(attempt: &Attempt) -> String {
     match answer_of(attempt) {
         Some(output) => serde_json::to_string_pretty(&output).unwrap_or_default(),
@@ -2755,6 +2757,44 @@ mod tests {
         assert_eq!((views.len(), left_out), (8, 0));
     }
 
+    /// A specifier's answer with these criteria and limits.
+    fn specified(criteria: &[&str], limits: &[&str]) -> Attempt {
+        let mut spec = attempt("spec", 1);
+        spec.role = "specifier".into();
+        let criteria: Vec<Json> = criteria
+            .iter()
+            .map(|id| json!({ "id": id, "when": "w", "then": "t" }))
+            .collect();
+        spec.output = Some(json!({ "summary": "s", "criteria": criteria, "limits": limits }));
+        spec
+    }
+
+    #[test]
+    fn the_report_says_a_finding_breaks_only_what_the_specification_has() {
+        let mut review = attempt("code", 1);
+        review.output = Some(json!({ "verdict": "approved", "findings": [
+            { "file": "a.py", "line": 1, "text": "Names what isn't there", "breaks": "C9" },
+            { "file": "a.py", "line": 2, "text": "Past the last limit", "breaks": "L2" },
+            { "file": "a.py", "line": 3, "text": "Subtracts", "breaks": "C2" },
+            { "file": "a.py", "line": 4, "text": "Changes the signature", "breaks": "L1" },
+        ]}));
+        let breaks = |attempts: &[Attempt]| {
+            let report = reviews(attempts);
+            let findings = report[0]["findings"].as_array().unwrap().clone();
+            findings
+                .into_iter()
+                .map(|finding| finding["breaks"].clone())
+                .collect::<Vec<_>>()
+        };
+        let spec = specified(&["C1", "C2"], &["Its signature stays"]);
+        assert_eq!(
+            breaks(&[spec, review.clone()]),
+            [Json::Null, Json::Null, json!("C2"), json!("L1")]
+        );
+        // Without a specification, nothing can be broken.
+        assert_eq!(breaks(&[review]), vec![Json::Null; 4]);
+    }
+
     #[test]
     fn the_report_shows_findings_written_as_text_before_and_with_what_they_break_now() {
         let long = "x".repeat(MAX_FINDING + 10);
@@ -2765,7 +2805,7 @@ mod tests {
             { "file": "src/jobs.py", "line": 42, "text": "Sends the notice twice", "breaks": "C5" },
             { "file": null, "line": null, "text": long, "breaks": null },
         ]}));
-        let report = reviews(&[old.clone(), new.clone()]);
+        let report = reviews(&[specified(&["C5"], &[]), old.clone(), new.clone()]);
         assert_eq!(report[0]["findings"], json!(["Line 3 divides by zero"]));
         let findings = &report[1]["findings"];
         assert_eq!(

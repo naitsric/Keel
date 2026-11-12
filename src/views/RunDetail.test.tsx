@@ -569,6 +569,33 @@ describe("the approval card", () => {
       press("Ver las revisiones");
       expect(items()).toContain("Rompe C2. calc.py:3 Subtracts when one is negative");
     });
+
+    // Keel keeps a review that approved what breaks a criterion as asking for changes, and its own summary can still say all is fine.
+    const keptAsChanges = () => [
+      asked,
+      builder(["calc.py"]),
+      check,
+      found("security", ["app/api.py:42 doesn't call require_role"]),
+      attempt({ id: "code", stepId: "code", role: "reviewer", output: { verdict: "changes", findings: [{ file: "calc.py", line: 3, text: "Subtracts when one is negative", breaks: "C2" }], summary: "Minor things, nothing that blocks.", unread: [], unchecked: [] } as unknown as Attempt["output"] }),
+      attempt({ id: "ux", stepId: "ux", role: "reviewer", output: { verdict: "approved", findings: [{ file: "calc.py", line: 9, text: "Names what isn't there", breaks: "C9" }], summary: "Fine.", unread: [], unchecked: [] } as unknown as Attempt["output"] }),
+      human,
+    ];
+    const verdicts = () => [...([...document.querySelectorAll("dt")].find((dt) => dt.textContent?.startsWith("Revi"))?.nextElementSibling?.querySelectorAll("li") ?? [])].map((li) => li.textContent);
+
+    it("says at a glance why a review whose summary sounds fine doesn't count as an approval", () => {
+      show(keptAsChanges(), ["calc.py"]);
+      expect(verdicts()).toEqual(["securityAsks for changes", "codeBreaks C2, so Keel doesn't count it as an approval", "uxNo problems"]);
+      expect(page()).toContain("code: Minor things, nothing that blocks.");
+      // The same in the full reviews.
+      press("See the reviews");
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain("codeBreaks C2, so Keel doesn't count it as an approval");
+    });
+
+    it("says why in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      show(keptAsChanges(), ["calc.py"]);
+      expect(verdicts()).toContain("codeRompe C2, así que Keel no lo cuenta como aprobación");
+    });
   });
 
   // In a short window, "What proves it" can be far down the list, or out of it.

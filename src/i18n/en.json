@@ -349,6 +349,7 @@
     "verdictApproved": "No problems",
     "verdictChanges": "Asks for changes",
     "verdictUnread": "Didn't read all of it",
+    "verdictBreaks": "Breaks {{ids}}, so Keel doesn't count it as an approval",
     "unreadFiles": "Didn't read: {{files}}",
     "reviewUnchecked": "Couldn't check by reading the code, so not proven: {{items}}",
     "findingBreaks": "Breaks {{id}}.",

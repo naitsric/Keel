@@ -59,8 +59,9 @@ impl Finding {
     }
 }
 
-/// What a review found, as Keel reads it, old text included. Anything else is left out.
-pub fn findings_of(output: &Value) -> Vec<Finding> {
+/// What a review found, as Keel reads it, old text included. Anything else is left out. Only what's
+/// in `breakable` breaks anything: an id the specification doesn't have reads as breaking nothing.
+pub fn findings_of(output: &Value, breakable: &[String]) -> Vec<Finding> {
     let filled = |value: Option<&Value>| {
         value
             .and_then(Value::as_str)
@@ -83,7 +84,7 @@ pub fn findings_of(output: &Value) -> Vec<Finding> {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                     .to_owned(),
-                breaks: filled(found.get("breaks")),
+                breaks: filled(found.get("breaks")).filter(|id| breakable.contains(id)),
             }),
             _ => None,
         })
@@ -105,7 +106,7 @@ pub fn breakable_ids(attempts: &[Attempt]) -> Vec<String> {
     let Some(spec) = specifying_attempt(attempts).and_then(specs::of_attempt) else {
         return Vec::new();
     };
-    let limits = (1..=spec.limits.len()).map(|number| format!("L{number}"));
+    let limits = (0..spec.limits.len()).map(limit_id);
     spec.criteria
         .into_iter()
         .map(|criterion| criterion.id)
@@ -133,9 +134,8 @@ pub fn review_as_kept(output: &Value, breakable: &[String]) -> Option<(Value, No
         .map(str::to_owned)
         .collect();
     let mut breaks: Vec<String> = Vec::new();
-    for finding in findings_of(output) {
+    for finding in findings_of(output, breakable) {
         if let Some(id) = finding.breaks()
-            && breakable.iter().any(|known| known == id)
             && !breaks.iter().any(|seen| seen == id)
         {
             breaks.push(id.to_owned());
@@ -159,13 +159,10 @@ pub fn broken_text(attempts: &[Attempt], language: &str) -> String {
     let lines: Vec<String> = attempts
         .iter()
         .filter(|a| a.role == "reviewer" && is_latest_of_its_step(attempts, a))
-        .filter_map(|a| Some((&a.step_id, findings_of(a.output.as_ref()?))))
+        .filter_map(|a| Some((&a.step_id, findings_of(a.output.as_ref()?, &breakable))))
         .flat_map(|(step, findings)| {
-            let breakable = &breakable;
             findings.into_iter().filter_map(move |finding| {
-                let id = finding
-                    .breaks()
-                    .filter(|id| breakable.iter().any(|known| known == id))?;
+                let id = finding.breaks()?;
                 Some(format!(
                     "- {step}: {breaks} {id}. {}",
                     finding.where_and_what()
@@ -505,14 +502,19 @@ fn numbered_decided(output: &Value) -> Value {
     output
 }
 
-/// A specification with each of its limits as an id and its text, from `L1`, in the order the person
-/// sees them. They have no id of their own, and a review names the one a change breaks by it, as it
+/// The id of a specification's limit at `index`, from `L1`, in the order the person sees them.
+/// Limits have no id of their own, and a review names the one a change breaks by this one, as it
 /// does a criterion.
+fn limit_id(index: usize) -> String {
+    format!("L{}", index + 1)
+}
+
+/// A specification with each of its limits as an id and its text.
 pub fn limits_with_ids(mut output: Value) -> Value {
     if let Some(limits) = output.get_mut("limits").and_then(Value::as_array_mut) {
         for (index, limit) in limits.iter_mut().enumerate() {
             if let Some(text) = limit.as_str() {
-                *limit = serde_json::json!({ "id": format!("L{}", index + 1), "text": text });
+                *limit = serde_json::json!({ "id": limit_id(index), "text": text });
             }
         }
     }
@@ -2367,7 +2369,7 @@ mod tests {
             { "file": " src/b.py ", "line": "x", "text": "No line", "breaks": " " },
             7,
         ]});
-        let findings = findings_of(&output);
+        let findings = findings_of(&output, &breakable());
         let found = |file: Option<&str>, line: Option<u64>, text: &str, breaks: Option<&str>| {
             Finding::Found {
                 file: file.map(str::to_owned),
@@ -2402,7 +2404,12 @@ mod tests {
             serde_json::to_value(&findings[..2]).unwrap(),
             json!(["a.py:1 written before Keel asked", { "file": "src/jobs.py", "line": 42, "text": "Sends it twice", "breaks": "C5" }])
         );
-        assert!(findings_of(&json!({ "verdict": "approved" })).is_empty());
+        assert!(findings_of(&json!({ "verdict": "approved" }), &breakable()).is_empty());
+        // What the specification doesn't have, it reads as breaking nothing.
+        let unknown =
+            json!({ "findings": [{ "file": null, "line": null, "text": "t", "breaks": "C9" }] });
+        assert_eq!(findings_of(&unknown, &breakable())[0].breaks(), None);
+        assert_eq!(findings_of(&output, &[])[1].breaks(), None);
     }
 
     #[test]
