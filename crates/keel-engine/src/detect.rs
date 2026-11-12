@@ -31,6 +31,9 @@ pub struct Guess {
     pub check_options: Vec<String>,
     /// It's what the project's CI runs, since nothing else here says how it installs and tests.
     pub from_ci: bool,
+    /// Its check can't run with localhost closed, whatever its tests do: its tool talks to the
+    /// processes it starts there. For a person to open it.
+    pub localhost: bool,
 }
 
 /// What one kind of project gives away. A check is left out when nothing says how it tests itself,
@@ -42,6 +45,7 @@ struct Stack {
     from: Vec<String>,
     setup_options: Vec<String>,
     check_options: Vec<String>,
+    localhost: bool,
 }
 
 /// Regular files only, so a link or a pipe in the repo can't make this hang or read elsewhere.
@@ -519,7 +523,21 @@ fn maven(root: &Path) -> Option<Stack> {
     })
 }
 
-/// `testClasses` compiles the code and its tests, which downloads what both need.
+/// The Gradle a wrapper downloads, as `(major, minor)`, from the name of what it downloads.
+fn wrapper_version(root: &Path) -> Option<(u32, u32)> {
+    let properties = read(root, "gradle/wrapper/gradle-wrapper.properties")?;
+    let url = properties
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("distributionUrl="))?;
+    let name = url.rsplit('/').next()?.strip_prefix("gradle-")?;
+    let mut parts = name.split(['.', '-']);
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// A dry run of the tests compiles the code and its tests and resolves what they run with, which
+/// `testClasses` leaves out, without running any. It came in Gradle 8.3, so an older wrapper, or
+/// one whose version doesn't show, gets `testClasses`. Gradle talks to its own processes on
+/// localhost, so its check can't run without it.
 fn gradle(root: &Path) -> Option<Stack> {
     let build = [
         "build.gradle.kts",
@@ -530,10 +548,17 @@ fn gradle(root: &Path) -> Option<Stack> {
     .into_iter()
     .find(|name| is_file(root, name))?;
     let (tool, from) = with_wrapper(root, build, "gradlew", "gradle");
+    let dry_run =
+        tool == "gradle" || wrapper_version(root).is_some_and(|version| version >= (8, 3));
     Some(Stack {
-        setup: Some(format!("{tool} testClasses")),
+        setup: Some(if dry_run {
+            format!("{tool} test --test-dry-run")
+        } else {
+            format!("{tool} testClasses")
+        }),
         check: Some(format!("{tool} test")),
         from,
+        localhost: true,
         ..Stack::default()
     })
 }
@@ -716,6 +741,7 @@ pub fn guess(root: &Path) -> Guess {
     // With a single stack and no Makefile its check is the guess itself, or what it already offers.
     let offer_checks = stacks.len() > 1 || makefile.is_some();
     guess.setup = setup;
+    guess.localhost = stacks.iter().any(|stack| stack.localhost);
     if guess.check.is_none() {
         guess.check = check;
     }
@@ -1220,22 +1246,51 @@ mod tests {
         assert_eq!(maven.check.as_deref(), Some("./mvnw test"));
         assert_eq!(maven.setup, Some(maven_setup("./mvnw")));
         assert_eq!(maven.from, ["pom.xml", "mvnw"]);
+        assert!(!maven.localhost);
 
+        let gradle = guess(repo(&[("build.gradle", "")]).path());
         assert_eq!(
-            found(&[("build.gradle", "")]),
-            both("gradle test", "gradle testClasses")
+            (gradle.check, gradle.setup),
+            both("gradle test", "gradle test --test-dry-run")
         );
-        let gradle = guess(
-            repo(&[
-                ("settings.gradle.kts", ""),
-                ("build.gradle.kts", ""),
-                ("gradlew", "#!/bin/sh\n"),
-            ])
-            .path(),
-        );
+        // Gradle talks to the processes it starts on localhost, so its check needs it open.
+        assert!(gradle.localhost);
+        let wrapper = |version: &str| {
+            guess(
+                repo(&[
+                    ("settings.gradle.kts", ""),
+                    ("build.gradle.kts", ""),
+                    ("gradlew", "#!/bin/sh\n"),
+                    (
+                        "gradle/wrapper/gradle-wrapper.properties",
+                        &format!(
+                            "distributionUrl=https\\://services.gradle.org/distributions/gradle-{version}-bin.zip\n"
+                        ),
+                    ),
+                ])
+                .path(),
+            )
+        };
+        let gradle = wrapper("9.9.0");
         assert_eq!(gradle.check.as_deref(), Some("./gradlew test"));
-        assert_eq!(gradle.setup.as_deref(), Some("./gradlew testClasses"));
+        assert_eq!(
+            gradle.setup.as_deref(),
+            Some("./gradlew test --test-dry-run")
+        );
         assert_eq!(gradle.from, ["build.gradle.kts", "gradlew"]);
+        assert!(gradle.localhost);
+        assert_eq!(
+            wrapper("8.3").setup.as_deref(),
+            Some("./gradlew test --test-dry-run")
+        );
+        // Before 8.3 there was no dry run, and it would stop at the option.
+        for old in ["8.2.1", "7.6", "bad"] {
+            assert_eq!(
+                wrapper(old).setup.as_deref(),
+                Some("./gradlew testClasses"),
+                "{old}"
+            );
+        }
     }
 
     fn gem_lock(gems: &str) -> String {
