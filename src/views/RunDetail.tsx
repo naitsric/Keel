@@ -479,8 +479,18 @@ function questionedLines(q: Questioned, decided: SpecDecided[]): number[] {
 }
 
 /**
+ * The round in which the change added something nothing asks for, which the approver gives with no
+ * number. One with a number is a line of what was decided, and an older answer has no round.
+ */
+function addedIn(q: Questioned): number | null {
+  const { number, round } = q;
+  return typeof number !== "number" && typeof round === "number" && Number.isInteger(round) && round >= 1 ? round : null;
+}
+
+/**
  * What it settled by itself. Each line can go back to whoever does the work, without starting over.
- * What a review questions of it is the person's to settle, so it shows on its line.
+ * What a review questions of it is the person's to settle, so it shows on its line. What the change
+ * added that nothing asks for comes after, as lines of their own, with the round each appeared in.
  */
 function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; questioned: Questioned[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
   const { t } = useTranslation();
@@ -488,12 +498,20 @@ function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, o
   const draftKey = `${attemptId}:change:${changing}`;
   const instruction = useApp((s) => s.approvalDrafts[draftKey] ?? "");
   const setDraft = useApp((s) => s.setApprovalDraft);
-  const lines = questioned.map((q) => questionedLines(q, decided));
+  const onLines = questioned.filter((q) => addedIn(q) === null);
+  const lines = onLines.map((q) => questionedLines(q, decided));
   // One that matches no line still reaches the person, quoted as it came.
-  const elsewhere = questioned.filter((_, at) => lines[at].length === 0);
+  const elsewhere = onLines.filter((_, at) => lines[at].length === 0);
+  const items: (SpecDecided & { added?: { round: number; why: string } })[] = [
+    ...decided,
+    ...questioned.flatMap((q) => {
+      const round = addedIn(q);
+      return round === null ? [] : [{ text: q.decided, added: { round, why: q.why } }];
+    }),
+  ];
   return (
     <ul className="space-y-1.5">
-      {decided.map((item, index) => (
+      {items.map((item, index) => (
         // Lines of a fixed text: their position is their identity.
         <li key={index}>
           <div className="flex items-start gap-2">
@@ -506,7 +524,8 @@ function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, o
           </div>
           {item.taken === "person" && <p className="text-[11.5px] text-subtle">{t("run.decidedYouChose")}</p>}
           {item.taken === "roundsLimit" && <p className="text-[11.5px] text-warning">{t("run.decidedKeelTook")}</p>}
-          {questioned
+          {item.added && <p className="selectable text-[11.5px] break-words text-warning">{t("run.decidedAdded", { round: item.added.round, why: item.added.why })}</p>}
+          {onLines
             .filter((_, at) => lines[at].includes(index))
             .map((q, at) => (
               <p key={at} className="selectable text-[11.5px] break-words text-warning">
@@ -704,9 +723,9 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             <p className="selectable break-words">{askedGist.text}</p>
           </ApprovalRow>
         )}
-        {spec && (spec.decided.length > 0 || questioned.length > 0) && (
+        {((spec?.decided.length ?? 0) > 0 || questioned.length > 0) && (
           <ApprovalRow label={t("run.decidedTitle")} note={t("run.generated")}>
-            <DecidedList attemptId={attempt.id} decided={spec.decided} questioned={questioned} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
+            <DecidedList attemptId={attempt.id} decided={spec?.decided ?? []} questioned={questioned} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
           </ApprovalRow>
         )}
         {sentBack && (

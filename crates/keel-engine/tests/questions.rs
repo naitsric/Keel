@@ -1258,7 +1258,10 @@ fn a_saved_prompt_that_leaves_out_the_rework_still_gets_what_a_person_asked() {
         human(),
     ]);
     let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
-    assert_eq!(w.step(&run, "builder").prompt, "BUILD");
+    // It's told where to list what it added, whatever its prompt says.
+    let added = "\n\nEnd your final message with the heading \"## Added without being asked\"";
+    let first = w.step(&run, "builder").prompt;
+    assert!(first.starts_with(&format!("BUILD{added}")), "{first}");
     w.engine.send_back(&approval.id, "Return 0").unwrap();
     w.wait_for_attempts(&run, "human", 2, AttemptState::WaitingApproval);
     let prompt = w.step(&run, "builder").prompt;
@@ -1266,7 +1269,7 @@ fn a_saved_prompt_that_leaves_out_the_rework_still_gets_what_a_person_asked() {
         prompt.starts_with("BUILD\n\nA person sent this work back."),
         "{prompt}"
     );
-    assert!(prompt.ends_with("Return 0"), "{prompt}");
+    assert!(prompt.contains(&format!("Return 0{added}")), "{prompt}");
 }
 
 #[test]
