@@ -223,6 +223,9 @@ impl Inner {
                 ("pr_state_at", known(Value::Text(now()))),
                 ("pr_checked_at", known(Value::Text(now()))),
                 ("pr_head", head.map_or(Value::Null, Value::Text)),
+                // What its CI said was about another commit.
+                ("pr_ci", Value::Null),
+                ("pr_ci_failed", Value::Null),
             ],
         )?;
         store.patch_attempt(&attempt.id, &[("account", Value::Text(account.clone()))])?;
@@ -395,6 +398,12 @@ impl Inner {
                 label(
                     "skipped: Keel treated this as a small change",
                     "omitida: Keel lo trató como un cambio pequeño",
+                )
+                .to_owned()
+            } else if crate::sizing::skipped_for_risks(attempt) {
+                label(
+                    "skipped: what was asked names none of the risks it looks at",
+                    "omitida: lo pedido no nombra ninguno de los riesgos que revisa",
                 )
                 .to_owned()
             } else if attempt.state == AttemptState::Skipped.as_str() {

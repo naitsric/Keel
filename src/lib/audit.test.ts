@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { Attempt, AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, agentCouldHaveWritten, answersIn, approvalOutcome, askedText, breakableIds, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, findingsOf, focusAttempt, gist, latestOfEachStep, notProvenInRound, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows, whyNotProven } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -23,6 +23,27 @@ describe("what an attempt's state reads as", () => {
     // The fix that didn't fit either stops the step for a person.
     expect(shownState(first({ state: "blocked" }), [first(), fix])).toBe("blocked");
     expect(shownState(fix, [first(), fix])).toBe("succeeded");
+  });
+
+  it("says a step put off for a new setup runs again after it, and leaves a put-off approval as the person's asking", () => {
+    const putOff = (kind: Attempt["kind"]) => ({ id: "c1", kind, state: "postponed", reason: null, resumedFrom: null }) as Attempt;
+    expect(shownState(putOff("check"), [putOff("check")])).toBe("afterSetup");
+    expect(shownState(putOff("approval"), [putOff("approval")])).toBe("postponed");
+    // The attempt that ran before it keeps how it ended.
+    const failed = { id: "c0", kind: "check", state: "failed", reason: { code: "checkFailed", exitCode: 1 }, resumedFrom: null } as unknown as Attempt;
+    expect(shownState(failed, [failed, putOff("check")])).toBe("failed");
+  });
+
+  it("knows when an agent that can change files has had the run's copy, which one that only reads or was skipped never did", () => {
+    const of = (kind: Attempt["kind"], state: Attempt["state"], tools = "build") => ({ kind, state, tools }) as Attempt;
+    expect(agentCouldHaveWritten([])).toBe(false);
+    expect(agentCouldHaveWritten([of("setup", "succeeded", "setup"), of("check", "failed", "check"), of("agent", "skipped")])).toBe(false);
+    for (const state of ["succeeded", "failed", "stopped", "queued"] as const) {
+      expect(agentCouldHaveWritten([of("agent", state, "readOnly")])).toBe(false);
+      expect(agentCouldHaveWritten([of("agent", "succeeded", "readOnly"), of("setup", "succeeded", "setup"), of("agent", state)])).toBe(true);
+    }
+    // Tools Keel doesn't know may write.
+    expect(agentCouldHaveWritten([of("agent", "succeeded", "someday")])).toBe(true);
   });
 });
 
@@ -73,6 +94,46 @@ describe("what a verifier found", () => {
     expect(line("es", item("unverified"), item("unverified"))).toBe("No se pudo verificar ninguno de los 2");
     expect(line("en", item("unverified"))).toBe("It couldn't be verified");
     expect(line("es", item("unverified"))).toBe("No se pudo verificar");
+  });
+
+  it("says why nothing proves something: what Keel corrected, or else what the verifier said", () => {
+    expect(whyNotProven(item("unverified", { evidence: "tests/db.rs:12", why: "notRun" }))).toBe("notRun");
+    expect(whyNotProven(item("unverified", { why: "noTest" }))).toBe("noTest");
+    for (const corrected of ["noEvidence", "noCheckPassed", "leftOut"] as const) {
+      expect(whyNotProven(item("unverified", { evidence: "a", corrected, why: "notRun" }))).toBe(corrected);
+    }
+    // From before the verifier said why: pointing at nothing, it found nothing that proves it.
+    expect(whyNotProven(item("unverified"))).toBe("noTest");
+    // What it pointed at may well say why, as the prompt from before asked: Keel claims nothing.
+    expect(whyNotProven(item("unverified", { evidence: "requiere Postgres; se salta" }))).toBe("seeEvidence");
+    // What was proven either way isn't unproven.
+    expect(whyNotProven(item("met"))).toBeNull();
+    expect(whyNotProven(item("unmet", { evidence: "calc.py:3" }))).toBeNull();
+  });
+});
+
+describe("how much wasn't proven in a round, and why", () => {
+  const item = (result: CheckedCriterion["result"], fields: Partial<CheckedCriterion> = {}): CheckedCriterion => ({ id: "C1", when: "w", then: "t", result, evidence: "", ...fields });
+  const verifier = (criteria: CheckedCriterion[], round = 0) => ({ stepId: "verify", role: "verifier", state: "succeeded", round, output: { criteria, summary: "" } });
+  const review = (unchecked: string[]) => ({ stepId: "ux", role: "reviewer", state: "succeeded", round: 0, output: { verdict: "approved", findings: [], summary: "", unread: [], unchecked } });
+
+  it("groups by why, what the reviews couldn't check first, and leaves out what was proven either way", () => {
+    const attempts = [
+      verifier([item("met", { evidence: "a" }), item("unverified", { why: "noTest" }), item("unverified", { evidence: "tests/db.rs:12", why: "notRun" }), item("unverified", { evidence: "tests/db.rs:30", why: "notRun" }), item("unverified", { corrected: "noCheckPassed" }), item("unmet", { evidence: "calc.py:3" })]),
+      review(["How it looks in dark mode"]),
+    ];
+    expect(notProvenInRound(attempts, 0)).toEqual([
+      { why: "byReviews", count: 1 },
+      { why: "notRun", count: 2 },
+      { why: "noTest", count: 1 },
+      { why: "noCheckPassed", count: 1 },
+    ]);
+  });
+
+  it("is nothing when everything was proven, and only counts the round it's asked about", () => {
+    expect(notProvenInRound([verifier([item("met", { evidence: "a" })])], 0)).toEqual([]);
+    expect(notProvenInRound([verifier([item("unverified")], 0), verifier([item("met", { evidence: "a" })], 1)], 1)).toEqual([]);
+    expect(notProvenInRound([review(["The page in a wide window", "Its colours"])], 0)).toEqual([{ why: "byReviews", count: 2 }]);
   });
 });
 
@@ -354,6 +415,52 @@ describe("what the reviews couldn't check by reading the code", () => {
       { stepId: "builder", role: "worker", round: 0, output: { unchecked: ["Not a review"] } },
     ];
     expect(uncheckedInRound(attempts, 0)).toEqual([]);
+  });
+});
+
+describe("what a review found", () => {
+  const breakable = breakableIds({ summary: "s", criteria: [{ id: "C1", when: "w", then: "t" }, { id: "C2", when: "w", then: "t" }], changes: [], limits: ["Its signature stays"], decided: [], questions: [] });
+
+  it("can break each criterion of the specification, and each of its limits from L1", () => {
+    expect(breakable).toEqual(["C1", "C2", "L1"]);
+    expect(breakableIds(null)).toEqual([]);
+  });
+
+  it("reads text from before Keel asked, and where it is and what it breaks now", () => {
+    const output = {
+      verdict: "changes",
+      findings: [
+        "app/api.py:42 doesn't call require_role",
+        { file: "calc.py", line: 3, text: "Subtracts when one is negative", breaks: "C2" },
+        { file: " test_calc.py ", line: null, text: "The test name could say more", breaks: " " },
+        { file: null, line: null, text: "Touches the public API", breaks: "L1" },
+        7,
+        null,
+      ],
+    };
+    expect(findingsOf(output, breakable)).toEqual([
+      { where: null, text: "app/api.py:42 doesn't call require_role", breaks: null },
+      { where: "calc.py:3", text: "Subtracts when one is negative", breaks: "C2" },
+      { where: "test_calc.py", text: "The test name could say more", breaks: null },
+      { where: null, text: "Touches the public API", breaks: "L1" },
+    ]);
+  });
+
+  it("says nothing breaks when the specification has no such criterion or limit, as Keel does", () => {
+    const output = { findings: [{ file: "a.py", line: 1, text: "Something", breaks: "C9" }, { file: "a.py", line: 2, text: "Past the last limit", breaks: "L2" }, { file: "a.py", line: 3, text: "Words", breaks: "none" }] };
+    expect(findingsOf(output, breakable).map((finding) => finding.breaks)).toEqual([null, null, null]);
+    expect(findingsOf({ findings: [{ file: "a.py", line: 1, text: "Something", breaks: "C1" }] }, []).map((finding) => finding.breaks)).toEqual([null]);
+  });
+
+  it("leaves out a line that isn't a whole number from 0, as Keel does", () => {
+    const output = { findings: [-3, 2.5, "7", 0].map((line) => ({ file: "a.py", line, text: "Something", breaks: null })) };
+    expect(findingsOf(output, breakable).map((finding) => finding.where)).toEqual(["a.py", "a.py", "a.py", "a.py:0"]);
+  });
+
+  it("is nothing for an answer it can't read", () => {
+    expect(findingsOf(null, breakable)).toEqual([]);
+    expect(findingsOf({ verdict: "approved" }, breakable)).toEqual([]);
+    expect(findingsOf({ findings: "Not a list" }, breakable)).toEqual([]);
   });
 });
 

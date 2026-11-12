@@ -61,11 +61,14 @@ describe("the MCP card", () => {
 
   it("says what an assistant can do if allowed, and what it never can", async () => {
     await open();
-    expect(page()).toContain("If you allow it, it can send work back, try a step again and close the runs it started.");
+    expect(page()).toContain(
+      "If you allow it, it can send work back, try a step again, close the runs it started, and add a note to their cards or put them back in Todo while they wait.",
+    );
     expect(page()).toContain("It can't approve or reject a step, answer the questions a step asks, merge");
     // Closing its own runs comes with starting them, so it can let go of one it won't take further.
     expect(page()).toContain("Can start and stop runs, close the ones it started");
-    expect(page()).toContain("Can give feedback: send work back and try again on its runs");
+    // A note changes what a run is asked, so it's feedback.
+    expect(page()).toContain("Can give feedback: send work back, try again and add notes to its cards");
   });
 
   describe("giving feedback", () => {
@@ -162,7 +165,7 @@ describe("the MCP card", () => {
     await i18next.changeLanguage("es");
     await open();
     expect(page()).toContain("Puede lanzar y detener ejecuciones, cerrar las que lanzó");
-    expect(page()).toContain("Puede dar feedback: devolver trabajo y reintentar en sus ejecuciones");
+    expect(page()).toContain("Puede dar feedback: devolver trabajo, reintentar y agregar notas a sus tarjetas");
     expect(page()).toContain("Ejecuciones abiertas a la vez");
     expect(page()).toContain("Si lo permites, puede devolver trabajo");
   });

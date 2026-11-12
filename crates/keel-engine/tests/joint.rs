@@ -31,6 +31,8 @@ struct World {
     valora: String,
     valora_path: PathBuf,
     data: PathBuf,
+    /// Keel's database, which the store has open.
+    db: PathBuf,
     log: PathBuf,
     queue: PathBuf,
     flags: PathBuf,
@@ -50,7 +52,8 @@ fn git(repo: &Path, args: &[&str]) {
 }
 
 /// Each call takes the next answer from a numbered file. Every call is logged with its schema, its
-/// arguments, what Keel told it and its settings.
+/// arguments, what Keel told it and its settings. While `hold` is in the queue, a call that's been
+/// logged waits to answer.
 fn fake(log: &Path, queue: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -74,6 +77,7 @@ echo "{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"fake\",\"tools\":[\
 if [ -f "{queue}/commits" ] && [ "$tools" != "Read,Grep,Glob" ]; then
   echo work >> "built-$RANDOM.txt"; git add -A && git commit -qm "build"
 fi
+while [ -f "{queue}/hold" ]; do sleep 0.02; done
 n=$(cat "{queue}/count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "{queue}/count"
 output="$(cat "{queue}/$n.json")"
 printf '%s\n' "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"num_turns\":1,\"structured_output\":$output}}"
@@ -84,26 +88,31 @@ printf '%s\n' "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,
 }
 
 /// GitHub as far as Keel asks it, for any repo under `acme`. Pull requests are numbered from 7 in
-/// the order they're opened, and each keeps its description. `pr view` answers with what's in
+/// the order they're opened, and each keeps its description. `api graphql` answers with what's in
 /// `flags/pr-view-<owner>-<name>`, and fails without it.
 fn fake_gh(log: &Path, flags: &Path) -> String {
     format!(
         r##"#!/bin/bash
 echo "gh $*" >> "{log}/gh.log"
-repo=""; prev=""
-for a in "$@"; do [ "$prev" = "--repo" ] && repo="$a"; prev="$a"; done
+repo=""; owner=""; name=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "--repo" ] && repo="$a"
+  if [ "$prev" = "-f" ]; then case "$a" in owner=*) owner="${{a#owner=}}";; name=*) name="${{a#name=}}";; esac; fi
+  prev="$a"
+done
+[ -n "$owner" ] && repo="$owner/$name"
 case "$1 $2" in
 "auth token") echo "tok-SECRET"; exit 0;;
 "repo view") echo '{{"defaultBranchRef":{{"name":"main"}},"viewerPermission":"WRITE","isPrivate":true}}'; exit 0;;
+"api graphql")
+  if [ -f "{flags}/pr-view-${{repo/\//-}}" ]; then cat "{flags}/pr-view-${{repo/\//-}}"; exit 0; fi
+  echo "HTTP 502: Bad Gateway" >&2; exit 1;;
 "api "*) echo false; exit 0;;
 "pr create")
   n=$(cat "{log}/prs" 2>/dev/null || echo 6); n=$((n + 1)); echo "$n" > "{log}/prs"
   prev=""
   for a in "$@"; do [ "$prev" = "--body-file" ] && cp "$a" "{log}/pr-body-${{repo/\//-}}.md"; prev="$a"; done
   echo "https://github.com/$repo/pull/$n"; exit 0;;
-"pr view")
-  if [ -f "{flags}/pr-view-${{repo/\//-}}" ]; then cat "{flags}/pr-view-${{repo/\//-}}"; exit 0; fi
-  echo "HTTP 502: Bad Gateway" >&2; exit 1;;
 esac
 echo "unexpected: $*" >&2; exit 1
 "##,
@@ -151,7 +160,8 @@ fn world_with(on_github: bool) -> World {
         std::fs::write(&gh, fake_gh(&log, &flags)).unwrap();
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let store = Arc::new(Store::open(&dir.path().join("keel.db")).unwrap());
+    let db = dir.path().join("keel.db");
+    let store = Arc::new(Store::open(&db).unwrap());
     let data = dir.path().join("data");
     let mut config = Config::new(data.clone());
     config.tick = Duration::from_millis(20);
@@ -190,6 +200,7 @@ fn world_with(on_github: bool) -> World {
         valora,
         valora_path,
         data,
+        db,
         log,
         queue,
         flags,
@@ -235,6 +246,8 @@ fn agent_with(
         max_budget_usd: None,
         paths: vec![],
         when,
+        risks: vec![],
+        model_when_risky: None,
         role,
     })
 }
@@ -271,6 +284,18 @@ fn agreed(parts: &[(&str, &str)]) -> Value {
 
 fn both() -> Value {
     agreed(&[("valora", "Sends the token"), ("app", "Reads the token")])
+}
+
+/// Both, with what the parts have to agree on exactly, one side to each point: K1 is what valora
+/// sends, and K2 and K3 how app answers it.
+fn with_contract() -> Value {
+    let mut agreed = both();
+    agreed["contract"] = json!([
+        { "when": "someone logs in on valora", "then": "valora sends POST /session with `token`", "projects": ["valora"] },
+        { "when": "app gets POST /session with `token`", "then": "it answers 201", "projects": ["app"] },
+        { "when": "the token is wrong", "then": "app answers 401", "projects": ["app"] },
+    ]);
+    agreed
 }
 
 impl World {
@@ -357,6 +382,114 @@ impl World {
         }
     }
 
+    /// Both projects' cards run a specifier, a builder, a check that passes and a verifier, and
+    /// then wait for a person.
+    fn verifying_workflows(&self) {
+        for project in [&self.app, &self.valora] {
+            let workflow = self
+                .engine
+                .save_workflow(
+                    project,
+                    &Workflow {
+                        id: String::new(),
+                        name: "Verifying".into(),
+                        steps: vec![
+                            agent("spec", StepRole::Specifier, None, "{{request}}"),
+                            agent_with(
+                                "build",
+                                ToolProfile::Build,
+                                StepRole::Worker,
+                                None,
+                                "Build it",
+                            ),
+                            WorkflowStep::Check {
+                                id: "check".into(),
+                                run: "true".into(),
+                            },
+                            agent(
+                                "verify",
+                                StepRole::Verifier,
+                                None,
+                                "Check this: {{steps.spec.output}}",
+                            ),
+                            WorkflowStep::Approval {
+                                id: "approval".into(),
+                            },
+                        ],
+                        builtin: false,
+                    },
+                )
+                .unwrap();
+            self.engine
+                .update_project(
+                    project,
+                    &keel_store::ProjectSettings {
+                        default_workflow: Some(workflow.id),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+        }
+    }
+
+    /// Each point of the contract, with what each part it names last said about it, by project:
+    /// "K1 valora=Some(Met)", and "K1 valora=None, unverifiable" for a part that has no verifier.
+    fn contract(&self, card: &str) -> Vec<String> {
+        self.engine
+            .joint_change(card)
+            .unwrap()
+            .contract
+            .into_iter()
+            .map(|point| {
+                let parts: Vec<String> = point
+                    .parts
+                    .iter()
+                    .map(|part| {
+                        let unverifiable = if part.verifies { "" } else { ", unverifiable" };
+                        format!("{}={:?}{unverifiable}", part.project, part.result)
+                    })
+                    .collect();
+                format!("{} {}", point.id, parts.join(" "))
+            })
+            .collect()
+    }
+
+    /// What an agent was asked, without what Keel told it in its system prompt.
+    fn asked(&self, index: usize) -> String {
+        self.call(index)
+            .split("--- schema")
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    }
+
+    /// Each call from here on waits to answer until [`World::answer_now`].
+    fn hold(&self) {
+        std::fs::write(self.queue.join("hold"), "").unwrap();
+    }
+
+    fn answer_now(&self) {
+        std::fs::remove_file(self.queue.join("hold")).unwrap();
+    }
+
+    /// Waits until this many calls have started.
+    fn wait_for_calls(&self, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.calls().matches("=== CALL").count() < count {
+            assert!(Instant::now() < deadline, "{}", self.calls());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// From here on, reading a change across projects fails in the store, as a broken database would,
+    /// rather than finding none.
+    fn break_joint_changes(&self) {
+        rusqlite::Connection::open(&self.db)
+            .unwrap()
+            .execute_batch("alter table joint_change rename to joint_change_away")
+            .unwrap();
+    }
+
     /// Both projects run a specifier and a builder that commits, wait for a person, and open a
     /// pull request from the account `alice`.
     fn delivering_workflows(&self) {
@@ -409,11 +542,12 @@ impl World {
         std::fs::read_to_string(self.log.join(format!("pr-body-acme-{repo}.md"))).unwrap()
     }
 
-    /// What `gh pr view` says about the pull requests in `acme/<repo>`.
+    /// What GitHub says about the pull requests in `acme/<repo>`.
     fn pr_view(&self, repo: &str, view: Value) {
+        let answer = json!({ "data": { "repository": { "pullRequest": view } } });
         std::fs::write(
             self.flags.join(format!("pr-view-acme-{repo}")),
-            view.to_string(),
+            answer.to_string(),
         )
         .unwrap();
     }
@@ -1125,6 +1259,241 @@ fn each_part_reads_the_whole_request_and_not_only_its_own_line() {
 }
 
 #[test]
+fn each_part_verifies_the_contract_points_that_name_it_and_the_change_shows_each() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.verifying_workflows();
+    // Valora's specifier writes K1 in its own words. What was agreed is what's verified.
+    let mut valora = plain("Valora sends the token");
+    valora["criteria"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "id": "K1", "when": "its own words", "then": "for the same point" }));
+    w.answers(&[
+        with_contract(),
+        valora,
+        json!({}),
+        json!({ "criteria": [
+            { "id": "C1", "result": "met", "evidence": "send.test.ts:3" },
+            { "id": "K1", "result": "met", "evidence": "send.test.ts:9" },
+        ], "summary": "Both hold." }),
+        plain("back-adm reads the token"),
+        json!({}),
+        // It leaves K2 out.
+        json!({ "criteria": [
+            { "id": "C1", "result": "met", "evidence": "read.test.ts:1" },
+            { "id": "K3", "result": "unmet", "evidence": "session.ts:4" },
+        ], "summary": "It answers 400." }),
+    ]);
+    let (card, run) = w.agreeing();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    let agreed = w.store.joint_change(&card).unwrap().agreed.unwrap();
+    assert_eq!(agreed["contract"][2]["id"], "K3");
+
+    // No part has said anything about any of them yet.
+    assert_eq!(
+        w.contract(&card),
+        ["K1 valora=None", "K2 app=None", "K3 app=None"]
+    );
+
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+    // Valora's part keeps its side, K1, in the agreement's words. App's side isn't checked there.
+    let spec = &w.attempts(&first, "spec")[0];
+    let output = spec.output.clone().unwrap();
+    let criteria: Vec<(&str, &str)> = output["criteria"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| (c["id"].as_str().unwrap(), c["when"].as_str().unwrap()))
+        .collect();
+    assert_eq!(
+        criteria,
+        [("C1", "it's asked"), ("K1", "someone logs in on valora")]
+    );
+    // What it wrote of K1 in its own words gave way, and the record says so.
+    let replaced: Vec<Value> = w
+        .store
+        .events(&spec.id, 0)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "contractReplaced")
+        .map(|event| event.data)
+        .collect();
+    assert_eq!(replaced, [json!({ "replaced": ["K1"] })]);
+    // Every part still reads all of what was agreed, and is told which points are its own.
+    let call = w.call(1);
+    for told in [
+        "K1 (valora): someone logs in on valora → valora sends POST /session with `token`",
+        "K2 (app): app gets POST /session with `token` → it answers 201",
+        "Keel adds the points of the contract that name valora to this part's criteria, with their ids (K1)",
+        "The other points are what the other parts promise",
+    ] {
+        assert!(call.contains(told), "{told}: {call}");
+    }
+    // Only the specifier writes criteria, so only it is told not to write the points again. The
+    // builder and the verifier still learn which points are this part's.
+    let again = "Don't write them again as criteria of your own.";
+    assert!(call.contains(again), "{call}");
+    for index in [2, 3] {
+        let call = w.call(index);
+        assert!(!call.contains(again), "{index}: {call}");
+        assert!(
+            call.contains("Keel adds the points of the contract that name valora"),
+            "{index}: {call}"
+        );
+    }
+    // Its verifier is asked about K1 as part of what has to be true, and not about app's side.
+    let verifier = w.asked(3);
+    assert!(
+        verifier.contains("valora sends POST /session with `token`"),
+        "{verifier}"
+    );
+    assert!(!verifier.contains("it answers 201"), "{verifier}");
+
+    w.engine.card_stop_waiting(&parts[1].id).unwrap();
+    w.engine.board_tick().unwrap();
+    let second = w.store.card(&parts[1].id).unwrap().run_id.unwrap();
+    w.wait_for(&second, "approval", AttemptState::WaitingApproval);
+    let spec = w.attempts(&second, "spec")[0].output.clone().unwrap();
+    let ids: Vec<&str> = spec["criteria"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["C1", "K2", "K3"]);
+    // Its verifier left K2 out, and K2 is still on the list.
+    let verified = w.attempts(&second, "verify")[0].output.clone().unwrap();
+    let k2 = &verified["criteria"][1];
+    assert_eq!(
+        (&k2["id"], &k2["result"], &k2["corrected"]),
+        (&json!("K2"), &json!("unverified"), &json!("leftOut"))
+    );
+
+    assert_eq!(
+        w.contract(&card),
+        [
+            "K1 valora=Some(Met)",
+            "K2 app=Some(Unverified)",
+            "K3 app=Some(Unmet)"
+        ]
+    );
+}
+
+#[test]
+fn a_part_whose_workflow_has_no_verifier_says_so_rather_than_not_yet() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.short_workflows();
+    w.answers(&[
+        with_contract(),
+        plain("Valora sends the token"),
+        json!({}),
+        json!({}),
+    ]);
+    let (card, run) = w.agreeing();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+    // App's part hasn't started, so nothing says yet whether it verifies.
+    assert_eq!(
+        w.contract(&card),
+        ["K1 valora=None, unverifiable", "K2 app=None", "K3 app=None"]
+    );
+}
+
+#[test]
+fn only_a_kept_answer_that_said_a_point_differently_records_it_gave_way() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.short_workflows();
+    // Valora's specifier first breaks a limit while writing K1 in its own words, and its fix copies
+    // K1 word for word.
+    let mut broken = plain("");
+    broken["criteria"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "id": "K1", "when": "its own words", "then": "for the same point" }));
+    let mut fixed = plain("Valora sends the token");
+    fixed["criteria"].as_array_mut().unwrap().push(json!({
+        "id": "K1",
+        "when": "someone logs in on valora",
+        "then": "valora sends POST /session with `token`",
+    }));
+    w.answers(&[with_contract(), broken, fixed, json!({}), json!({})]);
+    let (card, run) = w.agreeing();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+
+    let specs = w.attempts(&first, "spec");
+    assert_eq!(specs.len(), 2, "{specs:?}");
+    assert_eq!(specs[0].state, "failed");
+    assert_eq!(specs[1].resumed_from.as_deref(), Some(specs[0].id.as_str()));
+    let kept = specs[1].output.clone().unwrap();
+    assert_eq!(kept["criteria"][1]["when"], "someone logs in on valora");
+    // Nothing of the first was kept, and the second said K1 as it was agreed.
+    for spec in &specs {
+        let events = w.store.events(&spec.id, 0).unwrap();
+        assert!(
+            !events.iter().any(|event| event.kind == "contractReplaced"),
+            "{}: {events:?}",
+            spec.number
+        );
+    }
+}
+
+#[test]
+fn a_part_whose_answer_cannot_be_checked_against_what_was_agreed_does_not_pass() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.short_workflows();
+    w.answers(&[
+        with_contract(),
+        plain("Valora sends the token"),
+        json!({}),
+        json!({}),
+    ]);
+    let (card, run) = w.agreeing();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    // Valora's specifier is told what was agreed, and by the time it answers, the store can't
+    // read it any more.
+    w.hold();
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    w.wait_for_calls(2);
+    w.break_joint_changes();
+    w.answer_now();
+
+    // Keel can't tell which points it has to keep, so its answer doesn't count without them.
+    let failed = w.wait_for(&first, "spec", AttemptState::Failed);
+    let reason = failed.reason.clone().unwrap();
+    assert_eq!(reason["code"], "specNotChecked", "{reason}");
+    assert!(
+        reason["detail"].as_str().unwrap().contains("joint_change"),
+        "{reason}"
+    );
+    assert!(w.attempts(&first, "build").is_empty());
+    assert_eq!(
+        w.calls().matches("=== CALL").count(),
+        2,
+        "no fix is asked for"
+    );
+}
+
+#[test]
 fn a_project_that_cannot_be_read_holds_only_that_step_until_it_can() {
     keel_harness::needs!(sandbox);
     let w = world();
@@ -1254,7 +1623,8 @@ fn each_part_opens_its_own_pull_request_saying_which_part_it_is() {
         Some(&pushed)
     );
     w.until("looking at the first part", || {
-        w.gh_log().contains("gh pr view 7 --repo acme/valora")
+        w.gh_log()
+            .contains(" -f owner=acme -f name=valora -F number=7")
     });
     let part = w.on_board(&w.app, &parts[1].id);
     assert_eq!((part.waits_for, part.warnings), (None, vec![]));
@@ -1309,7 +1679,11 @@ fn each_part_opens_its_own_pull_request_saying_which_part_it_is() {
     let log = w.gh_log();
     let writes: Vec<&str> = log
         .lines()
-        .filter(|line| !line.starts_with("gh pr view") && !line.starts_with("gh auth token"))
+        // A GraphQL question that reads starts with `query`, and one that writes with `mutation`.
+        .filter(|line| {
+            !line.starts_with("gh api graphql -f query=query(")
+                && !line.starts_with("gh auth token")
+        })
         .filter(|line| !line.starts_with("gh repo view") && !line.starts_with("gh api repos/"))
         .collect();
     assert_eq!(writes.len(), 2, "{writes:?}");

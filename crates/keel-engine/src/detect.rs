@@ -8,6 +8,7 @@ use std::path::Path;
 use serde::Serialize;
 use toml::Value;
 
+mod calls;
 mod ci;
 
 /// Far more than a manifest takes. Something this large isn't one.
@@ -31,6 +32,59 @@ pub struct Guess {
     pub check_options: Vec<String>,
     /// It's what the project's CI runs, since nothing else here says how it installs and tests.
     pub from_ci: bool,
+    /// What the check runs because the project's CI does, though nothing else here names it, as
+    /// Keel runs it with no network.
+    pub ci_checks: Vec<String>,
+    /// What else the CI checks, as it runs it, and why the check doesn't run it.
+    pub ci_left_out: Vec<CiLeftOut>,
+}
+
+/// Why a command the CI runs isn't one Keel adds to the check: it can't be sure the command runs
+/// in its sandbox, with no network, as it does in CI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CiWhy {
+    /// Keel doesn't know how to run it with no network as CI does.
+    Offline,
+    /// CI lets it fail.
+    MayFail,
+    /// CI sets variables for it.
+    Env,
+    /// CI runs it only for some events, or under a condition.
+    Sometimes,
+    /// Its job installs more than the project's setup does.
+    Installs,
+    /// It uses a GitLab template from another file.
+    Template,
+}
+
+/// A command the CI runs, as it runs it, and why the check doesn't.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CiLeftOut {
+    pub command: String,
+    pub why: CiWhy,
+}
+
+/// What a project's CI checks and its saved check doesn't run.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CiGap {
+    /// As Keel runs them, with no network, for a person to add.
+    pub commands: Vec<String>,
+    /// As the CI runs them, and why a check doesn't.
+    pub left_out: Vec<CiLeftOut>,
+    /// The CI's files they're in.
+    pub from: Vec<String>,
+}
+
+/// Only reads the repo, like `guess`. What the project's setup installs is what a command can use.
+pub fn ci_gap(root: &Path, setup: &str, check: &str) -> CiGap {
+    let missing = ci::missing_from(root, setup, check);
+    CiGap {
+        commands: missing.add,
+        left_out: missing.left_out,
+        from: missing.from,
+    }
 }
 
 /// What one kind of project gives away. A check is left out when nothing says how it tests itself,
@@ -210,29 +264,39 @@ fn script_stack(scripts: &Scripts, run: impl Fn(&str) -> String) -> (Option<Stri
     (check, options)
 }
 
-/// Yarn 2 and later need a global folder that's in the home folder. Nobody has tried them in the
-/// sandbox, so a repo with a `.yarnrc.yml` gets no guess.
-fn javascript(root: &Path) -> Option<Stack> {
-    let package = read(root, "package.json")?;
-    let (tool, setup, lock) = if is_file(root, "pnpm-lock.yaml") {
-        ("pnpm", "pnpm install --frozen-lockfile", "pnpm-lock.yaml")
+/// The tool a JavaScript project installs with, how, and the lock that says so. Yarn 2 and later
+/// need a global folder that's in the home folder. Nobody has tried them in the sandbox, so a repo
+/// with a `.yarnrc.yml` gets no guess.
+fn node_tool(root: &Path) -> Option<(&'static str, &'static str, &'static str)> {
+    if is_file(root, "pnpm-lock.yaml") {
+        Some(("pnpm", "pnpm install --frozen-lockfile", "pnpm-lock.yaml"))
     } else if is_file(root, "yarn.lock") && !is_file(root, ".yarnrc.yml") {
-        ("yarn", "yarn install --frozen-lockfile", "yarn.lock")
+        Some(("yarn", "yarn install --frozen-lockfile", "yarn.lock"))
     } else if is_file(root, "package-lock.json") {
-        ("npm", "npm ci", "package-lock.json")
+        Some(("npm", "npm ci", "package-lock.json"))
     } else {
         let lock = ["bun.lock", "bun.lockb"]
             .into_iter()
             .find(|name| is_file(root, name))?;
-        ("bun", "bun install --frozen-lockfile", lock)
-    };
+        Some(("bun", "bun install --frozen-lockfile", lock))
+    }
+}
+
+/// How that tool runs one of the project's scripts.
+fn run_script(tool: &str, name: &str) -> String {
+    match (tool, name) {
+        // `bun test` is Bun's own runner, which doesn't run the script.
+        ("bun", _) => format!("bun run {name}"),
+        (_, "test") => format!("{tool} test"),
+        _ => format!("{tool} run {name}"),
+    }
+}
+
+fn javascript(root: &Path) -> Option<Stack> {
+    let package = read(root, "package.json")?;
+    let (tool, setup, lock) = node_tool(root)?;
     let (check, check_options) =
-        script_stack(&scripts(&package, "scripts"), |name| match (tool, name) {
-            // `bun test` is Bun's own runner, which doesn't run the script.
-            ("bun", _) => format!("bun run {name}"),
-            (_, "test") => format!("{tool} test"),
-            _ => format!("{tool} run {name}"),
-        });
+        script_stack(&scripts(&package, "scripts"), |name| run_script(tool, name));
     Some(Stack {
         setup: Some(setup.to_owned()),
         check,
@@ -271,14 +335,19 @@ fn normalized(name: &str) -> String {
     name.to_ascii_lowercase().replace(['_', '.'], "-")
 }
 
-/// `pytest~=9.1`, `pytest[psutil]` or `pytest ; python_version < "3.13"`, but not `pytest-cov`.
-fn is_pytest(requirement: &str) -> bool {
+/// `pytest` in `pytest~=9.1`, `pytest[psutil]` or `pytest ; python_version < "3.13"`.
+fn requirement_name(requirement: &str) -> String {
     let name = requirement
         .trim_start()
         .split(|c: char| !c.is_ascii_alphanumeric() && !"-_.".contains(c))
         .next()
         .unwrap_or_default();
-    normalized(name) == "pytest"
+    normalized(name)
+}
+
+/// But not `pytest-cov`.
+fn is_pytest(requirement: &str) -> bool {
+    requirement_name(requirement) == "pytest"
 }
 
 fn names_pytest(requirements: &Value) -> bool {
@@ -287,9 +356,11 @@ fn names_pytest(requirements: &Value) -> bool {
         .is_some_and(|list| list.iter().any(|r| r.as_str().is_some_and(is_pytest)))
 }
 
-/// Without recursion: a group can include another, and a repo can make that chain as long as it likes.
-fn any_reaches_pytest(groups: &HashMap<String, &Value>, mut waiting: Vec<String>) -> bool {
+/// Every package these groups name, and the groups they include. Without recursion: a group can
+/// include another, and a repo can make that chain as long as it likes.
+fn group_names(groups: &HashMap<String, &Value>, mut waiting: Vec<String>) -> HashSet<String> {
     let mut seen = HashSet::new();
+    let mut names = HashSet::new();
     while let Some(name) = waiting.pop() {
         if !seen.insert(name.clone()) {
             continue;
@@ -297,7 +368,9 @@ fn any_reaches_pytest(groups: &HashMap<String, &Value>, mut waiting: Vec<String>
         let entries = groups.get(&name).and_then(|group| group.as_array());
         for entry in entries.into_iter().flatten() {
             match entry {
-                Value::String(requirement) if is_pytest(requirement) => return true,
+                Value::String(requirement) => {
+                    names.insert(requirement_name(requirement));
+                }
                 Value::Table(include) => waiting.extend(
                     include
                         .get("include-group")
@@ -308,7 +381,156 @@ fn any_reaches_pytest(groups: &HashMap<String, &Value>, mut waiting: Vec<String>
             }
         }
     }
-    false
+    names
+}
+
+fn any_reaches_pytest(groups: &HashMap<String, &Value>, waiting: Vec<String>) -> bool {
+    group_names(groups, waiting).contains("pytest")
+}
+
+/// A pyproject's dependency groups by name, and those `uv sync` installs unless told otherwise:
+/// `dev`, or what `[tool.uv] default-groups` says.
+fn uv_groups(pyproject: &toml::Table) -> (HashMap<String, &Value>, Vec<String>) {
+    let uv = pyproject.get("tool").and_then(|tool| tool.get("uv"));
+    let groups: HashMap<String, &Value> = pyproject
+        .get("dependency-groups")
+        .and_then(Value::as_table)
+        .into_iter()
+        .flatten()
+        .map(|(name, group)| (normalized(name), group))
+        .collect();
+    let default_groups: Vec<String> = match uv.and_then(|uv| uv.get("default-groups")) {
+        Some(Value::Array(names)) => names
+            .iter()
+            .filter_map(Value::as_str)
+            .map(normalized)
+            .collect(),
+        // The only other thing it can be is "all".
+        Some(_) => groups.keys().cloned().collect(),
+        None => vec!["dev".to_owned()],
+    };
+    (groups, default_groups)
+}
+
+/// What a plain `uv sync` installs, by name: the project's dependencies, its old dev-dependencies
+/// and its default groups.
+fn uv_installs(pyproject: &str) -> HashSet<String> {
+    let Ok(pyproject) = toml::from_str::<toml::Table>(pyproject) else {
+        return HashSet::new();
+    };
+    let listed = |list: Option<&Value>| -> Vec<String> {
+        list.and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(requirement_name)
+            .collect()
+    };
+    let project = pyproject.get("project");
+    let uv = pyproject.get("tool").and_then(|tool| tool.get("uv"));
+    let (groups, default_groups) = uv_groups(&pyproject);
+    let mut names = group_names(&groups, default_groups);
+    names.extend(listed(project.and_then(|p| p.get("dependencies"))));
+    names.extend(listed(uv.and_then(|uv| uv.get("dev-dependencies"))));
+    names
+}
+
+/// What a `uv sync` installs: its packages by name, and the groups and extras it was told to.
+struct UvSync {
+    names: HashSet<String>,
+    groups: HashSet<String>,
+    extras: HashSet<String>,
+}
+
+/// What `uv sync` with these options installs. None when it's told something this doesn't follow,
+/// like leaving a group out or another Python.
+fn uv_sync(pyproject: &str, args: &[&str]) -> Option<UvSync> {
+    let table = toml::from_str::<toml::Table>(pyproject).unwrap_or_default();
+    let (groups, defaults) = uv_groups(&table);
+    let extras_table = table
+        .get("project")
+        .and_then(|project| project.get("optional-dependencies"))
+        .and_then(Value::as_table);
+    let mut chosen: Vec<String> = defaults
+        .into_iter()
+        .filter(|name| groups.contains_key(name))
+        .collect();
+    let mut extras = HashSet::new();
+    let mut at = 0;
+    while let Some(arg) = args.get(at) {
+        at += 1;
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value)),
+            _ => (*arg, None),
+        };
+        let mut value = || {
+            inline.map(normalized).or_else(|| {
+                at += 1;
+                args.get(at - 1).map(|value| normalized(value))
+            })
+        };
+        match flag {
+            "--frozen" | "--locked" | "-q" | "--quiet" | "--no-progress" | "--inexact" => {}
+            "--group" => chosen.push(value()?),
+            "--all-groups" => chosen.extend(groups.keys().cloned()),
+            "--extra" => {
+                extras.insert(value()?);
+            }
+            "--all-extras" => extras.extend(
+                extras_table
+                    .into_iter()
+                    .flatten()
+                    .map(|(name, _)| normalized(name)),
+            ),
+            _ => return None,
+        }
+    }
+    let mut names = uv_installs(pyproject);
+    names.extend(group_names(&groups, chosen.clone()));
+    for (name, list) in extras_table.into_iter().flatten() {
+        if extras.contains(&normalized(name)) {
+            let listed = list
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str);
+            names.extend(listed.map(requirement_name));
+        }
+    }
+    Some(UvSync {
+        names,
+        groups: chosen.into_iter().collect(),
+        extras,
+    })
+}
+
+/// What `poetry install` installs, by name: every group that isn't optional.
+fn poetry_installs(pyproject: &str) -> HashSet<String> {
+    let Ok(pyproject) = toml::from_str::<toml::Table>(pyproject) else {
+        return HashSet::new();
+    };
+    let poetry = pyproject.get("tool").and_then(|tool| tool.get("poetry"));
+    let keys = |table: Option<&Value>| -> Vec<String> {
+        table
+            .and_then(Value::as_table)
+            .into_iter()
+            .flatten()
+            .map(|(name, _)| normalized(name))
+            .collect()
+    };
+    let mut names: HashSet<String> = keys(poetry.and_then(|p| p.get("dependencies")))
+        .into_iter()
+        .chain(keys(poetry.and_then(|p| p.get("dev-dependencies"))))
+        .collect();
+    let groups = poetry
+        .and_then(|p| p.get("group"))
+        .and_then(Value::as_table);
+    for group in groups.into_iter().flatten().map(|(_, group)| group) {
+        if group.get("optional").and_then(Value::as_bool) != Some(true) {
+            names.extend(keys(group.get("dependencies")));
+        }
+    }
+    names
 }
 
 /// This name ends up in a command, so one a shell or uv could read as anything else doesn't count.
@@ -332,21 +554,7 @@ fn uv_options(pyproject: &str) -> (Vec<String>, Option<String>) {
     let project = pyproject.get("project");
     let uv = pyproject.get("tool").and_then(|tool| tool.get("uv"));
     let group_table = pyproject.get("dependency-groups").and_then(Value::as_table);
-    let groups: HashMap<String, &Value> = group_table
-        .into_iter()
-        .flatten()
-        .map(|(name, group)| (normalized(name), group))
-        .collect();
-    let default_groups: Vec<String> = match uv.and_then(|uv| uv.get("default-groups")) {
-        Some(Value::Array(names)) => names
-            .iter()
-            .filter_map(Value::as_str)
-            .map(normalized)
-            .collect(),
-        // The only other thing it can be is "all".
-        Some(_) => groups.keys().cloned().collect(),
-        None => vec!["dev".to_owned()],
-    };
+    let (groups, default_groups) = uv_groups(&pyproject);
     let installed = |list: Option<&Value>| list.is_some_and(names_pytest);
     let pytest_comes_by_itself = installed(project.and_then(|p| p.get("dependencies")))
         || installed(uv.and_then(|uv| uv.get("dev-dependencies")))
@@ -674,10 +882,21 @@ fn elixir(root: &Path) -> Option<Stack> {
     })
 }
 
+/// Commands chained so that each has to pass. A command with a `#` or a new line in it is left
+/// out: under `sh -c` it could turn every command after it into a comment, or run without having
+/// to pass.
+fn chained(parts: Vec<String>) -> Option<String> {
+    let parts: Vec<String> = parts
+        .into_iter()
+        .filter(|part| !part.trim().is_empty() && !part.contains(['#', '\n']))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(" && "))
+}
+
 /// A Makefile's `test` target is what the project itself calls testing, so it wins. Every stack found
-/// adds its setup and its check, chained so that each one has to pass. When nothing here is known,
-/// what the project's CI runs is the guess. Without that either, an unknown stack gets nothing rather
-/// than something plausible.
+/// adds its setup and its check, chained so that each one has to pass, and then what else the CI
+/// checks, like a linter, goes after them. When nothing here is known, what the project's CI runs is
+/// the guess. Without that either, an unknown stack gets nothing rather than something plausible.
 pub fn guess(root: &Path) -> Guess {
     let mut guess = Guess::default();
     let makefile = ["Makefile", "GNUmakefile", "makefile"]
@@ -693,7 +912,6 @@ pub fn guess(root: &Path) -> Guess {
     .iter()
     .filter_map(|find| find(root))
     .collect();
-    let chained = |parts: Vec<String>| (!parts.is_empty()).then(|| parts.join(" && "));
     if stacks.is_empty() && makefile.is_none() {
         let ci = ci::commands(root);
         return Guess {
@@ -701,6 +919,7 @@ pub fn guess(root: &Path) -> Guess {
             check: chained(ci.check),
             from_ci: !ci.from.is_empty(),
             from: ci.from,
+            ci_left_out: ci.left_out,
             ..Guess::default()
         };
     }
@@ -712,6 +931,17 @@ pub fn guess(root: &Path) -> Guess {
     if guess.check.is_none() {
         guess.check = check;
     }
+    let ci = ci::missing_from(
+        root,
+        guess.setup.as_deref().unwrap_or_default(),
+        guess.check.as_deref().unwrap_or_default(),
+    );
+    if !ci.add.is_empty() {
+        let own = guess.check.take().into_iter();
+        guess.check = chained(own.chain(ci.add.iter().cloned()).collect());
+    }
+    guess.ci_checks = ci.add;
+    guess.ci_left_out = ci.left_out;
     for stack in stacks {
         guess.from.extend(stack.from);
         guess.setup_options.extend(stack.setup_options);
@@ -721,6 +951,10 @@ pub fn guess(root: &Path) -> Guess {
                 guess.check_options.push(option);
             }
         }
+    }
+    // Only what the commands came from: what's left out is only mentioned.
+    if !guess.ci_checks.is_empty() {
+        guess.from.extend(ci.from);
     }
     guess
 }
@@ -748,6 +982,24 @@ mod tests {
 
     pub(super) fn both(check: &str, setup: &str) -> (Option<String>, Option<String>) {
         (Some(check.to_owned()), Some(setup.to_owned()))
+    }
+
+    #[test]
+    fn a_piece_that_could_hide_the_rest_is_never_joined() {
+        let parts = |list: &[&str]| list.iter().map(|part| (*part).to_owned()).collect();
+        assert_eq!(
+            chained(parts(&["make test # all of it", "cargo test"])),
+            Some("cargo test".to_owned())
+        );
+        assert_eq!(
+            chained(parts(&["make test\nmake lint", "cargo test"])),
+            Some("cargo test".to_owned())
+        );
+        assert_eq!(chained(parts(&["#", ""])), None);
+        assert_eq!(
+            chained(parts(&["make test", "cargo test"])),
+            Some("make test && cargo test".to_owned())
+        );
     }
 
     #[test]
