@@ -19,8 +19,11 @@ export type AttemptState =
   | "skipped"
   | "abandoned";
 
-/** What the app calls a state. `corrected` is a failed answer that Keel had fixed at once: see `shownState`. */
-export type ShownState = AttemptState | "corrected";
+/**
+ * What the app calls a state. `corrected` is a failed answer that Keel had fixed at once, and
+ * `afterSetup` a step put off for a new setup to run first: see `shownState`.
+ */
+export type ShownState = AttemptState | "corrected" | "afterSetup";
 
 export type ToolProfile = "readOnly" | "build";
 
@@ -487,6 +490,14 @@ export interface Totals {
   costUsd: number;
 }
 
+/** A run's setup or check whose command the project changed after the run started. */
+export interface CommandChange {
+  stepId: string;
+  kind: "setup" | "check";
+  before: string;
+  now: string;
+}
+
 export interface Overview {
   runs: RunRow[];
   totals: Totals;
@@ -774,7 +785,9 @@ export const api = {
   attemptStop: (attemptId: string) => invoke<void>("attempt_stop", { attemptId }),
   attemptWait: (attemptId: string) => invoke<void>("attempt_wait", { attemptId }),
   attemptKillCommand: (attemptId: string) => invoke<void>("attempt_kill_command", { attemptId }),
-  attemptRetry: (attemptId: string, resume: boolean) => invoke<string>("attempt_retry", { attemptId, resume }),
+  /** With `currentCommands`, the run takes the project's setup and check as they are now. */
+  attemptRetry: (attemptId: string, resume: boolean, currentCommands = false) => invoke<string>("attempt_retry", { attemptId, resume, currentCommands }),
+  runCommandChanges: (runId: string) => invoke<CommandChange[]>("run_command_changes", { runId }),
   attemptAbandon: (attemptId: string) => invoke<void>("attempt_abandon", { attemptId }),
   languageGet: () => invoke<string | null>("language_get"),
   languageSet: (language: string) => invoke<void>("language_set", { language }),

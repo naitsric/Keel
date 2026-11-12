@@ -118,7 +118,8 @@
     "returned": "Devuelto",
     "postponed": "Se pidió más",
     "skipped": "Omitido",
-    "corrected": "Keel pidió corregirlo"
+    "corrected": "Keel pidió corregirlo",
+    "afterSetup": "Vuelve a correr después de la preparación"
   },
   "reasons": {
     "claudeMissing": "Claude Code no está instalado, o Keel no lo encuentra.",
@@ -173,7 +174,8 @@
     "partsNotOpened": "Lo aprobaste, pero Keel no pudo poner en el tablero la parte de cada proyecto: {{detail}}. Inténtalo de nuevo cuando eso esté resuelto.",
     "startsOnTheBoard": "Este issue es un cambio en varios proyectos, así que arranca desde su tarjeta en el tablero.",
     "readCopyFailed": "Keel no pudo traer una copia de {{project}} para leerla: {{detail}}. Inténtalo de nuevo cuando se pueda alcanzar.",
-    "specNotChecked": "Keel no pudo leer lo que necesitaba para revisar esta respuesta, así que no cuenta: {{detail}}. Inténtalo de nuevo."
+    "specNotChecked": "Keel no pudo leer lo que necesitaba para revisar esta respuesta, así que no cuenta: {{detail}}. Inténtalo de nuevo.",
+    "newCommandsNeedSetupOrCheck": "Solo una preparación o una verificación puede empezar de nuevo con los comandos nuevos del proyecto."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
@@ -268,6 +270,13 @@
     "retry": "Empezar de nuevo",
     "resume": "Continuar",
     "abandon": "Dejarlo",
+    "commandsChanged": "Los comandos del proyecto cambiaron después de que empezó esta ejecución.",
+    "commandBefore": "Antes",
+    "commandNow": "Ahora",
+    "commandsChangedHint": "Empezar de nuevo corre los de antes.",
+    "commandsSetupFirst": "La preparación nueva corre primero, y después este paso otra vez.",
+    "retryWithNewCommands": "Empezar de nuevo con los comandos nuevos",
+    "setupLimited": "Esta preparación corre sin más permisos que los agentes, porque antes corrió un agente que puede cambiar el código: sin internet y sin la caché compartida del proyecto. Una instalación que necesite descargar algo puede fallar. Si falla, empieza una ejecución nueva.",
     "signIn": "Iniciar sesión en Claude Code",
     "decideStalled": "Elige arriba qué hacer con él.",
     "noResultEnded": "Terminó antes de escribir una explicación. La actividad de abajo muestra lo que hizo.",
@@ -468,6 +477,8 @@
     "abandoned": "Dejaste esta ejecución",
     "abandonedBy": "{{client}} cerró esta ejecución",
     "retryRequested": "{{client}} lo reintentó",
+    "commandsUpdated": "Empezó de nuevo con los comandos nuevos del proyecto",
+    "setupLimited": "Corre sin más permisos que los agentes, porque antes corrió un agente que puede cambiar el código: sin internet y sin la caché compartida del proyecto. Una instalación que necesite descargar algo puede fallar por eso. Solo una preparación antes de cualquier agente así, como al empezar una ejecución nueva, tiene internet.",
     "recovered": "Keel se reabrió y retomó este paso",
     "snapshotFailed": "No se pudieron registrar los cambios: {{error}}",
     "result": "El agente terminó",

@@ -6,7 +6,7 @@ import type { AuditEvent, Reason } from "./api";
 import { latestSizeDecision, skippedAsSmall, skippedSteps, whyNotSmallText } from "./size";
 
 const small = { code: "treatedAsSmall", lines: 3, files: 1 };
-const step = (stepId: string, state: string, reason: { code: string } | null = null) => ({ stepId, state, reason });
+const step = (stepId: string, state: string, reason: { code: string } | null = null, kind = "agent") => ({ stepId, state, reason, kind });
 const decided = (seq: number, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "", kind: "sizeDecided", data });
 
 describe("what was skipped for being small", () => {
@@ -25,7 +25,12 @@ describe("what was skipped for being small", () => {
 
 describe("what stands skipped once a person has asked for it", () => {
   it("is nothing, even for what hasn't started yet", () => {
-    expect(skippedSteps([step("a", "skipped", small), step("human", "postponed"), step("b", "running")])).toEqual([]);
+    expect(skippedSteps([step("a", "skipped", small), step("human", "postponed", null, "approval"), step("b", "running")])).toEqual([]);
+  });
+
+  it("is still all of it when what was put off is a check, for a new setup to run first", () => {
+    const attempts = [step("check", "failed", null, "check"), step("check", "postponed", null, "check"), step("setup", "succeeded", null, "setup"), step("check", "succeeded", null, "check"), step("security", "skipped", small)];
+    expect(skippedSteps(attempts).map((s) => s.stepId)).toEqual(["security"]);
   });
 });
 

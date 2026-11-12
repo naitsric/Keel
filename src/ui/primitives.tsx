@@ -49,6 +49,7 @@ const STATE_TONES: Record<ShownState, string> = {
   postponed: "text-muted",
   // Keel had it fixed straight away: nothing for the person to look into.
   corrected: "text-muted",
+  afterSetup: "text-muted",
   skipped: "text-subtle",
   abandoned: "text-subtle",
 };
@@ -69,6 +70,7 @@ const STATE_DOTS: Record<ShownState, string> = {
   returned: "bg-subtle",
   postponed: "bg-subtle",
   corrected: "bg-subtle",
+  afterSetup: "bg-subtle",
   skipped: "bg-subtle",
   abandoned: "bg-subtle",
 };

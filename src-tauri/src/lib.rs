@@ -12,9 +12,10 @@ use keel_core::{
     serialize_masked,
 };
 use keel_engine::{
-    AddedProject, Answer, Board, BrainView, Config, Engine, Error as EngineError, GithubStatus,
-    JointChangeView, Preflight, ProjectProposalReview, ProjectSetup, RawCheck, RunJoint, StartRun,
-    Workflow, WorkflowDraft, request_from_issue, title_from_issue,
+    AddedProject, Answer, Board, BrainView, CommandChange, Config, Engine, Error as EngineError,
+    GithubStatus, JointChangeView, Preflight, ProjectProposalReview, ProjectSetup, RawCheck,
+    RetryOptions, RunJoint, StartRun, Workflow, WorkflowDraft, request_from_issue,
+    title_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
@@ -757,8 +758,23 @@ fn attempt_retry(
     state: State<'_, AppState>,
     attempt_id: String,
     resume: bool,
+    current_commands: bool,
 ) -> CommandResult<String> {
-    Ok(state.engine.retry(&attempt_id, resume)?)
+    let options = RetryOptions {
+        resume,
+        by: None,
+        current_commands,
+    };
+    Ok(state.engine.retry_with(&attempt_id, options)?)
+}
+
+/// The run's setup and check whose command the project changed after it started.
+#[tauri::command(async)]
+fn run_command_changes(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> CommandResult<Masked<Vec<CommandChange>>> {
+    Ok(Masked(state.engine.command_changes(&run_id)?))
 }
 
 #[tauri::command(async)]
@@ -1059,6 +1075,7 @@ pub fn run() {
             attempt_wait,
             attempt_kill_command,
             attempt_retry,
+            run_command_changes,
             attempt_abandon,
             language_get,
             language_set,
