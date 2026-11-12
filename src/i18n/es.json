@@ -172,7 +172,9 @@
     "keptAsking": "Después de {{rounds}} rondas de preguntas, siguió preguntando algo que solo tú puedes decidir, así que Keel lo detuvo en vez de elegir por ti.",
     "partsNotOpened": "Lo aprobaste, pero Keel no pudo poner en el tablero la parte de cada proyecto: {{detail}}. Inténtalo de nuevo cuando eso esté resuelto.",
     "startsOnTheBoard": "Este issue es un cambio en varios proyectos, así que arranca desde su tarjeta en el tablero.",
-    "readCopyFailed": "Keel no pudo traer una copia de {{project}} para leerla: {{detail}}. Inténtalo de nuevo cuando se pueda alcanzar."
+    "readCopyFailed": "Keel no pudo traer una copia de {{project}} para leerla: {{detail}}. Inténtalo de nuevo cuando se pueda alcanzar.",
+    "assistantMayNotRun": "{{client}} volvió a poner esta tarjeta en Por hacer y ya no puede lanzar ejecuciones. Muévela tú a Por hacer para empezarla.",
+    "rerunWorkflowMissing": "Esta tarjeta volvió a Por hacer para correr de nuevo con el workflow “{{workflow}}”, que ya no existe. Muévela tú a Por hacer para empezarla con el workflow por defecto del proyecto."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",

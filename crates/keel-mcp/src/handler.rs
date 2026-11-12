@@ -169,7 +169,9 @@ const MOVE_CARD_TO_TODO: &str = "Put back in Todo a card whose last run this cli
                                  projects starts once the part before it has a pull request. It spends the \
                                  person's Claude usage and counts toward this client's open runs from when it \
                                  can start, and the run is this client's to follow: list_runs with `mine` finds \
-                                 it once it starts. Refused if this client may only read or already has as many \
+                                 it once it starts. If the workflow is deleted, or this client loses its leave to \
+                                 run, before it starts, the card goes back to the person in the Backlog. \
+                                 Refused if this client may only read or already has as many \
                                  runs open as the person allows, if that workflow is gone, on a card whose run \
                                  the person rejected, closed, stopped or tried again, or that they moved, on the \
                                  card where a change across projects is agreed, which propose_change starts, \

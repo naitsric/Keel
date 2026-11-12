@@ -1182,6 +1182,90 @@ fn a_card_runs_again_with_its_workflow_and_the_project_s_commands_as_they_are_no
     assert_eq!(w.card(&card).column, BoardColumn::Backlog);
 }
 
+/// A card whose run, with this saved workflow, the client closed itself, and then put back in
+/// Todo. The board isn't started, so it waits there.
+fn queued_by_client(w: &World, client: &McpClient, workflow: &str, request: &str) -> String {
+    let mut asked = outside_run(w, steps_of(w, workflow), request);
+    asked.saved_workflow = Some(
+        w.engine
+            .workflow(&w.project_id, workflow, "en")
+            .unwrap()
+            .unwrap()
+            .reference(),
+    );
+    let run = w.engine.start_run_on_board(asked).unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    w.engine
+        .abandon_by(&w.wait_approval(&run), &client.name)
+        .unwrap();
+    closed_by_client(w, client, &run);
+    w.wait_column(&card, BoardColumn::Backlog);
+    w.engine.card_queue_by(&card, "en", &client.id).unwrap();
+    assert_eq!(w.card(&card).column, BoardColumn::Todo);
+    card
+}
+
+#[test]
+fn a_card_put_back_in_todo_whose_workflow_is_deleted_meanwhile_goes_back_saying_so() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let workflow = answer_step(&w.engine, &w.project_id);
+    let client = client(&w);
+    let card = queued_by_client(&w, &client, &workflow, "Add a triple function");
+
+    // The person deletes the workflow while the card waits in Todo.
+    w.engine.delete_workflow(&w.project_id, &workflow).unwrap();
+    w.engine.start_board();
+    let back = w.wait_column(&card, BoardColumn::Backlog);
+    assert_eq!(
+        back.start_blocked,
+        Some(Reason::RerunWorkflowMissing {
+            workflow: "Then ask".into()
+        })
+    );
+    assert_eq!(back.run_id, None);
+}
+
+#[test]
+fn a_card_a_client_put_back_in_todo_goes_back_to_the_person_once_it_may_not_run() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let workflow = answer_step(&w.engine, &w.project_id);
+    let revoked = client(&w);
+    let held = w
+        .store
+        .add_mcp_client("c2", "Other", &[8u8; 32], "keel_def", true)
+        .unwrap();
+    let first = queued_by_client(&w, &revoked, &workflow, "First");
+    let second = queued_by_client(&w, &held, &workflow, "Second");
+
+    // Revoked, or no longer allowed to run: the card is the person's again, and says why.
+    let reported = w.changes.lock().unwrap().len();
+    w.engine.revoke_mcp_client(&revoked.id).unwrap();
+    w.engine.set_mcp_client_can_run(&held.id, false).unwrap();
+    assert!(w.changes.lock().unwrap().len() >= reported + 2);
+    for (card, name) in [(&first, "Claude Code"), (&second, "Other")] {
+        let back = w.card(card);
+        assert_eq!(back.column, BoardColumn::Backlog, "{name}");
+        assert_eq!(
+            back.start_blocked,
+            Some(Reason::AssistantMayNotRun {
+                client: name.into()
+            })
+        );
+    }
+
+    // Todo goes on with the person's cards, and never starts those.
+    w.set_default(&workflow);
+    let theirs = w.queued("card-3");
+    w.engine.start_board();
+    w.wait_column(&theirs, BoardColumn::HumanReview);
+    for card in [&first, &second] {
+        assert_eq!(w.card(card).column, BoardColumn::Backlog);
+        assert_eq!(w.card(card).run_id, None);
+    }
+}
+
 // Criterion 3: only as many as the limit work at once, and the rest enter in order.
 
 #[test]

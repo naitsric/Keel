@@ -11,7 +11,7 @@ use keel_core::{
     WorkflowStep,
 };
 use keel_harness::github::Issue;
-use keel_store::{Card, NewCard, Project, Store};
+use keel_store::{Card, McpClient, NewCard, Project, Store};
 
 use crate::notes::{self, split_assistant_notes};
 use crate::prompts::part_request;
@@ -354,6 +354,22 @@ impl Engine {
         Ok(())
     }
 
+    /// Revokes a client over MCP. What it put back in Todo goes back to the person, in the
+    /// Backlog and saying why, since Keel won't start it.
+    pub fn revoke_mcp_client(&self, id: &str) -> Result<McpClient> {
+        let client = self.inner.store.revoke_mcp_client(id)?;
+        self.inner.changed("");
+        Ok(client)
+    }
+
+    /// Whether a client over MCP may start runs. Taking that away hands back what it put in Todo,
+    /// as revoking it does.
+    pub fn set_mcp_client_can_run(&self, id: &str, can_run: bool) -> Result<McpClient> {
+        let client = self.inner.store.set_mcp_client_can_run(id, can_run)?;
+        self.inner.changed("");
+        Ok(client)
+    }
+
     /// Moves a card within Backlog and Todo. Entering Todo is what asks for it to start, so that's
     /// when a project that could never run it says so, with the card still where it was. A session
     /// that can't work isn't a reason to refuse: the card waits in Todo for it.
@@ -657,6 +673,10 @@ impl Engine {
             Err(error) => {
                 let reason = match error {
                     Error::Blocked(reason) => reason,
+                    // Its client lost the leave to run after the card was taken from Todo.
+                    Error::Store(keel_store::Error::ClientMayNotRun(client)) => {
+                        Reason::AssistantMayNotRun { client }
+                    }
                     other => Reason::PrepareFailed {
                         detail: other.to_string(),
                     },
@@ -674,12 +694,21 @@ impl Engine {
         let language = card.language.clone().unwrap_or_else(|| "en".to_owned());
         // A client that put the card back in Todo runs its last run again, as it was.
         // Worked out now, as start_run would: the project's commands, or its workflow, may have
-        // changed since that run.
+        // changed since that run, or the workflow may be gone.
         let rerun = match (&card.queued_by_client, &card.rerun_of) {
-            (Some(_), Some(run)) => Some(
-                self.run_again(&self.inner.store.run(run)?, &language)?
-                    .ok_or(Error::InvalidState)?,
-            ),
+            (Some(_), Some(run)) => {
+                let run = self.inner.store.run(run)?;
+                match (self.run_again(&run, &language)?, run.workflow_id) {
+                    (Some(again), _) => Some(again),
+                    (None, Some(id)) => {
+                        return Err(Error::Blocked(Reason::RerunWorkflowMissing {
+                            workflow: run.workflow_name.unwrap_or(id),
+                        }));
+                    }
+                    // It was put in Todo only if it could run again, and what it was can't change.
+                    (None, None) => return Err(Error::InvalidState),
+                }
+            }
             _ => None,
         };
         let (mut workflow, saved_workflow) = match &rerun {
@@ -791,17 +820,15 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Done.","nu
         assert!(!wake.wait(Duration::from_millis(1)), "that was all of them");
     }
 
-    #[test]
-    fn a_change_while_advancing_is_held_returns_and_the_card_starts_once_it_is_free() {
-        keel_harness::needs!(sandbox);
+    /// An engine whose `claude` answers at once, with a project in `dir`.
+    fn engine_in(dir: &Path) -> (Engine, Project) {
         use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("bin");
+        let bin = dir.join("bin");
         std::fs::create_dir(&bin).unwrap();
         std::fs::write(bin.join("claude"), FAKE_CLAUDE).unwrap();
         std::fs::set_permissions(bin.join("claude"), std::fs::Permissions::from_mode(0o755))
             .unwrap();
-        let repo = dir.path().join("demo");
+        let repo = dir.join("demo");
         std::fs::create_dir(&repo).unwrap();
         git(&repo, &["init", "-q", "-b", "main"]);
         git(&repo, &["config", "user.name", "Tester"]);
@@ -810,31 +837,133 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Done.","nu
         git(&repo, &["add", "-A"]);
         git(&repo, &["commit", "-qm", "init"]);
 
-        let store = Arc::new(Store::open(&dir.path().join("keel.db")).unwrap());
-        let mut config = Config::new(dir.path().join("data"));
+        let store = Arc::new(Store::open(&dir.join("keel.db")).unwrap());
+        let mut config = Config::new(dir.join("data"));
         config.tick = Duration::from_millis(20);
         config.keep_awake = false;
         let tools = Tools::from_dirs(&[bin, "/usr/bin".into(), "/bin".into()]);
         let engine = Engine::new(store, config, tools, |_| {});
         let project = engine.add_project(&repo).unwrap();
+        (engine, project)
+    }
+
+    fn read_only(id: &str) -> WorkflowStep {
+        WorkflowStep::Agent(StepSpec {
+            id: id.into(),
+            model: "fake".into(),
+            effort: None,
+            tools: ToolProfile::ReadOnly,
+            prompt: "{{request}}".into(),
+            max_turns: None,
+            max_budget_usd: None,
+            paths: vec![],
+            when: None,
+            role: Default::default(),
+        })
+    }
+
+    #[test]
+    fn a_card_taken_from_todo_starts_no_run_once_its_client_may_not_run() {
+        keel_harness::needs!(sandbox);
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, project) = engine_in(dir.path());
+        let store = engine.inner.store.clone();
+        let workflow = engine
+            .save_workflow(
+                &project.id,
+                &Workflow {
+                    id: String::new(),
+                    name: "Then ask".into(),
+                    steps: vec![
+                        read_only("work"),
+                        WorkflowStep::Approval { id: "ask".into() },
+                    ],
+                    builtin: false,
+                },
+            )
+            .unwrap();
+        let client = store
+            .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        // The client's run, which it closes itself and puts back in Todo.
+        let run = engine
+            .start_run_on_board(StartRun {
+                project_id: project.id.clone(),
+                title: None,
+                request: "Fix it".into(),
+                workflow: workflow.steps.clone(),
+                language: "en".into(),
+                source_issue: None,
+                saved_workflow: Some(workflow.reference()),
+                started_by: Some(client.name.clone()),
+            })
+            .unwrap();
+        let card = store.card_of_run(&run).unwrap().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(25);
+        let approval = loop {
+            let waiting = store
+                .attempts_of_run(&run)
+                .unwrap()
+                .into_iter()
+                .find(|a| a.state == AttemptState::WaitingApproval.as_str());
+            if let Some(approval) = waiting {
+                break approval.id;
+            }
+            assert!(Instant::now() < deadline, "never reached the approval");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        engine.abandon_by(&approval, &client.name).unwrap();
+        for tool in ["start_run", "close_run"] {
+            store
+                .add_mcp_call(&keel_store::NewMcpCall {
+                    client: &client,
+                    tool,
+                    args: "{}",
+                    error: None,
+                    run_id: Some(&run),
+                    duration_ms: 1,
+                })
+                .unwrap();
+        }
+        while store.card(&card).unwrap().column() != BoardColumn::Backlog {
+            assert!(Instant::now() < deadline, "the run never closed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        engine.card_queue_by(&card, "en", &client.id).unwrap();
+
+        // Keel takes it from Todo, and the person takes away the client's leave to run before
+        // its run is added: none is, and the card is the person's again, saying why.
+        let taken = store.claim_next_todo_card().unwrap().unwrap();
+        engine.set_mcp_client_can_run(&client.id, false).unwrap();
+        engine.start_card(&taken).unwrap();
+        let back = store.card(&card).unwrap();
+        assert_eq!(back.column(), BoardColumn::Backlog);
+        assert_eq!(back.run_id, None);
+        assert_eq!(
+            serde_json::from_value::<Reason>(back.start_blocked.unwrap()).unwrap(),
+            Reason::AssistantMayNotRun {
+                client: "Claude Code".into()
+            }
+        );
+        assert_eq!(
+            store.runs(10).unwrap().len(),
+            1,
+            "only the client's first run"
+        );
+    }
+
+    #[test]
+    fn a_change_while_advancing_is_held_returns_and_the_card_starts_once_it_is_free() {
+        keel_harness::needs!(sandbox);
+        let dir = tempfile::tempdir().unwrap();
+        let (engine, project) = engine_in(dir.path());
         let workflow = engine
             .save_workflow(
                 &project.id,
                 &Workflow {
                     id: String::new(),
                     name: "One step".into(),
-                    steps: vec![WorkflowStep::Agent(StepSpec {
-                        id: "work".into(),
-                        model: "fake".into(),
-                        effort: None,
-                        tools: ToolProfile::ReadOnly,
-                        prompt: "{{request}}".into(),
-                        max_turns: None,
-                        max_budget_usd: None,
-                        paths: vec![],
-                        when: None,
-                        role: Default::default(),
-                    })],
+                    steps: vec![read_only("work")],
                     builtin: false,
                 },
             )

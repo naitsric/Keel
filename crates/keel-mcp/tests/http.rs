@@ -3661,6 +3661,43 @@ async fn a_client_adds_a_note_and_puts_back_in_todo_only_a_waiting_card_of_its_o
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn every_run_of_a_card_a_client_keeps_putting_back_in_todo_is_its_own() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    w.use_by_default(&w.project_id, &w.workflow_id);
+    let client = w.client(&w.token(true)).await;
+    let first = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.start_args("Fix the bug"),
+    )
+    .await));
+    let card = settled(&client, &first).await["cardId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    w.engine.start_board();
+    let mut runs = vec![first];
+    // Closed and put back in Todo twice: the card only points at the last run.
+    for _ in 0..2 {
+        let last = runs.last().unwrap().clone();
+        ok(&call(&client, "close_run", json!({ "run": last })).await);
+        w.card_in(&last, BoardColumn::Backlog).await;
+        ok(&call(&client, "move_card_to_todo", json!({ "card": card })).await);
+        let again = next_run_of(&w, &card, Some(&last)).await;
+        settled(&client, &again).await;
+        runs.push(again);
+    }
+    let mine = ok(&call(&client, "list_runs", json!({ "mine": true })).await);
+    for run in &runs {
+        assert!(mine.to_string().contains(run.as_str()), "{run}: {mine}");
+        let view = ok(&call(&client, "get_run", json!({ "run": run })).await);
+        assert_eq!(view["startedByYou"], true, "{run}: {view}");
+    }
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_part_waiting_its_turn_takes_a_note_and_one_closed_goes_back_to_todo() {
     keel_harness::needs!(sandbox, sockets);
     let w = world().await;
