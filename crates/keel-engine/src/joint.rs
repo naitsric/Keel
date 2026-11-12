@@ -3,6 +3,7 @@
 //! and in what order, and a person approves it. Then each project that changes gets a card of its
 //! own, and each waits for the one before it to have a pull request (see `Store::open_joint_parts`).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -268,8 +269,8 @@ pub struct PartOf {
     /// What changed in the parts before it since it read them.
     pub warnings: Vec<PartWarning>,
     /// The points of the contract it was specified with as they no longer are, by id: corrected,
-    /// added or removed since. Empty until it's specified. Starting it again gives it the contract
-    /// as it is.
+    /// added or removed since. Its own first, then the other parts' it relies on. Empty until it's
+    /// specified. Only a new run of it takes the contract as it is.
     pub contract_changed: Vec<String>,
 }
 
@@ -367,6 +368,39 @@ fn changed_points(given: &[Criterion], now: &[Criterion]) -> Vec<String> {
         }
     }
     changed
+}
+
+/// The points of the whole contract a part read, `given`, that say something else `now`, by id:
+/// each that says something else or is new, then each that's gone. The other parts' points are what
+/// it relies on, so they count too. Which projects one names only counts for its own: see
+/// [`changed_points`].
+fn changed_promises(given: &[ContractPoint], now: &[ContractPoint]) -> Vec<String> {
+    let says = |point: &ContractPoint| (point.when.clone(), point.then.clone());
+    let mut changed: Vec<String> = now
+        .iter()
+        .filter(|point| {
+            !given
+                .iter()
+                .any(|read| read.id == point.id && says(read) == says(point))
+        })
+        .map(|point| point.id.clone())
+        .collect();
+    for point in given {
+        if !now.iter().any(|kept| kept.id == point.id) && !changed.contains(&point.id) {
+            changed.push(point.id.clone());
+        }
+    }
+    changed
+}
+
+/// Whether two versions of the contract say the same: the same points by id, each saying the same
+/// and naming the same projects, in whatever order.
+fn same_contract(a: &[ContractPoint], b: &[ContractPoint]) -> bool {
+    let named = |point: &ContractPoint| point.projects.iter().cloned().collect::<BTreeSet<_>>();
+    let same = |x: &ContractPoint, y: &ContractPoint| {
+        x.id == y.id && x.when == y.when && x.then == y.then && named(x) == named(y)
+    };
+    a.len() == b.len() && a.iter().all(|x| b.iter().any(|y| same(x, y)))
 }
 
 /// The name a part's project goes by in what was agreed.
@@ -522,7 +556,7 @@ impl crate::Engine {
             .corrected_contract(numbered, &known)
             .map_err(|problems| Error::Blocked(Reason::ContractNotValid { problems }))?;
         // Saving it as it is changes nothing.
-        if contract == spec.contract && next == next_point(&change) {
+        if same_contract(&contract, &spec.contract) && next == next_point(&change) {
             return Ok(());
         }
         if !store.correct_joint_contract(
@@ -695,12 +729,24 @@ impl Inner {
             spec.and_then(|spec| part_name(&spec, here).map(|name| spec.contract_of(name)))
                 .unwrap_or_default()
         };
-        let given = match self.given(run_id)? {
+        let (own, whole) = match self.given(run_id)? {
             Given::Nothing => return Ok(Vec::new()),
-            Given::Recorded { points, .. } => points,
-            Given::Agreed => of(agreed_spec(change)),
+            Given::Recorded { points, contract } => (points, contract),
+            Given::Agreed => (
+                of(agreed_spec(change)),
+                agreed_spec(change).map(|agreed| agreed.contract),
+            ),
         };
-        Ok(changed_points(&given, &of(current_spec(change))))
+        let now = current_spec(change);
+        let mut changed = changed_points(&own, &of(now.clone()));
+        if let (Some(whole), Some(now)) = (whole, now) {
+            for id in changed_promises(&whole, &now.contract) {
+                if !changed.contains(&id) {
+                    changed.push(id);
+                }
+            }
+        }
+        Ok(changed)
     }
 
     /// Each point of the contract, with what the verifier of each part that keeps it said of it in
@@ -1235,7 +1281,8 @@ impl Inner {
             (_, spec) => spec,
         };
         let corrected = spec.as_ref().is_some_and(|spec| {
-            agreed_spec(&change).is_some_and(|agreed| agreed.contract != spec.contract)
+            agreed_spec(&change)
+                .is_some_and(|agreed| !same_contract(&agreed.contract, &spec.contract))
         });
         if let (Some(here), Some(spec)) = (card.joint_position, spec) {
             let answered: Vec<GivenAnswer> = agreed
@@ -1433,6 +1480,62 @@ mod tests {
         assert_eq!(changed_points(&given, &now), ["K1", "K4", "K2"]);
         // Given none, every point it has now is new to it.
         assert_eq!(changed_points(&[], &now), ["K1", "K3", "K4"]);
+    }
+
+    fn promise(id: &str, then: &str, projects: &[&str]) -> ContractPoint {
+        ContractPoint {
+            id: id.into(),
+            when: "someone logs in".into(),
+            then: then.into(),
+            projects: projects.iter().map(|&p| p.to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_part_relies_on_every_point_and_only_what_they_say_counts() {
+        let read = [
+            promise("K1", "201", &["valora"]),
+            promise("K2", "401", &["app"]),
+        ];
+        // Which projects K2 names is for the parts that keep it.
+        let renamed = [
+            promise("K1", "201", &["valora"]),
+            promise("K2", "401", &["app", "admin"]),
+        ];
+        assert!(changed_promises(&read, &renamed).is_empty());
+        let now = [
+            promise("K2", "401 with `reason`", &["app"]),
+            promise("K3", "409", &["app"]),
+        ];
+        assert_eq!(changed_promises(&read, &now), ["K2", "K3", "K1"]);
+    }
+
+    #[test]
+    fn two_versions_say_the_same_whatever_order_their_points_and_projects_are_in() {
+        let agreed = [
+            promise("K1", "201", &["valora", "admin"]),
+            promise("K2", "401", &["app"]),
+        ];
+        let reordered = [
+            promise("K2", "401", &["app"]),
+            promise("K1", "201", &["admin", "valora", "valora"]),
+        ];
+        assert!(same_contract(&agreed, &reordered));
+        assert!(!same_contract(&agreed, &reordered[..1]));
+        assert!(!same_contract(
+            &agreed,
+            &[
+                promise("K1", "201", &["valora"]),
+                promise("K2", "401", &["app"])
+            ]
+        ));
+        assert!(!same_contract(
+            &agreed,
+            &[
+                promise("K1", "201", &["valora", "admin"]),
+                promise("K3", "401", &["app"])
+            ]
+        ));
     }
 
     fn change(ids: &[&str], next: Option<i64>) -> JointChange {

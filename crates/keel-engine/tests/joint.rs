@@ -1480,17 +1480,21 @@ fn a_person_corrects_the_contract_and_a_part_started_again_is_specified_and_veri
         agreed["contract"][0]["then"],
         "valora sends POST /session with `token`"
     );
-    // Valora's part was specified with K1 as it was, so what its verifier found is about that.
-    // App's part hasn't started: it takes the contract as it is when it does.
+    // Valora's part was specified with K1 as it was, so what its verifier found is about that. It
+    // also relied on app's side, where K4 is new and K3 is gone. App's part hasn't started: it
+    // takes the contract as it is when it does.
     assert_eq!(
         w.contract(&card),
         ["K1 valora=earlier", "K2 app=None", "K4 app=None"]
     );
-    assert_eq!(w.contract_changed(&card), [r#"valora ["K1"]"#, "app []"]);
+    assert_eq!(
+        w.contract_changed(&card),
+        [r#"valora ["K1", "K4", "K3"]"#, "app []"]
+    );
     let joint = w.engine.run_joint(&first).unwrap().unwrap();
     assert_eq!(
         joint.part.unwrap().contract_changed,
-        ["K1"],
+        ["K1", "K4", "K3"],
         "its run says so too"
     );
 
@@ -1679,6 +1683,81 @@ fn a_correction_keeps_its_points_ids_never_gives_one_again_and_is_checked_like_t
     assert_eq!(ids(), ["K6"]);
     w.engine.joint_contract_set(&card, &[]).unwrap();
     assert!(ids().is_empty());
+}
+
+#[test]
+fn a_part_is_told_when_a_point_it_relies_on_says_something_else() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.short_workflows();
+    w.answers(&[
+        with_contract(),
+        plain("Valora sends the token"),
+        json!({}),
+        json!({}),
+    ]);
+    let (card, run) = w.agreeing();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+    let k1 = point(
+        Some("K1"),
+        "someone logs in on valora",
+        "valora sends POST /session with `token`",
+        &["valora"],
+    );
+    let k3 = point(
+        Some("K3"),
+        "the token is wrong",
+        "app answers 401",
+        &["app"],
+    );
+    let k2 = |then: &str| {
+        point(
+            Some("K2"),
+            "app gets POST /session with `token`",
+            then,
+            &["app"],
+        )
+    };
+
+    // App's side changes. Valora keeps none of it, but its part relied on it.
+    w.engine
+        .joint_contract_set(
+            &card,
+            &[k1.clone(), k2("it answers 201 with `id`"), k3.clone()],
+        )
+        .unwrap();
+    assert_eq!(w.contract_changed(&card), [r#"valora ["K2"]"#, "app []"]);
+    // What it found of its own point is still about K1 as it is.
+    assert_eq!(
+        w.contract(&card),
+        ["K1 valora=None, unverifiable", "K2 app=None", "K3 app=None"]
+    );
+
+    // As it was agreed again, nothing it read is different.
+    w.engine
+        .joint_contract_set(&card, &[k1.clone(), k2("it answers 201"), k3.clone()])
+        .unwrap();
+    assert_eq!(w.contract_changed(&card), ["valora []", "app []"]);
+
+    // K1 names app too now, and saving it with its projects the other way round is no change.
+    let both = |projects: &[&str]| {
+        let mut k1 = k1.clone();
+        k1.projects = projects.iter().map(|&p| p.to_owned()).collect();
+        [k1, k2("it answers 201"), k3.clone()]
+    };
+    w.engine
+        .joint_contract_set(&card, &both(&["valora", "app"]))
+        .unwrap();
+    let saved = w.store.joint_change(&card).unwrap().contract;
+    w.engine
+        .joint_contract_set(&card, &both(&["app", "valora"]))
+        .unwrap();
+    assert_eq!(w.store.joint_change(&card).unwrap().contract, saved);
 }
 
 #[test]

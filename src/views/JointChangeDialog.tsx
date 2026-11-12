@@ -146,7 +146,7 @@ function ContractEditor({ change, busy, onSave, onCancel }: { change: JointChang
                       type="checkbox"
                       checked={point.projects.includes(name)}
                       disabled={busy}
-                      onChange={(e) => update(point.key, { projects: e.target.checked ? names.filter((other) => other === name || point.projects.includes(other)) : point.projects.filter((other) => other !== name) })}
+                      onChange={(e) => update(point.key, { projects: e.target.checked ? [...point.projects, name] : point.projects.filter((other) => other !== name) })}
                     />
                     {name}
                   </label>
