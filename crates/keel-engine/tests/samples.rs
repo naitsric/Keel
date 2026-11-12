@@ -606,6 +606,31 @@ fn go() {
     });
 }
 
+#[test]
+fn composer() {
+    try_sample(Sample {
+        name: "composer",
+        programs: &["composer", "php"],
+        path: &[],
+        finds: &[],
+        commands: Commands {
+            setup: "composer install",
+            check: "vendor/bin/phpunit",
+        },
+        guessed: true,
+        downloads: Some("Library/Caches/composer"),
+        needs_download: Some((
+            "composer require psr/log",
+            "Could not resolve host: repo.packagist.org",
+        )),
+        fails_within: 5,
+        env: &[],
+        starts_servers: false,
+        proposes_localhost: false,
+        reads_above: false,
+    });
+}
+
 /// #94: Keel's own check, from a clone with no `target/`. The app needs its frontend built to compile,
 /// as in CI.
 #[test]
