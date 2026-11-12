@@ -506,7 +506,7 @@ impl Inner {
                 })
                 .collect();
             let copies = self.prepare_read_copies(attempt, &wanted)?;
-            let joint = self.joint_text(&attempt.run_id, &copies)?;
+            let joint = self.joint_text(&attempt.run_id, &copies, &spec.role)?;
             (copies, joint)
         } else {
             (Vec::new(), String::new())
@@ -1257,8 +1257,8 @@ impl Inner {
         let mut correction = None;
         if state == AttemptState::Succeeded && m.role == "specifier" {
             match self.judge_spec(&m) {
-                Verdict::Ready(output) => self.keep_output(&m, &output),
-                Verdict::Ask { output, questions } => {
+                Ok(Verdict::Ready(output)) => self.keep_output(&m, &output),
+                Ok(Verdict::Ask { output, questions }) => {
                     self.keep_output(&m, &output);
                     state = AttemptState::WaitingAnswers;
                     let _ = store.append_event(
@@ -1267,11 +1267,11 @@ impl Inner {
                         &json!({ "questions": questions }),
                     );
                 }
-                Verdict::TookRecommended {
+                Ok(Verdict::TookRecommended {
                     output,
                     settled,
                     rounds,
-                } => {
+                }) => {
                     self.keep_output(&m, &output);
                     let _ = store.append_event(
                         &m.attempt_id,
@@ -1279,21 +1279,30 @@ impl Inner {
                         &json!({ "settled": settled, "rounds": rounds }),
                     );
                 }
-                Verdict::Correct(problems) => {
+                Ok(Verdict::Correct(problems)) => {
                     state = AttemptState::Failed;
                     reason = Some(Reason::SpecNotUsable {
                         problems: problems.clone(),
                     });
                     correction = Some(problems);
                 }
-                Verdict::Stop(problems) => {
+                Ok(Verdict::Stop(problems)) => {
                     state = AttemptState::Blocked;
                     reason = Some(Reason::SpecNotUsable { problems });
                 }
-                Verdict::KeptAsking { output, rounds } => {
+                Ok(Verdict::KeptAsking { output, rounds }) => {
                     self.keep_output(&m, &output);
                     state = AttemptState::Blocked;
                     reason = Some(Reason::KeptAsking { rounds });
+                }
+                // Without what the store holds, a part would be judged without its points of the
+                // contract, and an agreement as a plain spec. As with a verifier's answer Keel
+                // can't correct, it doesn't count, and a person tries it again.
+                Err(error) => {
+                    state = AttemptState::Failed;
+                    reason = Some(Reason::SpecNotChecked {
+                        detail: error.to_string(),
+                    });
                 }
             }
         }
@@ -1381,8 +1390,9 @@ impl Inner {
         found
     }
 
-    fn judge_spec(&self, m: &Monitor) -> Verdict {
-        let attempts = self.store.attempts_of_run(&m.run_id).unwrap_or_default();
+    /// What Keel makes of a specifier's answer. An error is the store's, not the answer's.
+    fn judge_spec(&self, m: &Monitor) -> Result<Verdict> {
+        let attempts = self.store.attempts_of_run(&m.run_id)?;
         let this = attempts.iter().find(|a| a.id == m.attempt_id);
         let fixing_a_limit = m.resumed_from.as_deref().is_some_and(|from| {
             attempts.iter().any(|a| {
@@ -1401,12 +1411,28 @@ impl Inner {
             })
             .count();
         let output = this.and_then(|attempt| attempt.output.as_ref());
-        match self.agreement(&m.run_id).ok().flatten() {
-            Some(agreement) => {
-                specs::judge_agreement(output, fixing_a_limit, rounds_answered, &agreement.names())
-            }
-            None => specs::judge(output, fixing_a_limit, rounds_answered),
+        if let Some(agreement) = self.agreement(&m.run_id)? {
+            return Ok(specs::judge_agreement(
+                output,
+                fixing_a_limit,
+                rounds_answered,
+                &agreement.names(),
+            ));
         }
+        // A part of a change across projects also keeps the points of the contract that name it,
+        // as they were agreed. Once what it wrote is kept, the record says which of them it wrote
+        // again in other words.
+        let contract = self.contract_of(&m.run_id)?;
+        let verdict = specs::judge_part(output, fixing_a_limit, rounds_answered, &contract);
+        let replaced = specs::replaced_by_contract(output, &contract);
+        if verdict.output().is_some() && !replaced.is_empty() {
+            let _ = self.store.append_event(
+                &m.attempt_id,
+                "contractReplaced",
+                &json!({ "replaced": replaced }),
+            );
+        }
+        Ok(verdict)
     }
 
     /// What it answered, without anything an agent added beyond the structure. The whole answer as
