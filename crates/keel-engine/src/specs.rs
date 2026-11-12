@@ -596,14 +596,10 @@ impl Spec {
     }
 }
 
-/// A heading's words, without `#`, bold or italics around them, a note in brackets after them, or
-/// a colon.
-fn heading_name(line: &str) -> &str {
-    let mut name = line
-        .trim()
-        .trim_start_matches('#')
-        .trim_start()
-        .trim_start_matches(['*', '_']);
+/// A heading's words, without bold or italics around them, a note in brackets after them, or a
+/// colon.
+fn heading_name(heading: &str) -> &str {
+    let mut name = heading.trim().trim_start_matches(['*', '_']);
     loop {
         let before = name;
         name = name.trim_end().trim_end_matches([':', '*', '_']).trim_end();
@@ -618,25 +614,75 @@ fn heading_name(line: &str) -> &str {
     }
 }
 
-fn is_decided_heading(line: &str) -> bool {
-    let name = heading_name(line);
+/// Whether a heading names a list of what was already decided.
+fn names_what_was_decided(heading: &str) -> bool {
+    let name = heading_name(heading);
     DECIDED_HEADINGS
         .iter()
         .any(|heading| name.eq_ignore_ascii_case(heading))
 }
 
-/// What a list item says, if the line is one: after `-`, `*`, `1.` or `1)`.
-fn list_item(line: &str) -> Option<&str> {
+/// What a heading with `#` says, if the line is one. As in Markdown, that's one to six `#` and then
+/// a space or nothing, so `#131` is a word. Any `#` at its end, after a space, only close it.
+fn atx_heading(trimmed: &str) -> Option<&str> {
+    let rest = trimmed.trim_start_matches('#');
+    let marks = trimmed.len() - rest.len();
+    if !(1..=6).contains(&marks) || !(rest.is_empty() || rest.starts_with([' ', '\t'])) {
+        return None;
+    }
+    let rest = rest.trim();
+    let open = rest.trim_end_matches('#');
+    Some(if open.is_empty() || open.ends_with([' ', '\t']) {
+        open.trim_end()
+    } else {
+        rest
+    })
+}
+
+/// A line of only `=`, or only `-`, which makes the text right above it a heading.
+fn underline(trimmed: &str) -> bool {
+    !trimmed.is_empty()
+        && (trimmed.bytes().all(|c| c == b'=') || trimmed.bytes().all(|c| c == b'-'))
+}
+
+/// How a list item is marked.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Mark {
+    /// `-`, `*` or `+`.
+    Bullet,
+    /// A number and `.` or `)`.
+    Numbered { from_one: bool },
+}
+
+/// What a list item says, if the line is one, and how it's marked.
+fn list_item(line: &str) -> Option<(&str, Mark)> {
     let line = line.trim_start();
-    let rest = line.strip_prefix(['-', '*']).or_else(|| {
-        let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-        if (1..=3).contains(&digits) {
-            line[digits..].strip_prefix(['.', ')'])
-        } else {
-            None
+    let (rest, mark) = match line.strip_prefix(['-', '*', '+']) {
+        Some(rest) => (rest, Mark::Bullet),
+        None => {
+            let digits = line.len() - line.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+            if !(1..=9).contains(&digits) {
+                return None;
+            }
+            let from_one = line[..digits].parse::<u32>() == Ok(1);
+            (
+                line[digits..].strip_prefix(['.', ')'])?,
+                Mark::Numbered { from_one },
+            )
         }
-    })?;
-    rest.starts_with(char::is_whitespace).then(|| rest.trim())
+    };
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| (rest.trim(), mark))
+}
+
+/// Whether a line that's marked as a list item starts one, as Markdown reads it. Right under a
+/// line of text, only one that says something can, and only a bullet or a number 1: any other goes
+/// on with that line, so a sentence wrapped before a number isn't cut in two. Right under an item
+/// of its kind, it's the next one, and at the start of a block it starts a list.
+fn starts_item(said: &str, mark: Mark, starts_block: bool, item: Option<&Item>) -> bool {
+    let numbered = matches!(mark, Mark::Numbered { .. });
+    starts_block
+        || item.is_some_and(|item| item.numbered == numbered)
+        || !said.is_empty() && mark != Mark::Numbered { from_one: false }
 }
 
 /// How far a line is indented, with a tab as four spaces.
@@ -647,13 +693,22 @@ fn indent(line: &str) -> usize {
         .sum()
 }
 
-/// The fence a line opens or closes a code block with, if it's one: its character and length.
-/// However indented, since one under a list item is indented with it.
+/// The fence a line opens a code block with, if it opens one: its character and length. However
+/// indented, since one under a list item is indented with it. As in Markdown, backticks with more
+/// backticks after them on the line are code within it, and open nothing.
 fn fence(line: &str) -> Option<(char, usize)> {
     let line = line.trim_start();
     let mark = line.chars().next().filter(|c| matches!(c, '`' | '~'))?;
     let length = line.chars().take_while(|c| *c == mark).count();
-    (length >= 3).then_some((mark, length))
+    let words = &line[length..];
+    (length >= 3 && !(mark == '`' && words.contains('`'))).then_some((mark, length))
+}
+
+/// Whether a line ends a code block opened with this fence: only the same character, as many times
+/// or more, and spaces.
+fn closes(line: &str, (mark, length): (char, usize)) -> bool {
+    let trimmed = line.trim();
+    trimmed.chars().all(|c| c == mark) && trimmed.chars().count() >= length
 }
 
 /// A line of only `-`, `*` or `_`, three or more, which breaks one part of a text from the next.
@@ -681,6 +736,23 @@ fn without_comments(text: &str) -> String {
     kept
 }
 
+/// What a task that's done says, without its box: `[x]` and a space.
+fn done_task(text: &str) -> Option<&str> {
+    let rest = text
+        .strip_prefix("[x]")
+        .or_else(|| text.strip_prefix("[X]"))?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim_start())
+}
+
+/// A list item being read.
+struct Item {
+    text: String,
+    /// A task still open, which isn't decided.
+    open_task: bool,
+    /// Marked with a number rather than a bullet.
+    numbered: bool,
+}
+
 /// A list of what was decided, as it's read item by item.
 #[derive(Default)]
 struct DecidedList {
@@ -689,22 +761,18 @@ struct DecidedList {
     open: bool,
     /// How far its items are indented, once one is read. Anything deeper is part of one.
     items_at: Option<usize>,
-    /// The item being read, and whether it's a task still open.
-    item: Option<(String, bool)>,
+    item: Option<Item>,
 }
 
 impl DecidedList {
     fn end_item(&mut self) {
-        if let Some((text, open_task)) = self.item.take() {
-            let text = one_line(&without_comments(&text));
+        if let Some(item) = self.item.take() {
+            let text = one_line(&without_comments(&item.text));
+            let text = done_task(&text).unwrap_or(&text);
             // Markup with no words, such as `[x]` or `**`, says nothing, as an empty template doesn't.
-            let words = text
-                .strip_prefix("[x]")
-                .or_else(|| text.strip_prefix("[X]"));
-            let says_something = words.unwrap_or(&text).chars().any(char::is_alphanumeric);
-            let fits = says_something && chars(&text) <= MAX_REQUEST_ITEM;
-            if !open_task && fits && !self.decided.contains(&text) {
-                self.decided.push(text);
+            let fits = text.chars().any(char::is_alphanumeric) && chars(text) <= MAX_REQUEST_ITEM;
+            if !item.open_task && fits && !self.decided.iter().any(|known| known == text) {
+                self.decided.push(text.to_owned());
             }
         }
     }
@@ -716,24 +784,24 @@ impl DecidedList {
 }
 
 /// What a person settled in so many words in a text: each item of a list under a heading such as
-/// "Decided" or "Decisiones ya tomadas", on one line. As in Markdown, a line right under an item
-/// goes on with it, and an item under another is part of it. The list ends at a blank line or a
-/// heading. A task still open isn't decided, nor is anything in code, a quote or a comment:
-/// someone else may be speaking there. An item too long to carry into every prompt stays only in
-/// the request.
+/// "Decided" or "Decisiones ya tomadas", on one line, without the box of a task that's done. It's
+/// read as Markdown reads it: a line right under an item goes on with it unless it starts something
+/// else, and an item under another is part of it. The list ends at a blank line or a heading. A
+/// task still open isn't decided, nor is anything in code, a quote or a comment: someone else may
+/// be speaking there. An item too long to carry into every prompt stays only in the request.
 pub(crate) fn decided_in(text: &str) -> Vec<String> {
     let mut list = DecidedList::default();
     let mut code: Option<(char, usize)> = None;
     let mut comment = false;
-    // Whether this line starts a block, as after a blank line. A heading is one only there, or
-    // with `#`: anywhere else it's the end of a sentence.
+    // Whether this line starts a block, as after a blank line or a heading, rather than going on
+    // with a paragraph. A line of text names a list only there.
     let mut block_start = true;
+    // Whether the line before was text outside a list's items, which a line of `=` or `-` makes a
+    // heading.
+    let mut paragraph = false;
     for line in text.lines() {
-        // A fence ends only with one of the same kind, as long or longer.
-        if let Some((mark, length)) = code {
-            if fence(line).is_some_and(|(m, n)| m == mark && n >= length)
-                && line.trim().chars().all(|c| c == mark)
-            {
+        if let Some(opened) = code {
+            if closes(line, opened) {
                 (code, block_start) = (None, true);
             }
             continue;
@@ -747,18 +815,25 @@ pub(crate) fn decided_in(text: &str) -> Vec<String> {
         // Code, a comment or a quote is never part of an item. Code ends the list.
         if let Some(opened) = fence(line) {
             list.end();
-            code = Some(opened);
+            (code, paragraph) = (Some(opened), false);
             continue;
         }
         if let Some(opened) = trimmed.strip_prefix("<!--") {
             comment = !opened.contains("-->");
             continue;
         }
+        let under_text = std::mem::take(&mut paragraph);
         if trimmed.is_empty() {
             // Between a heading and its list it's fine. After an item, the list is over.
             if list.item.is_some() {
                 list.end();
             }
+            block_start = true;
+            continue;
+        }
+        // The text above is a heading. If it named the list, the list is still open, and any other
+        // text has ended it already.
+        if under_text && depth < 4 && underline(trimmed) {
             block_start = true;
             continue;
         }
@@ -770,30 +845,37 @@ pub(crate) fn decided_in(text: &str) -> Vec<String> {
             continue;
         }
         let starts_block = std::mem::replace(&mut block_start, false);
-        if let (Some((item, _)), Some(at)) = (&mut list.item, list.items_at)
+        if let (Some(item), Some(at)) = (&mut list.item, list.items_at)
             && depth > at
         {
-            item.push(' ');
-            item.push_str(trimmed);
+            item.text.push(' ');
+            item.text.push_str(trimmed);
         } else if depth >= 4 {
             list.end();
-        } else if let Some(said) = list_item(line) {
+        } else if let Some((said, mark)) = list_item(line)
+            && starts_item(said, mark, starts_block, list.item.as_ref())
+        {
             if list.open {
                 list.end_item();
                 list.items_at.get_or_insert(depth);
-                list.item = Some((said.to_owned(), said.starts_with("[ ]")));
+                list.item = Some(Item {
+                    text: said.to_owned(),
+                    open_task: said.starts_with("[ ]"),
+                    numbered: matches!(mark, Mark::Numbered { .. }),
+                });
             }
-        } else if is_decided_heading(line) && (starts_block || trimmed.starts_with('#')) {
+        } else if let Some(heading) = atx_heading(trimmed) {
             list.end();
-            list.open = true;
-        } else if trimmed.starts_with('#') {
+            (list.open, block_start) = (names_what_was_decided(heading), true);
+        } else if starts_block && names_what_was_decided(trimmed) {
             list.end();
-            block_start = true;
-        } else if let Some((item, _)) = &mut list.item {
-            item.push(' ');
-            item.push_str(trimmed);
+            (list.open, paragraph) = (true, true);
+        } else if let Some(item) = &mut list.item {
+            item.text.push(' ');
+            item.text.push_str(trimmed);
         } else {
             list.end();
+            paragraph = true;
         }
     }
     list.end();
@@ -927,8 +1009,10 @@ pub enum Verdict {
 /// option. A question with none goes to the person once more, and asking past that stops the step,
 /// so it can't go on asking forever and Keel never makes up an answer.
 ///
-/// `written` is what the person wrote in the run's request, which is all a decision can quote to
-/// count as theirs.
+/// `written` is the run's request as Keel knows who wrote each piece: the person, or an assistant
+/// they allowed. Each item of a list of what a piece already decided goes first in `decided`, as
+/// the request's and in its words, and a copy the spec made of one is dropped. Nothing else can be
+/// the request's.
 pub fn judge(
     output: Option<&Value>,
     written: &[Written],
@@ -1295,7 +1379,7 @@ mod tests {
         validate_spec_for(output, None, &[])
     }
 
-    /// [`super::judge`] for a request with nothing in it a spec could quote.
+    /// [`super::judge`] for a request that decided nothing, so Keel adds nothing from it.
     fn judge(output: Option<&Value>, after_correction: bool, rounds_answered: usize) -> Verdict {
         super::judge(output, &[], after_correction, rounds_answered)
     }
@@ -1745,8 +1829,140 @@ mod tests {
         // A task still open isn't decided, nor anything under it.
         assert_eq!(
             decided_in("Decided:\n- [ ] Open thing\n  that goes on.\n- [x] Old threads stay."),
-            ["[x] Old threads stay."]
+            ["Old threads stay."]
         );
+    }
+
+    #[test]
+    fn a_task_that_is_done_is_decided_without_its_box() {
+        assert_eq!(
+            decided_in("Decided:\n- [x] Old threads stay.\n- [X]  Critical ones count."),
+            ["Old threads stay.", "Critical ones count."]
+        );
+        // Only a box with a space after it is one.
+        assert_eq!(
+            decided_in("Decided:\n- [x]Old threads stay."),
+            ["[x]Old threads stay."]
+        );
+        // So a spec that copies it is matched, and it's there once, as the request's.
+        let spec = kept(
+            json!([{ "text": "Old threads stay." }]),
+            &typed("Decided:\n- [x] Old threads stay."),
+        );
+        assert_eq!(
+            json!(spec)["decided"],
+            json!([{ "text": "Old threads stay.", "taken": "request" }])
+        );
+    }
+
+    #[test]
+    fn a_line_that_starts_with_a_hash_is_a_heading_only_as_markdown_reads_one() {
+        // `#131` goes on with the sentence: a heading has one to six `#`, then a space.
+        assert_eq!(
+            decided_in("Decided:\n- Old threads are deleted only after\n#131 lands"),
+            ["Old threads are deleted only after #131 lands"]
+        );
+        assert_eq!(
+            decided_in("Decided:\n- It stays\n####### as it is."),
+            ["It stays ####### as it is."]
+        );
+        // With a space, or nothing after them, they are one, and the list is over.
+        assert_eq!(
+            decided_in("Decided:\n- It stays.\n# Next\n- Not this."),
+            ["It stays."]
+        );
+        assert_eq!(
+            decided_in("Decided:\n- It stays.\n##\n- Not this."),
+            ["It stays."]
+        );
+        // Nor is `#Decided` a heading for what was decided.
+        assert!(decided_in("#Decided\n- Drop the table.").is_empty());
+    }
+
+    #[test]
+    fn a_wrapped_line_that_starts_with_a_number_goes_on_with_the_sentence() {
+        // Only a numbered item that starts at 1 breaks into a sentence, as in Markdown.
+        assert_eq!(
+            decided_in("Decided:\n- Old threads are deleted only after\n10. lands"),
+            ["Old threads are deleted only after 10. lands"]
+        );
+        assert_eq!(
+            decided_in("Decided:\n- Old threads stay.\n1. Critical ones count."),
+            ["Old threads stay.", "Critical ones count."]
+        );
+        // A numbered list goes on with any number.
+        assert_eq!(
+            decided_in("## Decided\n9. Old threads stay.\n10. Critical ones count."),
+            ["Old threads stay.", "Critical ones count."]
+        );
+        // Right under a line of text that names the list, one from 2 is part of that line, so
+        // there's no list. After a blank line, there is.
+        assert!(decided_in("Decided:\n2. Old threads stay.\n3. Critical ones count.").is_empty());
+        assert_eq!(
+            decided_in("Decided:\n\n2. Old threads stay."),
+            ["Old threads stay."]
+        );
+    }
+
+    #[test]
+    fn code_in_a_line_is_not_a_code_block() {
+        // Backticks with more backticks after them are code within the line, as in Markdown.
+        assert_eq!(
+            decided_in("Decided:\n- Check it with\n```pnpm test``` first.\n- Old threads stay."),
+            ["Check it with ```pnpm test``` first.", "Old threads stay."]
+        );
+        assert_eq!(
+            decided_in("```pnpm test```\n\nDecided:\n- Old threads stay."),
+            ["Old threads stay."]
+        );
+        // After tildes, backticks are still the words of a fence.
+        assert_eq!(
+            decided_in("~~~ `md`\nDecided:\n- Drop the table.\n~~~\nDecided:\n- It stays."),
+            ["It stays."]
+        );
+        // And only a line of the same marks, as many or more, ends one.
+        assert_eq!(
+            decided_in(
+                "```\nDecided:\n- Drop the table.\n``` still code\n```\nDecided:\n- It stays."
+            ),
+            ["It stays."]
+        );
+    }
+
+    #[test]
+    fn plus_bullets_closed_headings_and_underlined_ones_are_read_as_markdown_does() {
+        assert_eq!(
+            decided_in("Decided:\n+ Old threads stay.\n+ Critical ones count."),
+            ["Old threads stay.", "Critical ones count."]
+        );
+        for heading in [
+            "## Decided ##",
+            "# Decisiones ya tomadas #####",
+            "### Decided #  ",
+        ] {
+            assert_eq!(
+                decided_in(&format!("{heading}\n- It stays.")),
+                ["It stays."],
+                "{heading}"
+            );
+        }
+        // The closing `#` needs a space before it.
+        assert!(decided_in("## Decided#\n- Drop the table.").is_empty());
+        for underline in ["---", "===", "  ======  "] {
+            assert_eq!(
+                decided_in(&format!("Decided\n{underline}\n- It stays.")),
+                ["It stays."],
+                "{underline}"
+            );
+        }
+        assert_eq!(decided_in("Decided:\n---\n\n- It stays."), ["It stays."]);
+        // Under an item, it's a break and the list is over. Under more than the heading's words,
+        // it's another heading.
+        assert_eq!(
+            decided_in("Decided\n---\n- It stays.\n---\n- Not this."),
+            ["It stays."]
+        );
+        assert!(decided_in("Some context.\nDecided\n---\n- Not this.").is_empty());
     }
 
     #[test]

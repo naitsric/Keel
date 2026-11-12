@@ -581,7 +581,8 @@ fn what_the_request_already_decided_reaches_the_reviewers_as_the_persons() {
     w.answers(&[good()]);
     let review = built_in_review(&w);
     let run = w.start_asking(
-        "Count the threads that got fixed.\n\nDecisions already made (don't ask them):\n6. If the author resolves their own\n   critical thread, it counts for now.",
+        // As in Markdown, a list from 6 starts after a blank line, not right under a line of text.
+        "Count the threads that got fixed.\n\nDecisions already made (don't ask them):\n\n6. If the author resolves their own\n   critical thread, it counts for now.",
         vec![specifier(), builder(), check(), review, human()],
     );
     w.wait_for(&run, "human", AttemptState::WaitingApproval);
@@ -675,6 +676,12 @@ fn an_issue_counts_only_from_the_project_s_account_and_what_was_added_stays_apar
         ])
     );
     assert_eq!(w.decided(&from_theirs), json!([]), "someone else's issue");
+    // Keel keeps the issue's text for this, apart from what the run shows: its request has it.
+    let shown = serde_json::to_value(w.store.run(&from_mine).unwrap()).unwrap();
+    assert_eq!(
+        shown["sourceIssue"],
+        json!({ "number": 7, "title": "Count the fixed threads", "author": "Alice", "url": "https://github.com/acme/app/issues/7" })
+    );
 
     // The specifier is told exactly what Keel adds, and nothing when it adds nothing, so it copies
     // the rest as it always has.

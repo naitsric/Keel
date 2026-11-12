@@ -476,6 +476,7 @@ impl World {
                     workflow: serde_json::to_string(&[&step]).unwrap(),
                     language: "en".into(),
                     source_issue: None,
+                    issue_text: None,
                     workflow_id: None,
                     workflow_name: None,
                     started_by: None,
@@ -809,6 +810,54 @@ fn a_card_an_assistant_wrote_is_still_its_words_when_a_person_runs_it_again() {
         .unwrap();
     assert_ne!(again, run);
     assert_eq!(decided_in_run(&w, &again), by_the_client);
+
+    // Once the person changes what it says, it's theirs.
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    w.engine
+        .card_update(
+            &card,
+            "Export the threads",
+            "Decided:\n- The admin export asks for a login.",
+        )
+        .unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let theirs = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_eq!(
+        decided_in_run(&w, &theirs),
+        serde_json::json!([{ "text": "The admin export asks for a login.", "taken": "request" }])
+    );
+}
+
+#[test]
+fn what_a_card_nobody_can_tell_who_wrote_decided_counts_for_no_one_until_a_person_changes_it() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    let card = w
+        .engine
+        .card_create(
+            &w.project_id,
+            "Export the threads",
+            "Decided:\n- The admin export needs no login.",
+        )
+        .unwrap();
+    // As a card from before Keel kept who wrote it is, where nothing told.
+    rusqlite::Connection::open(w.dir.path().join("keel.db"))
+        .unwrap()
+        .execute("update card set body_by_unknown = 1 where id = ?1", [&card])
+        .unwrap();
+    w.engine.start_board();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let run = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_eq!(decided_in_run(&w, &run), serde_json::json!([]));
 
     // Once the person changes what it says, it's theirs.
     w.engine
@@ -2990,6 +3039,7 @@ fn dying_with_the_run_linked_and_not_yet_begun_runs_the_card_once() {
                 workflow: serde_json::to_string(&steps).unwrap(),
                 language: "en".into(),
                 source_issue: None,
+                issue_text: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,

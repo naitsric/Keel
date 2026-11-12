@@ -327,12 +327,39 @@ const MIGRATIONS: &[&str] = &[
     alter table run add column extra_read text not null default '[]';
 "#,
     // 17: Who wrote what a card says: the assistant that started a run from outside, or null for
-    // a person. A person who changes it makes it theirs. A card from before is the assistant's
-    // whose run it has.
+    // a person. A person who changes it makes it theirs. A card from before is an assistant's
+    // where a run or a call shows it: the run it has, a run an assistant started asking what it
+    // says, or the call that asked for it, also one that failed to start. Such a card is written
+    // while that call lasts, so one that says something, was written then, and shows none of these
+    // can't be told: it's nobody's until a person changes it, and what it says settles nothing.
+    // A run also keeps what its issue said, and what was added to it, apart from what it shows.
     r#"
     alter table card add column body_by text;
+    alter table card add column body_by_unknown integer not null default 0;
     update card set body_by = (select started_by from run where run.id = card.run_id)
     where run_id is not null;
+    update card set body_by = (
+        select r.started_by from run r
+        where r.project_id = card.project_id and r.started_by is not null
+          and trim(r.request, char(32, 9, 10, 11, 12, 13)) = card.body
+        order by abs(julianday(r.created_at) - julianday(card.created_at)) limit 1)
+    where body_by is null and card.body <> '';
+    update card set body_by = (
+        select c.client_name from mcp_call c
+        where c.tool in ('start_run', 'start_task', 'propose_change')
+          and trim(case when json_valid(c.args)
+                        then coalesce(json_extract(c.args, '$.request'), json_extract(c.args, '$.prompt'))
+                   end, char(32, 9, 10, 11, 12, 13)) = card.body
+        order by abs(julianday(c.at) - julianday(card.created_at)) limit 1)
+    where body_by is null and card.body <> '';
+    update card set body_by_unknown = 1
+    where body_by is null and trim(body, char(32, 9, 10, 11, 12, 13)) <> ''
+      and exists (select 1 from mcp_call c
+                  where c.tool in ('start_run', 'start_task', 'propose_change')
+                    and coalesce(julianday(card.created_at)
+                                 between julianday(c.at) - (c.duration_ms + 2000) / 86400000.0
+                                     and julianday(c.at) + 2000 / 86400000.0, 1));
+    alter table run add column issue_text text;
 "#,
 ];
 
@@ -556,6 +583,9 @@ pub struct NewRun {
     pub workflow: String,
     pub language: String,
     pub source_issue: Option<String>,
+    /// What that issue said, and what the request added to it, apart, for Keel to tell who wrote
+    /// what. The request has both, so nothing shows this. See [`Store::issue_text`].
+    pub issue_text: Option<String>,
     pub workflow_id: Option<String>,
     pub workflow_name: Option<String>,
     /// The assistant that started it over MCP, if one did.
@@ -842,6 +872,18 @@ pub struct MovedUpBecause {
     pub runs: i64,
 }
 
+/// Who wrote what a card says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Writer {
+    /// A person, in the app.
+    Person,
+    /// The assistant that started a run from outside, by the name it had.
+    Assistant(String),
+    /// Nothing tells, on a card from before Keel kept it. What it says counts as nobody's until a
+    /// person changes it.
+    Unknown,
+}
+
 /// A card on the board, with what its column depends on. The issue is a copy taken on import.
 #[derive(Debug, Clone)]
 pub struct Card {
@@ -849,8 +891,8 @@ pub struct Card {
     pub project_id: String,
     pub title: String,
     pub body: String,
-    /// The assistant that wrote `body`, which a run from the card keeps. None for a person.
-    pub body_by: Option<String>,
+    /// Who wrote `body`, which a run from the card keeps.
+    pub body_by: Writer,
     pub issue: Option<serde_json::Value>,
     pub issue_number: Option<i64>,
     pub lane: CardLane,
@@ -951,7 +993,11 @@ fn card_from(r: &Row) -> rusqlite::Result<Card> {
         project_id: r.get("project_id")?,
         title: r.get("title")?,
         body: r.get("body")?,
-        body_by: r.get("body_by")?,
+        body_by: match (r.get("body_by")?, r.get("body_by_unknown")?) {
+            (Some(assistant), _) => Writer::Assistant(assistant),
+            (None, true) => Writer::Unknown,
+            (None, false) => Writer::Person,
+        },
         issue: json_col(r, "issue")?,
         issue_number: r.get("issue_number")?,
         lane: CardLane::parse(&lane).unwrap_or(CardLane::Backlog),
@@ -1118,9 +1164,9 @@ fn read_joint_change(conn: &Connection, id: &str) -> Result<JointChange> {
 
 fn insert_run(conn: &Connection, run: &NewRun) -> rusqlite::Result<()> {
     conn.execute(
-        "insert into run (id, project_id, title, request, workflow, language, source_issue, created_at, workflow_id, workflow_name, started_by)
-         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![run.id, run.project_id, run.title, run.request, run.workflow, run.language, run.source_issue, now(), run.workflow_id, run.workflow_name, run.started_by],
+        "insert into run (id, project_id, title, request, workflow, language, source_issue, created_at, workflow_id, workflow_name, started_by, issue_text)
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![run.id, run.project_id, run.title, run.request, run.workflow, run.language, run.source_issue, now(), run.workflow_id, run.workflow_name, run.started_by, run.issue_text],
     )?;
     Ok(())
 }
@@ -1570,6 +1616,19 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// What the issue a run came from said, and what its request added to it, as the engine kept
+    /// them apart. None for a run from no issue, or from before Keel kept this.
+    pub fn issue_text(&self, run_id: &str) -> Result<Option<serde_json::Value>> {
+        let text: Option<String> = self
+            .lock()
+            .query_row("select issue_text from run where id = ?1", [run_id], |r| {
+                r.get(0)
+            })
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("run {run_id}")))?;
+        Ok(text.and_then(|text| serde_json::from_str(&text).ok()))
     }
 
     pub fn run(&self, id: &str) -> Result<Run> {
@@ -2216,7 +2275,8 @@ impl Store {
             return Ok(false);
         }
         conn.execute(
-            "update card set title = ?2, body = ?3, body_by = case when body = ?3 then body_by end
+            "update card set title = ?2, body = ?3, body_by = case when body = ?3 then body_by end,
+                             body_by_unknown = case when body = ?3 then body_by_unknown else 0 end
              where id = ?1",
             params![id, title, body],
         )?;
@@ -2731,6 +2791,7 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
+                issue_text: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,
@@ -2795,6 +2856,7 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
+                issue_text: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,
@@ -2880,6 +2942,8 @@ mod tests {
             conn.execute_batch(
                 "pragma user_version = 4;
                  alter table card drop column body_by;
+                 alter table card drop column body_by_unknown;
+                 alter table run drop column issue_text;
                  alter table run drop column extra_read;
                  alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;
@@ -3202,6 +3266,8 @@ mod tests {
             conn.execute_batch(
                 "pragma user_version = 15;
                  alter table card drop column body_by;
+                 alter table card drop column body_by_unknown;
+                 alter table run drop column issue_text;
                  alter table run drop column extra_read;
                  update project set allowed_read = 'not a list' where id = 'bad';",
             )
@@ -3250,6 +3316,7 @@ mod tests {
                     workflow: "[]".into(),
                     language: "en".into(),
                     source_issue: None,
+                    issue_text: None,
                     workflow_id: None,
                     workflow_name: None,
                     started_by: None,
@@ -3455,6 +3522,7 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
+                issue_text: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,
@@ -3562,6 +3630,7 @@ mod tests {
                     workflow: "[]".into(),
                     language: "en".into(),
                     source_issue: None,
+                    issue_text: None,
                     workflow_id: workflow.map(|w| w.0.into()),
                     workflow_name: workflow.map(|w| w.1.into()),
                     started_by: None,
@@ -3674,6 +3743,7 @@ mod tests {
                     workflow: "[]".into(),
                     language: "en".into(),
                     source_issue: None,
+                    issue_text: None,
                     workflow_id: Some("w".into()),
                     workflow_name: Some("W".into()),
                     started_by: None,
@@ -3747,6 +3817,7 @@ mod tests {
                     workflow: "[]".into(),
                     language: "en".into(),
                     source_issue: None,
+                    issue_text: None,
                     workflow_id: Some("w".into()),
                     workflow_name: Some("W".into()),
                     started_by: None,
@@ -4317,6 +4388,7 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
+                issue_text: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,
@@ -4337,6 +4409,7 @@ mod tests {
             workflow: "[]".into(),
             language: "en".into(),
             source_issue: None,
+            issue_text: None,
             workflow_id: None,
             workflow_name: None,
             started_by: None,
@@ -4379,7 +4452,7 @@ mod tests {
             })
             .unwrap();
         let by = || store.card("c").unwrap().body_by;
-        assert_eq!(by().as_deref(), Some("Claude Code"));
+        assert_eq!(by(), Writer::Assistant("Claude Code".into()));
         // Moving it, or changing only its title, keeps who wrote it.
         assert!(store.move_card("c", CardLane::Todo, 0, "en").unwrap());
         assert!(store.move_card("c", CardLane::Backlog, 0, "en").unwrap());
@@ -4388,60 +4461,132 @@ mod tests {
                 .update_card("c", "Export the threads", "Decided:\n- No login.")
                 .unwrap()
         );
-        assert_eq!(by().as_deref(), Some("Claude Code"));
+        assert_eq!(by(), Writer::Assistant("Claude Code".into()));
         // Changing what it says makes it the person's.
         assert!(
             store
                 .update_card("c", "Export the threads", "Decided:\n- A login.")
                 .unwrap()
         );
-        assert_eq!(by(), None);
+        assert_eq!(by(), Writer::Person);
+        // A card a person writes is theirs from the start.
+        card(&store, "mine");
+        assert_eq!(store.card("mine").unwrap().body_by, Writer::Person);
+    }
+
+    /// A database exactly as version 16 left it, with these rows in it.
+    fn before_who_wrote_cards(path: &Path, rows: &str) {
+        let conn = Connection::open(path).unwrap();
+        for migration in &MIGRATIONS[..16] {
+            conn.execute_batch(migration).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 16).unwrap();
+        conn.execute_batch(rows).unwrap();
     }
 
     #[test]
-    fn a_card_from_before_keel_kept_who_wrote_it_is_the_assistant_s_whose_run_it_has() {
+    fn who_wrote_a_card_from_before_comes_from_its_runs_and_calls_and_is_nobody_where_nothing_tells()
+     {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("keel.db");
-        {
-            let store = Store::open(&path).unwrap();
-            seeded(&store);
-            store
-                .add_run(&NewRun {
-                    id: "from-outside".into(),
-                    project_id: "p".into(),
-                    title: "Export".into(),
-                    request: "Export".into(),
-                    workflow: "[]".into(),
-                    language: "en".into(),
-                    source_issue: None,
-                    workflow_id: None,
-                    workflow_name: None,
-                    started_by: Some("Claude Code".into()),
-                })
-                .unwrap();
-            for id in ["theirs", "mine", "never-ran"] {
-                card(&store, id);
-            }
-            let conn = store.lock();
-            conn.execute_batch(
-                "update card set run_id = 'from-outside' where id = 'theirs';
-                 update card set run_id = 'r' where id = 'mine';",
-            )
-            .unwrap();
-        }
-        {
-            let conn = rusqlite::Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "pragma user_version = 16;
-                 alter table card drop column body_by;",
-            )
-            .unwrap();
-        }
+        // An assistant's run, the call that starts one being where its card is written, and the
+        // card being written while that call lasts. The rest is a person's, a day later.
+        before_who_wrote_cards(
+            &path,
+            r#"
+            insert into project (id, name, path, created_at) values ('p', 'demo', '/demo', '2026-11-01T09:00:00.000Z');
+            insert into mcp_client (id, name, token_hash, token_prefix, can_run, created_at)
+                values ('c1', 'Claude Code', x'07', 'keel_abc', 1, '2026-11-01T09:00:00.000Z');
+            insert into run (id, project_id, title, request, started_by, created_at) values
+                ('linked', 'p', 'Export', 'Decided:' || char(10) || '- No login.', 'Claude Code', '2026-11-01T10:00:00.100Z'),
+                ('rejected', 'p', 'Archive', 'Decided:' || char(10) || '- Old threads go.', 'Claude Code', '2026-11-01T10:01:00.100Z'),
+                ('first', 'p', 'Count', 'Decided:' || char(10) || '- Critical ones count.', 'Claude Code', '2026-11-01T10:02:00.100Z'),
+                ('again', 'p', 'Count', 'Count' || char(10) || char(10) || 'Decided:' || char(10) || '- Critical ones count.', null, '2026-11-02T10:00:00.000Z'),
+                ('person', 'p', 'Sort', 'Sort', null, '2026-11-02T11:00:00.000Z');
+            insert into card (id, project_id, title, body, lane, position, run_id, created_at) values
+                ('linked', 'p', 'Export', 'Decided:' || char(10) || '- No login.', 'started', 0, 'linked', '2026-11-01T10:00:00.050Z'),
+                ('rejected', 'p', 'Archive', 'Decided:' || char(10) || '- Old threads go.', 'todo', 1, null, '2026-11-01T10:01:00.050Z'),
+                ('rerun', 'p', 'Count', 'Decided:' || char(10) || '- Critical ones count.', 'started', 2, 'again', '2026-11-01T10:02:00.050Z'),
+                ('failed', 'p', 'Merge', 'Decided:' || char(10) || '- Merge by date.', 'backlog', 3, null, '2026-11-01T10:03:00.050Z'),
+                ('task', 'p', 'Look', 'Decided:' || char(10) || '- Only read.', 'backlog', 4, null, '2026-11-01T10:04:00.050Z'),
+                ('cut', 'p', 'Long', 'Decided:' || char(10) || '- A long one.', 'backlog', 5, null, '2026-11-01T10:05:00.050Z'),
+                ('empty', 'p', 'Short', '', 'backlog', 6, null, '2026-11-01T10:05:00.060Z'),
+                ('mine', 'p', 'Sort', 'Decided:' || char(10) || '- By date.', 'started', 7, 'person', '2026-11-02T10:59:00.000Z'),
+                ('never-ran', 'p', 'Tidy', 'Decided:' || char(10) || '- Keep it.', 'backlog', 8, null, '2026-11-02T12:00:00.000Z');
+            insert into mcp_call (client_id, client_name, tool, args, ok, error, run_id, at, duration_ms) values
+                ('c1', 'Claude Code', 'start_run', '{"project":"demo","workflow":"builtin:full","request":"Decided:\n- No login."}', 1, null, 'linked', '2026-11-01T10:00:00.200Z', 300),
+                ('c1', 'Claude Code', 'start_run', '{"project":"demo","workflow":"builtin:full","request":" Decided:\n- Merge by date.\n"}', 0, 'Keel is paused', null, '2026-11-01T10:03:00.200Z', 300),
+                ('c1', 'Claude Code', 'start_task', '{"project":"demo","prompt":"Decided:\n- Only read."}', 0, 'Keel is paused', null, '2026-11-01T10:04:00.200Z', 300),
+                ('c1', 'Claude Code', 'start_run', '{"project":"demo","workflow":"builtin:full","request":"Decided:\n- A lo' || char(10) || '… [cut at 4096 bytes]', 0, 'Keel is paused', null, '2026-11-01T10:05:00.200Z', 300),
+                ('c1', 'Claude Code', 'get_run', '{"run":"linked"}', 1, null, 'linked', '2026-11-02T12:00:00.010Z', 5);
+            "#,
+        );
+
         let store = Store::open(&path).unwrap();
         let by = |id: &str| store.card(id).unwrap().body_by;
-        assert_eq!(by("theirs").as_deref(), Some("Claude Code"));
-        assert_eq!(by("mine"), None);
-        assert_eq!(by("never-ran"), None);
+        let assistant = Writer::Assistant("Claude Code".into());
+        // The run it has.
+        assert_eq!(by("linked"), assistant);
+        // A run that asked what it says: one rejected and dragged back to Todo, or one a person
+        // ran again.
+        assert_eq!(by("rejected"), assistant);
+        assert_eq!(by("rerun"), assistant);
+        // The call that started it, when starting it failed before it had a run.
+        assert_eq!(by("failed"), assistant);
+        assert_eq!(by("task"), assistant);
+        // Written while a call that starts runs lasted, where the call can't be read: nothing tells.
+        assert_eq!(by("cut"), Writer::Unknown);
+        // Saying nothing, or a person's, with no call that starts runs around.
+        assert_eq!(by("empty"), Writer::Person);
+        assert_eq!(by("mine"), Writer::Person);
+        assert_eq!(by("never-ran"), Writer::Person);
+
+        // Nobody's until a person changes what it says, and then it's theirs.
+        assert!(
+            store
+                .update_card("cut", "Longer", "Decided:\n- A long one.")
+                .unwrap()
+        );
+        assert_eq!(by("cut"), Writer::Unknown);
+        assert!(
+            store
+                .update_card("cut", "Longer", "Decided:\n- A short one.")
+                .unwrap()
+        );
+        assert_eq!(by("cut"), Writer::Person);
+        // And a card from now on is whoever's it says.
+        card(&store, "new");
+        assert_eq!(by("new"), Writer::Person);
+    }
+
+    #[test]
+    fn what_an_issue_said_is_kept_for_keel_and_not_shown_with_the_run() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let issue = serde_json::json!({ "number": 7, "title": "Broken", "author": "alice", "url": "https://github.com/acme/app/issues/7" });
+        let said = serde_json::json!({ "body": "Decided:\n- Old threads stay.", "added": "Keep it small." });
+        store
+            .add_run(&NewRun {
+                id: "from-issue".into(),
+                project_id: "p".into(),
+                title: "#7 Broken".into(),
+                request: "the issue, as Keel asks for it".into(),
+                workflow: "[]".into(),
+                language: "en".into(),
+                source_issue: Some(issue.to_string()),
+                issue_text: Some(said.to_string()),
+                workflow_id: None,
+                workflow_name: None,
+                started_by: None,
+            })
+            .unwrap();
+        let shown = serde_json::to_value(store.run("from-issue").unwrap()).unwrap();
+        assert_eq!(shown["sourceIssue"], issue);
+        assert!(!shown.to_string().contains("Old threads stay"), "{shown}");
+        let listed = serde_json::to_string(&store.runs(10).unwrap()).unwrap();
+        assert!(!listed.contains("Old threads stay"), "{listed}");
+        assert_eq!(store.issue_text("from-issue").unwrap(), Some(said));
+        assert_eq!(store.issue_text("r").unwrap(), None);
     }
 
     #[test]
@@ -4487,6 +4632,7 @@ mod tests {
                         workflow: "[]".into(),
                         language: "en".into(),
                         source_issue: None,
+                        issue_text: None,
                         workflow_id: None,
                         workflow_name: None,
                         started_by: None,
@@ -4817,6 +4963,8 @@ mod tests {
             conn.execute_batch(
                 "pragma user_version = 8;
                  alter table card drop column body_by;
+                 alter table card drop column body_by_unknown;
+                 alter table run drop column issue_text;
                  alter table run drop column extra_read;
                  alter table attempt drop column skipped_tests;
                  alter table run drop column pr_head;
@@ -5009,6 +5157,7 @@ mod tests {
                     workflow: "[]".into(),
                     language: "en".into(),
                     source_issue: None,
+                    issue_text: None,
                     workflow_id: None,
                     workflow_name: None,
                     started_by: None,
@@ -5148,6 +5297,7 @@ mod tests {
                 workflow: "[]".into(),
                 language: "en".into(),
                 source_issue: None,
+                issue_text: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,

@@ -12,7 +12,7 @@ use keel_harness::process::{self, SIGINT, SIGTERM, Tail};
 use keel_harness::stream::ResultEvent;
 use keel_harness::{Parsed, StepCommand, home, parse_line, settings};
 use keel_store::rusqlite_value::Value;
-use keel_store::{Attempt, now};
+use keel_store::{Attempt, Writer, now};
 use serde_json::json;
 
 use crate::git::{Git, RUN_CACHE};
@@ -1360,21 +1360,33 @@ impl Inner {
         // An assistant that started it wrote what it asks. Started from a card, it's in the words
         // of whoever wrote the card, which a person rerunning it doesn't change.
         let writer = match (&run.started_by, self.store.card_of_run(run_id)) {
-            (Some(assistant), _) => Some(assistant.clone()),
-            (None, Ok(None)) => None,
+            (Some(assistant), _) => Writer::Assistant(assistant.clone()),
+            (None, Ok(None)) => Writer::Person,
             (None, Ok(Some(card))) => match self.store.card(&card) {
                 Ok(card) => card.body_by,
                 Err(_) => return Vec::new(),
             },
             (None, Err(_)) => return Vec::new(),
         };
-        let Some(issue) = &run.source_issue else {
-            return vec![specs::Written {
-                text: run.request,
-                assistant: writer,
-            }];
+        let by_writer = |text: &str| {
+            let assistant = match &writer {
+                Writer::Person => None,
+                Writer::Assistant(assistant) => Some(assistant.clone()),
+                // What a card says that nobody can tell who wrote counts for no one.
+                Writer::Unknown => return None,
+            };
+            Some(specs::Written {
+                text: text.to_owned(),
+                assistant,
+            })
         };
-        let text = |key: &str| issue.get(key).and_then(serde_json::Value::as_str);
+        let Some(issue) = &run.source_issue else {
+            return by_writer(&run.request).into_iter().collect();
+        };
+        let Ok(said) = self.store.issue_text(run_id) else {
+            return Vec::new();
+        };
+        let text = |key: &str| said.as_ref()?.get(key)?.as_str();
         let account = self
             .store
             .project(&run.project_id)
@@ -1390,12 +1402,7 @@ impl Inner {
                 assistant: None,
             });
         }
-        if let Some(added) = text("added") {
-            written.push(specs::Written {
-                text: added.to_owned(),
-                assistant: writer,
-            });
-        }
+        written.extend(text("added").and_then(by_writer));
         written
     }
 

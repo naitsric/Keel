@@ -478,21 +478,21 @@ function questionedLines(q: Questioned, decided: SpecDecided[]): number[] {
   return typeof number === "number" && Number.isInteger(number) && number >= 1 && number <= decided.length ? [number - 1] : [];
 }
 
+/** What a review questions, with the lines of `decided` it's about, by their place among all of them. */
+type QuestionedLines = Questioned & { lines: number[] };
+
 /**
  * What it settled by itself, or what the request already had: the lines of `decided` that `only` picks,
  * by their place among all of them. Each line can go back to whoever does the work, without starting
- * over. What a review questions of it is the person's to settle, so it shows on its line, and one that
- * matches no line shows where `elsewhere` says.
+ * over. What a review questions of it is the person's to settle, so it shows on its line, and
+ * `elsewhere` is what matches no line, quoted as it came.
  */
-function DecidedList({ attemptId, decided, only, elsewhere: showElsewhere, questioned, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; only: (item: SpecDecided) => boolean; elsewhere: boolean; questioned: Questioned[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
+function DecidedList({ attemptId, decided, only, questioned, elsewhere, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; only: (item: SpecDecided) => boolean; questioned: QuestionedLines[]; elsewhere: Questioned[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
   const { t } = useTranslation();
   const [changing, setChanging] = useState<number | null>(null);
   const draftKey = `${attemptId}:change:${changing}`;
   const instruction = useApp((s) => s.approvalDrafts[draftKey] ?? "");
   const setDraft = useApp((s) => s.setApprovalDraft);
-  const lines = questioned.map((q) => questionedLines(q, decided));
-  // One that matches no line still reaches the person, quoted as it came.
-  const elsewhere = showElsewhere ? questioned.filter((_, at) => lines[at].length === 0) : [];
   const shown = decided.flatMap((item, index) => (only(item) ? [{ item, index }] : []));
   return (
     <ul className="space-y-1.5">
@@ -511,7 +511,7 @@ function DecidedList({ attemptId, decided, only, elsewhere: showElsewhere, quest
           {item.taken === "request" && item.assistant && <p className="text-[11.5px] text-subtle">{t("run.decidedWrittenBy", { client: item.assistant })}</p>}
           {item.taken === "roundsLimit" && <p className="text-[11.5px] text-warning">{t("run.decidedKeelTook")}</p>}
           {questioned
-            .filter((_, at) => lines[at].includes(index))
+            .filter((q) => q.lines.includes(index))
             .map((q, at) => (
               <p key={at} className="selectable text-[11.5px] break-words text-warning">
                 {t("run.decidedQuestioned", { why: q.why })}
@@ -640,9 +640,15 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const nothingToExplain = asked !== null && !attempts.some((a) => a.kind === "agent" && a.role === "worker");
   const { reviewers, approver } = reviewsOfRound(attempts, run.round);
   const reviewed = reviewers.some((review) => review.state !== "skipped") || approver != null;
-  // What a review questions of what was decided alone, which the approver left to the person.
+  // What a review questions of what was decided alone, which the approver left to the person, and
+  // the lines it's about.
   const raised = approver?.output?.questioned;
-  const questioned = Array.isArray(raised) ? raised.filter((q) => typeof q?.decided === "string" && typeof q.why === "string") : [];
+  const questioned: QuestionedLines[] = (Array.isArray(raised) ? raised.filter((q) => typeof q?.decided === "string" && typeof q.why === "string") : []).map((q) => ({
+    ...q,
+    lines: spec ? questionedLines(q, spec.decided) : [],
+  }));
+  // One that matches no line still reaches the person, quoted as it came, with what it decided alone.
+  const elsewhere = questioned.filter((q) => q.lines.length === 0);
   const skippedForSize = skippedSteps(attempts);
   const hiddenFiles = files.length - SHOWN_FILES;
   const sentBack = sentBackByAssistant(attempts, run.round);
@@ -698,12 +704,12 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
         )}
         {spec && spec.decided.some(fromRequest) && (
           <ApprovalRow label={t("run.decidedInRequest")}>
-            <DecidedList attemptId={attempt.id} decided={spec.decided} only={fromRequest} elsewhere={false} questioned={questioned} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
+            <DecidedList attemptId={attempt.id} decided={spec.decided} only={fromRequest} questioned={questioned} elsewhere={[]} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
           </ApprovalRow>
         )}
-        {spec && (spec.decided.some((item) => !fromRequest(item)) || questioned.some((q) => questionedLines(q, spec.decided).length === 0)) && (
+        {spec && (spec.decided.some((item) => !fromRequest(item)) || elsewhere.length > 0) && (
           <ApprovalRow label={t("run.decidedTitle")} note={t("run.generated")}>
-            <DecidedList attemptId={attempt.id} decided={spec.decided} only={(item) => !fromRequest(item)} elsewhere questioned={questioned} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
+            <DecidedList attemptId={attempt.id} decided={spec.decided} only={(item) => !fromRequest(item)} questioned={questioned} elsewhere={elsewhere} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
           </ApprovalRow>
         )}
         {sentBack && (
