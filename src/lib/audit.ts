@@ -283,6 +283,41 @@ export function uncheckedOf(output: unknown): string[] {
   return unchecked.filter((text): text is string => typeof text === "string" && text.trim() !== "").map((text) => text.trim());
 }
 
+/** A finding as the app shows it: where, what, and the criterion or limit it breaks. One from an older answer is only text. */
+export interface FindingShown {
+  where: string | null;
+  text: string;
+  breaks: string | null;
+}
+
+/** The id of a specification's limit at `index`, from `L1`, in the order the person sees them. Limits have no id of their own, and a review names the one a change breaks by this one, as it does a criterion. */
+export function limitId(index: number): string {
+  return `L${index + 1}`;
+}
+
+/** What a finding can say the change breaks: each criterion of the specification, and each of its limits from `L1`. */
+export function breakableIds(spec: SpecOutput | null): string[] {
+  if (!spec) return [];
+  return [...spec.criteria.map((criterion) => criterion.id), ...spec.limits.map((_, index) => limitId(index))];
+}
+
+/** What one review found, old text included. Anything else is left out. As for Keel, only what's in `breakable` breaks anything. */
+export function findingsOf(output: unknown, breakable: string[]): FindingShown[] {
+  const findings = (output as { findings?: unknown } | null)?.findings;
+  if (!Array.isArray(findings)) return [];
+  const filled = (value: unknown) => (typeof value === "string" && value.trim() !== "" ? value.trim() : null);
+  return findings.flatMap((finding): FindingShown[] => {
+    if (typeof finding === "string") return [{ where: null, text: finding, breaks: null }];
+    if (!finding || typeof finding !== "object") return [];
+    const { file, line, text, breaks } = finding as Record<string, unknown>;
+    const at = filled(file);
+    const id = filled(breaks);
+    // A line is a whole number from 0, or none, as Keel reads it.
+    const lineKept = typeof line === "number" && Number.isInteger(line) && line >= 0;
+    return [{ where: at && lineKept ? `${at}:${line}` : at, text: typeof text === "string" ? text : "", breaks: id && breakable.includes(id) ? id : null }];
+  });
+}
+
 export type ApprovalOutcome = "delivers" | "deliversLater" | "noDelivery" | "nothingToDeliver";
 
 /**
@@ -343,7 +378,22 @@ export function focusAttempt<T extends { stepId: string; state: string; role?: s
  * failed, but Keel went straight on with the same session to have it fixed: for the person that's
  * not a failure. Until that next attempt exists, nothing is fixing it, and it did fail.
  */
-export function shownState(attempt: Pick<Attempt, "id" | "state" | "reason">, attempts: Pick<Attempt, "resumedFrom">[]): ShownState {
+export function shownState(attempt: Pick<Attempt, "id" | "state" | "reason"> & { kind?: Attempt["kind"] }, attempts: Pick<Attempt, "resumedFrom">[]): ShownState {
   const fixed = attempt.state === "failed" && attempt.reason?.code === "specNotUsable" && attempts.some((a) => a.resumedFrom === attempt.id);
-  return fixed ? "corrected" : attempt.state;
+  if (fixed) return "corrected";
+  return putOffForSetup(attempt) ? "afterSetup" : attempt.state;
 }
+
+/**
+ * Whether this stands for a step a retry with the project's new commands put off for a new setup to
+ * run first, as `sizing::put_off_for_setup` says. It never ran, and the step comes round again once
+ * the setup is through. The only other thing put off is an approval, by a person who asked for more.
+ */
+export const putOffForSetup = (attempt: { state: string; kind?: string }) => attempt.state === "postponed" && attempt.kind !== undefined && attempt.kind !== "approval";
+
+/**
+ * Whether an agent that can change files has had the run's copy, as `runner::before_any_agent_could_write`
+ * says: from then on, a setup gets no more than the agents do. One that only reads has no Bash, Edit or
+ * Write, and a skipped one never had it. Tools Keel doesn't know may write.
+ */
+export const agentCouldHaveWritten = (attempts: Pick<Attempt, "kind" | "state" | "tools">[]) => attempts.some((attempt) => attempt.kind === "agent" && attempt.state !== "skipped" && attempt.tools !== "readOnly");

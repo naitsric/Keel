@@ -7,15 +7,15 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use keel_core::{
-    AttemptState, Reason, StepCondition, StepRole, StepSpec, ToolProfile, WorkflowStep,
-    mask_secrets, mask_value,
+    AttemptState, BoardColumn, Reason, StepCondition, StepRole, StepSpec, ToolProfile,
+    WorkflowStep, mask_secrets, mask_value,
 };
 use keel_engine::{
-    Error, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
-    Verification, WhyNotProven, can_send_back, files_changed, request_from_issue, skipped_steps,
-    spec_of_attempt, verifications_in_round,
+    Error, Finding, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
+    Verification, WhyNotProven, breakable_ids, can_send_back, files_changed, findings_of,
+    limits_with_ids, request_from_issue, skipped_steps, spec_of_attempt, verifications_in_round,
 };
-use keel_store::{Attempt, MAX_OPEN_RUNS_CEILING, McpClient, NewMcpCall, Project, Run};
+use keel_store::{Attempt, Card, MAX_OPEN_RUNS_CEILING, McpClient, NewMcpCall, Project, Run};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as Json, json};
@@ -259,6 +259,12 @@ pub struct RetryStepArgs {
     /// isn't an agent always starts over. False by default.
     #[serde(default)]
     pub resume: Option<bool>,
+    /// For a setup or check: run the project's setup and check as they are now, not as they were
+    /// when the run started. get_run's `commandsChanged` says which differ. A new setup runs before
+    /// the step, with no network after an agent that can edit files or run commands. Refused for
+    /// any other step, and when it would run nothing new. False by default.
+    #[serde(default)]
+    pub use_current_commands: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -266,6 +272,26 @@ pub struct RetryStepArgs {
 pub struct CloseRunArgs {
     /// A run's id.
     pub run: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AppendToCardArgs {
+    /// A card's id: a run's `cardId` from get_run, or a part's in `jointChange.parts`.
+    pub card: String,
+    /// What to add, plainly, in up to 16 KB. The card's next run gets it with the rest of what the
+    /// card says.
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveCardToTodoArgs {
+    /// A card's id: a run's `cardId` from get_run, or a part's in `jointChange.parts`.
+    pub card: String,
+    /// `en` or `es`, for what agents write. The app's language by default.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 // Nothing here can make it edit, reach the network or deliver. Anything else is refused rather than
@@ -898,6 +924,8 @@ impl McpServer {
                 max_budget_usd: args.max_budget_usd,
                 paths: Vec::new(),
                 when: None,
+                risks: Vec::new(),
+                model_when_risky: None,
                 role: StepRole::Worker,
             };
             let mut request = StartRun::one_step(project.id, step, language);
@@ -1029,7 +1057,11 @@ impl McpServer {
                 ));
             }
             for attempt in working {
-                server.0.engine.stop(&attempt.id).map_err(engine_error)?;
+                server
+                    .0
+                    .engine
+                    .stop_by(&attempt.id, &client.name)
+                    .map_err(engine_error)?;
             }
             Ok((server.run_view(client, &args.run)?, Some(args.run)))
         })
@@ -1073,6 +1105,30 @@ impl McpServer {
         self.call(client, "retry_step", args, |server, client, args| {
             let (run, attempts) = server.steerable(client, &args.run)?;
             let step = retry_target(&run, &attempts)?;
+            let current_commands = args.use_current_commands.unwrap_or(false);
+            if current_commands && !matches!(step.kind.as_str(), "setup" | "check") {
+                return Err(ToolError::new(format!(
+                    "Step {:?} doesn't run one of the project's commands: only a setup or a check takes them as they are now. Retry it without `useCurrentCommands`.",
+                    step.step_id
+                )));
+            }
+            // Or it would be a plain retry that the client thinks ran something new.
+            if current_commands {
+                let changes = server
+                    .0
+                    .engine
+                    .command_changes_of(&run)
+                    .map_err(engine_error)?;
+                if !keel_engine::retry_runs_something_new(&changes, &step.step_id, &step.kind) {
+                    return Err(ToolError::new(nothing_new_to_run(
+                        &step.step_id,
+                        &step.kind,
+                        keel_engine::Engine::follows_project(&run, &step.step_id),
+                        run.workflow_name.as_deref(),
+                        &changes,
+                    )));
+                }
+            }
             if !server.feedback_left(client, &run.id, "retry_step")? {
                 return Err(ToolError::new(format!(
                     "This client has retried this run {MAX_FEEDBACK_PER_RUN} times already, which is as many as it may. Bring it to the person, who decides in Keel."
@@ -1080,10 +1136,15 @@ impl McpServer {
             }
             // As the app's Retry button: the step starts over unless asked to go on.
             let resume = args.resume.unwrap_or(false);
+            let options = keel_engine::RetryOptions {
+                resume,
+                by: Some(&client.name),
+                current_commands,
+            };
             server
                 .0
                 .engine
-                .retry_by(&step.id, resume, &client.name)
+                .retry_with(&step.id, options)
                 .map_err(changed_meanwhile)?;
             Ok((server.run_view(client, &args.run)?, Some(args.run)))
         })
@@ -1106,6 +1167,57 @@ impl McpServer {
                 .abandon_by(&target.id, &client.name)
                 .map_err(changed_meanwhile)?;
             Ok((server.run_view(client, &args.run)?, Some(args.run)))
+        })
+        .await
+    }
+
+    /// A note at the end of a card of the client's own that waits, as the person could edit it.
+    /// It's feedback, so it needs the person's leave as send_back does.
+    pub(crate) async fn append_to_card(
+        &self,
+        client: McpClient,
+        args: AppendToCardArgs,
+    ) -> Result<Json, ToolError> {
+        self.call(client, "append_to_card", args, |server, client, args| {
+            may_steer(client)?;
+            let card = server.own_card(client, &args.card)?;
+            server.note_target(client, &card)?;
+            let text = args.text.trim();
+            if text.is_empty() || text.len() > MAX_TEXT {
+                return Err(ToolError::new("Say what to add in `text`, in up to 16 KB."));
+            }
+            let language = server.language(None)?;
+            server
+                .0
+                .engine
+                .card_append_by(&card.id, text, &client.id, &client.name, &language)
+                .map_err(card_changed_meanwhile)?;
+            Ok((server.card_view(client, &card.id)?, None))
+        })
+        .await
+    }
+
+    /// Puts a card of the client's own back in Todo, which starts a run as start_run does, so it
+    /// counts toward the client's open runs from now on.
+    pub(crate) async fn move_card_to_todo(
+        &self,
+        client: McpClient,
+        args: MoveCardToTodoArgs,
+    ) -> Result<Json, ToolError> {
+        self.call(client, "move_card_to_todo", args, |server, client, args| {
+            if !client.can_run {
+                return Err(may_only_read());
+            }
+            let card = server.own_card(client, &args.card)?;
+            server.queue_target(client, &card)?;
+            let language = server.language(args.language.as_deref())?;
+            server.room_for_another_run(client)?;
+            server
+                .0
+                .engine
+                .card_queue_by(&card.id, &language, &client.id)
+                .map_err(card_changed_meanwhile)?;
+            Ok((server.card_view(client, &card.id)?, None))
         })
         .await
     }
@@ -1273,7 +1385,7 @@ impl McpServer {
             .map_err(store_error)?;
         if open >= client.max_open_runs.clamp(1, MAX_OPEN_RUNS_CEILING) {
             return Err(ToolError::new(format!(
-                "This client has as many runs open as the person allows it ({open}). A run that waits for the person stays open until they decide in Keel, or until you close it with close_run if you won't take it further. list_runs with `mine` finds them. The person can also raise the limit in Keel's settings."
+                "This client has as many runs open as the person allows it ({open}). A run that waits for the person stays open until they decide in Keel, or until you close it with close_run if you won't take it further. A card you put back in Todo counts from when it can start, and then as its run, which close_run closes once it has started. list_runs with `mine` finds them. The person can also raise the limit in Keel's settings."
             )));
         }
         Ok(())
@@ -1306,6 +1418,158 @@ impl McpServer {
         }
         let run = store.run(run_id).map_err(store_error)?;
         Ok((run, attempts))
+    }
+
+    /// A card of a run or a change this client started, or why it may not act on it.
+    fn own_card(&self, client: &McpClient, card_id: &str) -> Result<Card, ToolError> {
+        let store = &self.0.store;
+        let card = store.card(card_id).map_err(|_| {
+            ToolError::new(
+                "Keel has no card with that id. get_run has a run's `cardId`, and `jointChange.parts` each part's.",
+            )
+        })?;
+        if !store
+            .card_of_mcp_client(card_id, &client.id)
+            .map_err(store_error)?
+        {
+            return Err(ToolError::new(
+                "Only the person acts on a card of a run or change this client didn't start, in Keel.",
+            ));
+        }
+        Ok(card)
+    }
+
+    /// The tools this client may use on a card right now, by the same rules the tools follow.
+    fn card_you_can(
+        &self,
+        client: &McpClient,
+        card: &Card,
+    ) -> Result<Vec<&'static str>, ToolError> {
+        let mut tools = Vec::new();
+        if !client.can_run
+            || !self
+                .0
+                .store
+                .card_of_mcp_client(&card.id, &client.id)
+                .map_err(store_error)?
+        {
+            return Ok(tools);
+        }
+        if may_steer(client).is_ok() && self.note_target(client, card).is_ok() {
+            tools.push("append_to_card");
+        }
+        if self.queue_target(client, card).is_ok() && self.room_for_another_run(client).is_ok() {
+            tools.push("move_card_to_todo");
+        }
+        Ok(tools)
+    }
+
+    /// Whether a client could add a note to a card of its own: one it put in Todo, a part waiting
+    /// there as its change opened it, or one in the Backlog whose last run it closed itself. Its
+    /// run gets the note when it starts. A card the person put in Todo, ended or held back is
+    /// theirs, and a note on it would ride along in their run. The store looks again as it writes.
+    fn note_target(&self, client: &McpClient, card: &Card) -> Result<(), ToolError> {
+        match card.column() {
+            BoardColumn::Todo
+                if card.queued_by_client.as_deref() == Some(client.id.as_str())
+                    || card.waits_as_opened() =>
+            {
+                Ok(())
+            }
+            BoardColumn::Todo => Err(ToolError::new(
+                "The person put this card in Todo, so what its run is asked is theirs, in Keel.",
+            )),
+            BoardColumn::Backlog => self.closed_by_client(client, card),
+            BoardColumn::Done => Err(ToolError::new(
+                "This card's run has finished, so a note would reach nothing.",
+            )),
+            BoardColumn::InProgress | BoardColumn::HumanReview => Err(ToolError::new(
+                "This card's run is underway, so what it was asked can't change now. A note goes on a card waiting in Todo, or in the Backlog once this client closed its run.",
+            )),
+        }
+    }
+
+    /// Whether a client could put a card back in Todo: only one in the Backlog whose last run it
+    /// closed itself, and that can start again as start_run or start_task would start it today.
+    /// The store looks again as the card moves.
+    fn queue_target(&self, client: &McpClient, card: &Card) -> Result<(), ToolError> {
+        match card.column() {
+            BoardColumn::Backlog => {
+                self.closed_by_client(client, card)?;
+                let run_id = card.run_id.as_deref().unwrap_or_default();
+                let language = self.language(None)?;
+                if !self
+                    .0
+                    .engine
+                    .can_run_again(run_id, &language)
+                    .map_err(engine_error)?
+                {
+                    let run = self.0.store.run(run_id).map_err(store_error)?;
+                    return Err(ToolError::new(match run.workflow_id {
+                        Some(_) => {
+                            "The workflow this card's last run used isn't in Keel anymore, so only the person can start it again, in Keel."
+                        }
+                        None => {
+                            "This card's last run was neither a saved workflow nor a task that only reads, so only the person can start it again, in Keel."
+                        }
+                    }));
+                }
+                Ok(())
+            }
+            BoardColumn::Todo => Err(ToolError::new(
+                "This card is already in Todo, waiting to start.",
+            )),
+            BoardColumn::Done => Err(ToolError::new("This card's run has finished.")),
+            BoardColumn::InProgress | BoardColumn::HumanReview => Err(ToolError::new(
+                "This card's run is still open. Close it with close_run first, after stop_run if something in it is working.",
+            )),
+        }
+    }
+
+    /// Whether a card waits in the Backlog because this client closed its last run itself, with
+    /// nothing the person did ending it or holding the card back.
+    fn closed_by_client(&self, client: &McpClient, card: &Card) -> Result<(), ToolError> {
+        if card.joint_change_id.as_deref() == Some(card.id.as_str()) {
+            return Err(ToolError::new(
+                "This card is where a change across projects is agreed. To agree on one again, use propose_change.",
+            ));
+        }
+        if card.rejection.is_some() {
+            return Err(ToolError::new(
+                "The person rejected this card's run. What happens to it is theirs to decide, in Keel.",
+            ));
+        }
+        let Some(run) = card.run_id.as_deref() else {
+            return Err(ToolError::new(
+                "This card has no run this client closed: the person is holding it in the Backlog, or it couldn't start. Either way it's the person's to decide, in Keel.",
+            ));
+        };
+        if !self
+            .0
+            .store
+            .run_closed_by_mcp_client(run, &client.id)
+            .map_err(store_error)?
+        {
+            return Err(ToolError::new(
+                "The person ended this card's last run, closing or stopping it, or tried it again after this client closed it, so whether it runs again is theirs to decide, in Keel.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// A card as the card tools return it. What it says ends with the latest note, so a long one
+    /// keeps its end.
+    fn card_view(&self, client: &McpClient, card_id: &str) -> Result<Json, ToolError> {
+        let card = self.0.store.card(card_id).map_err(store_error)?;
+        Ok(json!({
+            "cardId": card.id,
+            "projectId": card.project_id,
+            "title": card.title,
+            "body": capped_end(&card.body, MAX_TEXT),
+            "column": card.column(),
+            "runId": card.run_id,
+            "youCan": self.card_you_can(client, &card)?,
+        }))
     }
 
     /// Whether this client may still use a feedback tool on one of its runs.
@@ -1398,14 +1662,23 @@ impl McpServer {
                 .map_err(store_error)?;
         let steps = steps_of(run);
         let (state, waiting) = run_state(run, attempts);
+        let joint = self.joint_view(client, run)?;
         let waiting_for = match waiting {
             Some(attempt) => {
+                let mut you_can = self.you_can(client, mine, run, &steps, attempts)?;
+                // What it may do on the other cards of the change, like a part waiting its turn.
+                // Each part in jointChange says which.
+                for tool in joint.iter().flat_map(|(_, tools)| tools) {
+                    if !you_can.contains(tool) {
+                        you_can.push(tool);
+                    }
+                }
                 let mut view = json!({
                     "step": attempt.step_id,
                     "attemptId": attempt.id,
                     "state": attempt.state,
                     "reason": attempt.reason,
-                    "youCan": self.you_can(client, mine, run, &steps, attempts)?,
+                    "youCan": you_can,
                     "who": who_decides(&attempt.state),
                 });
                 if attempt.state == AttemptState::WaitingAnswers.as_str() {
@@ -1449,7 +1722,18 @@ impl McpServer {
         if left_out > 0 {
             view["earlierAttemptsLeftOut"] = json!(left_out);
         }
-        if let Some(joint) = self.joint_view(run)? {
+        // Only while it can still be retried with them. It's extra, and not finding out mustn't
+        // hide the run.
+        if run.finished_at.is_none()
+            && let Ok(changes) = self.0.engine.command_changes_of(run)
+            && !changes.is_empty()
+        {
+            view["commandsChanged"] = changes
+                .iter()
+                .map(|c| json!({ "step": c.step_id, "kind": c.kind, "before": c.before, "now": c.now }))
+                .collect();
+        }
+        if let Some((joint, _)) = joint {
             view["jointChange"] = joint;
         }
         Ok(view)
@@ -1457,9 +1741,15 @@ impl McpServer {
 
     /// What a run says about the change across projects it's in, if it's in one: whether it's where
     /// the change is agreed or one of its parts, which part it is and what it waits for, and every
-    /// part with its project, its order and the run it started, if it has. So a client that follows
-    /// the agreement finds each part's run, and one that follows a part sees where it stands.
-    fn joint_view(&self, run: &Run) -> Result<Option<Json>, ToolError> {
+    /// part with its project, its order, its card, the run it started, if it has, and what this
+    /// client may do on its card now. So a client that follows the agreement finds each part's run,
+    /// and one that follows a part sees where it stands. Also every tool this client may use on
+    /// any of those cards.
+    fn joint_view(
+        &self,
+        client: &McpClient,
+        run: &Run,
+    ) -> Result<Option<(Json, Vec<&'static str>)>, ToolError> {
         let engine = &self.0.engine;
         let Some(here) = engine.run_joint(&run.id).map_err(engine_error)? else {
             return Ok(None);
@@ -1471,28 +1761,38 @@ impl McpServer {
             .project(&run.project_id)
             .map_err(store_error)?
             .name;
-        let parts: Vec<Json> = change
-            .parts
-            .iter()
-            .map(|card| {
-                let part = card.part.as_ref();
-                let position = part.map(|part| part.position);
-                let waits_for = part
-                    .and_then(|part| part.waits_for.as_ref())
-                    .map(neighbour_view);
-                json!({
-                    "position": position,
-                    "project": card.project,
-                    "projectId": card.project_id,
-                    "column": card.column,
-                    "runId": card.run_id,
-                    "runState": card.run_state,
-                    "waitsFor": waits_for,
-                    "prUrl": card.pr_url,
-                    "prState": card.pr_state,
-                })
-            })
-            .collect();
+        let mut card_tools: Vec<&'static str> = Vec::new();
+        let mut parts: Vec<Json> = Vec::new();
+        for card in &change.parts {
+            let part = card.part.as_ref();
+            let position = part.map(|part| part.position);
+            let waits_for = part
+                .and_then(|part| part.waits_for.as_ref())
+                .map(neighbour_view);
+            // A part deleted a moment ago has nothing left to do on it.
+            let you_can = match self.0.store.card(&card.card_id) {
+                Ok(stored) => self.card_you_can(client, &stored)?,
+                Err(_) => Vec::new(),
+            };
+            for tool in &you_can {
+                if !card_tools.contains(tool) {
+                    card_tools.push(tool);
+                }
+            }
+            parts.push(json!({
+                "position": position,
+                "project": card.project,
+                "projectId": card.project_id,
+                "cardId": card.card_id,
+                "column": card.column,
+                "runId": card.run_id,
+                "runState": card.run_state,
+                "waitsFor": waits_for,
+                "prUrl": card.pr_url,
+                "prState": card.pr_state,
+                "youCan": you_can,
+            }));
+        }
         let role = if here.agrees { "agreement" } else { "part" };
         let mut view = json!({
             "changeId": here.change_id,
@@ -1511,7 +1811,7 @@ impl McpServer {
                 "warnings": part.warnings,
             });
         }
-        Ok(Some(view))
+        Ok(Some((view, card_tools)))
     }
 
     /// What the run did, in short, the way a subagent answers: what an orchestrator reads first.
@@ -1619,8 +1919,9 @@ fn who_decides(state: &str) -> &'static str {
     }
 }
 
-/// Whether the person lets this client give feedback at all: send back or retry. Both ask this
-/// first, in this order, so the refusal says what's missing. The run also has to be the client's own.
+/// Whether the person lets this client give feedback at all: send back, retry or add a note to a
+/// card. Each asks this first, in this order, so the refusal says what's missing. The run or card
+/// also has to be the client's own.
 fn may_steer(client: &McpClient) -> Result<(), ToolError> {
     if !client.can_run {
         return Err(may_only_read());
@@ -1685,6 +1986,43 @@ fn retry_target<'a>(run: &Run, attempts: &'a [Attempt]) -> Result<&'a Attempt, T
     }
 }
 
+/// Why retrying this step with the project's current commands would run nothing a plain retry
+/// doesn't. See `keel_engine::retry_runs_something_new`. `follows_project` says whether the step
+/// takes its command from the project, `workflow` is the saved workflow's name, and `changes` are
+/// the run's, which get_run lists.
+fn nothing_new_to_run(
+    step_id: &str,
+    kind: &str,
+    follows_project: bool,
+    workflow: Option<&str>,
+    changes: &[keel_engine::CommandChange],
+) -> String {
+    if !follows_project {
+        let workflow = workflow.unwrap_or("its workflow");
+        return format!(
+            "Step {step_id:?} is a {kind} of the saved workflow {workflow:?}, which keeps its command whatever the project's is, and the run has no new setup to run before it, so there's nothing new to run. Retry without `useCurrentCommands`. Changing that {kind} is the person's, in the workflow, for a new run."
+        );
+    }
+    if changes.is_empty() {
+        return "The commands this run takes from the project are the same as the project's now, so there's nothing new to run. Retry without `useCurrentCommands`, or ask the person to change the project's commands in Keel first.".to_owned();
+    }
+    // Only another step's command changed, which this one doesn't run: a setup's, when only the
+    // check did.
+    let name = |kind: keel_engine::CommandKind| match kind {
+        keel_engine::CommandKind::Setup => "setup",
+        keel_engine::CommandKind::Check => "check",
+    };
+    let other = name(changes[0].kind);
+    let steps: Vec<String> = changes
+        .iter()
+        .map(|change| format!("step {:?}", change.step_id))
+        .collect();
+    format!(
+        "Step {step_id:?} runs the same command as the project's {kind} now, so retrying it with `useCurrentCommands` runs nothing new. Only the project's {other} changed ({}), and this step doesn't run it. Retry without `useCurrentCommands`: when the {other} comes round, it runs what this run started with, and if it fails, retrying it with `useCurrentCommands` takes the project's.",
+        steps.join(", ")
+    )
+}
+
 /// The attempt a client could close the run on: the one the person would act on, or else the
 /// latest step that didn't go through. Never while something works, since closing doesn't stop it.
 /// The engine looks again as it closes, in case the run moved meanwhile.
@@ -1702,7 +2040,7 @@ fn close_target<'a>(run: &Run, attempts: &'a [Attempt]) -> Result<&'a Attempt, T
                 .rev()
                 .find(|a| !matches!(a.state.as_str(), "succeeded" | "skipped"))
         })
-        // On its way to the next round, or to what was skipped.
+        // On its way to the next round, to what was skipped, or to a new setup.
         .filter(|a| !matches!(a.state.as_str(), "returned" | "postponed"))
         .ok_or_else(|| {
             ToolError::new(
@@ -1791,8 +2129,10 @@ fn unchecked_by_reviews(attempts: &[Attempt], round: i64) -> usize {
 }
 
 /// Each reviewer's verdict and each approver's decision, from the latest of each. As in the
-/// builder's rework prompt, an approver's instructions only count when it sent the work back.
+/// builder's rework prompt, an approver's instructions only count when it sent the work back. As
+/// for the engine, a finding breaks only what the specification has.
 fn reviews(attempts: &[Attempt]) -> Vec<Json> {
+    let breakable = breakable_ids(attempts);
     latest_of_each_step(attempts)
         .into_iter()
         .filter(|a| a.kind == "agent" && a.state == AttemptState::Succeeded.as_str())
@@ -1806,14 +2146,24 @@ fn reviews(attempts: &[Attempt]) -> Vec<Json> {
             };
             match a.role.as_str() {
                 "reviewer" => {
-                    let findings: Vec<String> = output
-                        .get("findings")
-                        .and_then(Json::as_array)
+                    // Text, as reviews wrote them before, or where, what and what it breaks.
+                    let findings: Vec<Finding> = findings_of(output, &breakable)
                         .into_iter()
-                        .flatten()
-                        .filter_map(Json::as_str)
                         .take(MAX_FINDINGS)
-                        .map(|finding| capped(finding, MAX_FINDING))
+                        .map(|finding| match finding {
+                            Finding::Text(text) => Finding::Text(capped(&text, MAX_FINDING)),
+                            Finding::Found {
+                                file,
+                                line,
+                                text,
+                                breaks,
+                            } => Finding::Found {
+                                file: file.map(|file| capped(&file, MAX_FINDING)),
+                                line,
+                                text: capped(&text, MAX_FINDING),
+                                breaks: breaks.map(|id| capped(&id, MAX_FINDING)),
+                            },
+                        })
                         .collect();
                     Some(json!({
                         "step": a.step_id,
@@ -1937,9 +2287,8 @@ fn step_overview(attempt: &Attempt, long: &LongParts) -> Json {
     view["brainReceived"] = attempt.system_prompt_sources.clone();
     let mut left_out = serde_json::Map::new();
     // Its structured answer as Keel read it, which Keel may have corrected, or else what it wrote.
-    match &attempt.output {
+    match answer_of(attempt) {
         Some(output) => {
-            let output = mask_value(output.clone());
             if output.to_string().len() <= MAX_ANSWER {
                 view["output"] = output;
             } else {
@@ -2004,13 +2353,23 @@ fn step_overview(attempt: &Attempt, long: &LongParts) -> Json {
     view
 }
 
+/// An attempt's structured answer, masked. A specification's limits come with the id a finding
+/// names them by, as agents get them.
+fn answer_of(attempt: &Attempt) -> Option<Json> {
+    let output = attempt.output.clone()?;
+    let output = if attempt.role == "specifier" {
+        limits_with_ids(output)
+    } else {
+        output
+    };
+    Some(mask_value(output))
+}
+
 /// What an attempt answered, as text: its structured answer as Keel read it, laid out, or else
 /// what it wrote. Masked.
 fn answer_text(attempt: &Attempt) -> String {
-    match &attempt.output {
-        Some(output) => {
-            serde_json::to_string_pretty(&mask_value(output.clone())).unwrap_or_default()
-        }
+    match answer_of(attempt) {
+        Some(output) => serde_json::to_string_pretty(&output).unwrap_or_default(),
         None => attempt
             .result_text
             .as_deref()
@@ -2445,6 +2804,8 @@ impl DraftAgent {
             when: self.when.map(|when| match when {
                 DraftCondition::NotSmall => StepCondition::NotSmall,
             }),
+            risks: Vec::new(),
+            model_when_risky: None,
             role: match self.role {
                 Some(DraftRole::Worker) | None => StepRole::Worker,
                 Some(DraftRole::Reviewer) => StepRole::Reviewer,
@@ -2544,6 +2905,16 @@ fn changed_meanwhile(error: Error) -> ToolError {
     match error {
         Error::InvalidState => ToolError::new(
             "The run changed in the meantime, so Keel did nothing. Look at it again with get_run.",
+        ),
+        other => engine_error(other),
+    }
+}
+
+/// The person, or the board, can move a card between a client looking and the engine acting on it.
+fn card_changed_meanwhile(error: Error) -> ToolError {
+    match error {
+        Error::InvalidState => ToolError::new(
+            "The card changed in the meantime, so Keel did nothing. Look at it again with get_run.",
         ),
         other => engine_error(other),
     }
@@ -2690,6 +3061,50 @@ mod tests {
         assert!(cut.starts_with("the token is\n"), "{cut}");
     }
 
+    #[test]
+    fn a_retry_with_nothing_new_to_run_says_what_changed_and_what_did_not() {
+        use keel_engine::{CommandChange, CommandKind};
+        let change = |step: &str, kind, before: &str, now: &str| CommandChange {
+            step_id: step.into(),
+            kind,
+            before: before.into(),
+            now: now.into(),
+        };
+        let check = change("check", CommandKind::Check, "make test", "make check");
+
+        // The setup failed before the builder, and the person then changed only the project's
+        // check, which get_run lists.
+        let text = nothing_new_to_run("setup", "setup", true, None, std::slice::from_ref(&check));
+        assert!(
+            text.contains("Step \"setup\" runs the same command as the project's setup now"),
+            "{text}"
+        );
+        assert!(text.contains("Only the project's check changed"), "{text}");
+        assert!(text.contains("when the check comes round"), "{text}");
+        assert!(
+            !text.contains("are the same as the project's now"),
+            "{text}"
+        );
+
+        // Nothing changed at all.
+        let text = nothing_new_to_run("check", "check", true, None, &[]);
+        assert!(
+            text.contains(
+                "The commands this run takes from the project are the same as the project's now"
+            ),
+            "{text}"
+        );
+
+        // A saved workflow's own check, whatever changed in the project.
+        for changes in [vec![], vec![check]] {
+            let text = nothing_new_to_run("check", "check", false, Some("Mine"), &changes);
+            assert!(
+                text.contains("Step \"check\" is a check of the saved workflow \"Mine\""),
+                "{text}"
+            );
+        }
+    }
+
     /// An agent's attempt that answered with a verdict, also as its text.
     fn attempt(step: &str, number: i64) -> Attempt {
         let verdict = json!({ "verdict": "approved", "findings": [] });
@@ -2779,6 +3194,103 @@ mod tests {
 
         let (views, left_out) = steps_view(&attempts[..8]);
         assert_eq!((views.len(), left_out), (8, 0));
+    }
+
+    /// A specifier's answer with these criteria and limits.
+    fn specified(criteria: &[&str], limits: &[&str]) -> Attempt {
+        let mut spec = attempt("spec", 1);
+        spec.role = "specifier".into();
+        let criteria: Vec<Json> = criteria
+            .iter()
+            .map(|id| json!({ "id": id, "when": "w", "then": "t" }))
+            .collect();
+        spec.output = Some(json!({ "summary": "s", "criteria": criteria, "limits": limits }));
+        spec
+    }
+
+    #[test]
+    fn the_report_says_a_finding_breaks_only_what_the_specification_has() {
+        let mut review = attempt("code", 1);
+        review.output = Some(json!({ "verdict": "approved", "findings": [
+            { "file": "a.py", "line": 1, "text": "Names what isn't there", "breaks": "C9" },
+            { "file": "a.py", "line": 2, "text": "Past the last limit", "breaks": "L2" },
+            { "file": "a.py", "line": 3, "text": "Subtracts", "breaks": "C2" },
+            { "file": "a.py", "line": 4, "text": "Changes the signature", "breaks": "L1" },
+        ]}));
+        let breaks = |attempts: &[Attempt]| {
+            let report = reviews(attempts);
+            let findings = report[0]["findings"].as_array().unwrap().clone();
+            findings
+                .into_iter()
+                .map(|finding| finding["breaks"].clone())
+                .collect::<Vec<_>>()
+        };
+        let spec = specified(&["C1", "C2"], &["Its signature stays"]);
+        assert_eq!(
+            breaks(&[spec, review.clone()]),
+            [Json::Null, Json::Null, json!("C2"), json!("L1")]
+        );
+        // Without a specification, nothing can be broken.
+        assert_eq!(breaks(&[review]), vec![Json::Null; 4]);
+    }
+
+    #[test]
+    fn the_report_shows_findings_written_as_text_before_and_with_what_they_break_now() {
+        let long = "x".repeat(MAX_FINDING + 10);
+        let mut old = attempt("security", 1);
+        old.output = Some(json!({ "verdict": "changes", "findings": ["Line 3 divides by zero"] }));
+        let mut new = attempt("code", 1);
+        new.output = Some(json!({ "verdict": "changes", "findings": [
+            { "file": "src/jobs.py", "line": 42, "text": "Sends the notice twice", "breaks": "C5" },
+            { "file": null, "line": null, "text": long, "breaks": null },
+        ]}));
+        let report = reviews(&[specified(&["C5"], &[]), old.clone(), new.clone()]);
+        assert_eq!(report[0]["findings"], json!(["Line 3 divides by zero"]));
+        let findings = &report[1]["findings"];
+        assert_eq!(
+            findings[0],
+            json!({ "file": "src/jobs.py", "line": 42, "text": "Sends the notice twice", "breaks": "C5" })
+        );
+        assert_eq!(findings[1]["breaks"], Json::Null);
+        assert_eq!(findings[1]["text"], json!(capped(&long, MAX_FINDING)));
+        // get_step has each as it was kept.
+        let parts = LongParts {
+            prompt: String::new(),
+            diff: None,
+            printed: None,
+        };
+        assert_eq!(
+            step_overview(&old, &parts)["output"]["findings"],
+            json!(["Line 3 divides by zero"])
+        );
+        assert_eq!(
+            step_overview(&new, &parts)["output"]["findings"][0]["breaks"],
+            "C5"
+        );
+    }
+
+    #[test]
+    fn get_step_shows_the_specifications_limits_by_the_id_a_finding_names_them_by() {
+        let mut spec = attempt("spec", 1);
+        spec.role = "specifier".into();
+        spec.output =
+            Some(json!({ "summary": "s", "criteria": [], "limits": ["Stays", "Also stays"] }));
+        let parts = LongParts {
+            prompt: String::new(),
+            diff: None,
+            printed: None,
+        };
+        let limits = json!([{ "id": "L1", "text": "Stays" }, { "id": "L2", "text": "Also stays" }]);
+        assert_eq!(step_overview(&spec, &parts)["output"]["limits"], limits);
+        let whole: Json = serde_json::from_str(&answer_text(&spec)).unwrap();
+        assert_eq!(whole["limits"], limits);
+        // Anything else's answer is as it was kept.
+        let mut other = attempt("spec", 1);
+        other.output = spec.output.clone();
+        assert_eq!(
+            step_overview(&other, &parts)["output"]["limits"],
+            json!(["Stays", "Also stays"])
+        );
     }
 
     #[test]

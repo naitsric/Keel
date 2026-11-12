@@ -27,7 +27,29 @@ const agreed: JointChange = {
   ],
   readOnly: [{ id: "p3", name: "dupplaBack" }],
   checks: [{ seq: 1, text: "Log in on Valora and land in back-adm", confirmedAt: null }],
+  contract: [],
 };
+
+const contract: JointChange["contract"] = [
+  {
+    id: "K1",
+    when: "someone logs in on valora",
+    then: "valora posts /session with token",
+    parts: [{ cardId: "one", position: 1, project: "valora", result: "met", verifies: true }],
+  },
+  {
+    id: "K2",
+    when: "app gets /session with token",
+    then: "it answers 201",
+    parts: [{ cardId: "two", position: 2, project: "app", result: null, verifies: true }],
+  },
+  {
+    id: "K3",
+    when: "the token is wrong",
+    then: "app answers 401",
+    parts: [{ cardId: "two", position: 2, project: "app", result: "unmet", verifies: true }],
+  },
+];
 
 describe("a change across several projects, in one place", () => {
   let root: Root;
@@ -94,6 +116,39 @@ describe("a change across several projects, in one place", () => {
     expect(useApp.getState().view).toEqual({ name: "run", runId: "r1", backTo: { name: "board", projectId: "p1" } });
   });
 
+  it("shows, for each point the parts agree on, what each part that keeps it found", async () => {
+    shown = { ...agreed, agreed: { ...agreed.agreed!, contract: [{ id: "K3", when: "the token is wrong", then: "app answers 401", projects: ["app"] }] }, contract };
+    await render();
+    const points = [...document.querySelectorAll("[data-contract]")].map((point) => point.textContent ?? "");
+    expect(points).toHaveLength(3);
+    expect(points[0]).toContain("K1");
+    expect(points[0]).toContain("someone logs in on valora → valora posts /session with token");
+    expect(points[0]).toContain("Part 1, valora: Met");
+    expect(points[1]).toContain("Part 2, app: Not checked yet");
+    expect(points[2]).toContain("Part 2, app: Not met");
+    expect(page()).toContain("What the parts agree on exactly");
+    // Once is enough: not again in what was agreed.
+    expect(page().match(/app answers 401/g)).toHaveLength(1);
+  });
+
+  it("says when a part's workflow doesn't verify, rather than that it hasn't yet", async () => {
+    const unverifiable = contract.map((point) => ({ ...point, parts: point.parts.map((part) => (part.project === "app" ? { ...part, result: null, verifies: false } : part)) }));
+    shown = { ...agreed, contract: unverifiable };
+    await render();
+    const points = [...document.querySelectorAll("[data-contract]")].map((point) => point.textContent ?? "");
+    expect(points[1]).toContain("Part 2, app: This workflow doesn't verify");
+    expect(page()).not.toContain("Not checked yet");
+    await i18next.changeLanguage("es");
+    await render();
+    expect(page()).toContain("Parte 2, app: Este flujo no verifica");
+  });
+
+  it("says nothing about it for an agreement without any", async () => {
+    await render();
+    expect(document.querySelector("[data-contract]")).toBeNull();
+    expect(page()).not.toContain("What the parts agree on exactly");
+  });
+
   it("before it's agreed, says where that happens and which projects it touches", async () => {
     shown = { ...agreed, agreedIn: card({ cardId: "plan", column: "inProgress", runId: "r0", runState: "running" }), agreed: null, parts: [], readOnly: [], checks: [] };
     await render();
@@ -104,10 +159,14 @@ describe("a change across several projects, in one place", () => {
 
   it("is all in Spanish too", async () => {
     await i18next.changeLanguage("es");
+    shown = { ...agreed, contract };
     await render();
     expect(page()).toContain("Cambio en varios proyectos");
     expect(page()).toContain("Parte 2 de 2");
     expect(page()).toContain("Para probar juntos");
+    expect(page()).toContain("Lo que las partes acuerdan entre sí");
+    expect(page()).toContain("Parte 1, valora: Se cumple");
+    expect(page()).toContain("Parte 2, app: Sin revisar aún");
     expect(button("No esperar")).toBeDefined();
   });
 });

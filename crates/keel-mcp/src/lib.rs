@@ -7,8 +7,9 @@
 //! - **Token.** Only a hash is stored, and it's looked up on every request, so revoking a client or
 //!   changing what it may do takes effect at once.
 //! - **Tools.** Reading and, for a client the person allowed, starting, stopping and closing its own
-//!   runs and proposing workflows and projects. A client the person also lets give feedback can send
-//!   its own runs back from an approval and retry a step that failed, a few times per run at most.
+//!   runs, putting their cards back in Todo, and proposing workflows and projects. A client the
+//!   person also lets give feedback can send its own runs back from an approval and retry a step
+//!   that failed, a few times per run at most, and add a note to a card of its own that waits.
 //!   There is no tool to approve, reject, answer a step's questions, merge, change settings, save a
 //!   workflow, add a project or let anything into the Brain, because a person does those.
 //! - **Audit.** Every call leaves a row nobody can rewrite, shown in the app's settings.
@@ -62,6 +63,10 @@ workflows, add a project, or accept anything into the Brain: there is no tool fo
 around it.\n\
 - Close a run you started and won't take further, like one that failed and you won't retry, with close_run. It \
 delivers nothing, and frees its place among the runs you may have open.\n\
+- A card of yours waiting in Todo, like a part waiting for its turn, takes a note at its end with \
+append_to_card. move_card_to_todo runs again a card whose run you closed yourself, as start_run would start it \
+today. What the person put in Todo, rejected, closed, stopped, tried again or held back stays theirs. Each part \
+in `jointChange` says which of these apply to its card.\n\
 - draft_workflow and propose_project only leave a proposal for the person. A draft can't run until they save it, \
 and a folder isn't a project until they add it, with the account and commands they choose. Tell them it's there \
 rather than waiting for it.\n\

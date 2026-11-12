@@ -797,6 +797,24 @@ describe("the run page's flow", () => {
       expect(page()).toContain("Claude Code tried it again");
     });
 
+    it("says which assistant asked a step to stop", async () => {
+      const stopped = attempt("builder", "stopped");
+      attempts = [attempt("spec", "succeeded"), stopped];
+      events = { [stopped.id]: [event(stopped.id, "stopRequested", { by: "Claude Code" })] };
+      await open();
+      expect(page()).toContain("Claude Code asked it to stop");
+      expect(page()).not.toContain("You asked it to stop");
+    });
+
+    it("keeps a stop the person asked for as theirs", async () => {
+      const stopped = attempt("builder", "stopped");
+      attempts = [attempt("spec", "succeeded"), stopped];
+      events = { [stopped.id]: [event(stopped.id, "stopRequested", {})] };
+      await open();
+      expect(page()).toContain("You asked it to stop");
+      expect(page()).not.toContain("Claude Code asked it to stop");
+    });
+
     it("looks just as before when it was the person", async () => {
       const failed = attempt("builder", "failed");
       const closed = left();

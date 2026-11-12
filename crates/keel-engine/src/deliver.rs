@@ -397,6 +397,12 @@ impl Inner {
                     "omitida: Keel lo trató como un cambio pequeño",
                 )
                 .to_owned()
+            } else if crate::sizing::skipped_for_risks(attempt) {
+                label(
+                    "skipped: what was asked names none of the risks it looks at",
+                    "omitida: lo pedido no nombra ninguno de los riesgos que revisa",
+                )
+                .to_owned()
             } else if attempt.state == AttemptState::Skipped.as_str() {
                 label(
                     "skipped: nothing it covers changed",

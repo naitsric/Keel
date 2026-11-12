@@ -221,21 +221,40 @@ pub struct Facts<'a> {
     pub part_of_joint_change: bool,
 }
 
-pub fn skipped_as_small(attempt: &Attempt) -> bool {
+fn skipped_for(attempt: &Attempt, code: &str) -> bool {
     attempt.state == AttemptState::Skipped.as_str()
-        && attempt.reason.as_ref().and_then(|r| r.get("code")) == Some(&json!("treatedAsSmall"))
+        && attempt.reason.as_ref().and_then(|r| r.get("code")) == Some(&json!(code))
 }
 
-/// Whether a person asked for what was skipped to run, at any point in this run.
+pub fn skipped_as_small(attempt: &Attempt) -> bool {
+    skipped_for(attempt, "treatedAsSmall")
+}
+
+/// Left out because what was asked names none of the risks it looks at. That's settled before the
+/// size, so it says nothing about it either way.
+pub fn skipped_for_risks(attempt: &Attempt) -> bool {
+    skipped_for(attempt, "noMatchingRisks")
+}
+
+/// Whether this stands for a step that a retry with the project's current commands put off for a
+/// new setup to run first. It never ran, and the step comes round again once the setup is through.
+/// The only other thing put off is an approval, by a person who asked for what was skipped.
+pub fn put_off_for_setup(attempt: &Attempt) -> bool {
+    attempt.state == AttemptState::Postponed.as_str() && attempt.kind != "approval"
+}
+
+/// Whether a person asked for what was skipped to run, at any point in this run. That puts off
+/// their approval.
 pub fn person_asked(attempts: &[Attempt]) -> bool {
-    attempts
-        .iter()
-        .any(|attempt| attempt.state == AttemptState::Postponed.as_str())
+    attempts.iter().any(|attempt| {
+        attempt.state == AttemptState::Postponed.as_str() && !put_off_for_setup(attempt)
+    })
 }
 
-/// An approval a person put off comes round again, and what they asked for runs before it. Asking
-/// keeps the run from counting as small, so nothing gets skipped this way after that, and the attempts
-/// alone say what's due: a restart loses nothing.
+/// What was put off comes round again: an approval a person put off, with what they asked for
+/// before it, and a step put off for a new setup, once that's through. Asking keeps the run from
+/// counting as small, so nothing gets skipped this way after that, and the attempts alone say
+/// what's due: a restart loses nothing.
 pub fn due_again(attempt: &Attempt, attempts: &[Attempt]) -> bool {
     attempt.state == AttemptState::Postponed.as_str()
         || (skipped_as_small(attempt) && person_asked(attempts))
@@ -275,12 +294,13 @@ fn conditional_step_ids(steps: &[WorkflowStep]) -> HashSet<&str> {
 /// Whether a step that only runs for a change that isn't small has been past the point of being
 /// skipped for it. That's what keeps a run from going back down in a later round, across a person's
 /// send-back or a restart. A step passed over because its paths didn't match counts: those are only
-/// looked at once the change has been found not to be small.
+/// looked at once the change has been found not to be small. One its risks left out doesn't: that
+/// comes first, small or not.
 pub fn already_up(steps: &[WorkflowStep], attempts: &[Attempt]) -> bool {
     let conditional = conditional_step_ids(steps);
-    attempts
-        .iter()
-        .any(|a| conditional.contains(a.step_id.as_str()) && !skipped_as_small(a))
+    attempts.iter().any(|a| {
+        conditional.contains(a.step_id.as_str()) && !skipped_as_small(a) && !skipped_for_risks(a)
+    })
 }
 
 pub(crate) fn why_from_spec(attempts: &[Attempt]) -> Vec<WhyNotSmall> {
@@ -775,6 +795,8 @@ mod tests {
             paths: vec![],
             role: StepRole::Reviewer,
             when: Some(keel_core::StepCondition::NotSmall),
+            risks: vec![],
+            model_when_risky: None,
         }
     }
 

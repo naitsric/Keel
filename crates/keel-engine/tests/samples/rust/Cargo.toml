@@ -1,0 +1,10 @@
+[package]
+name = "keel-sample"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+itoa = "=1.0.15"
+
+# Its own workspace, so cargo doesn't look for one in the folders above.
+[workspace]

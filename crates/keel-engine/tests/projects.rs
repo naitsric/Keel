@@ -365,6 +365,104 @@ fn trying_a_check_runs_setup_first_in_the_sandbox_and_spends_nothing() {
     );
 }
 
+/// #120: the folders in the home folder where a project's programs are, for a person to let them be
+/// read. What the commands start, and what the repo's own files say it uses, since `make test`
+/// hides what it runs. Nothing runs from the repo and nothing is saved.
+#[test]
+fn keel_finds_where_in_the_home_folder_the_programs_a_project_uses_are() {
+    let w = world(true);
+    // Where a version manager would put them: in the home folder, as this build folder is.
+    let place = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let bin = place.path().canonicalize().unwrap().join("bin");
+    let home = PathBuf::from(std::env::var("HOME").unwrap());
+    let Ok(inside) = bin.strip_prefix(&home) else {
+        keel_harness::testing::skipped("this build folder isn't in the home folder");
+        return;
+    };
+    std::fs::create_dir_all(&bin).unwrap();
+    for name in ["pnpm", "node"] {
+        keel_harness::testing::write_script(&bin.join(name), "#!/bin/sh\nexit 0\n").unwrap();
+    }
+    w.engine.set_tools(Tools::from_dirs(&[
+        bin.clone(),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ]));
+    std::fs::write(w.repo.join("Makefile"), "test:\n\tpnpm test\n").unwrap();
+    std::fs::write(
+        w.repo.join("package.json"),
+        r#"{"scripts":{"test":"node --test"}}"#,
+    )
+    .unwrap();
+    std::fs::write(w.repo.join("pnpm-lock.yaml"), "lockfileVersion: '9.0'\n").unwrap();
+    git(&w.repo, &["add", "-A"]);
+    git(&w.repo, &["commit", "-qm", "commands"]);
+    let id = w.add();
+
+    let wanted = [keel_harness::toolchains::Found {
+        folder: format!("~/{}", inside.display()),
+        programs: vec!["pnpm".into(), "node".into()],
+    }];
+    assert_eq!(w.engine.tool_folders(&id, "", "make test").unwrap(), wanted);
+    assert_eq!(
+        w.engine
+            .tool_folders(&id, "pnpm install", "pnpm test")
+            .unwrap(),
+        wanted
+    );
+    assert!(w.store.project(&id).unwrap().allowed_read.is_empty());
+}
+
+/// Trying commands with the folders the person is about to let them read, before saving any.
+#[test]
+fn a_trial_reads_the_folders_being_tried_and_saves_none_of_them() {
+    keel_harness::needs!(sandbox);
+    let w = world(true);
+    let id = w.add();
+    let home = std::env::var("HOME").unwrap();
+    let rule = format!("(subpath \"{home}/.keel-trial-only\")");
+    let profile = |attempt: &Attempt| {
+        w.store
+            .events(&attempt.id, 0)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == "started")
+            .unwrap()
+            .data["profile"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let run = w
+        .engine
+        .try_check_reading(
+            &id,
+            "true",
+            "true",
+            &["~/.keel-trial-only".to_owned()],
+            "en",
+        )
+        .unwrap();
+    w.wait_finished(&run);
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    assert_eq!(attempts.len(), 2);
+    for attempt in &attempts {
+        assert_eq!(attempt.state, "succeeded", "{}", attempt.kind);
+        assert!(profile(attempt).contains(&rule), "{}", attempt.kind);
+        assert_eq!(
+            attempt.settings["read"],
+            serde_json::json!(["~/.keel-trial-only"])
+        );
+    }
+    assert!(w.store.project(&id).unwrap().allowed_read.is_empty());
+
+    let other = w.engine.try_check(&id, "true", "true", "en").unwrap();
+    w.wait_finished(&other);
+    for attempt in w.store.attempts_of_run(&other).unwrap() {
+        assert!(!profile(&attempt).contains(&rule), "{}", attempt.kind);
+    }
+}
+
 #[test]
 fn trying_saves_nothing() {
     keel_harness::needs!(sandbox);
