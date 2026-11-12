@@ -62,7 +62,11 @@ most about 4 KB, so when it's full, adding something means retiring something.
 - Services a project needs, like a test database, run outside the sandbox while a step uses
   them, and commands reach them only through a Unix socket.
 - A setup command installs dependencies once per run, before any agent. It's the one step with
-  internet access, and it still can't reach your home folder or anything else on your Mac.
+  internet access and the only one that fills the project's cache shared by its runs, and it
+  still can't reach your home folder or anything else on your Mac. A setup that runs after an
+  agent that can edit files or run commands, like a retry with the project's new setup, gets no
+  more than a check: no network, and the run's own copy of the project's home instead of the
+  project's. An agent that only reads, such as a spec, doesn't count.
 - Setup, the check and the agents' commands run in a home folder of the project's own. Setup fills
   it with whatever its tools download, and each run works in a copy of it, so no step can change
   what the next run gets. Toolchains such as rustup's stay in your home folder, where they can only

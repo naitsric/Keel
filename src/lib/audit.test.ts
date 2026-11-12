@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { Attempt, AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
+import { accountsOf, activityFrom, agentCouldHaveWritten, answersIn, approvalOutcome, askedText, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, focusAttempt, gist, latestOfEachStep, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -23,6 +23,27 @@ describe("what an attempt's state reads as", () => {
     // The fix that didn't fit either stops the step for a person.
     expect(shownState(first({ state: "blocked" }), [first(), fix])).toBe("blocked");
     expect(shownState(fix, [first(), fix])).toBe("succeeded");
+  });
+
+  it("says a step put off for a new setup runs again after it, and leaves a put-off approval as the person's asking", () => {
+    const putOff = (kind: Attempt["kind"]) => ({ id: "c1", kind, state: "postponed", reason: null, resumedFrom: null }) as Attempt;
+    expect(shownState(putOff("check"), [putOff("check")])).toBe("afterSetup");
+    expect(shownState(putOff("approval"), [putOff("approval")])).toBe("postponed");
+    // The attempt that ran before it keeps how it ended.
+    const failed = { id: "c0", kind: "check", state: "failed", reason: { code: "checkFailed", exitCode: 1 }, resumedFrom: null } as unknown as Attempt;
+    expect(shownState(failed, [failed, putOff("check")])).toBe("failed");
+  });
+
+  it("knows when an agent that can change files has had the run's copy, which one that only reads or was skipped never did", () => {
+    const of = (kind: Attempt["kind"], state: Attempt["state"], tools = "build") => ({ kind, state, tools }) as Attempt;
+    expect(agentCouldHaveWritten([])).toBe(false);
+    expect(agentCouldHaveWritten([of("setup", "succeeded", "setup"), of("check", "failed", "check"), of("agent", "skipped")])).toBe(false);
+    for (const state of ["succeeded", "failed", "stopped", "queued"] as const) {
+      expect(agentCouldHaveWritten([of("agent", state, "readOnly")])).toBe(false);
+      expect(agentCouldHaveWritten([of("agent", "succeeded", "readOnly"), of("setup", "succeeded", "setup"), of("agent", state)])).toBe(true);
+    }
+    // Tools Keel doesn't know may write.
+    expect(agentCouldHaveWritten([of("agent", "succeeded", "someday")])).toBe(true);
   });
 });
 
