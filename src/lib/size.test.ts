@@ -3,7 +3,7 @@ import i18next from "../i18n";
 import en from "../i18n/en.json";
 import es from "../i18n/es.json";
 import type { AuditEvent, Reason } from "./api";
-import { latestSizeDecision, skippedAsSmall, skippedSteps, whyNotSmallText } from "./size";
+import { latestSizeDecision, skippedAsSmall, skippedForRisks, skippedSteps, whyNotSmallText } from "./size";
 
 const small = { code: "treatedAsSmall", lines: 3, files: 1 };
 const step = (stepId: string, state: string, reason: { code: string } | null = null, kind = "agent") => ({ stepId, state, reason, kind });
@@ -15,6 +15,15 @@ describe("what was skipped for being small", () => {
     expect(skippedAsSmall(step("a", "skipped", { code: "noMatchingPaths" }))).toBe(false);
     expect(skippedAsSmall(step("a", "succeeded", small))).toBe(false);
     expect(skippedAsSmall(step("a", "skipped"))).toBe(false);
+  });
+
+  it("isn't what was left out for the risks of what was asked, which has a check of its own", () => {
+    const risks = { code: "noMatchingRisks", risks: ["concurrency"] };
+    expect(skippedAsSmall(step("a", "skipped", risks))).toBe(false);
+    expect(skippedForRisks(step("a", "skipped", risks))).toBe(true);
+    expect(skippedForRisks(step("a", "skipped", small))).toBe(false);
+    expect(skippedForRisks(step("a", "succeeded", risks))).toBe(false);
+    expect(skippedSteps([step("a", "skipped", small), step("state", "skipped", risks)]).map((s) => s.stepId)).toEqual(["a"]);
   });
 
   it("goes by each step's latest attempt, so what a person asked for no longer counts", () => {

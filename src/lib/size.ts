@@ -11,9 +11,18 @@ export interface SizeDecision {
 }
 
 /** The engine's closed list. Anything else an agent wrote still counts as a risk, and is called one. */
-const KNOWN_RISKS = ["security", "money", "personalData", "irreversibleData", "sharedContracts", "concurrency", "environment", "noRegressionTest"];
+export const KNOWN_RISKS = ["security", "money", "personalData", "irreversibleData", "sharedContracts", "concurrency", "environment", "noRegressionTest"];
 
-export const skippedAsSmall = (attempt: { state: string; reason?: { code: string } | null }) => attempt.state === "skipped" && attempt.reason?.code === "treatedAsSmall";
+/** A risk in the words of someone who asked for the change. */
+export const riskText = (t: TFunction, risk: string) => t(KNOWN_RISKS.includes(risk) ? `fits.risks.${risk}` : "fits.risks.other");
+
+type Skippable = { state: string; reason?: { code: string } | null };
+const skippedFor = (code: string) => (attempt: Skippable) => attempt.state === "skipped" && attempt.reason?.code === code;
+
+export const skippedAsSmall = skippedFor("treatedAsSmall");
+
+/** Left out because what was asked names none of the risks it looks at. That's settled before the size, so it says nothing about it. */
+export const skippedForRisks = skippedFor("noMatchingRisks");
 
 /**
  * Whether a person asked for what was skipped to run, as `sizing::person_asked` says: that puts off
@@ -42,7 +51,7 @@ export function whyNotSmallText(t: TFunction, why: Reason): string {
   const data = why as Record<string, any>;
   switch (why.code) {
     case "specNamesRisks": {
-      const named = (data.risks ?? []).map((risk: string) => t(KNOWN_RISKS.includes(risk) ? `fits.risks.${risk}` : "fits.risks.other"));
+      const named = (data.risks ?? []).map((risk: string) => riskText(t, risk));
       return t("fits.why.specNamesRisks", { risks: [...new Set(named)].join(", ") });
     }
     case "sensitiveFiles":

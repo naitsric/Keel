@@ -169,6 +169,8 @@ async fn world() -> World {
                         max_budget_usd: None,
                         paths: vec![],
                         when: None,
+                        risks: vec![],
+                        model_when_risky: None,
                         role: Default::default(),
                     }),
                     WorkflowStep::Approval { id: "human".into() },
@@ -326,6 +328,8 @@ fn agent(id: &str, tools: ToolProfile, role: StepRole) -> StepSpec {
         max_budget_usd: None,
         paths: vec![],
         when: None,
+        risks: vec![],
+        model_when_risky: None,
         role,
     }
 }
@@ -1150,6 +1154,8 @@ async fn a_step_asking_the_person_something_reads_as_waiting_for_them() {
                     max_budget_usd: None,
                     paths: vec![],
                     when: None,
+                    risks: vec![],
+                    model_when_risky: None,
                     role: StepRole::Specifier,
                 })],
             },

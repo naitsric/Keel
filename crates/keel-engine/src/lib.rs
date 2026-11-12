@@ -356,6 +356,9 @@ pub(crate) struct Resume {
 struct SizeThisPass {
     decision: Option<sizing::Decision>,
     said: bool,
+    /// The change, once read: `Some(None)` if it couldn't be. The size and a step's model both go by
+    /// it, and it's the same change for both.
+    change: Option<Option<git::ChangeSize>>,
 }
 
 #[derive(Default)]
@@ -1073,6 +1076,7 @@ impl Engine {
                             from: attempt.id.clone(),
                             prompt: Some(specs::answered_prompt(&given, &attempt.language)),
                         }),
+                        None,
                     )
                 });
             if let Err(error) = started {
@@ -1428,12 +1432,16 @@ impl Engine {
             Some(setup) => {
                 let number = workflows::next_number(&attempts, setup.id());
                 self.inner
-                    .start_step_with(&attempt.run_id, setup, number, None, Some(&retry))
+                    .start_step_with(&attempt.run_id, setup, number, None, Some(&retry), None)
             }
-            None => {
-                self.inner
-                    .start_step_with(&attempt.run_id, &step, number, resume, Some(&retry))
-            }
+            None => self.inner.start_step_with(
+                &attempt.run_id,
+                &step,
+                number,
+                resume,
+                Some(&retry),
+                None,
+            ),
         }
     }
 
@@ -2116,16 +2124,64 @@ impl Inner {
         })
     }
 
+    /// The step with the model it runs with this time. A fresh start decides it, since the
+    /// specification and the change only exist once a run gets there: a step's model for a risky
+    /// change, if it has one and the change is. Going on with a session keeps the model it began with.
+    fn with_its_model(
+        &self,
+        run_id: &str,
+        step: &WorkflowStep,
+        resume: Option<&Resume>,
+        pass: Option<&mut SizeThisPass>,
+    ) -> Result<WorkflowStep> {
+        let WorkflowStep::Agent(spec) = step else {
+            return Ok(step.clone());
+        };
+        let model = match resume {
+            Some(resume) => Some(self.store.attempt(&resume.from)?.model_requested)
+                .filter(|model| !model.is_empty()),
+            None if spec.model_when_risky.is_some() => {
+                let attempts = self.store.attempts_of_run(run_id)?;
+                // Before any step has run there's no change yet, which isn't one that can't be read.
+                let lines = || {
+                    if attempts.is_empty() {
+                        return Some(0);
+                    }
+                    let change = match pass {
+                        Some(pass) => self.change_this_pass(run_id, &attempts, pass),
+                        None => self.change_of_run(run_id, &attempts),
+                    };
+                    // What git won't count in lines could be any size, as it is for being small.
+                    change
+                        .filter(|change| change.without_lines.is_empty())
+                        .map(|change| change.lines)
+                };
+                workflows::model_for_the_change(spec, &workflows::named_risks(&attempts), lines)
+                    .map(str::to_owned)
+            }
+            None => None,
+        };
+        Ok(match model {
+            Some(model) => WorkflowStep::Agent(StepSpec {
+                model,
+                ..spec.clone()
+            }),
+            None => step.clone(),
+        })
+    }
+
     /// Records a step and sets it going. Every caller holds `advancing`, so this never takes it:
-    /// the step itself runs on a thread of its own.
+    /// the step itself runs on a thread of its own. `pass` is what `advance` has read so far, when
+    /// it's the one starting it.
     fn start_step(
         self: &Arc<Self>,
         run_id: &str,
         step: &WorkflowStep,
         number: i64,
         resume: Option<Resume>,
+        pass: Option<&mut SizeThisPass>,
     ) -> Result<String> {
-        self.start_step_with(run_id, step, number, resume, None)
+        self.start_step_with(run_id, step, number, resume, None, pass)
     }
 
     /// `start_step`, recording what a retry changes along with the attempt, in one go.
@@ -2136,6 +2192,7 @@ impl Inner {
         number: i64,
         resume: Option<Resume>,
         retry: Option<&keel_store::Retry>,
+        pass: Option<&mut SizeThisPass>,
     ) -> Result<String> {
         let run = self.store.run(run_id)?;
         let project = self.store.project(&run.project_id)?;
@@ -2143,6 +2200,7 @@ impl Inner {
         let workspace = self.workspace(run_id);
         let dir = self.run_dir(run_id);
         std::fs::create_dir_all(&dir)?;
+        let step = &self.with_its_model(run_id, step, resume.as_ref(), pass)?;
 
         let stem = format!("{}-{number}", step.id());
         let id = new_id();
@@ -2411,13 +2469,21 @@ impl Inner {
             for (index, step) in steps.iter().enumerate() {
                 if let WorkflowStep::Parallel { steps: group, .. } = step {
                     let changed = workflows::files_changed(&attempts);
+                    let named = workflows::named_risks(&attempts);
                     let mut pending = false;
                     for spec in group {
                         match latest(&spec.id, index) {
                             None => {
-                                let small = self
-                                    .treated_as_small(&run, &steps, &attempts, spec, &mut size)?;
-                                let id = if let Some(reason) = small {
+                                // Before the size, which has nothing to do with it: a step that
+                                // could never run on a small change isn't one to offer for it.
+                                let id = if !workflows::risks_match(&spec.risks, &named) {
+                                    let reason = Reason::NoMatchingRisks {
+                                        risks: spec.risks.clone(),
+                                    };
+                                    self.record_skipped(run_id, spec, &attempts, reason)?
+                                } else if let Some(reason) =
+                                    self.treated_as_small(&run, &steps, &attempts, spec, &mut size)?
+                                {
                                     self.record_skipped(run_id, spec, &attempts, reason)?
                                 } else if !workflows::paths_match(&spec.paths, &changed) {
                                     let reason = Reason::NoMatchingPaths {
@@ -2432,6 +2498,7 @@ impl Inner {
                                         &WorkflowStep::Agent(spec.clone()),
                                         number,
                                         None,
+                                        Some(&mut size),
                                     )?
                                 };
                                 self.say_size(spec, &id, &run, &attempts, &mut size)?;
@@ -2452,6 +2519,17 @@ impl Inner {
                         WorkflowStep::Agent(spec) if spec.when.is_some() => Some(spec),
                         _ => None,
                     };
+                    // Before the size, as in a group.
+                    if let WorkflowStep::Agent(spec) = step
+                        && !workflows::risks_match(&spec.risks, &workflows::named_risks(&attempts))
+                    {
+                        let reason = Reason::NoMatchingRisks {
+                            risks: spec.risks.clone(),
+                        };
+                        let id = self.record_skipped(run_id, spec, &attempts, reason)?;
+                        self.say_size(spec, &id, &run, &attempts, &mut size)?;
+                        continue 'round;
+                    }
                     if let Some(spec) = conditional
                         && let Some(reason) =
                             self.treated_as_small(&run, &steps, &attempts, spec, &mut size)?
@@ -2461,14 +2539,14 @@ impl Inner {
                         continue 'round;
                     }
                     let number = workflows::next_number(&attempts, step.id());
-                    let id = self.start_step(run_id, step, number, None)?;
+                    let id = self.start_step(run_id, step, number, None, Some(&mut size))?;
                     if let Some(spec) = conditional {
                         self.say_size(spec, &id, &run, &attempts, &mut size)?;
                     }
                     return Ok(());
                 };
-                // Only a condition gets a step here that stands alone. It holds nothing up, and it has
-                // no answer to act on: an approver that didn't run sends nothing back.
+                // Only a condition or its risks skip a step here that stands alone. It holds nothing
+                // up, and it has no answer to act on: an approver that didn't run sends nothing back.
                 if attempt.state == AttemptState::Skipped.as_str() {
                     continue;
                 }
@@ -2539,7 +2617,8 @@ impl Inner {
             return Ok(None);
         };
         if size.decision.is_none() {
-            size.decision = Some(self.size_of_run(run, steps, attempts)?);
+            let decision = self.size_of_run(run, steps, attempts, size)?;
+            size.decision = Some(decision);
         }
         Ok(match size.decision {
             Some(sizing::Decision::Small { lines, files }) => {
@@ -2555,6 +2634,7 @@ impl Inner {
         run: &keel_store::Run,
         steps: &[WorkflowStep],
         attempts: &[keel_store::Attempt],
+        pass: &mut SizeThisPass,
     ) -> Result<sizing::Decision> {
         if sizing::already_up(steps, attempts) {
             return Ok(sizing::Decision::StaysUp);
@@ -2585,9 +2665,21 @@ impl Inner {
             started_by: run.started_by.as_deref(),
             sensitive: &project.sensitive_paths,
             commands: &commands,
-            change: self.change_of_run(&run.id, attempts),
+            change: self.change_this_pass(&run.id, attempts, pass),
             part_of_joint_change: self.is_part(&run.id)?,
         }))
+    }
+
+    /// The change as this pass read it, reading it the first time anything asks.
+    fn change_this_pass(
+        &self,
+        run_id: &str,
+        attempts: &[keel_store::Attempt],
+        pass: &mut SizeThisPass,
+    ) -> Option<git::ChangeSize> {
+        pass.change
+            .get_or_insert_with(|| self.change_of_run(run_id, attempts))
+            .clone()
     }
 
     /// `None` if it can't be read, whatever the reason.
@@ -2606,7 +2698,8 @@ impl Inner {
     }
 
     /// Puts what was decided on the record, on the first step it applied to. Results count from this.
-    /// Being small again later in the same round isn't a new decision.
+    /// Being small again later in the same round isn't a new decision. A step its risks left out had
+    /// nothing decided for it, and leaves that to the next one.
     fn say_size(
         &self,
         spec: &StepSpec,
@@ -2615,6 +2708,9 @@ impl Inner {
         attempts: &[keel_store::Attempt],
         size: &mut SizeThisPass,
     ) -> Result<()> {
+        let Some(decision) = &size.decision else {
+            return Ok(());
+        };
         if spec.when.is_none() || size.said {
             return Ok(());
         }
@@ -2622,10 +2718,9 @@ impl Inner {
         let told = attempts
             .iter()
             .any(|a| a.round == run.round && sizing::skipped_as_small(a));
-        let data = match &size.decision {
-            Some(sizing::Decision::Small { .. }) if told => None,
-            Some(decision) => decision.on_record(run.round),
-            None => None,
+        let data = match decision {
+            sizing::Decision::Small { .. } if told => None,
+            decision => decision.on_record(run.round),
         };
         if let Some(data) = data {
             self.store.append_event(attempt_id, "sizeDecided", &data)?;
@@ -2739,6 +2834,8 @@ mod tests {
             max_budget_usd: None,
             paths: vec![],
             when: None,
+            risks: vec![],
+            model_when_risky: None,
             role: Default::default(),
         });
         let back: WorkflowStep =

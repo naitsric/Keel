@@ -751,6 +751,17 @@ describe("the approval card", () => {
       expect(row("Small change")).toBeNull();
     });
 
+    it("says apart what was left out for the risks of what was asked", async () => {
+      const nothing = attempt({ id: "ux", stepId: "ux", role: "reviewer", state: "skipped", reason: { code: "noMatchingPaths", paths: ["**/*.tsx"] } });
+      const state = attempt({ id: "state", stepId: "state", role: "reviewer", state: "skipped", reason: { code: "noMatchingRisks", risks: ["concurrency"] } });
+      show([builder(["calc.py"]), check, reviewer, nothing, state, human], ["calc.py"]);
+      expect(row("Reviews")).toContain("ux: skipped, nothing they cover changed");
+      expect(row("Reviews")).toContain("state: skipped, what was asked names none of the risks they look at");
+      await i18next.changeLanguage("es");
+      show([builder(["calc.py"]), check, reviewer, nothing, state, human], ["calc.py"]);
+      expect(row("Revisiones")).toContain("state: omitidas, lo pedido no nombra ninguno de los riesgos que revisan");
+    });
+
     it("never shows a review that couldn't read all of the change as no problems", () => {
       const partly = attempt({ id: "code", stepId: "code", role: "reviewer", output: { verdict: "changes", findings: [], summary: "Fine as far as I got.", unread: ["src/b.ts"] } as unknown as Attempt["output"] });
       show([builder(["calc.py"]), check, partly, human], ["calc.py"]);
@@ -1864,5 +1875,30 @@ describe("a review that approved what breaks a criterion", () => {
     await i18next.changeLanguage("es");
     inActivity();
     expect(page()).toContain("Dice que el cambio rompe C5, L2, así que Keel no lo cuenta como aprobación.");
+  });
+});
+
+describe("a step skipped for the risks of what was asked", () => {
+  let root: Root;
+  const page = () => document.body.textContent ?? "";
+  const skipped: AuditEvent = { seq: 1, attemptId: "state", at: "2026-01-01T00:00:00Z", kind: "skipped", data: { paths: [], reason: { code: "noMatchingRisks", risks: ["concurrency"] } } };
+
+  beforeEach(() => {
+    mockIPC(() => null);
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("says why in its activity, not that nothing changed", async () => {
+    await i18next.changeLanguage("en");
+    act(() => root.render(<ActivityTab events={[skipped]} role="reviewer" />));
+    expect(page()).toContain("Skipped: what was asked names none of the risks it looks at");
+    expect(page()).not.toContain("nothing it covers");
+    await i18next.changeLanguage("es");
+    act(() => root.render(<ActivityTab events={[{ ...skipped, seq: 2 }]} role="reviewer" />));
+    expect(page()).toContain("Omitido: lo pedido no nombra ninguno de los riesgos que revisa");
   });
 });

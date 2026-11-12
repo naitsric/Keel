@@ -924,6 +924,8 @@ impl McpServer {
                 max_budget_usd: args.max_budget_usd,
                 paths: Vec::new(),
                 when: None,
+                risks: Vec::new(),
+                model_when_risky: None,
                 role: StepRole::Worker,
             };
             let mut request = StartRun::one_step(project.id, step, language);
@@ -2757,6 +2759,8 @@ impl DraftAgent {
             when: self.when.map(|when| match when {
                 DraftCondition::NotSmall => StepCondition::NotSmall,
             }),
+            risks: Vec::new(),
+            model_when_risky: None,
             role: match self.role {
                 Some(DraftRole::Worker) | None => StepRole::Worker,
                 Some(DraftRole::Reviewer) => StepRole::Reviewer,

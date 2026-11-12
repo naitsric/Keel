@@ -145,6 +145,8 @@ fn spec(id: &str, tools: ToolProfile, role: StepRole, paths: &[&str], prompt: &s
         max_budget_usd: None,
         paths: paths.iter().map(|p| (*p).to_owned()).collect(),
         when: None,
+        risks: vec![],
+        model_when_risky: None,
         role,
     }
 }

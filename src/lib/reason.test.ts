@@ -26,6 +26,20 @@ describe("reasonText", () => {
   });
 });
 
+describe("a step skipped for the risks of what was asked", () => {
+  it("names the risks it looks at in plain words, in both languages", () => {
+    const reason = { code: "noMatchingRisks", risks: ["concurrency", "sharedContracts", "whatever"] };
+    expect(reasonText(t("en"), reason)).toBe("What was asked names none of the risks it looks at (things happening at the same time, something other code depends on, something it couldn't name).");
+    expect(reasonText(t("es"), reason)).toBe("Lo pedido no nombra ninguno de los riesgos que revisa (cosas que pasan al mismo tiempo, algo de lo que depende otro código, algo que no supo nombrar).");
+  });
+
+  it("says which step needs one that works out the change before it", () => {
+    const reason = { code: "invalidWorkflow", problem: "risksNeedSpecifier", step: "state" };
+    expect(reasonText(t("en"), reason)).toBe("“state” goes by the risks of what was asked, so a step that works out the change has to come before it.");
+    expect(reasonText(t("es"), reason)).toBe("«state» se guía por los riesgos de lo pedido, así que antes tiene que haber un paso que defina el cambio.");
+  });
+});
+
 describe("a step waiting for its project's turn", () => {
   it("names the step and the run that have the turn, and that it's about running commands", () => {
     const reason = { code: "waitingForProject", step: "builder", runId: "r44", title: "The runs' folders" };

@@ -252,6 +252,8 @@ fn agent(id: &str, tools: ToolProfile) -> WorkflowStep {
         max_budget_usd: None,
         paths: vec![],
         when: None,
+        risks: vec![],
+        model_when_risky: None,
         role: Default::default(),
     })
 }
@@ -1069,6 +1071,8 @@ fn a_task_a_client_closed_runs_again_as_the_same_task_that_only_reads() {
         max_budget_usd: None,
         paths: vec![],
         when: None,
+        risks: vec![],
+        model_when_risky: None,
         role: Default::default(),
     };
     let mut task = StartRun::one_step(w.project_id.clone(), step, "en".into());
@@ -1676,20 +1680,20 @@ fn a_review_that_fails_goes_to_human_review_even_when_a_later_one_went_fine() {
     let id = w.queued("card-1");
     let card = w.wait_column(&id, BoardColumn::HumanReview);
 
-    // The other review is still going, and when it ends it's the newest attempt and it went well.
-    // Reading only the newest would call this run working, for ever.
+    // The other review is still going, and when it ends it went well, like everything recorded after
+    // the one that failed. Reading only the newest would call this run working, for ever.
     let run = card.run_id.clone().unwrap();
     let deadline = Instant::now() + PATIENCE;
-    let last = loop {
+    loop {
         let attempts = w.store.attempts_of_run(&run).unwrap();
-        let last = attempts.last().unwrap().clone();
-        if last.step_id == "code" && last.state == "succeeded" {
-            break last;
+        let code = attempts.iter().rev().find(|a| a.step_id == "code");
+        if code.is_some_and(|code| code.state == "succeeded") {
+            break;
         }
-        assert!(Instant::now() < deadline, "{} {}", last.step_id, last.state);
+        let states: Vec<_> = attempts.iter().map(|a| (&a.step_id, &a.state)).collect();
+        assert!(Instant::now() < deadline, "{states:?}");
         std::thread::sleep(Duration::from_millis(20));
-    };
-    assert_eq!(last.state, "succeeded");
+    }
 
     let card = w.card(&id);
     assert_eq!(card.column, BoardColumn::HumanReview);

@@ -241,6 +241,8 @@ fn agent_with(
         max_budget_usd: None,
         paths: vec![],
         when,
+        risks: vec![],
+        model_when_risky: None,
         role,
     })
 }

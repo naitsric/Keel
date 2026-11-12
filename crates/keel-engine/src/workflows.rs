@@ -263,7 +263,12 @@ pub fn validate(steps: &[WorkflowStep]) -> Result<(), Reason> {
         Ok(())
     };
     let check_agent = |spec: &StepSpec| -> Result<(), Reason> {
-        if spec.model.trim().is_empty() {
+        if spec.model.trim().is_empty()
+            || spec
+                .model_when_risky
+                .as_deref()
+                .is_some_and(|model| model.trim().is_empty())
+        {
             return Err(problem("noModel", &spec.id));
         }
         if spec.prompt.trim().is_empty() {
@@ -288,6 +293,13 @@ pub fn validate(steps: &[WorkflowStep]) -> Result<(), Reason> {
         }
         Ok(())
     };
+    // The risks come from a specifier's answer, so one has to have given it.
+    let check_risks = |spec: &StepSpec, specifier_seen: bool| -> Result<(), Reason> {
+        if !spec.risks.is_empty() && !specifier_seen {
+            return Err(problem("risksNeedSpecifier", &spec.id));
+        }
+        Ok(())
+    };
     let mut earlier: Vec<&str> = Vec::new();
     for (index, step) in steps.iter().enumerate() {
         remember(step.id())?;
@@ -295,6 +307,7 @@ pub fn validate(steps: &[WorkflowStep]) -> Result<(), Reason> {
             WorkflowStep::Agent(spec) => {
                 check_agent(spec)?;
                 check_when(spec, built)?;
+                check_risks(spec, specifier_seen)?;
                 built |= spec.role == StepRole::Worker && spec.tools == ToolProfile::Build;
                 // It's about what the run did, so it has to come once the run has done it.
                 if spec.role == StepRole::Learner && index + 1 != steps.len() {
@@ -327,6 +340,7 @@ pub fn validate(steps: &[WorkflowStep]) -> Result<(), Reason> {
                     remember(&spec.id)?;
                     check_agent(spec)?;
                     check_when(spec, built)?;
+                    check_risks(spec, specifier_seen)?;
                     // The rest act on what the whole run has done, so they can't run alongside it.
                     if !matches!(spec.role, StepRole::Worker | StepRole::Reviewer) {
                         return Err(problem("groupRole", &spec.id));
@@ -465,6 +479,43 @@ pub fn paths_match(paths: &[String], changed: &[String]) -> bool {
     changed.iter().any(|file| set.is_match(file))
 }
 
+/// The risks the specification names, as it wrote them. None without a structured one.
+pub fn named_risks(attempts: &[Attempt]) -> Vec<String> {
+    specifying_attempt(attempts)
+        .and_then(specs::of_attempt)
+        .map(|spec| spec.risks)
+        .unwrap_or_default()
+}
+
+/// Whether a step limited to some risks has one to look at.
+pub fn risks_match(risks: &[String], named: &[String]) -> bool {
+    risks.is_empty() || risks.iter().any(|risk| named.contains(risk))
+}
+
+/// What makes a change risky enough for a step's stronger model: the specification names one of
+/// these, or the change has more lines than [`RISKY_LINES`].
+const RISKY: [&str; 4] = ["security", "money", "personalData", "irreversibleData"];
+const RISKY_LINES: usize = 1500;
+
+/// `lines` reads the change only if the risks didn't decide it, and gives `None` when it can't be
+/// read, or git won't count all of it in lines. Like the size, a change nobody could read is never
+/// taken as a harmless one.
+pub fn is_risky(named: &[String], lines: impl FnOnce() -> Option<usize>) -> bool {
+    named.iter().any(|risk| RISKY.contains(&risk.as_str()))
+        || lines().is_none_or(|lines| lines > RISKY_LINES)
+}
+
+/// The model a step changes to for this change, if it does. A specifier works out the risks, so it
+/// has none to go by.
+pub fn model_for_the_change<'a>(
+    spec: &'a StepSpec,
+    named: &[String],
+    lines: impl FnOnce() -> Option<usize>,
+) -> Option<&'a str> {
+    let model = spec.model_when_risky.as_deref()?;
+    (spec.role != StepRole::Specifier && is_risky(named, lines)).then_some(model)
+}
+
 /// What a step produced, for the next one's prompt. From its latest attempt.
 pub fn output_of(attempts: &[Attempt], step_id: &str) -> String {
     let Some(attempt) = attempts.iter().rev().find(|a| a.step_id == step_id) else {
@@ -474,6 +525,9 @@ pub fn output_of(attempts: &[Attempt], step_id: &str) -> String {
     if sizing::skipped_as_small(attempt) {
         return "(skipped: Keel treated this as a small change, so this step looked at nothing)"
             .to_owned();
+    }
+    if sizing::skipped_for_risks(attempt) {
+        return "(skipped: the specification names none of the risks it looks at)".to_owned();
     }
     if attempt.state == AttemptState::Skipped.as_str() {
         return "(skipped: nothing it covers changed)".to_owned();
@@ -682,6 +736,8 @@ fn agent(
         max_budget_usd: None,
         paths: paths.iter().map(|p| (*p).to_owned()).collect(),
         when: None,
+        risks: Vec::new(),
+        model_when_risky: None,
         role,
     }
 }
@@ -722,6 +778,9 @@ const SCREEN_FILES: [&str; 8] = [
     "**/*.dart",
 ];
 
+/// What a built-in review of state looks at, as the specification names it.
+const STATE_RISKS: [&str; 3] = ["concurrency", "sharedContracts", "irreversibleData"];
+
 /// The workflows that ship with Keel, in the app's language. The full one is the user's diagram.
 pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
     let es = language.starts_with("es");
@@ -748,8 +807,9 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
     } else {
         ("security", "code", "approver", "human")
     };
+    let state = if es { "estado" } else { "state" };
     let approver_prompt = format!(
-        "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{VERIFY_STEP}: {{{{steps.{VERIFY_STEP}.output}}}}\n{security}: {{{{steps.{security}.output}}}}\nux: {{{{steps.ux.output}}}}\nui: {{{{steps.ui.output}}}}\n{code}: {{{{steps.{code}.output}}}}\n\n{}\n\n{{{{rework}}}}",
+        "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{VERIFY_STEP}: {{{{steps.{VERIFY_STEP}.output}}}}\n{security}: {{{{steps.{security}.output}}}}\nux: {{{{steps.ux.output}}}}\nui: {{{{steps.ui.output}}}}\n{code}: {{{{steps.{code}.output}}}}\n{state}: {{{{steps.{state}.output}}}}\n\n{}\n\n{{{{rework}}}}",
         text(
             "You decide whether this change is ready for a person to review, using the reviews below and what `verify` found, and you edit nothing. Check each finding in the code before believing it, and discard false ones. A review with files in `unread` didn't check them: check them yourself before you approve. Anything `unmet` in `verify` is a finding, unless what was sent back below changed it. `unverified` only means no test proves it, and isn't a finding by itself. What a review put in `unchecked` is what reading the code can't prove, such as how it looks on screen: Keel shows it to the person to check, so it isn't a finding and no reason to send the work back. decision = rework if a real finding remains, approve if not. risk = high if it touches authorization, personal data, money, contractual deadlines or the database schema; low if it's contained and easy to revert; medium otherwise. In instructions, say exactly what to fix.",
             "Decides si este cambio está listo para que lo revise una persona, usando las revisiones de abajo y lo que encontró `verify`, y no editas nada. Comprueba cada hallazgo en el código antes de creerle y descarta los falsos. Una revisión con archivos en `unread` no los revisó: revísalos tú antes de aprobar. Todo lo que esté `unmet` en `verify` es un hallazgo, salvo que lo devuelto abajo lo haya cambiado. `unverified` solo significa que ninguna prueba lo demuestra, y por sí solo no es un hallazgo. Lo que una revisión puso en `unchecked` es lo que leer el código no puede comprobar, como cómo se ve en pantalla: Keel se lo muestra a la persona para que lo compruebe, así que no es un hallazgo ni motivo para devolver el trabajo. decision = rework si queda un hallazgo real, approve si no. risk = high si toca autorización, datos personales, dinero, plazos contractuales o el esquema de base; low si es acotado y fácil de revertir; medium en otro caso. En instructions, di exactamente qué corregir. Responde en español.",
@@ -797,10 +857,20 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
                 "Focus on UI: consistency with the repo's design system, existing components, responsive behavior and accessibility. You only see the code, not the screen: say so if something needs to be seen.",
                 "Enfócate en UI: consistencia con el sistema de diseño del repo, componentes existentes, responsive y accesibilidad. Solo ves el código, no la pantalla: dilo si algo requiere verse.",
             )),
-            agent(code, "sonnet", ToolProfile::ReadOnly, StepRole::Reviewer, &[], &review(
-                "Focus on the CODE: that it meets each criterion of the specification, stays within its limits, logic errors, edge cases, and tests that really prove the behavior.",
-                "Enfócate en el CÓDIGO: que cumpla cada criterio de la especificación, que no se salga de sus límites, errores de lógica, casos borde y pruebas que de verdad demuestren el comportamiento.",
-            )),
+            StepSpec {
+                model_when_risky: Some("opus".into()),
+                ..agent(code, "sonnet", ToolProfile::ReadOnly, StepRole::Reviewer, &[], &review(
+                    "Focus on the CODE: that it meets each criterion of the specification, stays within its limits, logic errors, edge cases, and tests that really prove the behavior.",
+                    "Enfócate en el CÓDIGO: que cumpla cada criterio de la especificación, que no se salga de sus límites, errores de lógica, casos borde y pruebas que de verdad demuestren el comportamiento.",
+                ))
+            },
+            StepSpec {
+                risks: STATE_RISKS.map(str::to_owned).to_vec(),
+                ..agent(state, "sonnet", ToolProfile::ReadOnly, StepRole::Reviewer, &[], &review(
+                    "Focus on STATE: transitions that leave something with no owner or deadline, jobs that overlap and races, retries and idempotency, events lost with no retry, and states a recalculation overwrites.",
+                    "Enfócate en el ESTADO: transiciones que dejan algo sin dueño ni plazo, jobs que se solapan y carreras, reintentos e idempotencia, eventos que se pierden sin reintento, y estados que un recálculo pisa.",
+                ))
+            },
         ],
     });
     full.push(WorkflowStep::Agent(agent(
@@ -825,7 +895,7 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
             learnings, language, "sonnet", reviewers,
         ))
     };
-    full.push(learner(&[security, "ux", "ui", code]));
+    full.push(learner(&[security, "ux", "ui", code, state]));
     let mut simple = simple;
     simple.push(learner(&[]));
     let fitting = fitting_the_change(full.clone(), language);
@@ -1159,7 +1229,7 @@ mod tests {
         };
         assert_eq!(
             group.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
-            ["seguridad", "ux", "ui", "codigo"]
+            ["seguridad", "ux", "ui", "codigo", "estado"]
         );
         assert!(
             group
@@ -1255,9 +1325,9 @@ mod tests {
                     }
                 }
             }
-            // The full one and the one that fits the change have four reviews and an approver each,
+            // The full one and the one that fits the change have five reviews and an approver each,
             // and the simple one has none.
-            assert_eq!((reviewers, approvers), (8, 2), "{language}");
+            assert_eq!((reviewers, approvers), (10, 2), "{language}");
         }
         // Even an approver of a workflow saved before this is asked for them.
         let schema: Value = serde_json::from_str(DECISION_SCHEMA).unwrap();
@@ -1960,15 +2030,22 @@ mod tests {
             ("nothing", "agent", "reviewer", AttemptState::Skipped, ""),
             ("small", "agent", "reviewer", AttemptState::Skipped, ""),
             ("approver", "agent", "approver", AttemptState::Skipped, ""),
+            ("state", "agent", "reviewer", AttemptState::Skipped, ""),
         ]);
         attempts[0].reason = Some(serde_json::json!({ "code": "noMatchingPaths", "paths": ["a"] }));
         for index in [1, 2] {
             attempts[index].reason =
                 Some(serde_json::json!({ "code": "treatedAsSmall", "lines": 3, "files": 1 }));
         }
+        attempts[3].reason =
+            Some(serde_json::json!({ "code": "noMatchingRisks", "risks": ["concurrency"] }));
         assert_eq!(
             output_of(&attempts, "nothing"),
             "(skipped: nothing it covers changed)"
+        );
+        assert_eq!(
+            output_of(&attempts, "state"),
+            "(skipped: the specification names none of the risks it looks at)"
         );
         for id in ["small", "approver"] {
             let text = output_of(&attempts, id);
@@ -2174,6 +2251,159 @@ mod tests {
             &["app/store.py".to_owned(), "README.md".to_owned()]
         ));
         assert!(!paths_match(&screens, &[]));
+    }
+
+    #[test]
+    fn risks_decide_whether_a_step_has_anything_to_look_at() {
+        let state = STATE_RISKS.map(str::to_owned);
+        let named = |risks: &[&str]| risks.iter().map(|r| (*r).to_owned()).collect::<Vec<_>>();
+        assert!(risks_match(&[], &[]), "no limit means always");
+        for risk in ["concurrency", "sharedContracts", "irreversibleData"] {
+            assert!(risks_match(&state, &named(&["security", risk])), "{risk}");
+        }
+        assert!(!risks_match(&state, &named(&["security", "money"])));
+        assert!(!risks_match(&state, &[]));
+    }
+
+    #[test]
+    fn a_change_is_risky_for_these_risks_or_over_1500_lines() {
+        let named = |risks: &[&str]| risks.iter().map(|r| (*r).to_owned()).collect::<Vec<_>>();
+        for risk in ["security", "money", "personalData", "irreversibleData"] {
+            // The risks decide it without reading the change.
+            assert!(is_risky(&named(&[risk]), || unreachable!()), "{risk}");
+        }
+        let small = || Some(1);
+        assert!(!is_risky(&named(&["concurrency", "environment"]), small));
+        assert!(!is_risky(&[], || Some(1500)));
+        assert!(is_risky(&[], || Some(1501)));
+        // Like the size: a change that can't be read is never taken as a harmless one.
+        assert!(is_risky(&[], || None));
+    }
+
+    #[test]
+    fn a_specifier_never_changes_model_for_the_risks_it_works_out() {
+        let named = vec!["security".to_owned()];
+        let mut step = worker("code", ToolProfile::ReadOnly);
+        step.role = StepRole::Reviewer;
+        assert_eq!(model_for_the_change(&step, &named, || Some(1)), None);
+        step.model_when_risky = Some("opus".into());
+        assert_eq!(
+            model_for_the_change(&step, &named, || Some(1)),
+            Some("opus")
+        );
+        assert_eq!(model_for_the_change(&step, &[], || Some(1)), None);
+        step.role = StepRole::Specifier;
+        assert_eq!(model_for_the_change(&step, &named, || None), None);
+    }
+
+    #[test]
+    fn the_risks_come_from_the_specification_and_none_without_one() {
+        let mut attempts = recorded(&[("spec", "agent", "specifier", Succeeded, "")]);
+        assert!(named_risks(&attempts).is_empty());
+        attempts[0].output = Some(serde_json::json!({
+            "summary": "s",
+            "criteria": [{ "id": "C1", "when": "w", "then": "t" }],
+            "risks": ["concurrency", "security"],
+        }));
+        assert_eq!(named_risks(&attempts), ["concurrency", "security"]);
+        let free_text = recorded(&[("spec", "agent", "worker", Succeeded, "concurrency")]);
+        assert!(named_risks(&free_text).is_empty());
+    }
+
+    #[test]
+    fn a_step_that_goes_by_risks_needs_a_specifier_before_it() {
+        let mut review = worker("state", ToolProfile::ReadOnly);
+        review.role = StepRole::Reviewer;
+        review.risks = vec!["concurrency".into()];
+        let mut specifier = worker("spec", ToolProfile::ReadOnly);
+        specifier.role = StepRole::Specifier;
+        let builder = || step_of(worker("b", ToolProfile::Build));
+        let group = |spec: StepSpec| WorkflowStep::Parallel {
+            id: "g".into(),
+            steps: vec![spec],
+        };
+        let refused = Err(problem("risksNeedSpecifier", "state"));
+        assert_eq!(validate(&[builder(), group(review.clone())]), refused);
+        assert_eq!(validate(&[builder(), step_of(review.clone())]), refused);
+        assert_eq!(
+            validate(&[step_of(specifier), builder(), group(review)]),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn a_model_for_a_risky_change_has_to_name_one() {
+        let mut review = worker("code", ToolProfile::ReadOnly);
+        review.role = StepRole::Reviewer;
+        review.model_when_risky = Some("  ".into());
+        let builder = step_of(worker("b", ToolProfile::Build));
+        assert_eq!(
+            validate(&[builder.clone(), step_of(review.clone())]),
+            Err(problem("noModel", "code"))
+        );
+        review.model_when_risky = Some("opus".into());
+        assert_eq!(validate(&[builder, step_of(review)]), Ok(()));
+    }
+
+    #[test]
+    fn a_state_review_joins_the_built_in_reviews_for_the_risks_of_state() {
+        for (language, state, code, focus) in [
+            (
+                "en",
+                "state",
+                "code",
+                "Focus on STATE: transitions that leave something with no owner or deadline",
+            ),
+            (
+                "es",
+                "estado",
+                "codigo",
+                "Enfócate en el ESTADO: transiciones que dejan algo sin dueño ni plazo",
+            ),
+        ] {
+            for workflow in builtin(language, Some("make test")) {
+                if workflow.id == "builtin:simple" {
+                    continue;
+                }
+                let Some(WorkflowStep::Agent(review)) = find_step(&workflow.steps, state) else {
+                    panic!("{} {language}", workflow.id)
+                };
+                assert_eq!(review.risks, STATE_RISKS, "{}", workflow.id);
+                assert_eq!(review.model, "sonnet");
+                assert_eq!(review.model_when_risky, None);
+                assert!(review.prompt.contains(focus), "{}", review.prompt);
+                let Some(WorkflowStep::Agent(code)) = find_step(&workflow.steps, code) else {
+                    panic!()
+                };
+                assert_eq!(code.model, "sonnet");
+                assert_eq!(code.model_when_risky.as_deref(), Some("opus"));
+                // Nobody else changes model or depends on the risks.
+                for step in &workflow.steps {
+                    let specs: Vec<&StepSpec> = match step {
+                        WorkflowStep::Agent(spec) => vec![spec],
+                        WorkflowStep::Parallel { steps, .. } => steps.iter().collect(),
+                        _ => vec![],
+                    };
+                    for spec in specs
+                        .into_iter()
+                        .filter(|s| s.id != state && s.id != code.id)
+                    {
+                        assert!(spec.risks.is_empty(), "{}", spec.id);
+                        assert_eq!(spec.model_when_risky, None, "{}", spec.id);
+                    }
+                }
+                // What it found reaches the approver and the step that proposes notes.
+                let read = format!("{state}: {{{{steps.{state}.output}}}}");
+                for role in ["approver", "learner"] {
+                    let reader = workflow.steps.iter().find_map(|step| match step {
+                        WorkflowStep::Agent(spec) if spec.role.as_str() == role => Some(spec),
+                        _ => None,
+                    });
+                    let prompt = &reader.unwrap().prompt;
+                    assert!(prompt.contains(&read), "{} {role}: {prompt}", workflow.id);
+                }
+            }
+        }
     }
 
     #[test]
@@ -2563,7 +2793,8 @@ mod tests {
                 })
                 .filter(|spec| spec.role == StepRole::Reviewer)
                 .collect();
-            assert_eq!(reviewers.len(), 4, "{language}");
+            // Security, ux, ui, code and state.
+            assert_eq!(reviewers.len(), 5, "{language}");
             for reviewer in reviewers {
                 assert!(reviewer.prompt.contains(told), "{language} {}", reviewer.id);
             }
