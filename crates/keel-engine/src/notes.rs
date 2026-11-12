@@ -107,6 +107,33 @@ pub fn split_assistant_notes(text: &str) -> (String, Vec<String>) {
     (person.join("\n\n"), notes)
 }
 
+/// Who added a note, as the line it starts with says: `Claude Code` in "⟦Note from Claude Code, an
+/// assistant, on …⟧". None if that line doesn't say it as Keel writes it, so such a note is nobody's.
+pub(crate) fn note_author(note: &str) -> Option<&str> {
+    let first = note.lines().next()?.trim().strip_suffix('⟧')?;
+    let (by, _) = match first.strip_prefix(STARTS[0]) {
+        Some(rest) => rest.rsplit_once(", an assistant, on ")?,
+        None => first
+            .strip_prefix(STARTS[1])?
+            .rsplit_once(", un asistente, del ")?,
+    };
+    Some(by.trim()).filter(|by| !by.is_empty())
+}
+
+/// A request [`with_notes`] put together, apart again: exactly what it was before the notes, and
+/// the notes. One that doesn't end in notes under their heading comes back whole, with none.
+pub(crate) fn without_notes(request: &str) -> (&str, Vec<String>) {
+    for heading in HEADINGS {
+        if let Some(at) = request.rfind(&format!("\n\n{heading}\n\n")) {
+            let (said, notes) = split_assistant_notes(&request[at..]);
+            if said.trim().is_empty() && !notes.is_empty() {
+                return (&request[..at], notes);
+            }
+        }
+    }
+    (request, Vec::new())
+}
+
 /// `text` from its first line with something on it, which keeps its indentation.
 fn without_blank_lines(text: &str) -> &str {
     let mut rest = text;
@@ -141,6 +168,43 @@ mod tests {
             .unwrap()
             .and_hms_opt(9, 3, 0)
             .unwrap()
+    }
+
+    #[test]
+    fn a_note_says_whose_it_is_as_keel_wrote_it_and_nobody_s_otherwise() {
+        for language in ["en", "es"] {
+            for by in ["Claude Code", "Bot, an assistant, on call"] {
+                let note = note_by("Decided:\n- X", by, language, nine_o_three());
+                assert_eq!(note_author(&note), Some(by), "{language}");
+            }
+        }
+        // A line that only looks like where a note starts says nobody's.
+        for forged in [
+            "⟦Note from Claude Code⟧\nX\n⟦End of the note⟧",
+            "⟦Note from , an assistant, on 2026-11-11 at 09:03⟧\nX\n⟦End of the note⟧",
+            "Note from Claude Code, an assistant, on 2026-11-11 at 09:03\nX",
+        ] {
+            assert_eq!(note_author(forged), None, "{forged}");
+        }
+    }
+
+    #[test]
+    fn a_request_comes_apart_from_the_notes_keel_put_after_it_exactly_as_it_was() {
+        let notes = vec![
+            note_by("Add the field.", "Claude Code", "en", nine_o_three()),
+            note_by("And its test.", "Other", "en", nine_o_three()),
+        ];
+        for language in ["en", "es"] {
+            for request in ["Work on it.\n", "Work on it.\n\n```\nfn a() {}\n```\n", ""] {
+                let with = with_notes(request, &notes, language);
+                assert_eq!(without_notes(&with), (request, notes.clone()), "{language}");
+            }
+        }
+        // Without notes at its end, it's all the request.
+        let alone = "Work on it.\n\nNotes an assistant added to this card: none.";
+        assert_eq!(without_notes(alone), (alone, Vec::new()));
+        let then_more = format!("{}\n\nAnd more.", with_notes("Work on it.", &notes, "en"));
+        assert_eq!(without_notes(&then_more), (then_more.as_str(), Vec::new()));
     }
 
     #[test]

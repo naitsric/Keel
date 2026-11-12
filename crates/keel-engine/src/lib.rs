@@ -944,16 +944,31 @@ impl Engine {
             .map(|saved| saved.id.as_str());
         let workflow = project_commands::marked(&workflow, project_setup, saved_id);
         let run_id = new_id();
+        let source_issue = request.source_issue.as_ref().map(|issue| {
+            json!({ "number": issue.number, "title": issue.title, "author": issue.author, "url": issue.url }).to_string()
+        });
+        // Who wrote each piece of what it asks, as Keel knows now: only what the person wrote can
+        // settle anything for them, and a card or a project can change afterwards. Kept apart from
+        // what the run shows, since its request already says all of it.
+        let from_card = card.map(|id| self.inner.store.card(id)).transpose()?;
+        let written = self.inner.written_at_start(
+            &request.request,
+            request.started_by.as_deref(),
+            request.source_issue.as_ref(),
+            from_card.as_ref(),
+            project.github_account.as_deref(),
+        )?;
         let run = NewRun {
             id: run_id.clone(),
             project_id: project.id,
-            title: request.title.unwrap_or_else(|| title_from(&request.request)),
+            title: request
+                .title
+                .unwrap_or_else(|| title_from(&request.request)),
             request: request.request,
             workflow: workflow.to_string(),
             language: request.language,
-            source_issue: request.source_issue.as_ref().map(|issue| {
-                json!({ "number": issue.number, "title": issue.title, "author": issue.author, "url": issue.url }).to_string()
-            }),
+            source_issue,
+            request_written: serde_json::to_string(&written).ok(),
             workflow_id: request.saved_workflow.as_ref().map(|w| w.id.clone()),
             workflow_name: request.saved_workflow.map(|w| w.name),
             started_by: request.started_by,
@@ -2376,8 +2391,8 @@ impl Inner {
         Ok(id)
     }
 
-    /// An agent's prompt. What a person sent back has to reach whoever does the work, whatever a
-    /// saved workflow's prompt leaves out.
+    /// An agent's prompt. What a person sent back has to reach whoever does the work, and what the
+    /// request decided whoever judges it, whatever a saved workflow's prompt leaves out.
     fn agent_prompt(&self, spec: &StepSpec, run: &keel_store::Run) -> Result<String> {
         let judging = matches!(
             spec.role,
@@ -2385,6 +2400,29 @@ impl Inner {
         );
         let attempts = self.store.attempts_of_run(&run.id)?;
         let mut text = self.render_prompt(&spec.prompt, run, &attempts, judging)?;
+        // What Keel adds from the request itself, and what it leaves there, the specifier has to
+        // know of to leave it out, whatever a saved workflow's prompt says.
+        if spec.role == StepRole::Specifier {
+            let decided = specs::from_request(&self.written_in_request(&run.id));
+            if let Some(told) = specs::already_decided_prompt(&decided, &run.language) {
+                text.push_str(&format!("\n\n{told}"));
+            }
+        }
+        // What the request already decided is the person's, and a workflow saved before Keel read
+        // it doesn't say so: without this, its approver could send the person's decision back as
+        // rework. Only where the spec has some, so every other prompt stays as it was. Whether the
+        // prompt says it is looked at as the workflow has it, and the rule goes after anything else
+        // Keel adds, such as what the builder said, which is only its claim.
+        let request_rule = workflows::request_rule(&spec.role, &run.language).filter(|_| {
+            !workflows::says_request_rule(&text)
+                && workflows::specifying_attempt(&attempts)
+                    .and_then(specs::of_attempt)
+                    .is_some_and(|spec| {
+                        spec.decided
+                            .iter()
+                            .any(|decided| decided.taken == Some(specs::Taken::Request))
+                    })
+        });
         if spec.role == StepRole::Worker && spec.tools == keel_core::ToolProfile::Build {
             if workflows::returned_before(&attempts, run.round) {
                 let rework = workflows::rework_text(&attempts, run.round, &run.language);
@@ -2416,6 +2454,9 @@ impl Inner {
             if !broken.is_empty() {
                 text.push_str(&format!("\n\n{broken}"));
             }
+        }
+        if let Some(rule) = request_rule {
+            text.push_str(&format!("\n\n{rule}"));
         }
         Ok(text)
     }

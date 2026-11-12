@@ -743,6 +743,26 @@ describe("the run page's flow", () => {
       expect(page()).not.toContain('"criteria"');
     });
 
+    it("lists what the request already decided apart, saying when an assistant or the project's GitHub account wrote it", async () => {
+      const decided = [
+        { text: "If its author resolves it, it counts for now.", taken: "request" },
+        { text: "Old threads stay as they are.", taken: "request", assistant: "Claude Code" },
+        { text: "Invoices already sent keep their total.", taken: "request", githubAccount: "alice" },
+        { text: "Keeps the rounding" },
+      ];
+      attempts = [specifier("succeeded", { output: { ...output, decided } as unknown as Attempt["output"] }), attempt("builder", "running")];
+      await open();
+      await choose(node("spec"));
+      await choose(radio("What it understood"));
+      const list = (title: string) => [...document.querySelectorAll("h4")].find((h4) => h4.textContent === title)?.parentElement?.textContent ?? "";
+      expect(list("Decided in the request")).toContain("If its author resolves it, it counts for now.");
+      expect(list("Decided in the request")).toContain("Old threads stay as they are.Claude Code wrote it");
+      expect(list("Decided in the request")).toContain("Invoices already sent keep their total.Written with the project's GitHub account");
+      expect(list("Decided in the request")).not.toContain("Keeps the rounding");
+      expect(list("What it decided alone")).toContain("Keeps the rounding");
+      expect(list("What it decided alone")).not.toContain("Old threads stay");
+    });
+
     it("says it gave its answer in the activity, instead of printing it", async () => {
       const spec = specifier("succeeded");
       attempts = [spec, attempt("builder", "running")];

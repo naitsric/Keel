@@ -325,8 +325,12 @@ export interface SpecQuestion {
 
 export interface SpecDecided {
   text: string;
-  /** Who settled it, if it was once a question: a person, or Keel when the rounds of them ran out. */
-  taken?: "person" | "roundsLimit";
+  /** Who settled it, if it was once a question: a person, or Keel when the rounds of them ran out. Or the request, in a list of what was already decided, which `text` is word for word. */
+  taken?: "person" | "roundsLimit" | "request";
+  /** The assistant that wrote that request for the person, when one did. */
+  assistant?: string;
+  /** Or the project's GitHub account, for an issue written with it, which isn't proven to be the person. */
+  githubAccount?: string;
 }
 
 /** An answer to a question, as the engine keeps it. */

@@ -18,7 +18,7 @@ use crate::{brain, prompts, sizing, specs, verification};
 const MAX_ROUNDS: u32 = 5;
 
 pub const VERDICT_SCHEMA: &str = r#"{"type":"object","properties":{"verdict":{"type":"string","enum":["approved","changes"]},"findings":{"type":"array","items":{"type":"object","properties":{"file":{"type":["string","null"]},"line":{"type":["integer","null"]},"text":{"type":"string"},"breaks":{"type":["string","null"],"description":"The `id` of the criterion of the specification this breaks, or `L<n>` for its limit number n. null if it breaks neither. One that breaks either is never minor: the verdict can't be approved."}},"required":["file","line","text","breaks"],"additionalProperties":false}},"summary":{"type":"string"},"unread":{"type":"array","items":{"type":"string"},"description":"Each file of the change you could not read, if any. A review that left one out is not an approval."},"unchecked":{"type":"array","items":{"type":"string"},"description":"Each thing in this change you could not check by reading the code, such as how it looks on screen, in one line, if any. Keel shows them to the person as not proven."}},"required":["verdict","findings","summary","unread","unchecked"],"additionalProperties":false}"#;
-pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"},"questioned":{"type":"array","items":{"type":"object","properties":{"decided":{"type":"string"},"number":{"type":["integer","null"],"description":"The `number` that decision has in `decided`, or null for one the change added."},"round":{"type":["integer","null"],"description":"For one the change added, the round it appeared in. null for one in `decided`."},"why":{"type":"string"}},"required":["decided","number","round","why"],"additionalProperties":false},"description":"Each thing the specification decided on its own that a finding questions, quoted as `decided` says it, with the `number` it has there, and why it does not hold. Also each behavior the change added that no criterion, limit, decision or work sent back asks for: that it exists and the choice it makes, in one line, with no `number` and with the `round` it appeared in. A defect in it, or behavior that breaks a limit, is a finding and not one of these. A person decides these at the approval, so none is a reason for rework."}},"required":["decision","risk","reasons","instructions","questioned"],"additionalProperties":false}"#;
+pub const DECISION_SCHEMA: &str = r#"{"type":"object","properties":{"decision":{"type":"string","enum":["approve","rework"]},"risk":{"type":"string","enum":["low","medium","high"]},"reasons":{"type":"string"},"instructions":{"type":"string"},"questioned":{"type":"array","items":{"type":"object","properties":{"decided":{"type":"string"},"number":{"type":["integer","null"],"description":"The `number` that decision has in `decided`, or null for one the change added."},"round":{"type":["integer","null"],"description":"For one the change added, the round it appeared in. null for one in `decided`."},"why":{"type":"string"}},"required":["decided","number","round","why"],"additionalProperties":false},"description":"Each line of `decided` that a finding questions, if the specification decided it on its own or the request has it from an assistant or the project's GitHub account, or that what the approver or an assistant sent back goes against, quoted as `decided` says it, with the `number` it has there, and why it does not hold or what goes against it. Also each behavior the change added that no criterion, limit, decision or work sent back asks for: that it exists and the choice it makes, in one line, with no `number` and with the `round` it appeared in. A defect in it, or behavior that breaks a limit, is a finding and not one of these. A person decides these at the approval, so none is a reason for rework."}},"required":["decision","risk","reasons","instructions","questioned"],"additionalProperties":false}"#;
 
 /// One problem a review found. Reviews from before Keel asked where it is and what it breaks wrote
 /// only text, and they still read as that.
@@ -665,12 +665,17 @@ pub fn rework_text(attempts: &[Attempt], round: i64, language: &str) -> String {
         .iter()
         .filter(|a| a.round < round - 1 && a.state == AttemptState::Returned.as_str())
         .collect();
+    let all_from_a_person = returned.iter().all(|a| sent_back_by(a).is_none());
+    // Among an assistant's, a person's says so too: only what a person asked for can change what
+    // they decided.
     let earlier: Vec<String> = returned
         .iter()
         .filter_map(|a| {
             let text = instructions_of(a)?;
             Some(match sent_back_by(a) {
-                None => format!("- {text}"),
+                None if all_from_a_person => format!("- {text}"),
+                None if es => format!("- {text} (lo pidió una persona)"),
+                None => format!("- {text} (a person asked for this)"),
                 Some(by) if es => {
                     format!("- {text} (lo pidió {by}, un asistente que la persona autorizó)")
                 }
@@ -680,7 +685,6 @@ pub fn rework_text(attempts: &[Attempt], round: i64, language: &str) -> String {
             })
         })
         .collect();
-    let all_from_a_person = returned.iter().all(|a| sent_back_by(a).is_none());
     let still_stands = (!earlier.is_empty()).then(|| {
         let intro = match (all_from_a_person, es) {
             (true, true) => "Antes, una persona pidió esto. Sigue en pie, así que no lo deshagas:",
@@ -980,6 +984,37 @@ const SCREEN_FILES: [&str; 8] = [
 /// What a built-in review of state looks at, as the specification names it.
 const STATE_RISKS: [&str; 3] = ["concurrency", "sharedContracts", "irreversibleData"];
 
+const REVIEWER_REQUEST_EN: &str = "Lines of `decided` whose `taken` is `request` were already decided in the request. One without an `assistant` or a `githubAccount` is the person's: don't question it, nor one of the specification's that says the same, though you can say the change doesn't follow it. One with either may not be the person's own words: report it, or one of the specification's that says the same, only if it puts security or data at risk. Only what a person sent back can change one of these, and then it wins. Where what the approver or an assistant sent back goes against one, the decision stands: report the conflict, for the person to decide.";
+const REVIEWER_REQUEST_ES: &str = "Las líneas de `decided` cuyo `taken` es `request` ya las decidió el pedido. Una sin `assistant` ni `githubAccount` es de la persona: no la cuestiones, ni una de la especificación que diga lo mismo, aunque sí puedes decir que el cambio no la cumple. Una con alguno de los dos puede no ser palabra de la persona: repórtala, o una de la especificación que diga lo mismo, solo si pone en riesgo la seguridad o los datos. Solo lo que una persona devolvió puede cambiar una de estas, y entonces manda. Donde lo que devolvió el aprobador o un asistente vaya contra una, la decisión se mantiene: reporta el conflicto, para que lo decida la persona.";
+const APPROVER_REQUEST_EN: &str = "Lines of `decided` whose `taken` is `request` were already decided in the request. One without an `assistant` or a `githubAccount` is the person's: discard a finding that questions it, or one of the specification's that says the same, which is neither rework nor `questioned`, but not one that says the change doesn't follow it. One with either may not be the person's own words: a finding that it, or one of the specification's that says the same, puts security or data at risk goes in `questioned`, never as rework. Only what a person sent back can change one of these, and then it wins. Where what the approver or an assistant sent back goes against one, the decision stands: put the conflict in `questioned`, never as rework.";
+const APPROVER_REQUEST_ES: &str = "Las líneas de `decided` cuyo `taken` es `request` ya las decidió el pedido. Una sin `assistant` ni `githubAccount` es de la persona: descarta un hallazgo que la cuestione, o a una de la especificación que diga lo mismo, que no es rework ni va en `questioned`, pero no uno que diga que el cambio no la cumple. Una con alguno de los dos puede no ser palabra de la persona: un hallazgo de que ella, o una de la especificación que diga lo mismo, pone en riesgo la seguridad o los datos va en `questioned`, nunca como rework. Solo lo que una persona devolvió puede cambiar una de estas, y entonces manda. Donde lo que devolvió el aprobador o un asistente vaya contra una, la decisión se mantiene: pon el conflicto en `questioned`, nunca como rework.";
+
+/// What a reviewer or an approver keeps to about what the request already decided. The built-in
+/// prompts say it, and the engine adds it to any other that doesn't, such as one a workflow saved
+/// before kept: otherwise an approver could send the person's own decision back as rework.
+pub(crate) fn request_rule(role: &StepRole, language: &str) -> Option<&'static str> {
+    let es = language.starts_with("es");
+    match role {
+        StepRole::Reviewer if es => Some(REVIEWER_REQUEST_ES),
+        StepRole::Reviewer => Some(REVIEWER_REQUEST_EN),
+        StepRole::Approver { .. } if es => Some(APPROVER_REQUEST_ES),
+        StepRole::Approver { .. } => Some(APPROVER_REQUEST_EN),
+        _ => None,
+    }
+}
+
+/// Whether a prompt already says it, in either language.
+pub(crate) fn says_request_rule(prompt: &str) -> bool {
+    [
+        REVIEWER_REQUEST_EN,
+        REVIEWER_REQUEST_ES,
+        APPROVER_REQUEST_EN,
+        APPROVER_REQUEST_ES,
+    ]
+    .iter()
+    .any(|rule| prompt.contains(rule))
+}
+
 /// The workflows that ship with Keel, in the app's language. The full one is the user's diagram.
 pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
     let es = language.starts_with("es");
@@ -990,11 +1025,11 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
             "{}\n\n{}\n{{{{steps.spec.output}}}}\n\n{{{{answers}}}}\n\n{{{{rework}}}}\n\n{}\n{{{{diff}}}}",
             if es {
                 format!(
-                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque. No cuestiones lo que eligió una persona: una decisión cuyo `taken` es `person`, o lo que la persona respondió. Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Una decisión que no se sostenga con el cambio ya hecho también lo es: cítala como la dice `decided`, con el archivo y la línea donde se ve, si los hay. Reporta como decisión que el cambio tomó por su cuenta el comportamiento nuevo que no pide ningún criterio, límite, decisión ni lo que se devolvió, con archivo y línea. Un defecto en él, o un comportamiento que rompe un límite, es un problema, no una decisión. Si no hay, el veredicto es approved. En `breaks`, pon el `id` del criterio o del límite que rompe cada problema, si rompe uno: entonces el veredicto no puede ser approved, por menor que parezca. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
+                    "Revisas un cambio que no escribiste, y no editas nada. {focus_es} Cuestiona también lo que la especificación decidió por su cuenta, en `decided`, donde toque tu enfoque. No cuestiones lo que eligió una persona: una decisión cuyo `taken` es `person`, o lo que la persona respondió. {REVIEWER_REQUEST_ES} Reporta solo problemas reales de este cambio, cada uno con archivo y línea. Una decisión que no se sostenga con el cambio ya hecho también lo es: cítala como la dice `decided`, con el archivo y la línea donde se ve, si los hay. Reporta como decisión que el cambio tomó por su cuenta el comportamiento nuevo que no pide ningún criterio, límite, decisión ni lo que se devolvió, con archivo y línea. Un defecto en él, o un comportamiento que rompe un límite, es un problema, no una decisión. Si no hay, el veredicto es approved. En `breaks`, pon el `id` del criterio o del límite que rompe cada problema, si rompe uno: entonces el veredicto no puede ser approved, por menor que parezca. Si no pudiste leer parte del cambio, pon esos archivos en `unread`, y el veredicto no puede ser approved. Responde en español."
                 )
             } else {
                 format!(
-                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Also question what the specification decided on its own, in `decided`, where it touches your focus. Don't question what a person chose: a decision whose `taken` is `person`, or what the person answered. Report only real problems in this change, each with its file and line. A decision that doesn't hold up now that the change is made is one too: quote it as `decided` says it, with the file and line where it shows, if any. Report new behavior that no criterion, limit, decision or what was sent back asks for as a decision the change took on its own, with its file and line. A defect in it, or behavior that breaks a limit, is a problem, not a decision. If there are none, the verdict is approved. In `breaks`, put the `id` of the criterion or limit each problem breaks, if it breaks one: then the verdict can't be approved, however minor it looks. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
+                    "You're reviewing a change you didn't write, and you edit nothing. {focus_en} Also question what the specification decided on its own, in `decided`, where it touches your focus. Don't question what a person chose: a decision whose `taken` is `person`, or what the person answered. {REVIEWER_REQUEST_EN} Report only real problems in this change, each with its file and line. A decision that doesn't hold up now that the change is made is one too: quote it as `decided` says it, with the file and line where it shows, if any. Report new behavior that no criterion, limit, decision or what was sent back asks for as a decision the change took on its own, with its file and line. A defect in it, or behavior that breaks a limit, is a problem, not a decision. If there are none, the verdict is approved. In `breaks`, put the `id` of the criterion or limit each problem breaks, if it breaks one: then the verdict can't be approved, however minor it looks. If you couldn't read part of the change, put those files in `unread`, and the verdict can't be approved."
                 )
             },
             text("Specification:", "Especificación:"),
@@ -1015,10 +1050,15 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
         ),
         text("Specification:", "Especificación:"),
         // What the specification decided on its own is the person's to settle, not the builder's.
-        text(
-            "A finding that questions what the specification decided on its own, in `decided`, is not a reason for rework, even if it's right: a person decides that, and can change it at the approval. Put each one in `questioned`, quoting the decision as `decided` says it, with the `number` it has there, and saying why it doesn't hold, mention them in reasons, and leave them out of instructions. Do the same with behavior the change added that no criterion, limit, decision or what was sent back asks for: put in `questioned` that it exists and the choice it makes, as a decision of the change, said in one line, with `number` null and the `round` it appeared in. A defect in it, such as a bug or a security hole, is still a real finding, and so is behavior that breaks a limit.",
-            "Un hallazgo que cuestiona lo que la especificación decidió por su cuenta, en `decided`, no es motivo de rework, aunque tenga razón: eso lo decide una persona, que puede cambiarlo en la aprobación. Pon cada uno en `questioned`, citando la decisión como la dice `decided`, con el `number` que tiene ahí, y diciendo por qué no se sostiene, menciónalos en reasons y déjalos fuera de instructions. Haz lo mismo con un comportamiento que agregó el cambio y que no pide ningún criterio, límite, decisión ni lo que se devolvió: pon en `questioned` que existe y lo que elige, como una decisión del cambio, dicha en una línea, con `number` en null y el `round` en que apareció. Un defecto en él, como un error o un hueco de seguridad, sigue siendo un hallazgo real, y también lo es un comportamiento que rompe un límite.",
-        ),
+        if es {
+            format!(
+                "Un hallazgo que cuestiona lo que la especificación decidió por su cuenta, en `decided`, no es motivo de rework, aunque tenga razón: eso lo decide una persona, que puede cambiarlo en la aprobación. Pon cada uno en `questioned`, citando la decisión como la dice `decided`, con el `number` que tiene ahí, y diciendo por qué no se sostiene, menciónalos en reasons y déjalos fuera de instructions. Haz lo mismo con un comportamiento que agregó el cambio y que no pide ningún criterio, límite, decisión ni lo que se devolvió: pon en `questioned` que existe y lo que elige, como una decisión del cambio, dicha en una línea, con `number` en null y el `round` en que apareció. Un defecto en él, como un error o un hueco de seguridad, sigue siendo un hallazgo real, y también lo es un comportamiento que rompe un límite. No cuestiones una decisión cuyo `taken` es `person`, ni una de la especificación que diga lo mismo: la tomó la persona. Descarta un hallazgo que la cuestione, pero no uno que diga que el cambio no la cumple. {APPROVER_REQUEST_ES}"
+            )
+        } else {
+            format!(
+                "A finding that questions what the specification decided on its own, in `decided`, is not a reason for rework, even if it's right: a person decides that, and can change it at the approval. Put each one in `questioned`, quoting the decision as `decided` says it, with the `number` it has there, and saying why it doesn't hold, mention them in reasons, and leave them out of instructions. Do the same with behavior the change added that no criterion, limit, decision or what was sent back asks for: put in `questioned` that it exists and the choice it makes, as a decision of the change, said in one line, with `number` null and the `round` it appeared in. A defect in it, such as a bug or a security hole, is still a real finding, and so is behavior that breaks a limit. Don't question a decision whose `taken` is `person`, nor one of the specification's that says the same: the person made it. Discard a finding that questions it, but not one that says the change doesn't follow it. {APPROVER_REQUEST_EN}"
+            )
+        },
     );
 
     // The simple one is the base, up to where a person gets involved.
@@ -1541,12 +1581,75 @@ mod tests {
             questioned["items"]["required"],
             serde_json::json!(["decided", "number", "round", "why"])
         );
+        // What the request has from an assistant or the account, too, and what goes against what a
+        // send-back that wasn't the person's asked for.
+        assert!(questioned["description"].as_str().unwrap().contains(
+            "if the specification decided it on its own or the request has it from an assistant or the project's GitHub account, or that what the approver or an assistant sent back goes against,"
+        ));
         assert!(
             questioned["description"]
                 .as_str()
                 .unwrap()
                 .contains("A person decides these at the approval")
         );
+    }
+
+    #[test]
+    fn what_the_request_already_decided_is_left_alone_like_what_a_person_chose() {
+        // Only a person's send-back changes it: an approver or an assistant can't answer for the
+        // person, so where theirs goes against it, the person decides.
+        for (language, reviewer, approver) in [
+            (
+                "en",
+                "Lines of `decided` whose `taken` is `request` were already decided in the request. One without an `assistant` or a `githubAccount` is the person's: don't question it, nor one of the specification's that says the same, though you can say the change doesn't follow it. One with either may not be the person's own words: report it, or one of the specification's that says the same, only if it puts security or data at risk. Only what a person sent back can change one of these, and then it wins. Where what the approver or an assistant sent back goes against one, the decision stands: report the conflict, for the person to decide.",
+                "Lines of `decided` whose `taken` is `request` were already decided in the request. One without an `assistant` or a `githubAccount` is the person's: discard a finding that questions it, or one of the specification's that says the same, which is neither rework nor `questioned`, but not one that says the change doesn't follow it. One with either may not be the person's own words: a finding that it, or one of the specification's that says the same, puts security or data at risk goes in `questioned`, never as rework. Only what a person sent back can change one of these, and then it wins. Where what the approver or an assistant sent back goes against one, the decision stands: put the conflict in `questioned`, never as rework.",
+            ),
+            (
+                "es",
+                "Las líneas de `decided` cuyo `taken` es `request` ya las decidió el pedido. Una sin `assistant` ni `githubAccount` es de la persona: no la cuestiones, ni una de la especificación que diga lo mismo, aunque sí puedes decir que el cambio no la cumple. Una con alguno de los dos puede no ser palabra de la persona: repórtala, o una de la especificación que diga lo mismo, solo si pone en riesgo la seguridad o los datos. Solo lo que una persona devolvió puede cambiar una de estas, y entonces manda. Donde lo que devolvió el aprobador o un asistente vaya contra una, la decisión se mantiene: reporta el conflicto, para que lo decida la persona.",
+                "Las líneas de `decided` cuyo `taken` es `request` ya las decidió el pedido. Una sin `assistant` ni `githubAccount` es de la persona: descarta un hallazgo que la cuestione, o a una de la especificación que diga lo mismo, que no es rework ni va en `questioned`, pero no uno que diga que el cambio no la cumple. Una con alguno de los dos puede no ser palabra de la persona: un hallazgo de que ella, o una de la especificación que diga lo mismo, pone en riesgo la seguridad o los datos va en `questioned`, nunca como rework. Solo lo que una persona devolvió puede cambiar una de estas, y entonces manda. Donde lo que devolvió el aprobador o un asistente vaya contra una, la decisión se mantiene: pon el conflicto en `questioned`, nunca como rework.",
+            ),
+        ] {
+            // The engine adds the same to a reviewer or an approver whose prompt lacks it.
+            assert_eq!(request_rule(&StepRole::Reviewer, language), Some(reviewer));
+            let approving = StepRole::Approver {
+                rework_to: "builder".into(),
+                max_rounds: 2,
+            };
+            assert_eq!(request_rule(&approving, language), Some(approver));
+            assert_eq!(request_rule(&StepRole::Worker, language), None);
+            let (mut reviewers, mut approvers) = (0, 0);
+            for step in builtin(language, None)
+                .iter()
+                .flat_map(|workflow| workflow.steps.iter())
+            {
+                let specs: Vec<&StepSpec> = match step {
+                    WorkflowStep::Agent(spec) => vec![spec],
+                    WorkflowStep::Parallel { steps, .. } => steps.iter().collect(),
+                    _ => Vec::new(),
+                };
+                for spec in specs {
+                    let told = match spec.role {
+                        StepRole::Reviewer => {
+                            reviewers += 1;
+                            reviewer
+                        }
+                        StepRole::Approver { .. } => {
+                            approvers += 1;
+                            approver
+                        }
+                        _ => continue,
+                    };
+                    assert!(spec.prompt.contains(told), "{language} {}", spec.id);
+                    for gone in ["what was sent back wins", "manda lo devuelto"] {
+                        assert!(!spec.prompt.contains(gone), "{language} {}", spec.id);
+                    }
+                }
+            }
+            // Five reviews each, `state` among them, and an approver, in the full one and the one
+            // that fits the change.
+            assert_eq!((reviewers, approvers), (10, 2), "{language}");
+        }
     }
 
     #[test]
@@ -2219,9 +2322,24 @@ mod tests {
             ),
             "{text}"
         );
+
         assert!(text.contains("\n\nA person sent this work back."), "{text}");
         assert!(text.ends_with("\nName it zero"), "{text}");
         assert!(rework_text(&attempts, 2, "es").starts_with("Antes se pidió esto."));
+
+        // A round later still, both are earlier, and each says who asked for it.
+        let mut later = attempts.clone();
+        later.push(later[1].clone());
+        later[2].round = 2;
+        with_output(&mut later, 2, "succeeded", serde_json::json!({}));
+        let text = rework_text(&later, 3, "en");
+        assert!(
+            text.ends_with(
+                "\n- Return 0 instead (Claude Code, an assistant the person allowed, asked for this)\n- Name it zero (a person asked for this)"
+            ),
+            "{text}"
+        );
+        assert!(rework_text(&later, 3, "es").ends_with("\n- Name it zero (lo pidió una persona)"));
     }
 
     #[test]

@@ -16,7 +16,7 @@ import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge, VERI
 import { ProposalRow } from "./BrainPage";
 import { FlowDiagram } from "./FlowDiagram";
 import { JointChangeDialog } from "./JointChangeDialog";
-import { ContractLine, SpecView } from "./SpecView";
+import { ContractLine, SpecView, fromRequest } from "./SpecView";
 
 type Tab = "understood" | "found" | "activity" | "commands" | "changes" | "prompt" | "details" | "output";
 
@@ -488,6 +488,9 @@ function questionedLines(q: Questioned, decided: SpecDecided[]): number[] {
   return typeof number === "number" && Number.isInteger(number) && number >= 1 && number <= decided.length ? [number - 1] : [];
 }
 
+/** What a review questions, with the lines of `decided` it's about, by their place among all of them. */
+type QuestionedLines = Questioned & { lines: number[] };
+
 /**
  * The round in which the change added something nothing asks for, which the approver gives with no
  * number. One with a number is a line of what was decided, and an older answer has no round.
@@ -498,30 +501,29 @@ function addedIn(q: Questioned): number | null {
 }
 
 /**
- * What it settled by itself. Each line can go back to whoever does the work, without starting over.
- * What a review questions of it is the person's to settle, so it shows on its line. What the change
- * added that nothing asks for comes after, as lines of their own, with the round each appeared in.
+ * What it settled by itself, or what the request already had: the lines of `decided` that `only` picks,
+ * by their place among all of them. Each line can go back to whoever does the work, without starting
+ * over. What a review questions of it is the person's to settle, so it shows on its line, and
+ * `elsewhere` is what matches no line, quoted as it came. What the change added that nothing asks for,
+ * in `added`, comes after, as lines of their own, with the round each appeared in.
  */
-function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; questioned: Questioned[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
+function DecidedList({ attemptId, decided, only, questioned, elsewhere, added, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; only: (item: SpecDecided) => boolean; questioned: QuestionedLines[]; elsewhere: Questioned[]; added: Questioned[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
   const { t } = useTranslation();
   const [changing, setChanging] = useState<number | null>(null);
   const draftKey = `${attemptId}:change:${changing}`;
   const instruction = useApp((s) => s.approvalDrafts[draftKey] ?? "");
   const setDraft = useApp((s) => s.setApprovalDraft);
-  const onLines = questioned.filter((q) => addedIn(q) === null);
-  const lines = onLines.map((q) => questionedLines(q, decided));
-  // One that matches no line still reaches the person, quoted as it came.
-  const elsewhere = onLines.filter((_, at) => lines[at].length === 0);
-  const items: (SpecDecided & { added?: { round: number; why: string } })[] = [
-    ...decided,
-    ...questioned.flatMap((q) => {
+  const shown: { item: SpecDecided & { added?: { round: number; why: string } }; index: number }[] = [
+    ...decided.flatMap((item, index) => (only(item) ? [{ item, index }] : [])),
+    // After every line of `decided`, so none takes the place of one.
+    ...added.flatMap((q, at) => {
       const round = addedIn(q);
-      return round === null ? [] : [{ text: q.decided, added: { round, why: q.why } }];
+      return round === null ? [] : [{ item: { text: q.decided, added: { round, why: q.why } }, index: decided.length + at }];
     }),
   ];
   return (
     <ul className="space-y-1.5">
-      {items.map((item, index) => (
+      {shown.map(({ item, index }) => (
         // Lines of a fixed text: their position is their identity.
         <li key={index}>
           <div className="flex items-start gap-2">
@@ -533,10 +535,12 @@ function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, o
             )}
           </div>
           {item.taken === "person" && <p className="text-[11.5px] text-subtle">{t("run.decidedYouChose")}</p>}
+          {item.taken === "request" && item.assistant && <p className="text-[11.5px] text-subtle">{t("run.decidedWrittenBy", { client: item.assistant })}</p>}
+          {item.taken === "request" && !item.assistant && item.githubAccount && <p className="text-[11.5px] text-subtle">{t("run.decidedWrittenWithAccount")}</p>}
           {item.taken === "roundsLimit" && <p className="text-[11.5px] text-warning">{t("run.decidedKeelTook")}</p>}
           {item.added && <p className="selectable text-[11.5px] break-words text-warning">{t("run.decidedAdded", { round: item.added.round, why: item.added.why })}</p>}
-          {onLines
-            .filter((_, at) => lines[at].includes(index))
+          {questioned
+            .filter((q) => q.lines.includes(index))
             .map((q, at) => (
               <p key={at} className="selectable text-[11.5px] break-words text-warning">
                 {t("run.decidedQuestioned", { why: q.why })}
@@ -666,9 +670,17 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const nothingToExplain = asked !== null && !attempts.some((a) => a.kind === "agent" && a.role === "worker");
   const { reviewers, approver } = reviewsOfRound(attempts, run.round);
   const reviewed = reviewers.some((review) => review.state !== "skipped") || approver != null;
-  // What a review questions of what was decided alone, which the approver left to the person.
+  // What a review questions of what was decided alone, which the approver left to the person, and
+  // the lines it's about. What the change added that nothing asks for is about none of them.
   const raised = approver?.output?.questioned;
-  const questioned = Array.isArray(raised) ? raised.filter((q) => typeof q?.decided === "string" && typeof q.why === "string") : [];
+  const questioned: QuestionedLines[] = (Array.isArray(raised) ? raised.filter((q) => typeof q?.decided === "string" && typeof q.why === "string") : []).map((q) => ({
+    ...q,
+    lines: spec && addedIn(q) === null ? questionedLines(q, spec.decided) : [],
+  }));
+  // That comes after what was decided alone, with the round it appeared in.
+  const added = questioned.filter((q) => addedIn(q) !== null);
+  // One that matches no line still reaches the person, quoted as it came, with what it decided alone.
+  const elsewhere = questioned.filter((q) => q.lines.length === 0 && addedIn(q) === null);
   const skippedForSize = skippedSteps(attempts);
   const hiddenFiles = files.length - SHOWN_FILES;
   const sentBack = sentBackByAssistant(attempts, run.round);
@@ -733,9 +745,14 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             <p className="selectable break-words">{askedGist.text}</p>
           </ApprovalRow>
         )}
-        {((spec?.decided.length ?? 0) > 0 || questioned.length > 0) && (
+        {spec && spec.decided.some(fromRequest) && (
+          <ApprovalRow label={t("run.decidedInRequest")}>
+            <DecidedList attemptId={attempt.id} decided={spec.decided} only={fromRequest} questioned={questioned} elsewhere={[]} added={[]} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
+          </ApprovalRow>
+        )}
+        {((spec?.decided.some((item) => !fromRequest(item)) ?? false) || elsewhere.length > 0 || added.length > 0) && (
           <ApprovalRow label={t("run.decidedTitle")} note={t("run.generated")}>
-            <DecidedList attemptId={attempt.id} decided={spec?.decided ?? []} questioned={questioned} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
+            <DecidedList attemptId={attempt.id} decided={spec?.decided ?? []} only={(item) => !fromRequest(item)} questioned={questioned} elsewhere={elsewhere} added={added} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
           </ApprovalRow>
         )}
         {sentBack && (

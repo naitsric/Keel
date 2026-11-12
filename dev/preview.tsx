@@ -191,7 +191,17 @@ const previewSpec = {
   decided: [
     { text: say("Keeps the rounding as it is today, because nothing asked to change it.", "Deja el redondeo como está hoy, porque nada pidió cambiarlo.") },
     { text: say("If `whole` is 0, what should happen? Show an error, as today", "Si `whole` es 0, ¿qué debe pasar? Mostrar error, como hoy"), taken: "person" },
-    ...(params.get("taken") === "1" ? [{ text: say("Should the total round up? Leave it as it is", "¿El total debe redondear hacia arriba? Dejarlo como está"), taken: "roundsLimit" }] : []),
+    // taken=1 adds one Keel took when the rounds of questions ran out, and three the request already
+    // decided: one the person wrote, one an assistant wrote for them, and one from an issue written
+    // with the project's GitHub account.
+    ...(params.get("taken") === "1"
+      ? [
+          { text: say("Should the total round up? Leave it as it is", "¿El total debe redondear hacia arriba? Dejarlo como está"), taken: "roundsLimit" },
+          { text: say("If the author resolves their own critical thread, it counts for now.", "Si el autor resuelve su propio hilo critical, por ahora cuenta."), taken: "request" },
+          { text: say("Invoices already sent keep the total they had.", "Las facturas ya enviadas conservan el total que tenían."), taken: "request", assistant: "Claude Code" },
+          { text: say("Drafts don't count toward the total.", "Los borradores no cuentan en el total."), taken: "request", githubAccount: "alice" },
+        ]
+      : []),
     ...(questionedShown ? [{ text: say("Sorts the invoices by date, as the list does today.", "Ordena las facturas por fecha, como la lista de hoy.") }] : []),
   ],
   questions: [],

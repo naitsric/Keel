@@ -923,6 +923,40 @@ describe("the approval card", () => {
         expect(page()).toContain("The rounds of questions ran out, so Keel stopped asking and took the recommended option.");
       });
 
+      it("shows what the request already decided apart, saying when an assistant or the project's GitHub account wrote it", async () => {
+        const fromRequest = [
+          { text: "If the author resolves their own critical thread, it counts for now.", taken: "request" as const },
+          { text: "Old threads stay as they are.", taken: "request" as const, assistant: "Claude Code" },
+          { text: "Invoices already sent keep their total.", taken: "request" as const, githubAccount: "alice" },
+          ...decided,
+        ];
+        show([specifier({ decided: fromRequest }), builder(["calc.py"]), human], ["calc.py"], building);
+        const row = (label: string) => [...document.querySelectorAll("dt")].find((dt) => dt.textContent?.startsWith(label))?.parentElement?.textContent ?? "";
+        const inRequest = row("Decided in the request");
+        expect(inRequest).toContain("If the author resolves their own critical thread, it counts for now.");
+        expect(inRequest).toContain("Old threads stay as they are.ChangeClaude Code wrote it");
+        expect(inRequest).toContain("Invoices already sent keep their total.ChangeWritten with the project's GitHub account");
+        expect(inRequest).not.toContain("Keeps the rounding as it is");
+        expect(inRequest).not.toContain("Written by the agent");
+        const alone = row("What it decided alone");
+        expect(alone).toContain("Keeps the rounding as it is");
+        expect(alone).toContain("You chose this.");
+        expect(alone).not.toContain("Old threads stay");
+        expect(page().match(/wrote it/g)).toHaveLength(1);
+        expect(page().match(/GitHub account/g)).toHaveLength(1);
+
+        await i18next.changeLanguage("es");
+        show([specifier({ decided: fromRequest }), builder(["calc.py"]), human], ["calc.py"], building);
+        expect(page()).toContain("Lo escribió Claude Code");
+        expect(page()).toContain("Lo escribió la cuenta del proyecto en GitHub");
+      });
+
+      it("has no row for the request when it decided nothing, nor for the agent when only the request did", () => {
+        show([specifier({ decided: [{ text: "Old threads stay as they are.", taken: "request" }] }), builder(["calc.py"]), human], ["calc.py"], building);
+        expect(page()).toContain("Decided in the request");
+        expect(page()).not.toContain("What it decided alone");
+      });
+
       it("says on its line what a review questions, for the person to decide, and quotes one that matches no line", () => {
         const questioned = [
           { decided: "“keeps the rounding  as it is.”", why: "Totals now drift by a cent." },

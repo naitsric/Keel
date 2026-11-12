@@ -312,7 +312,8 @@ pub struct StartTaskArgs {
     pub max_turns: Option<u32>,
     #[serde(default)]
     pub max_budget_usd: Option<f64>,
-    /// What its card is called, in up to 80 characters. The prompt's first line by default.
+    /// What its card is called, on one line of up to 80 characters. The prompt's first line by
+    /// default.
     #[serde(default)]
     pub title: Option<String>,
     /// `en` or `es`, for what the agent writes. The app's language by default.
@@ -905,7 +906,12 @@ impl McpServer {
                     "`maxTurns` and `maxBudgetUsd` have to be above zero.",
                 ));
             }
-            let title = match args.title.as_deref().map(str::trim) {
+            // A card's title is one line, which only names it.
+            let title = args
+                .title
+                .as_deref()
+                .map(|title| title.split_whitespace().collect::<Vec<_>>().join(" "));
+            let title = match title.as_deref() {
                 None | Some("") => None,
                 Some(title) if title.chars().count() > MAX_TASK_TITLE => {
                     return Err(ToolError::new(format!(

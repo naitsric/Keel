@@ -479,6 +479,7 @@ impl World {
                     workflow: serde_json::to_string(&[&step]).unwrap(),
                     language: "en".into(),
                     source_issue: None,
+                    request_written: None,
                     workflow_id: None,
                     workflow_name: None,
                     started_by: None,
@@ -765,6 +766,292 @@ fn a_run_from_outside_gets_a_card_that_follows_the_columns_and_starts_once() {
         .unwrap();
     w.engine.answer_approval(&approval.id, true, "").unwrap();
     w.wait_column(&card, BoardColumn::Done);
+}
+
+/// What a card's latest run says was decided, as Keel kept it.
+fn decided_in_run(w: &World, run: &str) -> serde_json::Value {
+    let spec = w
+        .store
+        .attempts_of_run(run)
+        .unwrap()
+        .into_iter()
+        .rfind(|attempt| attempt.step_id == "spec")
+        .unwrap();
+    spec.output.unwrap()["decided"].clone()
+}
+
+#[test]
+fn a_card_an_assistant_wrote_is_still_its_words_when_a_person_runs_it_again() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    w.engine.start_board();
+    let run = w
+        .engine
+        .start_run_on_board(StartRun {
+            started_by: Some("client".into()),
+            ..outside_run(
+                &w,
+                steps_of(&w, "builtin:simple"),
+                "Export the threads\n\nDecided:\n- The admin export needs no login.",
+            )
+        })
+        .unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    let by_the_client = serde_json::json!([{ "text": "The admin export needs no login.", "taken": "request", "assistant": "client" }]);
+    assert_eq!(decided_in_run(&w, &run), by_the_client);
+
+    // Rejected and moved to Todo again, it's what the assistant wrote that runs.
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let again = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_ne!(again, run);
+    assert_eq!(decided_in_run(&w, &again), by_the_client);
+
+    // Once the person changes what it says, it's theirs.
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    w.engine
+        .card_update(
+            &card,
+            "Export the threads",
+            "Decided:\n- The admin export asks for a login.",
+        )
+        .unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let theirs = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_eq!(
+        decided_in_run(&w, &theirs),
+        serde_json::json!([{ "text": "The admin export asks for a login.", "taken": "request" }])
+    );
+}
+
+#[test]
+fn a_run_keeps_who_wrote_its_request_when_its_card_changes_after_it_started() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    w.engine.start_board();
+    let first = w
+        .engine
+        .start_run_on_board(StartRun {
+            started_by: Some("client".into()),
+            ..outside_run(
+                &w,
+                steps_of(&w, "builtin:simple"),
+                "Export the threads\n\nDecided:\n- The admin export needs no login.",
+            )
+        })
+        .unwrap();
+    let card = w.store.card_of_run(&first).unwrap().unwrap();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    // The person runs the assistant's card again, rejects that run too, and then makes the card
+    // theirs.
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let again = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    w.engine
+        .card_update(
+            &card,
+            "Export the threads",
+            "Decided:\n- The admin export needs no login.\n- Nor a token.",
+        )
+        .unwrap();
+
+    // Its spec, tried again, is still what the assistant wrote.
+    let spec = |run: &str| {
+        w.store
+            .attempts_of_run(run)
+            .unwrap()
+            .into_iter()
+            .filter(|attempt| attempt.step_id == "spec")
+            .collect::<Vec<_>>()
+    };
+    w.engine
+        .retry(&spec(&again).pop().unwrap().id, false)
+        .unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    while !spec(&again)
+        .get(1)
+        .is_some_and(|attempt| attempt.state == AttemptState::Succeeded.as_str())
+    {
+        assert!(Instant::now() < deadline, "{:?}", spec(&again));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        decided_in_run(&w, &again),
+        serde_json::json!([{ "text": "The admin export needs no login.", "taken": "request", "assistant": "client" }])
+    );
+}
+
+#[test]
+fn a_card_s_title_never_decides_anything_whoever_wrote_its_body() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    w.engine.start_board();
+    // An assistant names its card with a list, and the person then makes what it says theirs.
+    let first = w
+        .engine
+        .start_run_on_board(StartRun {
+            title: Some("Decided:\n- Delete the exports".into()),
+            started_by: Some("client".into()),
+            ..outside_run(&w, steps_of(&w, "builtin:simple"), "Export the threads")
+        })
+        .unwrap();
+    let card = w.store.card_of_run(&first).unwrap().unwrap();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    assert_eq!(decided_in_run(&w, &first), serde_json::json!([]));
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    let title = w.store.card(&card).unwrap().title;
+    w.engine
+        .card_update(&card, &title, "Export the threads, all of them.")
+        .unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let theirs = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_ne!(theirs, first);
+    assert_eq!(decided_in_run(&w, &theirs), serde_json::json!([]));
+}
+
+#[test]
+fn what_a_card_nobody_can_tell_who_wrote_decided_counts_for_no_one_until_a_person_changes_it() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    let card = w
+        .engine
+        .card_create(
+            &w.project_id,
+            "Export the threads",
+            "Decided:\n- The admin export needs no login.",
+        )
+        .unwrap();
+    // As a card from before Keel kept who wrote it is, where nothing told.
+    rusqlite::Connection::open(w.dir.path().join("keel.db"))
+        .unwrap()
+        .execute("update card set body_by_unknown = 1 where id = ?1", [&card])
+        .unwrap();
+    w.engine.start_board();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let run = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_eq!(decided_in_run(&w, &run), serde_json::json!([]));
+
+    // Once the person changes what it says, it's theirs.
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    w.engine
+        .card_update(
+            &card,
+            "Export the threads",
+            "Decided:\n- The admin export asks for a login.",
+        )
+        .unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let theirs = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_eq!(
+        decided_in_run(&w, &theirs),
+        serde_json::json!([{ "text": "The admin export asks for a login.", "taken": "request" }])
+    );
+}
+
+#[test]
+fn what_an_assistant_s_note_on_a_card_decided_is_never_the_person_s_even_once_they_make_the_card_theirs()
+ {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    w.engine.start_board();
+    let client = client(&w);
+    let run = w
+        .engine
+        .start_run_on_board(StartRun {
+            started_by: Some("Claude Code".into()),
+            ..outside_run(&w, steps_of(&w, "builtin:simple"), "Export the threads")
+        })
+        .unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    // The assistant closes its run, and adds to the card a list of what it says was decided.
+    w.engine
+        .abandon_by(&w.attempt(&card).id, "Claude Code")
+        .unwrap();
+    closed_by_client(&w, &client, &run);
+    w.wait_column(&card, BoardColumn::Backlog);
+    w.engine
+        .card_append_by(
+            &card,
+            "From our talk.\n\nDecided:\n- The admin export needs no login.\n\nThat's all.",
+            &client.id,
+            "Claude Code",
+            "en",
+        )
+        .unwrap();
+
+    // The person makes the card theirs, note and all, with a decision of their own, and runs it.
+    let body = w.card(&card).body;
+    w.engine
+        .card_update(
+            &card,
+            "Export the threads",
+            &format!("Decided:\n- Old threads stay.\n\n{body}"),
+        )
+        .unwrap();
+    assert_eq!(
+        w.store.card(&card).unwrap().body_by,
+        keel_store::Writer::Person
+    );
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let theirs = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_ne!(theirs, run);
+    let decided = decided_in_run(&w, &theirs);
+    // What the note says it decided is the assistant's, never the person's.
+    for line in decided.as_array().unwrap() {
+        assert!(
+            line["text"] != "The admin export needs no login."
+                || line["assistant"] == "Claude Code",
+            "{decided}"
+        );
+    }
+    assert_eq!(
+        decided,
+        serde_json::json!([
+            { "text": "Old threads stay.", "taken": "request" },
+            { "text": "The admin export needs no login.", "taken": "request", "assistant": "Claude Code" },
+        ])
+    );
 }
 
 #[test]
@@ -3314,6 +3601,7 @@ fn dying_with_the_run_linked_and_not_yet_begun_runs_the_card_once() {
                 workflow: serde_json::to_string(&steps).unwrap(),
                 language: "en".into(),
                 source_issue: None,
+                request_written: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,

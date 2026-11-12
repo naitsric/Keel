@@ -1822,6 +1822,58 @@ fn a_change_proposed_from_outside_the_board_is_agreed_like_one_started_from_a_ca
 }
 
 #[test]
+fn a_part_keeps_what_the_request_of_its_change_decided_and_who_wrote_it() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.short_workflows();
+    // The agent that agrees on it writes a list of its own into the part, which isn't the person's.
+    let agreed_with_a_list = agreed(&[
+        (
+            "valora",
+            "Sends the token.\n\nDecided:\n- Valora needs no login.",
+        ),
+        ("app", "Reads the token"),
+    ]);
+    w.answers(&[
+        agreed_with_a_list,
+        plain("Valora sends the token"),
+        json!({}),
+        json!({}),
+    ]);
+    let run = w
+        .engine
+        .propose_change_on_board(
+            StartRun {
+                request: "Log in through Valora.\n\nDecided:\n- The token travels in a header."
+                    .into(),
+                ..proposal(&w, None)
+            },
+            std::slice::from_ref(&w.valora),
+        )
+        .unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+
+    // Only that: what was agreed for the part is an agent's, and Keel's words around it are Keel's.
+    let spec = w.wait_for(&first, "spec", AttemptState::Succeeded);
+    assert_eq!(
+        spec.output.unwrap()["decided"],
+        json!([{ "text": "The token travels in a header.", "taken": "request", "assistant": "client" }])
+    );
+    assert!(
+        spec.prompt.contains(
+            "don't repeat them in `decided`:\n- The token travels in a header.\nAnything else"
+        ),
+        "{}",
+        spec.prompt
+    );
+}
+
+#[test]
 fn a_change_that_names_no_other_project_or_one_that_is_missing_creates_nothing() {
     let w = world();
     let own = std::slice::from_ref(&w.app);
