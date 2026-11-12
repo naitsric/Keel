@@ -1,0 +1,11 @@
+{
+  "name": "keel-sample-yarn",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/duration.js"
+  },
+  "dependencies": {
+    "ms": "2.1.3"
+  }
+}

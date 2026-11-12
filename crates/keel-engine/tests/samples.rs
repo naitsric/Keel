@@ -631,6 +631,31 @@ fn composer() {
     });
 }
 
+#[test]
+fn yarn() {
+    try_sample(Sample {
+        name: "yarn",
+        programs: &["yarn", "node"],
+        path: &[],
+        finds: &[],
+        commands: Commands {
+            setup: "yarn install --frozen-lockfile",
+            check: "yarn test",
+        },
+        guessed: true,
+        downloads: Some(".cache/yarn"),
+        needs_download: Some(("yarn add left-pad", "ENOTFOUND")),
+        // Yarn 1 retries four times, 3 s apart. Only its `--offline` flag stops that, which it reads
+        // from a settings file and from no variable.
+        fails_within: 15,
+        env: &[],
+        starts_servers: false,
+        proposes_localhost: false,
+        // It looks for a workspace in every `package.json` above the repo.
+        reads_above: true,
+    });
+}
+
 /// #94: Keel's own check, from a clone with no `target/`. The app needs its frontend built to compile,
 /// as in CI.
 #[test]
