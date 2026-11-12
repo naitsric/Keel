@@ -299,6 +299,25 @@ pub fn verify_prompt(language: &str) -> &'static str {
     }
 }
 
+/// The heading a builder puts what it added that nothing asks for under, in English and Spanish.
+/// Keel finds the list by it, so an approver gets it wherever it is in the message.
+pub const ADDED_HEADINGS: [&str; 2] = ["Added without being asked", "Agregado sin que se pidiera"];
+
+/// What every step that can change files is told about what it added that nothing asks for. A
+/// saved workflow's prompt may not say it, so Keel adds it when the prompt doesn't.
+pub fn added_apart(language: &str) -> String {
+    let [english, spanish] = ADDED_HEADINGS;
+    if language.starts_with("es") {
+        format!(
+            "Termina tu mensaje final con el título \"## {spanish}\" y, debajo, cada cosa que agregaste sin que la pida ningún criterio, límite, decisión ni lo que se devolvió, una por línea, o \"Nada.\" si no hay ninguna."
+        )
+    } else {
+        format!(
+            "End your final message with the heading \"## {english}\" and, under it, each thing you added that no criterion, limit, decision or what was sent back asks for, one per line, or \"Nothing.\" if there's none."
+        )
+    }
+}
+
 /// The default workflow from the user's diagram, without what later stages add.
 pub fn full_workflow(
     language: &str,
@@ -312,11 +331,18 @@ pub fn full_workflow(
     } else {
         SPEC_PROMPT_EN
     };
-    let builder_prompt = if spanish {
-        "Implementa esta especificación. Escribe primero la prueba que falla, respeta sus límites y deja el trabajo en un commit. Si algo no queda claro mientras construyes, no te detengas a preguntar: elige la opción más conservadora y di cuál en tu mensaje final. En tu mensaje final, lista aparte lo que agregaste sin que lo pida ningún criterio, límite ni decisión, o di que no hay nada.\n\nPedido original:\n{{request}}\n\nEspecificación:\n{{steps.spec.output}}\n\n{{answers}}\n\n{{rework}}"
+    let (opening, rest) = if spanish {
+        (
+            "Implementa esta especificación. Escribe primero la prueba que falla, respeta sus límites y deja el trabajo en un commit. Si algo no queda claro mientras construyes, no te detengas a preguntar: elige la opción más conservadora y di cuál en tu mensaje final.",
+            "\n\nPedido original:\n{{request}}\n\nEspecificación:\n{{steps.spec.output}}\n\n{{answers}}\n\n{{rework}}",
+        )
     } else {
-        "Implement this specification. Write the failing test first, respect its limits, and leave your work in a commit. If something is unclear while you build, don't stop to ask: choose the most conservative option and say which in your final message. In your final message, list apart what you added that no criterion, limit or decision asks for, or say there's nothing.\n\nOriginal request:\n{{request}}\n\nSpecification:\n{{steps.spec.output}}\n\n{{answers}}\n\n{{rework}}"
+        (
+            "Implement this specification. Write the failing test first, respect its limits, and leave your work in a commit. If something is unclear while you build, don't stop to ask: choose the most conservative option and say which in your final message.",
+            "\n\nOriginal request:\n{{request}}\n\nSpecification:\n{{steps.spec.output}}\n\n{{answers}}\n\n{{rework}}",
+        )
     };
+    let builder_prompt = format!("{opening} {}{rest}", added_apart(language));
     let agent = |id: &str, model: &str, tools, role, prompt: &str| {
         WorkflowStep::Agent(StepSpec {
             id: id.into(),
@@ -344,7 +370,7 @@ pub fn full_workflow(
             builder_model,
             ToolProfile::Build,
             StepRole::Worker,
-            builder_prompt,
+            &builder_prompt,
         ),
     ];
     if let Some(run) = check.map(str::trim).filter(|c| !c.is_empty()) {
@@ -744,22 +770,27 @@ mod tests {
     }
 
     #[test]
-    fn the_builder_lists_apart_what_it_added_that_nothing_asks_for() {
-        for (language, told) in [
+    fn the_builder_ends_its_message_with_what_it_added_under_a_heading_keel_finds() {
+        for (language, told, heading) in [
             (
                 "en",
-                "In your final message, list apart what you added that no criterion, limit or decision asks for, or say there's nothing.",
+                "End your final message with the heading \"## Added without being asked\" and, under it, each thing you added that no criterion, limit, decision or what was sent back asks for, one per line, or \"Nothing.\" if there's none.",
+                "Added without being asked",
             ),
             (
                 "es",
-                "En tu mensaje final, lista aparte lo que agregaste sin que lo pida ningún criterio, límite ni decisión, o di que no hay nada.",
+                "Termina tu mensaje final con el título \"## Agregado sin que se pidiera\" y, debajo, cada cosa que agregaste sin que la pida ningún criterio, límite, decisión ni lo que se devolvió, una por línea, o \"Nada.\" si no hay ninguna.",
+                "Agregado sin que se pidiera",
             ),
         ] {
+            assert_eq!(added_apart(language), told);
+            assert!(ADDED_HEADINGS.contains(&heading), "{language}");
+            // Said once, before what it works on, so Keel has no reason to say it again.
             let steps = full_workflow(language, "o", "s", None);
             let WorkflowStep::Agent(builder) = &steps[1] else {
                 panic!()
             };
-            assert!(builder.prompt.contains(told), "{language}");
+            assert_eq!(builder.prompt.matches(told).count(), 1, "{language}");
             assert!(
                 builder.prompt.find(told) < builder.prompt.find("{{request}}"),
                 "{language}"

@@ -2056,20 +2056,25 @@ impl Inner {
             spec.role,
             StepRole::Reviewer | StepRole::Verifier | StepRole::Approver { .. }
         );
-        let mut text = self.render_prompt(&spec.prompt, run, judging)?;
+        let attempts = self.store.attempts_of_run(&run.id)?;
+        let mut text = self.render_prompt(&spec.prompt, run, &attempts, judging)?;
         if spec.role == StepRole::Worker && spec.tools == keel_core::ToolProfile::Build {
-            let attempts = self.store.attempts_of_run(&run.id)?;
             if workflows::returned_before(&attempts, run.round) {
                 let rework = workflows::rework_text(&attempts, run.round, &run.language);
                 if !text.contains(&rework) {
                     text.push_str(&format!("\n\n{rework}"));
                 }
             }
+            // An approver is told this is where the builder lists what it added, so every step
+            // that can change files is told to, also one of a workflow saved or started before.
+            let added = prompts::added_apart(&run.language);
+            if !text.contains(&added) {
+                text.push_str(&format!("\n\n{added}"));
+            }
         }
         // Every approver can say in which round something the change added appeared, so every one
         // is told which round this is, and what the builder said it added, whatever its prompt says.
         if matches!(spec.role, StepRole::Approver { .. }) {
-            let attempts = self.store.attempts_of_run(&run.id)?;
             let builder = workflows::builder_text(&attempts, &run.language);
             let rounds = workflows::round_text(&attempts, run.round, &run.language);
             for part in [builder, rounds].iter().filter(|part| !part.is_empty()) {
@@ -2079,15 +2084,16 @@ impl Inner {
         Ok(text)
     }
 
-    /// What a step's prompt becomes right now. The answers come from this run's latest round.
-    /// `judging` is for an agent that decides on the change, which has to read all of it.
+    /// What a step's prompt becomes right now, from the run's `attempts` so far. The answers come
+    /// from this run's latest round. `judging` is for an agent that decides on the change, which
+    /// has to read all of it.
     fn render_prompt(
         &self,
         template: &str,
         run: &keel_store::Run,
+        attempts: &[keel_store::Attempt],
         judging: bool,
     ) -> Result<String> {
-        let attempts = self.store.attempts_of_run(&run.id)?;
         let steps: Vec<WorkflowStep> =
             serde_json::from_value(run.workflow.clone()).unwrap_or_default();
         let workspace = self.workspace(&run.id);
@@ -2109,20 +2115,20 @@ impl Inner {
                     .join(head.get(..12).unwrap_or(&head));
                 Some(diffs::for_prompt(diff, &folder, &run.language, judging))
             }
-            "rework" => Some(workflows::rework_text(&attempts, run.round, &run.language)),
-            "answers" => Some(workflows::answers_text(&attempts, &run.language)),
+            "rework" => Some(workflows::rework_text(attempts, run.round, &run.language)),
+            "answers" => Some(workflows::answers_text(attempts, &run.language)),
             "projects" => self
                 .agreement(&run.id)
                 .ok()
                 .flatten()
                 .map(|agreement| agreement.projects_text(&run.language)),
             "check" => Some(verification::check_text(
-                &verification::checks_in_round(&steps, &attempts, run.round),
+                &verification::checks_in_round(&steps, attempts, run.round),
                 &run.language,
             )),
             _ => {
                 let id = name.strip_prefix("steps.")?.strip_suffix(".output")?;
-                Some(workflows::output_of(&attempts, id))
+                Some(workflows::output_of(attempts, id))
             }
         }))
     }
