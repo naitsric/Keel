@@ -1,11 +1,11 @@
 import { AlertTriangle, ExternalLink, GitPullRequest } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type AttemptState, type CheckedCriterion, type ContractPoint, type JointCard, type JointChange } from "../lib/api";
+import { api, type AttemptState, type ContractPoint, type JointCard, type JointChange } from "../lib/api";
 import { isLane, partText, partWarningText, waitsForText } from "../lib/board";
 import { errorText } from "../lib/reason";
 import { useApp, type View } from "../lib/store";
-import { Button, Modal, StateBadge } from "../ui/primitives";
+import { Button, Modal, StateBadge, VERIFY_TONES } from "../ui/primitives";
 import { SpecView } from "./SpecView";
 
 /** Its badge: what became of its pull request, or where its run stands, or which column it's in. */
@@ -60,12 +60,6 @@ function PartRow({ card, busy, onOpenRun, onOpenPr, onStopWaiting }: { card: Joi
   );
 }
 
-const RESULT_TONES: Record<CheckedCriterion["result"], string> = {
-  met: "text-success",
-  unmet: "font-medium text-warning",
-  unverified: "text-muted",
-};
-
 /** A point the parts agree on exactly, and what each part that keeps it found. */
 function ContractRow({ point }: { point: ContractPoint }) {
   const { t } = useTranslation();
@@ -77,7 +71,7 @@ function ContractRow({ point }: { point: ContractPoint }) {
       <ul className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-[11.5px]">
         {point.parts.map((part) => (
           <li key={part.cardId}>
-            {t("joint.contractPart", { position: part.position, project: part.project })}: <span className={part.result ? RESULT_TONES[part.result] : "text-subtle"}>{part.result ? t(`run.verifyResult.${part.result}`) : t(part.verifies ? "joint.notChecked" : "joint.noVerifier")}</span>
+            {t("joint.contractPart", { position: part.position, project: part.project })}: <span className={part.result ? VERIFY_TONES[part.result] : "text-subtle"}>{part.result ? t(`run.verifyResult.${part.result}`) : t(part.verifies ? "joint.notChecked" : "joint.noVerifier")}</span>
           </li>
         ))}
       </ul>

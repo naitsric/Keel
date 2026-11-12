@@ -397,7 +397,8 @@ impl Spec {
     }
 
     /// What its contract gets wrong: like a criterion, each point says when and then within the
-    /// same limit, and it names only projects it was given, one with a part at least.
+    /// same limit, and it names only projects it was given, one with a part at least. Each problem
+    /// says where the point is, since its id is Keel's and the agent never wrote it.
     fn contract_problems(&self, projects: &[String]) -> Vec<SpecProblem> {
         let mut problems = Vec::new();
         if self.contract.len() > MAX_CONTRACT {
@@ -406,15 +407,17 @@ impl Spec {
                 limit: MAX_CONTRACT,
             });
         }
-        for point in &self.contract {
+        for (index, point) in self.contract.iter().enumerate() {
             let id = || point.id.clone();
+            let position = index + 1;
             if point.when.is_empty() || point.then.is_empty() {
-                problems.push(SpecProblem::CriterionNeedsText { id: id() });
+                problems.push(SpecProblem::ContractNeedsText { id: id(), position });
             }
             let length = chars(&point.when) + chars(&point.then);
             if length > MAX_CRITERION {
-                problems.push(SpecProblem::CriterionTooLong {
+                problems.push(SpecProblem::ContractTooLong {
                     id: id(),
+                    position,
                     chars: length,
                     limit: MAX_CRITERION,
                 });
@@ -427,6 +430,7 @@ impl Spec {
             for project in &unknown {
                 problems.push(SpecProblem::ContractUnknownProject {
                     id: id(),
+                    position,
                     project: (*project).clone(),
                 });
             }
@@ -435,7 +439,7 @@ impl Spec {
                 .iter()
                 .any(|part| point.projects.contains(&part.project));
             if unknown.is_empty() && !has_a_part {
-                problems.push(SpecProblem::ContractWithoutPart { id: id() });
+                problems.push(SpecProblem::ContractWithoutPart { id: id(), position });
             }
         }
         problems
@@ -750,19 +754,23 @@ fn is_one_of(criterion: &Value, contract: &[Criterion]) -> bool {
         .any(|point| id.as_deref() == Some(point.id.as_str()))
 }
 
-/// The points of the contract a part's specifier also wrote, in its own words, which give way to
-/// what was agreed.
+/// The points of the contract a part's specifier also wrote, in words of its own, which give way to
+/// what was agreed. One it copied as it was agreed, but for spacing, said nothing different.
 pub fn replaced_by_contract(output: Option<&Value>, contract: &[Criterion]) -> Vec<String> {
     let mut replaced: Vec<String> = Vec::new();
     let written = output
         .and_then(|output| output.get("criteria"))
         .and_then(Value::as_array);
     for criterion in written.into_iter().flatten() {
-        if let Some(id) = criterion.get("id").and_then(Value::as_str).map(one_line)
-            && is_one_of(criterion, contract)
-            && !replaced.contains(&id)
-        {
-            replaced.push(id);
+        let text = |field: &str| criterion.get(field).and_then(Value::as_str).map(one_line);
+        let Some(point) = text("id").and_then(|id| contract.iter().find(|point| point.id == id))
+        else {
+            continue;
+        };
+        let same = text("when").as_deref() == Some(point.when.as_str())
+            && text("then").as_deref() == Some(point.then.as_str());
+        if !same && !replaced.contains(&point.id) {
+            replaced.push(point.id.clone());
         }
     }
     replaced
@@ -782,50 +790,51 @@ pub fn judge_part(
     if contract.is_empty() {
         return judge(output, after_correction, rounds_answered);
     }
-    let own = output.map(|output| {
-        let mut output = output.clone();
-        if let Some(criteria) = output.get_mut("criteria").and_then(Value::as_array_mut) {
+    let points = || contract.iter().map(|point| json!(point));
+    let mut own = output.cloned();
+    // With none of its own left, the points stand in for them and are judged with the rest.
+    // Otherwise they join once it's judged, outside its limits.
+    let only_points = match own.as_mut().and_then(criteria_mut) {
+        Some(criteria) => {
             criteria.retain(|criterion| !is_one_of(criterion, contract));
-            if criteria.is_empty() {
-                criteria.extend(contract.iter().map(|point| json!(point)));
+            let none_left = criteria.is_empty();
+            if none_left {
+                criteria.extend(points());
             }
+            none_left
         }
-        output
-    });
-    judge(own.as_ref(), after_correction, rounds_answered).with_contract(contract)
+        None => false,
+    };
+    let mut verdict = judge(own.as_ref(), after_correction, rounds_answered);
+    if !only_points && let Some(criteria) = verdict.output_mut().and_then(criteria_mut) {
+        criteria.extend(points());
+    }
+    verdict
+}
+
+fn criteria_mut(output: &mut Value) -> Option<&mut Vec<Value>> {
+    output.get_mut("criteria").and_then(Value::as_array_mut)
 }
 
 impl Verdict {
-    /// Its spec with these points among its criteria, in place of any with the same id.
-    fn with_contract(self, contract: &[Criterion]) -> Self {
-        let add = |mut output: Value| {
-            if let Some(criteria) = output.get_mut("criteria").and_then(Value::as_array_mut) {
-                criteria.retain(|criterion| !is_one_of(criterion, contract));
-                criteria.extend(contract.iter().map(|point| json!(point)));
-            }
-            output
-        };
+    /// The answer as it's kept. None when it isn't: it has to be fixed, or it stops the step.
+    pub fn output(&self) -> Option<&Value> {
         match self {
-            Self::Ready(output) => Self::Ready(add(output)),
-            Self::Ask { output, questions } => Self::Ask {
-                output: add(output),
-                questions,
-            },
-            Self::TookRecommended {
-                output,
-                settled,
-                rounds,
-            } => Self::TookRecommended {
-                output: add(output),
-                settled,
-                rounds,
-            },
-            Self::KeptAsking { output, rounds } => Self::KeptAsking {
-                output: add(output),
-                rounds,
-            },
-            Self::Correct(problems) => Self::Correct(problems),
-            Self::Stop(problems) => Self::Stop(problems),
+            Self::Ready(output)
+            | Self::Ask { output, .. }
+            | Self::TookRecommended { output, .. }
+            | Self::KeptAsking { output, .. } => Some(output),
+            Self::Correct(_) | Self::Stop(_) => None,
+        }
+    }
+
+    fn output_mut(&mut self) -> Option<&mut Value> {
+        match self {
+            Self::Ready(output)
+            | Self::Ask { output, .. }
+            | Self::TookRecommended { output, .. }
+            | Self::KeptAsking { output, .. } => Some(output),
+            Self::Correct(_) | Self::Stop(_) => None,
         }
     }
 }
@@ -1162,17 +1171,47 @@ fn problem_line(problem: &SpecProblem, es: bool) -> String {
         TooManyContract { count, limit } => {
             format!("`contract` has {count} items, and the limit is {limit}.")
         }
-        ContractUnknownProject { id, project } if es => format!(
-            "{id} de `contract` nombra {project}, que no es ninguno de los proyectos de la lista. Usa el nombre exacto."
+        ContractNeedsText { id, position } if es => {
+            format!("Al elemento {position} de `contract` ({id}) le falta `when` o `then`.")
+        }
+        ContractNeedsText { id, position } => {
+            format!("Item {position} of `contract` ({id}) is missing its `when` or `then`.")
+        }
+        ContractTooLong {
+            id,
+            position,
+            chars,
+            limit,
+        } if es => format!(
+            "En el elemento {position} de `contract` ({id}), `when` y `then` suman {chars} caracteres y el máximo es {limit}."
         ),
-        ContractUnknownProject { id, project } => format!(
-            "{id} in `contract` names {project}, which isn't one of the listed projects. Use the exact name."
+        ContractTooLong {
+            id,
+            position,
+            chars,
+            limit,
+        } => format!(
+            "In item {position} of `contract` ({id}), `when` and `then` add up to {chars} characters, and the limit is {limit}."
         ),
-        ContractWithoutPart { id } if es => format!(
-            "{id} de `contract` no nombra ningún proyecto de `parts`: pon en `projects` cada uno cuya parte tiene que cumplirlo."
+        ContractUnknownProject {
+            id,
+            position,
+            project,
+        } if es => format!(
+            "El elemento {position} de `contract` ({id}) nombra {project}, que no es ninguno de los proyectos de la lista. Usa el nombre exacto."
         ),
-        ContractWithoutPart { id } => format!(
-            "{id} in `contract` names no project in `parts`: put in `projects` each one whose part has to keep it."
+        ContractUnknownProject {
+            id,
+            position,
+            project,
+        } => format!(
+            "Item {position} of `contract` ({id}) names {project}, which isn't one of the listed projects. Use the exact name."
+        ),
+        ContractWithoutPart { id, position } if es => format!(
+            "El elemento {position} de `contract` ({id}) no nombra ningún proyecto de `parts`: pon en `projects` cada uno cuya parte tiene que cumplirlo."
+        ),
+        ContractWithoutPart { id, position } => format!(
+            "Item {position} of `contract` ({id}) names no project in `parts`: put in `projects` each one whose part has to keep it."
         ),
     }
 }
@@ -1981,26 +2020,29 @@ mod tests {
             problems(json!([point("a", &["valora", "dupplaBack"])])),
             [SpecProblem::ContractUnknownProject {
                 id: "K1".into(),
+                position: 1,
                 project: "dupplaBack".into()
             }]
         );
         // back-adm is only read: nobody would check it.
-        assert_eq!(
-            problems(json!([point("a", &["back-adm"])])),
-            [SpecProblem::ContractWithoutPart { id: "K1".into() }]
-        );
-        assert_eq!(
-            problems(json!([point("a", &[])])),
-            [SpecProblem::ContractWithoutPart { id: "K1".into() }]
-        );
+        let without_part = [SpecProblem::ContractWithoutPart {
+            id: "K1".into(),
+            position: 1,
+        }];
+        assert_eq!(problems(json!([point("a", &["back-adm"])])), without_part);
+        assert_eq!(problems(json!([point("a", &[])])), without_part);
         assert_eq!(
             problems(json!([{ "when": "a", "then": " ", "projects": ["valora"] }])),
-            [SpecProblem::CriterionNeedsText { id: "K1".into() }]
+            [SpecProblem::ContractNeedsText {
+                id: "K1".into(),
+                position: 1
+            }]
         );
         assert_eq!(
             problems(json!([point(&"x".repeat(180), &["valora"])])),
-            [SpecProblem::CriterionTooLong {
+            [SpecProblem::ContractTooLong {
                 id: "K1".into(),
+                position: 1,
                 chars: 180 + 24,
                 limit: MAX_CRITERION
             }]
@@ -2013,6 +2055,35 @@ mod tests {
                 limit: MAX_CONTRACT
             }]
         );
+    }
+
+    #[test]
+    fn what_a_contract_point_gets_wrong_says_which_item_of_contract_it_is() {
+        // The agent wrote no ids there: Keel numbers them. Told only "K2", it could fix a
+        // criterion of that name, or nothing, and a second miss stops the step.
+        let told = |contract: Value, language: &str| {
+            let mut output = agreed(json!([part("valora", "x")]), json!([]));
+            output["contract"] = contract;
+            match judged(&output) {
+                Verdict::Correct(problems) => correction_prompt(&problems, language),
+                other => panic!("{other:?}"),
+            }
+        };
+        let fine = point("a", &["valora"]);
+        for contract in [
+            json!([fine, { "when": "a", "then": " ", "projects": ["valora"] }]),
+            json!([fine, point(&"x".repeat(180), &["valora"])]),
+            json!([fine, point("a", &["valora", "dupplaBack"])]),
+            json!([fine, point("a", &["back-adm"])]),
+        ] {
+            for (language, item) in [
+                ("en", "item 2 of `contract` (k2)"),
+                ("es", "elemento 2 de `contract` (k2)"),
+            ] {
+                let told = told(contract.clone(), language);
+                assert!(told.to_lowercase().contains(item), "{told}");
+            }
+        }
     }
 
     fn contract() -> [Criterion; 2] {
@@ -2079,6 +2150,19 @@ mod tests {
             judge(Some(&valid()), false, 0)
         );
         assert!(replaced_by_contract(Some(&valid()), &contract).is_empty());
+    }
+
+    #[test]
+    fn a_point_copied_word_for_word_was_not_written_in_other_words() {
+        let contract = contract();
+        let mut own = valid();
+        own["criteria"] = json!([
+            { "id": "C1", "when": "it's asked", "then": "it answers" },
+            // Only the spacing differs, which Keel tidies anyway.
+            { "id": "K1", "when": " app gets  POST /session", "then": "it answers 201\n" },
+            { "id": "K2", "when": "the token is wrong", "then": "it answers 403" },
+        ]);
+        assert_eq!(replaced_by_contract(Some(&own), &contract), ["K2"]);
     }
 
     #[test]
@@ -2190,11 +2274,25 @@ mod tests {
             SpecProblem::TooManyParts { count: 6, limit: 5 },
             SpecProblem::TooManyTogether { count: 6, limit: 5 },
             SpecProblem::TooManyContract { count: 8, limit: 7 },
+            SpecProblem::ContractNeedsText {
+                id: "K1".into(),
+                position: 1,
+            },
+            SpecProblem::ContractTooLong {
+                id: "K1".into(),
+                position: 1,
+                chars: 200,
+                limit: 180,
+            },
             SpecProblem::ContractUnknownProject {
                 id: "K1".into(),
+                position: 1,
                 project: "x".into(),
             },
-            SpecProblem::ContractWithoutPart { id: "K1".into() },
+            SpecProblem::ContractWithoutPart {
+                id: "K1".into(),
+                position: 1,
+            },
         ] {
             assert!(
                 correction_prompt(std::slice::from_ref(&problem), "en").contains("`"),

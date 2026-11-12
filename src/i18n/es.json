@@ -172,7 +172,8 @@
     "keptAsking": "Después de {{rounds}} rondas de preguntas, siguió preguntando algo que solo tú puedes decidir, así que Keel lo detuvo en vez de elegir por ti.",
     "partsNotOpened": "Lo aprobaste, pero Keel no pudo poner en el tablero la parte de cada proyecto: {{detail}}. Inténtalo de nuevo cuando eso esté resuelto.",
     "startsOnTheBoard": "Este issue es un cambio en varios proyectos, así que arranca desde su tarjeta en el tablero.",
-    "readCopyFailed": "Keel no pudo traer una copia de {{project}} para leerla: {{detail}}. Inténtalo de nuevo cuando se pueda alcanzar."
+    "readCopyFailed": "Keel no pudo traer una copia de {{project}} para leerla: {{detail}}. Inténtalo de nuevo cuando se pueda alcanzar.",
+    "specNotChecked": "Keel no pudo leer lo que necesitaba para revisar esta respuesta, así que no cuenta: {{detail}}. Inténtalo de nuevo."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",
@@ -1114,6 +1115,8 @@
     "repeatedPart": "pone {{project}} dos veces",
     "tooManyTogether": "pone {{count}} cosas para probar juntas, y el máximo es {{limit}}",
     "tooManyContract": "pone {{count}} puntos en los que las partes deben coincidir, y el máximo es {{limit}}",
+    "contractNeedsText": "{{id}} no dice cuándo pasa o qué debe cumplirse entonces",
+    "contractTooLong": "{{id}} tiene {{chars}} caracteres y el límite es {{limit}}",
     "contractUnknownProject": "{{id}} nombra {{project}}, que no es ninguno de los proyectos que elegiste",
     "contractWithoutPart": "{{id}} no nombra ningún proyecto que cambie"
   },

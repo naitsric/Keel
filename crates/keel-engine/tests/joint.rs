@@ -31,6 +31,8 @@ struct World {
     valora: String,
     valora_path: PathBuf,
     data: PathBuf,
+    /// Keel's database, which the store has open.
+    db: PathBuf,
     log: PathBuf,
     queue: PathBuf,
     flags: PathBuf,
@@ -50,7 +52,8 @@ fn git(repo: &Path, args: &[&str]) {
 }
 
 /// Each call takes the next answer from a numbered file. Every call is logged with its schema, its
-/// arguments, what Keel told it and its settings.
+/// arguments, what Keel told it and its settings. While `hold` is in the queue, a call that's been
+/// logged waits to answer.
 fn fake(log: &Path, queue: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -74,6 +77,7 @@ echo "{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"fake\",\"tools\":[\
 if [ -f "{queue}/commits" ] && [ "$tools" != "Read,Grep,Glob" ]; then
   echo work >> "built-$RANDOM.txt"; git add -A && git commit -qm "build"
 fi
+while [ -f "{queue}/hold" ]; do sleep 0.02; done
 n=$(cat "{queue}/count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "{queue}/count"
 output="$(cat "{queue}/$n.json")"
 printf '%s\n' "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"num_turns\":1,\"structured_output\":$output}}"
@@ -151,7 +155,8 @@ fn world_with(on_github: bool) -> World {
         std::fs::write(&gh, fake_gh(&log, &flags)).unwrap();
         std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
-    let store = Arc::new(Store::open(&dir.path().join("keel.db")).unwrap());
+    let db = dir.path().join("keel.db");
+    let store = Arc::new(Store::open(&db).unwrap());
     let data = dir.path().join("data");
     let mut config = Config::new(data.clone());
     config.tick = Duration::from_millis(20);
@@ -190,6 +195,7 @@ fn world_with(on_github: bool) -> World {
         valora,
         valora_path,
         data,
+        db,
         log,
         queue,
         flags,
@@ -448,6 +454,33 @@ impl World {
             .next()
             .unwrap_or_default()
             .to_owned()
+    }
+
+    /// Each call from here on waits to answer until [`World::answer_now`].
+    fn hold(&self) {
+        std::fs::write(self.queue.join("hold"), "").unwrap();
+    }
+
+    fn answer_now(&self) {
+        std::fs::remove_file(self.queue.join("hold")).unwrap();
+    }
+
+    /// Waits until this many calls have started.
+    fn wait_for_calls(&self, count: usize) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while self.calls().matches("=== CALL").count() < count {
+            assert!(Instant::now() < deadline, "{}", self.calls());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// From here on, reading a change across projects fails in the store, as a broken database would,
+    /// rather than finding none.
+    fn break_joint_changes(&self) {
+        rusqlite::Connection::open(&self.db)
+            .unwrap()
+            .execute_batch("alter table joint_change rename to joint_change_away")
+            .unwrap();
     }
 
     /// Both projects run a specifier and a builder that commits, wait for a person, and open a
@@ -1293,6 +1326,18 @@ fn each_part_verifies_the_contract_points_that_name_it_and_the_change_shows_each
     ] {
         assert!(call.contains(told), "{told}: {call}");
     }
+    // Only the specifier writes criteria, so only it is told not to write the points again. The
+    // builder and the verifier still learn which points are this part's.
+    let again = "Don't write them again as criteria of your own.";
+    assert!(call.contains(again), "{call}");
+    for index in [2, 3] {
+        let call = w.call(index);
+        assert!(!call.contains(again), "{index}: {call}");
+        assert!(
+            call.contains("Keel adds the points of the contract that name valora"),
+            "{index}: {call}"
+        );
+    }
     // Its verifier is asked about K1 as part of what has to be true, and not about app's side.
     let verifier = w.asked(3);
     assert!(
@@ -1353,6 +1398,90 @@ fn a_part_whose_workflow_has_no_verifier_says_so_rather_than_not_yet() {
     assert_eq!(
         w.contract(&card),
         ["K1 valora=None, unverifiable", "K2 app=None", "K3 app=None"]
+    );
+}
+
+#[test]
+fn only_a_kept_answer_that_said_a_point_differently_records_it_gave_way() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.short_workflows();
+    // Valora's specifier first breaks a limit while writing K1 in its own words, and its fix copies
+    // K1 word for word.
+    let mut broken = plain("");
+    broken["criteria"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({ "id": "K1", "when": "its own words", "then": "for the same point" }));
+    let mut fixed = plain("Valora sends the token");
+    fixed["criteria"].as_array_mut().unwrap().push(json!({
+        "id": "K1",
+        "when": "someone logs in on valora",
+        "then": "valora sends POST /session with `token`",
+    }));
+    w.answers(&[with_contract(), broken, fixed, json!({}), json!({})]);
+    let (card, run) = w.agreeing();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+
+    let specs = w.attempts(&first, "spec");
+    assert_eq!(specs.len(), 2, "{specs:?}");
+    assert_eq!(specs[0].state, "failed");
+    assert_eq!(specs[1].resumed_from.as_deref(), Some(specs[0].id.as_str()));
+    let kept = specs[1].output.clone().unwrap();
+    assert_eq!(kept["criteria"][1]["when"], "someone logs in on valora");
+    // Nothing of the first was kept, and the second said K1 as it was agreed.
+    for spec in &specs {
+        let events = w.store.events(&spec.id, 0).unwrap();
+        assert!(
+            !events.iter().any(|event| event.kind == "contractReplaced"),
+            "{}: {events:?}",
+            spec.number
+        );
+    }
+}
+
+#[test]
+fn a_part_whose_answer_cannot_be_checked_against_what_was_agreed_does_not_pass() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.short_workflows();
+    w.answers(&[
+        with_contract(),
+        plain("Valora sends the token"),
+        json!({}),
+        json!({}),
+    ]);
+    let (card, run) = w.agreeing();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    // Valora's specifier is told what was agreed, and by the time it answers, the store can't
+    // read it any more.
+    w.hold();
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    w.wait_for_calls(2);
+    w.break_joint_changes();
+    w.answer_now();
+
+    // Keel can't tell which points it has to keep, so its answer doesn't count without them.
+    let failed = w.wait_for(&first, "spec", AttemptState::Failed);
+    let reason = failed.reason.clone().unwrap();
+    assert_eq!(reason["code"], "specNotChecked", "{reason}");
+    assert!(
+        reason["detail"].as_str().unwrap().contains("joint_change"),
+        "{reason}"
+    );
+    assert!(w.attempts(&first, "build").is_empty());
+    assert_eq!(
+        w.calls().matches("=== CALL").count(),
+        2,
+        "no fix is asked for"
     );
 }
 

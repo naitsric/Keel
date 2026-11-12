@@ -127,15 +127,12 @@ pub struct ContractPart {
     pub verifies: bool,
 }
 
-/// Whether a workflow has a step that checks what its spec says has to be true.
+/// Whether a workflow has a step that checks what its spec says has to be true. A verifier can't
+/// be in a group (see `workflows::validate`).
 fn has_verifier(steps: &[WorkflowStep]) -> bool {
-    steps.iter().any(|step| match step {
-        WorkflowStep::Agent(spec) => spec.role == StepRole::Verifier,
-        WorkflowStep::Parallel { steps, .. } => {
-            steps.iter().any(|spec| spec.role == StepRole::Verifier)
-        }
-        _ => false,
-    })
+    steps
+        .iter()
+        .any(|step| matches!(step, WorkflowStep::Agent(spec) if spec.role == StepRole::Verifier))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -964,8 +961,13 @@ impl Inner {
 
     /// What an agent of a run in a change across projects is told, along with what Keel knows of
     /// its own project: which part it does and what was agreed, and where the other projects are.
-    /// Empty for any other run.
-    pub(crate) fn joint_text(&self, run_id: &str, copies: &[ReadyCopy]) -> Result<String> {
+    /// Empty for any other run. `role` is the agent's.
+    pub(crate) fn joint_text(
+        &self,
+        run_id: &str,
+        copies: &[ReadyCopy],
+        role: &StepRole,
+    ) -> Result<String> {
         let Some((card, change)) = self.joint_card(run_id)? else {
             return Ok(String::new());
         };
@@ -1000,9 +1002,14 @@ impl Inner {
             if !contract.is_empty() {
                 let ids: Vec<&str> = contract.iter().map(|point| point.id.as_str()).collect();
                 text.push_str(&format!(
-                    "\nKeel adds the points of the contract that name {name} to this part's criteria, with their ids ({}), and they're verified like the rest. Don't write them again as criteria of your own.\n",
+                    "\nKeel adds the points of the contract that name {name} to this part's criteria, with their ids ({}), and they're verified like the rest.",
                     ids.join(", ")
                 ));
+                // Only the specifier writes criteria.
+                if *role == StepRole::Specifier {
+                    text.push_str(" Don't write them again as criteria of your own.");
+                }
+                text.push('\n');
             }
             if spec.contract.len() > contract.len() {
                 let which = if contract.is_empty() {

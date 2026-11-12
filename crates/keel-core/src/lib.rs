@@ -436,6 +436,11 @@ pub enum Reason {
     SpecNotUsable {
         problems: Vec<SpecProblem>,
     },
+    /// Keel couldn't read what it needed to check a specifier's answer, such as what a change across
+    /// projects agreed, so the answer doesn't count. Trying again asks the agent again.
+    SpecNotChecked {
+        detail: String,
+    },
     /// An answer to a step's questions doesn't belong to them. `problem` is a code the UI
     /// translates: `unknownQuestion`, `repeatedQuestion`, `unanswered`, `optionNotOffered` or
     /// `emptyText`. `question` is the one it's about.
@@ -632,15 +637,29 @@ pub enum SpecProblem {
         count: usize,
         limit: usize,
     },
-    /// A point of the contract between the parts names a project that isn't one of those the
-    /// change touches.
+    /// A point of the contract between the parts with no `when` or no `then`. Keel gives each point
+    /// its `id`, so the agent that wrote it knows it by its `position`, from 1.
+    ContractNeedsText {
+        id: String,
+        position: usize,
+    },
+    /// A point of the contract whose `when` and `then` together go past the limit of a criterion.
+    ContractTooLong {
+        id: String,
+        position: usize,
+        chars: usize,
+        limit: usize,
+    },
+    /// A point of the contract names a project that isn't one of those the change touches.
     ContractUnknownProject {
         id: String,
+        position: usize,
         project: String,
     },
     /// A point of the contract that names no project with a part, so no part would check it.
     ContractWithoutPart {
         id: String,
+        position: usize,
     },
 }
 
@@ -702,6 +721,7 @@ impl Reason {
             | Self::RejectionNeedsReason
             | Self::UnsafeBranch { .. }
             | Self::SpecNotUsable { .. }
+            | Self::SpecNotChecked { .. }
             | Self::InvalidAnswer { .. }
             | Self::SendBackNeedsInstructions
             | Self::NothingToSendBackTo
@@ -1012,6 +1032,7 @@ mod tests {
             ),
             (Reason::ProjectRemoved, false),
             (Reason::SpecNotUsable { problems: vec![] }, false),
+            (Reason::SpecNotChecked { detail: text() }, false),
             (
                 Reason::InvalidAnswer {
                     problem: text(),
@@ -1086,6 +1107,7 @@ mod tests {
             Reason::PartsNotOpened { .. } => 44,
             Reason::StartsOnTheBoard => 45,
             Reason::ReadCopyFailed { .. } => 46,
+            Reason::SpecNotChecked { .. } => 47,
         }
     }
 
@@ -1099,7 +1121,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=46).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=47).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]
