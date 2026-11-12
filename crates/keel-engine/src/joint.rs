@@ -340,6 +340,19 @@ fn next_point(change: &JointChange) -> i64 {
     })
 }
 
+/// What a part's run was given of the contract with its spec.
+enum Given {
+    /// Its spec isn't kept yet, or a step that isn't a specifier wrote it, which gets no points.
+    Nothing,
+    /// What was recorded as its answer was kept: its own points, and every point then.
+    Recorded {
+        points: Vec<Criterion>,
+        contract: Option<Vec<ContractPoint>>,
+    },
+    /// Kept before Keel recorded it: what was agreed, since nothing could correct it then.
+    Agreed,
+}
+
 /// The points a part was `given` as they no longer are, by id: each of the points it has `now` that
 /// it wasn't given word for word, then each it was given that it no longer has.
 fn changed_points(given: &[Criterion], now: &[Criterion]) -> Vec<String> {
@@ -491,9 +504,27 @@ impl crate::Engine {
                 projects: point.projects.clone(),
             });
         }
+        // A point may name each project with a part, and any other one the contract named, as it
+        // was agreed or since: all were among those the agent was given.
+        let mut known: Vec<String> = spec.parts.iter().map(|p| p.project.clone()).collect();
+        let agreed = agreed_spec(&change).map(|agreed| agreed.contract);
+        for project in agreed
+            .iter()
+            .flatten()
+            .chain(&spec.contract)
+            .flat_map(|point| &point.projects)
+        {
+            if !known.contains(project) {
+                known.push(project.clone());
+            }
+        }
         let contract = spec
-            .corrected_contract(numbered)
+            .corrected_contract(numbered, &known)
             .map_err(|problems| Error::Blocked(Reason::ContractNotValid { problems }))?;
+        // Saving it as it is changes nothing.
+        if contract == spec.contract && next == next_point(&change) {
+            return Ok(());
+        }
         if !store.correct_joint_contract(
             change_id,
             change.contract.as_ref(),
@@ -604,39 +635,37 @@ impl Inner {
             .map(str::to_owned))
     }
 
-    /// The points of the contract a run's part has to keep, as criteria: as a person corrected
-    /// them since it was agreed, if they did. Empty for any other run, and for a part of an
-    /// agreement without any.
-    pub(crate) fn contract_of(&self, run_id: &str) -> Result<Vec<Criterion>> {
+    /// For a run that does one part of a change across projects, the contract as it is now: the
+    /// points its part has to keep, as criteria, and every point. As a person corrected them since
+    /// it was agreed, if they did. None for any other run. Empty for an agreement without any.
+    pub(crate) fn part_contract(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<(Vec<Criterion>, Vec<ContractPoint>)>> {
         let Some((card, change)) = self.joint_card(run_id)? else {
-            return Ok(Vec::new());
+            return Ok(None);
         };
-        let (Some(here), Some(spec)) = (card.joint_position, current_spec(&change)) else {
-            return Ok(Vec::new());
+        let Some(here) = card.joint_position else {
+            return Ok(None);
         };
-        Ok(part_name(&spec, here)
+        let Some(spec) = current_spec(&change) else {
+            return Ok(Some((Vec::new(), Vec::new())));
+        };
+        let own = part_name(&spec, here)
             .map(|name| spec.contract_of(name))
-            .unwrap_or_default())
+            .unwrap_or_default();
+        Ok(Some((own, spec.contract)))
     }
 
-    /// The points of the contract a part's card was specified with as they no longer are: see
-    /// [`PartOf::contract_changed`]. What its specifier was given is on its kept attempt. One
-    /// specified before Keel recorded that was given what was agreed, since nobody could correct
-    /// it then. Nothing can differ while nobody has corrected it.
-    fn contract_changed(&self, change: &JointChange, card: &Card) -> Result<Vec<String>> {
-        let (Some(here), Some(run_id)) = (card.joint_position, &card.run_id) else {
-            return Ok(Vec::new());
-        };
-        if change.contract.is_none() {
-            return Ok(Vec::new());
-        }
+    /// What a part's run was given of the contract with its spec, by its latest kept specifier
+    /// answer.
+    fn given(&self, run_id: &str) -> Result<Given> {
         let attempts = self.store.attempts_of_run(run_id)?;
-        let Some(specified) = workflows::specifying_attempt(&attempts) else {
-            return Ok(Vec::new());
-        };
-        let of = |spec: Option<Spec>| {
-            spec.and_then(|spec| part_name(&spec, here).map(|name| spec.contract_of(name)))
-                .unwrap_or_default()
+        // A step that isn't a specifier is never given any points.
+        let Some(specified) =
+            workflows::specifying_attempt(&attempts).filter(|a| a.role == "specifier")
+        else {
+            return Ok(Given::Nothing);
         };
         let recorded = self
             .store
@@ -644,9 +673,32 @@ impl Inner {
             .into_iter()
             .rev()
             .find(|event| event.attempt_id == specified.id);
-        let given: Vec<Criterion> = match recorded {
-            Some(event) => serde_json::from_value(event.data["points"].clone()).unwrap_or_default(),
-            None => of(agreed_spec(change)),
+        Ok(match recorded {
+            Some(event) => Given::Recorded {
+                points: serde_json::from_value(event.data["points"].clone()).unwrap_or_default(),
+                contract: serde_json::from_value(event.data["contract"].clone()).ok(),
+            },
+            None => Given::Agreed,
+        })
+    }
+
+    /// The points of the contract a part's card was specified with as they no longer are: see
+    /// [`PartOf::contract_changed`]. Nothing can differ while nobody has corrected it.
+    fn contract_changed(&self, change: &JointChange, card: &Card) -> Result<Vec<String>> {
+        let (Some(here), Some(run_id)) = (card.joint_position, &card.run_id) else {
+            return Ok(Vec::new());
+        };
+        if change.contract.is_none() {
+            return Ok(Vec::new());
+        }
+        let of = |spec: Option<Spec>| {
+            spec.and_then(|spec| part_name(&spec, here).map(|name| spec.contract_of(name)))
+                .unwrap_or_default()
+        };
+        let given = match self.given(run_id)? {
+            Given::Nothing => return Ok(Vec::new()),
+            Given::Recorded { points, .. } => points,
+            Given::Agreed => of(agreed_spec(change)),
         };
         Ok(changed_points(&given, &of(current_spec(change))))
     }
@@ -1163,8 +1215,29 @@ impl Inner {
         let language = self.store.run(run_id)?.language;
         let mut text = String::new();
         let agreed = change.agreed.clone().unwrap_or_default();
-        // The contract as it is now, if a person corrected it since.
-        if let (Some(here), Some(spec)) = (card.joint_position, current_spec(&change)) {
+        let spec = match (card.joint_position, current_spec(&change)) {
+            // A run keeps the contract its part was specified with, which is what its criteria
+            // say, until its part is specified again. Only its specifier reads it as it is now.
+            (Some(_), Some(mut spec)) if *role != StepRole::Specifier => {
+                match self.given(run_id)? {
+                    Given::Recorded {
+                        contract: Some(contract),
+                        ..
+                    } => spec.contract = contract,
+                    Given::Agreed => {
+                        spec.contract =
+                            agreed_spec(&change).map(|s| s.contract).unwrap_or_default();
+                    }
+                    Given::Recorded { contract: None, .. } | Given::Nothing => {}
+                }
+                Some(spec)
+            }
+            (_, spec) => spec,
+        };
+        let corrected = spec.as_ref().is_some_and(|spec| {
+            agreed_spec(&change).is_some_and(|agreed| agreed.contract != spec.contract)
+        });
+        if let (Some(here), Some(spec)) = (card.joint_position, spec) {
             let answered: Vec<GivenAnswer> = agreed
                 .get("answered")
                 .and_then(|answered| serde_json::from_value(answered.clone()).ok())
@@ -1181,9 +1254,9 @@ impl Inner {
                 total = spec.parts.len(),
                 agreed = spec.readable(&language),
             ));
-            if change.contract.is_some() {
+            if corrected {
                 text.push_str(
-                    "\nA person corrected what the parts agree on exactly after approving it. It reads above as it is now, and that's what counts.\n",
+                    "\nA person corrected what the parts agree on exactly after approving it. It reads above as it applies to this run, and that's what counts.\n",
                 );
             }
             if !answered.is_empty() {

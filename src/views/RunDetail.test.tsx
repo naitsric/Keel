@@ -1215,7 +1215,7 @@ describe("the approval card", () => {
     const joint = { changeId: "plan", agrees: false, part: { changeId: "plan", position: 2, total: 2, waitsFor: null, warnings: [{ kind: "closed" as const, position: 1, project: "valora" }], contractChanged: ["K2"] } };
     act(() => root.render(<ApprovalCard attempt={human} run={runWith(deliverNext)} attempts={[builder(["calc.py"]), human]} files={["calc.py"]} commands={[]} rawCheck="intact" joint={joint} onShowChanges={() => {}} onError={() => {}} />));
     expect(page()).toContain("Part 1, in valora: its pull request was closed.");
-    expect(document.querySelector("[data-contract-changed]")?.textContent).toBe("Specified with an earlier version of what the parts agree on (K2). It takes the current one when it starts again from Todo.");
+    expect(document.querySelector("[data-contract-changed]")?.textContent).toBe("Specified with an earlier version of what the parts agree on (K2). Only a new run of this part takes the current one.");
     act(() => vi.advanceTimersByTime(800));
     expect(button("Approve and open a draft")?.disabled).toBe(false);
   });

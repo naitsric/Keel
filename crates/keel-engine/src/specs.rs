@@ -593,18 +593,13 @@ impl Spec {
 
     /// The contract as a person corrected it once it was agreed: `points` replace it, in their
     /// order and with their ids already given, tidied as an agent's are and checked by the same
-    /// rules. A point may name the projects with a part and the ones the contract names already,
-    /// which were among those the agent was given.
+    /// rules. A point may name only the `known` projects, which were among those the agent was
+    /// given, and one of them with a part.
     pub fn corrected_contract(
         &self,
         points: Vec<ContractPoint>,
+        known: &[String],
     ) -> Result<Vec<ContractPoint>, Vec<SpecProblem>> {
-        let mut known: Vec<String> = self.parts.iter().map(|p| p.project.clone()).collect();
-        for project in self.contract.iter().flat_map(|point| &point.projects) {
-            if !known.contains(project) {
-                known.push(project.clone());
-            }
-        }
         let mut spec = self.clone();
         spec.contract = points
             .into_iter()
@@ -624,7 +619,7 @@ impl Spec {
                 }
             })
             .collect();
-        let problems = spec.contract_problems(&known);
+        let problems = spec.contract_problems(known);
         if problems.is_empty() {
             Ok(spec.contract)
         } else {
@@ -3584,18 +3579,19 @@ mod tests {
     #[test]
     fn a_corrected_contract_is_tidied_and_checked_as_the_agreements_was() {
         // Valora has a part, and admin was only read, though a point named it too.
-        let mut output = agreed(json!([part("valora", "x")]), json!([]));
-        output["contract"] = json!([
-            { "id": "K1", "when": "a", "then": "b", "projects": ["valora", "admin"] },
-        ]);
-        let spec: Spec = serde_json::from_value(output).unwrap();
+        let spec: Spec =
+            serde_json::from_value(agreed(json!([part("valora", "x")]), json!([]))).unwrap();
+        let known = ["valora".to_owned(), "admin".to_owned()];
         let corrected = |projects: &[&str]| {
-            spec.corrected_contract(vec![ContractPoint {
-                id: "K2".into(),
-                when: " someone\n  logs in ".into(),
-                then: "it answers".into(),
-                projects: projects.iter().map(|&p| p.to_owned()).collect(),
-            }])
+            spec.corrected_contract(
+                vec![ContractPoint {
+                    id: "K2".into(),
+                    when: " someone\n  logs in ".into(),
+                    then: "it answers".into(),
+                    projects: projects.iter().map(|&p| p.to_owned()).collect(),
+                }],
+                &known,
+            )
         };
         let kept = corrected(&["admin", " valora", "valora"]).unwrap();
         assert_eq!(kept[0].when, "someone logs in");

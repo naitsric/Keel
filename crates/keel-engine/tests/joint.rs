@@ -1428,6 +1428,8 @@ fn a_person_corrects_the_contract_and_a_part_started_again_is_specified_and_veri
         plain("Valora sends the token"),
         json!({}),
         verified("send.test.ts:3"),
+        json!({}),
+        verified("send.test.ts:5"),
         plain("Valora sends the token and when it expires"),
         json!({}),
         verified("send.test.ts:12"),
@@ -1492,7 +1494,26 @@ fn a_person_corrects_the_contract_and_a_part_started_again_is_specified_and_veri
         "its run says so too"
     );
 
-    // The person sends it back and starts it again.
+    // Sent back from its approval, it's built and verified again, without being specified again.
+    // Its agents keep reading the contract it was specified with, which its criteria say.
+    w.engine.send_back(&approval.id, "Tidy it up").unwrap();
+    let approval = w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+    for index in [4, 5] {
+        let call = w.call(index);
+        assert!(
+            call.contains("valora sends POST /session with `token`"),
+            "{index}: {call}"
+        );
+        assert!(!call.contains(expires), "{index}: {call}");
+        assert!(!call.contains("A person corrected"), "{index}: {call}");
+        assert!(!call.contains("K4"), "{index}: {call}");
+    }
+    assert_eq!(
+        w.contract(&card),
+        ["K1 valora=earlier", "K2 app=None", "K4 app=None"]
+    );
+
+    // The person rejects it and starts it again.
     w.engine
         .answer_approval(&approval.id, false, "Send when it expires too")
         .unwrap();
@@ -1508,17 +1529,20 @@ fn a_person_corrects_the_contract_and_a_part_started_again_is_specified_and_veri
         spec["criteria"][1],
         json!({ "id": "K1", "when": "someone logs in on valora", "then": expires })
     );
-    // Every agent of it reads the contract as it is now.
-    let told = w.call(4);
-    for now in [
-        format!("K1 (valora): someone logs in on valora → {expires}"),
-        "K4 (app): the session already exists → app answers 409".to_owned(),
-    ] {
-        assert!(told.contains(&now), "{now}: {told}");
+    // Every agent of it reads the contract as it is now, and that a person corrected it.
+    for index in [6, 7, 8] {
+        let told = w.call(index);
+        for now in [
+            format!("K1 (valora): someone logs in on valora → {expires}"),
+            "K4 (app): the session already exists → app answers 409".to_owned(),
+            "A person corrected what the parts agree on exactly after approving it.".to_owned(),
+        ] {
+            assert!(told.contains(&now), "{index}, {now}: {told}");
+        }
+        assert!(!told.contains("the token is wrong"), "K3 is gone: {told}");
     }
-    assert!(!told.contains("the token is wrong"), "K3 is gone: {told}");
     // And its verifier checks K1 as it says now.
-    let verifier = w.asked(6);
+    let verifier = w.asked(8);
     assert!(verifier.contains(expires), "{verifier}");
     assert_eq!(
         w.contract(&card),
@@ -1547,6 +1571,23 @@ fn a_correction_keeps_its_points_ids_never_gives_one_again_and_is_checked_like_t
         Err(Error::InvalidState)
     ));
     w.engine.answer_approval(&approval.id, true, "").unwrap();
+
+    // Saving it as it was agreed changes nothing.
+    let agreed: Vec<ContractEdit> = w
+        .engine
+        .joint_change(&card)
+        .unwrap()
+        .contract
+        .into_iter()
+        .map(|point| ContractEdit {
+            id: Some(point.id),
+            when: point.when,
+            then: point.then,
+            projects: point.projects,
+        })
+        .collect();
+    w.engine.joint_contract_set(&card, &agreed).unwrap();
+    assert_eq!(w.store.joint_change(&card).unwrap().contract, None);
 
     let ids = || -> Vec<String> {
         let contract = w.engine.joint_change(&card).unwrap().contract;
@@ -1638,6 +1679,56 @@ fn a_correction_keeps_its_points_ids_never_gives_one_again_and_is_checked_like_t
     assert_eq!(ids(), ["K6"]);
     w.engine.joint_contract_set(&card, &[]).unwrap();
     assert!(ids().is_empty());
+}
+
+#[test]
+fn a_part_whose_spec_step_is_not_a_specifier_is_never_told_its_contract_changed() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // An older workflow: its `spec` step is a worker, which Keel gives no points of the contract.
+    for project in [&w.app, &w.valora] {
+        let workflow = w
+            .engine
+            .save_workflow(
+                project,
+                &Workflow {
+                    id: String::new(),
+                    name: "Older".into(),
+                    steps: vec![
+                        agent("spec", StepRole::Worker, None, "{{request}}"),
+                        WorkflowStep::Approval {
+                            id: "approval".into(),
+                        },
+                    ],
+                    builtin: false,
+                },
+            )
+            .unwrap();
+        w.engine
+            .update_project(
+                project,
+                &keel_store::ProjectSettings {
+                    default_workflow: Some(workflow.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    w.answers(&[with_contract(), plain("Valora sends the token")]);
+    let (card, run) = w.agreeing();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+
+    w.engine
+        .joint_contract_set(&card, &[point(Some("K1"), "a", "b", &["valora"])])
+        .unwrap();
+    // It never had K1 to have it as it was, and starting it again wouldn't give it K1 either.
+    assert_eq!(w.contract_changed(&card), ["valora []", "app []"]);
+    assert_eq!(w.contract(&card), ["K1 valora=None, unverifiable"]);
 }
 
 #[test]

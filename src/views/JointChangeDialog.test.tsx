@@ -223,6 +223,13 @@ describe("a change across several projects, in one place", () => {
     expect([...drafts()[0].querySelectorAll("label")].map((label) => label.textContent).slice(2)).toEqual(["valora", "app"]);
   });
 
+  it("still offers a project only read that what was agreed named, after a correction left it out", async () => {
+    shown = { ...corrected, agreed: { ...corrected.agreed!, contract: [{ id: "K1", when: "a", then: "b", projects: ["valora", "dupplaBack"] }] } };
+    await render();
+    await act(async () => button("Correct")?.click());
+    expect([...drafts()[0].querySelectorAll("label")].map((label) => label.textContent).slice(2)).toEqual(["valora", "app", "dupplaBack"]);
+  });
+
   it("doesn't offer to correct anything before it's agreed", async () => {
     shown = { ...agreed, agreed: null, parts: [], readOnly: [], checks: [], contractNext: null };
     await render();
@@ -237,7 +244,7 @@ describe("a change across several projects, in one place", () => {
     const points = [...document.querySelectorAll("[data-contract]")].map((point) => point.textContent ?? "");
     expect(points[0]).toContain("Part 1, valora: Specified with an earlier version");
     expect(points[0]).not.toContain("Met");
-    expect(document.querySelector("[data-contract-changed]")?.textContent).toBe("Specified with an earlier version of what the parts agree on (K1). It takes the current one when it starts again from Todo.");
+    expect(document.querySelector("[data-contract-changed]")?.textContent).toBe("Specified with an earlier version of what the parts agree on (K1). Only a new run of this part takes the current one.");
     await i18next.changeLanguage("es");
     await render();
     expect(page()).toContain("Parte 1, valora: Se especificó con una versión anterior");

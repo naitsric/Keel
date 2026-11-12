@@ -579,6 +579,7 @@ function DecidedList({ attemptId, decided, only, questioned, elsewhere, added, c
  */
 export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck, sizeDecision = null, joint = null, onShowChanges, onError }: { attempt: Attempt; run: Run; attempts: Attempt[]; files: string[]; commands: CommandRun[]; rawCheck: RawCheck; sizeDecision?: SizeDecision | null; joint?: RunJoint | null; onShowChanges: () => void; onError: (message: string) => void }) {
   const { t } = useTranslation();
+  const earlierContract = joint?.part ? contractChangedText(t, joint.part) : null;
   const project = useApp((s) => s.overview.projects.find((p) => p.id === run.projectId));
   const draft = useApp((s) => s.approvalDrafts[attempt.id] ?? "");
   const setDraft = useApp((s) => s.setApprovalDraft);
@@ -840,10 +841,10 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
           {partWarningText(t, warning)}
         </p>
       ))}
-      {joint?.part && contractChangedText(t, joint.part) && (
+      {earlierContract && (
         <p data-contract-changed className="mt-2 flex gap-1.5 rounded-md border border-warning/40 bg-inset p-2 text-[12.5px] font-medium text-warning">
           <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-          {contractChangedText(t, joint.part)}
+          {earlierContract}
         </p>
       )}
       {touchesWorkflows(files) && (

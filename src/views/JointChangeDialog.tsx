@@ -20,6 +20,7 @@ function PartRow({ card, busy, onOpenRun, onOpenPr, onStopWaiting }: { card: Joi
   const part = card.part;
   const badge = badgeOf(t, card);
   const waiting = part ? waitsForText(t, part) : null;
+  const earlier = part ? contractChangedText(t, part) : null;
   return (
     <li className="border-t border-border py-2 first:border-t-0">
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -56,10 +57,10 @@ function PartRow({ card, busy, onOpenRun, onOpenPr, onStopWaiting }: { card: Joi
           {partWarningText(t, warning)}
         </p>
       ))}
-      {part && contractChangedText(t, part) && (
+      {earlier && (
         <p data-contract-changed className="mt-1 flex gap-1.5 text-[11.5px] text-warning">
           <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-          {contractChangedText(t, part)}
+          {earlier}
         </p>
       )}
     </li>
@@ -104,8 +105,9 @@ function ContractEditor({ change, busy, onSave, onCancel }: { change: JointChang
   const { t } = useTranslation();
   const [points, setPoints] = useState<DraftPoint[]>(() => change.contract.map((point, key) => ({ key, id: point.id, when: point.when, then: point.then, projects: point.projects })));
   const [nextKey, setNextKey] = useState(change.contract.length);
-  // A point may name each project with a part, and any other the contract names already.
-  const names = [...new Set([...(change.agreed?.parts ?? []).map((part) => part.project), ...change.contract.flatMap((point) => point.projects)])];
+  // A point may name each project with a part, and any other the contract named, as agreed or since.
+  const named = [...(change.agreed?.contract ?? []), ...change.contract].flatMap((point) => point.projects);
+  const names = [...new Set([...(change.agreed?.parts ?? []).map((part) => part.project), ...named])];
   let next = change.contractNext ?? 1;
   const labels = points.map((point) => point.id ?? `K${next++}`);
   const update = (key: number, fields: Partial<ContractEdit>) => setPoints((all) => all.map((point) => (point.key === key ? { ...point, ...fields } : point)));

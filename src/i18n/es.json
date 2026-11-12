@@ -1006,7 +1006,7 @@
       "waitsFor": "Espera a que la parte {{position}}, en {{project}}, tenga pull request",
       "waitsForCard": "Espera a que la parte anterior, en {{project}}, tenga pull request",
       "open": "Ver el cambio",
-      "contractChanged": "Se especificó con una versión anterior de lo que las partes acuerdan ({{points}}). Toma la actual cuando vuelva a empezar desde Por hacer.",
+      "contractChanged": "Se especificó con una versión anterior de lo que las partes acuerdan ({{points}}). Solo una nueva ejecución de esta parte toma la actual.",
       "warnings": {
         "closed": "Parte {{position}}, en {{project}}: su pull request se cerró.",
         "changed": "La parte {{position}}, en {{project}}, tiene commits que esta parte no leyó."

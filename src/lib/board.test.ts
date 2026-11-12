@@ -507,8 +507,8 @@ describe("what a card says about a change across several projects", () => {
 
   it("warns when it was specified with points of the contract as they no longer are", () => {
     const earlier = card("b", "humanReview", { jointChangeId: "plan", part: part({ warnings: [{ kind: "changed", position: 1, project: "valora" }], contractChanged: ["K1", "K4"] }) });
-    expect(jointLabel(en, earlier, names)?.warnings).toEqual(["Part 1, in valora, has commits this part didn't read.", "Specified with an earlier version of what the parts agree on (K1, K4). It takes the current one when it starts again from Todo."]);
-    expect(jointLabel(t("es"), earlier, names)?.warnings[1]).toBe("Se especificó con una versión anterior de lo que las partes acuerdan (K1, K4). Toma la actual cuando vuelva a empezar desde Por hacer.");
+    expect(jointLabel(en, earlier, names)?.warnings).toEqual(["Part 1, in valora, has commits this part didn't read.", "Specified with an earlier version of what the parts agree on (K1, K4). Only a new run of this part takes the current one."]);
+    expect(jointLabel(t("es"), earlier, names)?.warnings[1]).toBe("Se especificó con una versión anterior de lo que las partes acuerdan (K1, K4). Solo una nueva ejecución de esta parte toma la actual.");
   });
 });
 

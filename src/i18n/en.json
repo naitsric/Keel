@@ -1006,7 +1006,7 @@
       "waitsFor": "Waits for part {{position}}, in {{project}}, to have a pull request",
       "waitsForCard": "Waits for the part before it, in {{project}}, to have a pull request",
       "open": "See the change",
-      "contractChanged": "Specified with an earlier version of what the parts agree on ({{points}}). It takes the current one when it starts again from Todo.",
+      "contractChanged": "Specified with an earlier version of what the parts agree on ({{points}}). Only a new run of this part takes the current one.",
       "warnings": {
         "closed": "Part {{position}}, in {{project}}: its pull request was closed.",
         "changed": "Part {{position}}, in {{project}}, has commits this part didn't read."
