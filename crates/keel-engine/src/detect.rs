@@ -501,11 +501,17 @@ fn with_wrapper(root: &Path, manifest: &str, wrapper: &str, tool: &str) -> (Stri
     }
 }
 
+/// `dependency:go-offline` leaves out what Surefire runs the tests with, which it downloads only
+/// once it runs them. So setup runs them too, with a filter no test can match: it names a method,
+/// so every class is looked at and Surefire gets what it needs, and no method has `-` in its name.
 fn maven(root: &Path) -> Option<Stack> {
     is_file(root, "pom.xml").then(|| {
         let (tool, from) = with_wrapper(root, "pom.xml", "mvnw", "mvn");
         Stack {
-            setup: Some(format!("{tool} dependency:go-offline")),
+            setup: Some(format!(
+                "{tool} dependency:go-offline test -Dtest='#keel-setup-runs-no-tests' \
+                 -Dsurefire.failIfNoSpecifiedTests=false"
+            )),
             check: Some(format!("{tool} test")),
             from,
             ..Stack::default()
@@ -1195,15 +1201,23 @@ mod tests {
         );
     }
 
+    /// Setup has to leave all a check needs. What runs the tests comes only once they run, so
+    /// Maven's setup runs them with a filter no test matches, and Gradle's pretends to.
     #[test]
     fn maven_and_gradle_use_the_wrapper_they_bring() {
+        let maven_setup = |tool: &str| {
+            format!(
+                "{tool} dependency:go-offline test -Dtest='#keel-setup-runs-no-tests' \
+                 -Dsurefire.failIfNoSpecifiedTests=false"
+            )
+        };
         assert_eq!(
             found(&[("pom.xml", "<project/>")]),
-            both("mvn test", "mvn dependency:go-offline")
+            both("mvn test", &maven_setup("mvn"))
         );
         let maven = guess(repo(&[("pom.xml", "<project/>"), ("mvnw", "#!/bin/sh\n")]).path());
         assert_eq!(maven.check.as_deref(), Some("./mvnw test"));
-        assert_eq!(maven.setup.as_deref(), Some("./mvnw dependency:go-offline"));
+        assert_eq!(maven.setup, Some(maven_setup("./mvnw")));
         assert_eq!(maven.from, ["pom.xml", "mvnw"]);
 
         assert_eq!(
@@ -1421,7 +1435,11 @@ mod tests {
         );
         assert_eq!(
             guess.setup.as_deref(),
-            Some("pnpm install --frozen-lockfile && mvn dependency:go-offline && mix deps.get")
+            Some(
+                "pnpm install --frozen-lockfile && mvn dependency:go-offline test \
+                 -Dtest='#keel-setup-runs-no-tests' -Dsurefire.failIfNoSpecifiedTests=false && \
+                 mix deps.get"
+            )
         );
         assert_eq!(
             guess.check.as_deref(),
