@@ -10,7 +10,7 @@ import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nod
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText, specProblemText } from "../lib/reason";
 import { allRecommend, answerFrom, differsFromRecommended, isAnswered, needsText, type QuestionPick, recommendedAnswers, recommendedOption, startingPick } from "../lib/questions";
-import { latestSizeDecision, type SizeDecision, skippedAsSmall, skippedSteps, whyNotSmallText } from "../lib/size";
+import { latestSizeDecision, type SizeDecision, skippedAsSmall, skippedForRisks, skippedSteps, whyNotSmallText } from "../lib/size";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
 import { ProposalRow } from "./BrainPage";
@@ -310,9 +310,8 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
   const ran = latest.filter((review) => review.state !== "skipped");
   // Those it skipped for being small are on a line of their own, with what can be done about it.
   const leftOut = latest.filter((review) => review.state === "skipped" && !skippedAsSmall(review));
-  const forRisks = (review: Attempt) => review.reason?.code === "noMatchingRisks";
-  const skipped = leftOut.filter((review) => !forRisks(review));
-  const skippedForRisks = leftOut.filter(forRisks);
+  const skipped = leftOut.filter((review) => !skippedForRisks(review));
+  const forRisks = leftOut.filter(skippedForRisks);
   return (
     <div className="space-y-0.5">
       {ran.length > 0 && (
@@ -333,7 +332,7 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
           </p>
         ))}
       {skipped.length > 0 && <p className="text-subtle">{t("run.approvalSkipped", { names: skipped.map((review) => review.stepId).join(", ") })}</p>}
-      {skippedForRisks.length > 0 && <p className="text-subtle">{t("run.approvalSkippedRisks", { names: skippedForRisks.map((review) => review.stepId).join(", ") })}</p>}
+      {forRisks.length > 0 && <p className="text-subtle">{t("run.approvalSkippedRisks", { names: forRisks.map((review) => review.stepId).join(", ") })}</p>}
       {approver?.output && (
         <div className={cx(ran.length + leftOut.length > 0 && "pt-1")}>
           <ApproverVerdict output={approver.output} riskClass={approver.output.risk === "high" ? "font-medium text-warning" : "text-fg"} />
@@ -1133,8 +1132,10 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       return line(data.command ? t("activity.startedCheck", { command: data.command }) : t("activity.started"), "text-subtle");
     case "waiting":
       return line(t("activity.waiting"), "text-warning");
-    case "skipped":
-      return line(data.reason?.code === "treatedAsSmall" ? t("activity.skippedSmall") : data.reason?.code === "noMatchingRisks" ? t("activity.skippedRisks") : t("activity.skipped"), "text-subtle");
+    case "skipped": {
+      const skipped = { state: "skipped", reason: data.reason };
+      return line(skippedAsSmall(skipped) ? t("activity.skippedSmall") : skippedForRisks(skipped) ? t("activity.skippedRisks") : t("activity.skipped"), "text-subtle");
+    }
     case "postponed":
       return line(t("activity.postponed", { names: (data.steps ?? []).join(", ") }), "font-medium");
     case "sizeDecided":

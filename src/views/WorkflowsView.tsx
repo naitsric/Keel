@@ -11,7 +11,7 @@ import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Segmented } from "../ui/primitives";
 import { AddProject } from "./AddProject";
 import { FlowDiagram } from "./FlowDiagram";
-import { MODELS, ModelField } from "./ModelField";
+import { ModelField } from "./ModelField";
 import { WorkflowResultsCard } from "./WorkflowResultsCard";
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
@@ -112,7 +112,6 @@ function RiskFields({ spec, onChange }: { spec: StepSpec; onChange: (spec: StepS
   // One the engine doesn't know stays, so saving doesn't drop it.
   const shown = [...KNOWN_RISKS, ...chosen.filter((risk) => !KNOWN_RISKS.includes(risk))];
   const toggle = (risk: string, on: boolean) => onChange(withRisks(spec, on ? [...chosen, risk] : chosen.filter((other) => other !== risk)));
-  const risky = spec.modelWhenRisky ?? "";
   return (
     <>
       <fieldset>
@@ -128,17 +127,7 @@ function RiskFields({ spec, onChange }: { spec: StepSpec; onChange: (spec: StepS
         <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t("workflows.risksHint")}</p>
       </fieldset>
       <div className="max-w-md">
-        <Field label={t("workflows.modelWhenRisky")} hint={t("workflows.modelWhenRiskyHint")}>
-          <select value={risky} onChange={(e) => onChange(withModelWhenRisky(spec, e.target.value))} className={inputClass}>
-            <option value="">{t("workflows.modelWhenRiskySame")}</option>
-            {MODELS.map((m) => (
-              <option key={m.value} value={m.value}>
-                {m.label}
-              </option>
-            ))}
-            {risky && !MODELS.some((m) => m.value === risky) && <option value={risky}>{risky}</option>}
-          </select>
-        </Field>
+        <ModelField label={t("workflows.modelWhenRisky")} hint={t("workflows.modelWhenRiskyHint")} none={t("workflows.modelWhenRiskySame")} value={spec.modelWhenRisky ?? ""} onChange={(model) => onChange(withModelWhenRisky(spec, model))} />
       </div>
     </>
   );

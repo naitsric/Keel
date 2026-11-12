@@ -221,9 +221,19 @@ pub struct Facts<'a> {
     pub part_of_joint_change: bool,
 }
 
-pub fn skipped_as_small(attempt: &Attempt) -> bool {
+fn skipped_for(attempt: &Attempt, code: &str) -> bool {
     attempt.state == AttemptState::Skipped.as_str()
-        && attempt.reason.as_ref().and_then(|r| r.get("code")) == Some(&json!("treatedAsSmall"))
+        && attempt.reason.as_ref().and_then(|r| r.get("code")) == Some(&json!(code))
+}
+
+pub fn skipped_as_small(attempt: &Attempt) -> bool {
+    skipped_for(attempt, "treatedAsSmall")
+}
+
+/// Left out because what was asked names none of the risks it looks at. That's settled before the
+/// size, so it says nothing about it either way.
+pub fn skipped_for_risks(attempt: &Attempt) -> bool {
+    skipped_for(attempt, "noMatchingRisks")
 }
 
 /// Whether a person asked for what was skipped to run, at any point in this run.
@@ -275,12 +285,13 @@ fn conditional_step_ids(steps: &[WorkflowStep]) -> HashSet<&str> {
 /// Whether a step that only runs for a change that isn't small has been past the point of being
 /// skipped for it. That's what keeps a run from going back down in a later round, across a person's
 /// send-back or a restart. A step passed over because its paths didn't match counts: those are only
-/// looked at once the change has been found not to be small.
+/// looked at once the change has been found not to be small. One its risks left out doesn't: that
+/// comes first, small or not.
 pub fn already_up(steps: &[WorkflowStep], attempts: &[Attempt]) -> bool {
     let conditional = conditional_step_ids(steps);
-    attempts
-        .iter()
-        .any(|a| conditional.contains(a.step_id.as_str()) && !skipped_as_small(a))
+    attempts.iter().any(|a| {
+        conditional.contains(a.step_id.as_str()) && !skipped_as_small(a) && !skipped_for_risks(a)
+    })
 }
 
 pub(crate) fn why_from_spec(attempts: &[Attempt]) -> Vec<WhyNotSmall> {

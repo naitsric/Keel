@@ -1642,6 +1642,131 @@ fn a_change_over_1500_lines_has_its_code_reviewed_with_the_stronger_model() {
 }
 
 #[test]
+fn a_change_git_can_not_count_has_its_code_reviewed_with_the_stronger_model() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.spec_says(answered_small(json!({ "size": "normal", "risks": [] })));
+    // However big it really is, git counts none of it.
+    w.builder_does(
+        1,
+        "printf '* -diff\\n' > .git/info/attributes\nseq 1 9000 > big.txt\n",
+    );
+    let run = w.start_builtin("builtin:full");
+    w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    assert_eq!(w.step(&run, "code").model_requested, "opus");
+    assert_eq!(w.step(&run, "security").model_requested, "sonnet");
+}
+
+/// The steps a small change offers to run, in the order they'd run.
+const OFFERED: [&str; 5] = ["security", "ux", "ui", "code", "approver"];
+
+#[test]
+fn a_small_change_does_not_offer_the_state_review_since_it_could_never_run_for_one() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.start_builtin("builtin:organic");
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+
+    // A change is small only when what was asked names no risk, so nothing would ever match.
+    let state = w.step(&run, "state");
+    assert_eq!(state.state, "skipped");
+    assert_eq!(
+        state.reason.unwrap(),
+        json!({ "code": "noMatchingRisks", "risks": ["concurrency", "sharedContracts", "irreversibleData"] })
+    );
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    assert_eq!(keel_engine::skipped_steps(&attempts), OFFERED);
+    let decisions = w.decisions(&run);
+    assert_eq!(decisions.len(), 1, "{decisions:?}");
+    assert_eq!(decisions[0]["small"], true);
+
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    w.wait_for(&run, "pull-request", AttemptState::Succeeded);
+    let body = w.body();
+    assert!(
+        body.contains("These didn't run: `security`, `ux`, `ui`, `code`, `approver`\n"),
+        "{body}"
+    );
+    assert!(
+        body.contains("- `state`: skipped: what was asked names none of the risks it looks at"),
+        "{body}"
+    );
+}
+
+#[test]
+fn running_what_a_small_change_skipped_leaves_out_the_state_review() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.start_builtin("builtin:organic");
+    let first = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+
+    w.engine.run_skipped(&first.id).unwrap();
+    let said = w.store.events(&first.id, 0).unwrap().pop().unwrap();
+    assert_eq!(said.data["steps"], json!(OFFERED));
+    let second = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    assert_ne!(second.id, first.id);
+    for id in OFFERED {
+        assert_eq!(w.all(&run, id).len(), 2, "{id} was looked at again");
+    }
+    for id in ["security", "code", "approver"] {
+        assert_eq!(w.step(&run, id).state, "succeeded", "{id}");
+    }
+    assert_eq!(w.all(&run, "state").len(), 1, "nothing to run it for");
+}
+
+#[test]
+fn a_small_change_sent_back_stays_small_whatever_its_risks_left_out() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.start_builtin("builtin:organic");
+    let first = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.send_back(&first.id, "A small fix").unwrap();
+    w.wait_for_round(&run, "human", 1, AttemptState::WaitingApproval);
+
+    for id in OFFERED {
+        let skipped = w.step(&run, id);
+        assert_eq!(skipped.round, 1, "{id}");
+        assert_eq!(skipped.reason.unwrap()["code"], "treatedAsSmall", "{id}");
+    }
+    let state = w.step(&run, "state");
+    assert_eq!(state.round, 1);
+    assert_eq!(state.reason.unwrap()["code"], "noMatchingRisks");
+    let decisions = w.decisions(&run);
+    assert_eq!(decisions.len(), 2, "{decisions:?}");
+    assert_eq!(decisions[1]["small"], true, "{decisions:?}");
+}
+
+#[test]
+fn a_step_its_risks_leave_out_first_does_not_take_the_size_off_the_record() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let mut races = spec_of(
+        "races",
+        ToolProfile::ReadOnly,
+        StepRole::Reviewer,
+        NOT_SMALL,
+    );
+    races.risks = vec!["concurrency".into()];
+    let mut steps = fitting();
+    if let WorkflowStep::Parallel { steps: group, .. } = &mut steps[4] {
+        group.insert(0, races);
+    }
+    let run = w.start(steps);
+    let first = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    assert_eq!(
+        w.step(&run, "races").reason.unwrap()["code"],
+        "noMatchingRisks"
+    );
+    w.assert_went_small(&run);
+    assert_eq!(w.decisions(&run).len(), 1);
+
+    w.engine.send_back(&first.id, "A small fix").unwrap();
+    w.wait_for_round(&run, "human", 1, AttemptState::WaitingApproval);
+    w.assert_went_small(&run);
+    assert_eq!(w.decisions(&run).len(), 2);
+}
+
+#[test]
 fn a_persons_own_step_can_go_by_risks_too_also_alone() {
     keel_harness::needs!(sandbox);
     let w = world();

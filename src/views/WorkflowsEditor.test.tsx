@@ -1110,6 +1110,7 @@ describe("the workflow editor", () => {
     };
     const box = (label: string) => [...document.querySelectorAll("label")].find((l) => l.textContent === label)?.querySelector<HTMLInputElement>('input[type="checkbox"]') as HTMLInputElement;
     const riskyModel = () => labelled<HTMLSelectElement>("If the change is risky, use", "select") as HTMLSelectElement;
+    const riskyOther = () => labelled<HTMLInputElement>("If the change is risky, use", "input");
     const choose = (select: HTMLSelectElement, value: string) =>
       act(() => {
         Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set?.call(select, value);
@@ -1162,12 +1163,23 @@ describe("the workflow editor", () => {
       const reviewers = [spec("code", { role: { kind: "reviewer" }, modelWhenRisky: "claude-big" }), spec("state", { role: { kind: "reviewer" }, risks: ["somethingNew"] })];
       await openRisky({ ...RISKY, steps: [...RISKY.steps.slice(0, 2), { type: "parallel", id: "reviews", steps: reviewers }] });
       await click(node("code"));
-      expect(riskyModel().value).toBe("claude-big");
+      expect(riskyModel().value).toBe("__custom__");
+      expect(riskyOther()?.value).toBe("claude-big");
       await click(node("state"));
       expect(box("something it couldn't name").checked).toBe(true);
       await saveNow();
       expect(reviews()[0].modelWhenRisky).toBe("claude-big");
       expect(reviews()[1].risks).toEqual(["somethingNew"]);
+    });
+
+    it("takes any other model by name, as the step's own model does", async () => {
+      await openRisky();
+      await click(node("state"));
+      expect(riskyOther()).toBeNull();
+      choose(riskyModel(), "__custom__");
+      write(riskyOther() as HTMLInputElement, "claude-big");
+      await saveNow();
+      expect(reviews()[1].modelWhenRisky).toBe("claude-big");
     });
 
     it("says what the engine refused, on the step", async () => {

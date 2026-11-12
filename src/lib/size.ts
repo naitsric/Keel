@@ -16,7 +16,13 @@ export const KNOWN_RISKS = ["security", "money", "personalData", "irreversibleDa
 /** A risk in the words of someone who asked for the change. */
 export const riskText = (t: TFunction, risk: string) => t(KNOWN_RISKS.includes(risk) ? `fits.risks.${risk}` : "fits.risks.other");
 
-export const skippedAsSmall = (attempt: { state: string; reason?: { code: string } | null }) => attempt.state === "skipped" && attempt.reason?.code === "treatedAsSmall";
+type Skippable = { state: string; reason?: { code: string } | null };
+const skippedFor = (code: string) => (attempt: Skippable) => attempt.state === "skipped" && attempt.reason?.code === code;
+
+export const skippedAsSmall = skippedFor("treatedAsSmall");
+
+/** Left out because what was asked names none of the risks it looks at. That's settled before the size, so it says nothing about it. */
+export const skippedForRisks = skippedFor("noMatchingRisks");
 
 /** The steps that stand skipped for being a small change: what a person can ask for. Once they've asked, all of it is on its way. */
 export const skippedSteps = <T extends { stepId: string; state: string; reason?: { code: string } | null }>(attempts: T[]): T[] => (attempts.some((attempt) => attempt.state === "postponed") ? [] : latestOfEachStep(attempts).filter(skippedAsSmall));

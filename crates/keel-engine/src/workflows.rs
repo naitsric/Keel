@@ -356,7 +356,8 @@ const RISKY: [&str; 4] = ["security", "money", "personalData", "irreversibleData
 const RISKY_LINES: usize = 1500;
 
 /// `lines` reads the change only if the risks didn't decide it, and gives `None` when it can't be
-/// read. Like the size, a change nobody could read is never taken as a harmless one.
+/// read, or git won't count all of it in lines. Like the size, a change nobody could read is never
+/// taken as a harmless one.
 pub fn is_risky(named: &[String], lines: impl FnOnce() -> Option<usize>) -> bool {
     named.iter().any(|risk| RISKY.contains(&risk.as_str()))
         || lines().is_none_or(|lines| lines > RISKY_LINES)
@@ -383,10 +384,10 @@ pub fn output_of(attempts: &[Attempt], step_id: &str) -> String {
         return "(skipped: Keel treated this as a small change, so this step looked at nothing)"
             .to_owned();
     }
+    if sizing::skipped_for_risks(attempt) {
+        return "(skipped: the specification names none of the risks it looks at)".to_owned();
+    }
     if attempt.state == AttemptState::Skipped.as_str() {
-        if attempt.reason.as_ref().and_then(|r| r.get("code")) == Some(&"noMatchingRisks".into()) {
-            return "(skipped: the specification names none of the risks it looks at)".to_owned();
-        }
         return "(skipped: nothing it covers changed)".to_owned();
     }
     match &attempt.output {

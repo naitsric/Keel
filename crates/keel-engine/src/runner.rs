@@ -1447,6 +1447,7 @@ impl Inner {
                 from: attempt.id.clone(),
                 prompt: Some(specs::correction_prompt(problems, &attempt.language)),
             }),
+            None,
         )?;
         Ok(())
     }
