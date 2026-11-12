@@ -1396,7 +1396,10 @@ impl Inner {
             })
         };
         let Some(issue) = issue else {
-            return Ok(by_writer(request).into_iter().collect());
+            // From a card, only what it says counts. Its title is only a name, and who wrote it
+            // isn't kept: an assistant's can stay on a card whose words the person made theirs.
+            let said = card.map_or(request, |card| card.body.as_str());
+            return Ok(by_writer(said).into_iter().collect());
         };
         let mut written = Vec::new();
         // Someone else's issue counts for no one. One written with the project's account is that

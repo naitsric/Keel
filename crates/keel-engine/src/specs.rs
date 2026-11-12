@@ -31,8 +31,47 @@ const DECIDED_HEADINGS: [&str; 4] = [
     "decisions already made",
     "decided",
 ];
-/// What a note after such a heading can say to hold what's under it back, word for word.
-const HEDGES: [&str; 33] = [
+/// What a note after such a heading can say, each part of it between commas, for what's under it
+/// to count: that the decisions are taken, or only not to ask about them. Any other note holds them
+/// back, since nobody can list every way of saying they aren't settled.
+const AFFIRMING: [&str; 34] = [
+    "no las preguntes",
+    "no preguntes",
+    "no preguntar",
+    "no las cuestiones",
+    "sin preguntas",
+    "definitivas",
+    "definitivos",
+    "definitiva",
+    "definitivo",
+    "por mí",
+    "por mi",
+    "ya tomadas",
+    "tomadas",
+    "ya decididas",
+    "decididas",
+    "don't ask",
+    "dont ask",
+    "do not ask",
+    "don't ask them",
+    "do not ask them",
+    "don't ask about them",
+    "do not ask about them",
+    "don't question them",
+    "do not question them",
+    "no questions",
+    "final",
+    "by me",
+    "already made",
+    "already decided",
+    "decided",
+    "made",
+    "settled",
+    "taken",
+    "done",
+];
+/// What a note can say that holds what's under it back, word for word, even next to one of those.
+const HEDGES: [&str; 50] = [
     "tentative",
     "tentatively",
     "provisional",
@@ -40,19 +79,37 @@ const HEDGES: [&str; 33] = [
     "not yet",
     "maybe",
     "draft",
+    "drafts",
     "to confirm",
     "to be confirmed",
     "unconfirmed",
+    "not confirmed",
+    "not final",
+    "to be decided",
+    "pending",
+    "proposed",
+    "proposal",
+    "preliminary",
+    "wip",
     "tbd",
     "tbc",
+    "so far",
     "todavía no",
     "todavia no",
     "aún no",
     "aun no",
     "por confirmar",
     "sin confirmar",
+    "por definir",
+    "por revisar",
     "pendiente",
     "pendientes",
+    "propuesta",
+    "propuestas",
+    "no definitivas",
+    "no definitivos",
+    "no definitiva",
+    "no definitivo",
     "tentativo",
     "tentativa",
     "tentativos",
@@ -65,7 +122,6 @@ const HEDGES: [&str; 33] = [
     "tal vez",
     "borrador",
     "borradores",
-    "drafts",
 ];
 const MAX_QUESTIONS: usize = 3;
 const MAX_QUESTION_TEXT: usize = 140;
@@ -682,29 +738,35 @@ fn heading_name(heading: &str) -> (&str, Vec<&str>) {
     }
 }
 
-/// Whether a note says what's under the heading isn't settled yet, such as "(tentative)".
-fn holds_back(note: &str) -> bool {
-    let words: Vec<String> = note
-        .split(|c: char| !c.is_alphanumeric())
+/// Whether a note leaves what's under the heading counting: each part of it says the decisions are
+/// taken, or only not to ask about them, as "(no las preguntes)" does, and none of it hedges.
+fn affirms(note: &str) -> bool {
+    let note = note.to_lowercase().replace(['’', '‘'], "'");
+    let words: Vec<&str> = note
+        .split(|c: char| !(c.is_alphanumeric() || c == '\''))
         .filter(|word| !word.is_empty())
-        .map(str::to_lowercase)
         .collect();
-    HEDGES.iter().any(|hedge| {
+    let hedged = HEDGES.iter().any(|hedge| {
         let hedge: Vec<&str> = hedge.split(' ').collect();
         words
             .windows(hedge.len())
-            .any(|window| window.iter().zip(&hedge).all(|(word, said)| word == said))
-    })
+            .any(|window| window == hedge.as_slice())
+    });
+    let parts: Vec<String> = note
+        .split([',', ';'])
+        .map(|part| one_line(part.trim().trim_end_matches(['.', '!'])))
+        .collect();
+    !hedged && parts.iter().all(|part| AFFIRMING.contains(&part.as_str()))
 }
 
-/// Whether a heading names a list of what was already decided. One with a note that holds it back,
-/// such as "Decided (tentative)", doesn't.
+/// Whether a heading names a list of what was already decided. One with a note that doesn't say
+/// they're taken, such as "Decided (tentative)", doesn't.
 fn names_what_was_decided(heading: &str) -> bool {
     let (name, notes) = heading_name(heading);
     DECIDED_HEADINGS
         .iter()
         .any(|heading| name.eq_ignore_ascii_case(heading))
-        && !notes.into_iter().any(holds_back)
+        && notes.into_iter().all(affirms)
 }
 
 /// What a heading with `#` says, if the line is one. As in Markdown, that's one to six `#` and then
@@ -821,10 +883,21 @@ fn fence(line: &str) -> Option<(char, usize)> {
 }
 
 /// Whether a line ends a code block opened with this fence: only the same character, as many times
-/// or more, and spaces.
-fn closes(line: &str, (mark, length): (char, usize)) -> bool {
+/// or more, and spaces, indented at most three past where the fence's block starts.
+fn closes(line: &str, Fence { mark, length, at }: Fence) -> bool {
     let trimmed = line.trim();
-    trimmed.chars().all(|c| c == mark) && trimmed.chars().count() >= length
+    indent(line) <= at + 3
+        && trimmed.chars().all(|c| c == mark)
+        && trimmed.chars().count() >= length
+}
+
+/// A code block's fence: its character, how many, and where the block it's in starts, from which
+/// it can be indented at most three, as in Markdown. Indented more, it's a line of code.
+#[derive(Clone, Copy)]
+struct Fence {
+    mark: char,
+    length: usize,
+    at: usize,
 }
 
 /// A line of only `-`, `*` or `_`, three or more, which breaks one part of a text from the next.
@@ -837,19 +910,13 @@ fn thematic_break(trimmed: &str) -> bool {
     rest.len() >= 2 && rest.iter().all(|c| *c == first)
 }
 
-/// A text without its `<!-- -->` comments, which nobody reads as part of it.
-fn without_comments(text: &str) -> String {
-    let mut kept = String::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("<!--") {
-        kept.push_str(&rest[..start]);
-        rest = match rest[start + 4..].find("-->") {
-            Some(end) => &rest[start + 4 + end + 3..],
-            None => "",
-        };
-    }
-    kept.push_str(rest);
-    kept
+/// Whether an item's words may not be what it says: a comment in them can hide part of it, or Keel
+/// can misread where one ends, and struck-through words may have been taken back.
+fn unsure(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    ["<!--", "~~", "<s>", "<del>", "<strike>"]
+        .iter()
+        .any(|mark| lower.contains(mark))
 }
 
 /// What a task that's done says, without its box: `[x]` and a space.
@@ -880,6 +947,9 @@ struct DecidedList {
     item: Option<Item>,
     /// A blank line came after the item. It's whole, unless what comes next is still part of it.
     after_blank: bool,
+    /// A comment on lines of its own came after the item, not indented as its words. It says
+    /// nothing, but Markdown ends the item there, so nothing after it goes on with it.
+    after_comment: bool,
 }
 
 impl DecidedList {
@@ -890,13 +960,14 @@ impl DecidedList {
 
     /// Keeps the item being read, which is whole.
     fn end_item(&mut self) {
-        self.after_blank = false;
+        (self.after_blank, self.after_comment) = (false, false);
         if let Some(item) = self.item.take() {
-            let text = one_line(&without_comments(&item.text));
+            let text = one_line(&item.text);
             let text = done_task(&text).unwrap_or(&text);
             // Markup with no words, such as `[x]` or `**`, says nothing, as an empty template doesn't.
             let says = text.chars().any(char::is_alphanumeric);
-            if !item.open_task && says && !self.decided.iter().any(|known| known == text) {
+            let kept = !item.open_task && says && !unsure(text);
+            if kept && !self.decided.iter().any(|known| known == text) {
                 self.decided.push(text.to_owned());
             }
         }
@@ -905,7 +976,7 @@ impl DecidedList {
     /// Leaves out the item being read: something cut it short, or may have, and part of a
     /// decision can say the opposite of the whole.
     fn drop_item(&mut self) {
-        (self.item, self.after_blank) = (None, false);
+        (self.item, self.after_blank, self.after_comment) = (None, false, false);
     }
 
     fn end(&mut self) {
@@ -921,12 +992,13 @@ impl DecidedList {
 /// a blank line, a heading or a break. Keel shows a request as plain text, so whatever might be the
 /// rest of an item without being indented as its words, or might cut it short, drops the item: a
 /// line that isn't, which also ends the list, as it may be a label over what follows; code, a
-/// quote or a tag right under it or in it; or more of it after a blank line. A task still open
-/// isn't decided, nor is anything in code, a quote or a comment: someone else may be speaking
-/// there.
+/// quote or a tag right under it or in it; more of it after a blank line; or a comment in it, or
+/// words after one right under it. A comment on lines of its own between items, as templates
+/// have, says nothing. A task still open isn't decided, nor are struck-through words, nor is
+/// anything in code, a quote or a comment: someone else may be speaking there.
 pub(crate) fn decided_in(text: &str) -> Vec<String> {
     let mut list = DecidedList::default();
-    let mut code: Option<(char, usize)> = None;
+    let mut code: Option<Fence> = None;
     let mut comment = false;
     // Whether this line starts a block, as after a blank line or a heading, rather than going on
     // with a paragraph. A line of text names a list only there.
@@ -942,14 +1014,40 @@ pub(crate) fn decided_in(text: &str) -> Vec<String> {
             continue;
         }
         if comment {
-            comment = !line.contains("-->");
+            if let Some(end) = line.find("-->") {
+                comment = false;
+                // Words after it, on its line, may be the rest of the item above.
+                if !line[end + 3..].trim().is_empty() {
+                    list.drop_item();
+                    list.end();
+                }
+            }
             continue;
         }
         let trimmed = line.trim();
         let depth = indent(line);
-        // A comment says nothing, so it cuts nothing short.
         if let Some(opened) = trimmed.strip_prefix("<!--") {
-            comment = !opened.contains("-->");
+            let after = opened.find("-->").map(|end| opened[end + 3..].trim());
+            comment = after.is_none();
+            if list.within(depth) {
+                // In an item, it may hide part of what it says. After a blank line, it's more of
+                // the item, which drops it too.
+                if list.after_blank {
+                    list.drop_item();
+                    list.end();
+                } else if let Some(item) = &mut list.item {
+                    item.text.push(' ');
+                    item.text.push_str(trimmed);
+                }
+            } else if after == Some("") || after.is_none() {
+                // On lines of its own, between items or before the list, it says nothing, unless
+                // words follow where it ends.
+                list.after_comment |= list.item.is_some();
+            } else {
+                // Words after it may be the rest of the item above, or a label over what follows.
+                list.drop_item();
+                list.end();
+            }
             continue;
         }
         let under_text = std::mem::take(&mut paragraph);
@@ -965,14 +1063,26 @@ pub(crate) fn decided_in(text: &str) -> Vec<String> {
             }
             list.end();
         }
+        // After a comment Markdown ends the item at, more of it would be read as something else.
+        if std::mem::take(&mut list.after_comment) && list.within(depth) {
+            list.drop_item();
+        }
         let within = list.within(depth);
         // Code, a quote or a tag on its own line, such as one that closes an issue, is never part
         // of an item. Right under one, it may be what the item goes on to say.
         let tag = trimmed.starts_with('<') && trimmed.ends_with('>');
-        if let Some(opened) = fence(line) {
+        let block_at = match &list.item {
+            Some(item) if within => item.content,
+            _ => 0,
+        };
+        if let Some((mark, length)) = fence(line).filter(|_| depth <= block_at + 3) {
             list.drop_item();
             list.end();
-            code = Some(opened);
+            code = Some(Fence {
+                mark,
+                length,
+                at: block_at,
+            });
             continue;
         }
         if trimmed.starts_with('>') || tag {
@@ -1004,6 +1114,12 @@ pub(crate) fn decided_in(text: &str) -> Vec<String> {
         } else if let Some(marked) = list_item(line).filter(|marked| {
             depth < 4 && starts_item(marked.said, marked.mark, starts_block, list.item.as_ref())
         }) {
+            // An item whose words start a comment that doesn't end on its line opens one, which
+            // goes on over the lines after it.
+            comment = marked
+                .said
+                .strip_prefix("<!--")
+                .is_some_and(|opened| !opened.contains("-->"));
             if list.open {
                 list.end_item();
                 list.item = Some(Item {
@@ -2109,7 +2225,7 @@ mod tests {
     }
 
     #[test]
-    fn a_heading_whose_note_holds_the_decisions_back_names_no_list() {
+    fn a_heading_s_note_opens_the_list_only_when_it_says_the_decisions_are_taken() {
         for heading in [
             "Decided (tentative):",
             "## Decided (not yet, ask me)",
@@ -2118,6 +2234,18 @@ mod tests {
             "Decided (draft)",
             "Decided (to confirm)",
             "Decided (provisional)",
+            "## Decided (pending)",
+            "## Decided (proposed)",
+            "## Decisions already made (preliminary)",
+            "## Decided (not final)",
+            "## Decided (pending confirmation)",
+            "## Decided (to be decided)",
+            "## Decided (WIP)",
+            "## Decided (final, maybe)",
+            "## Decided (don't ask, pending)",
+            "## Decided (not confirmed)",
+            "## Decided (so far)",
+            "**Decided** (pending):",
             "Decisiones tomadas (todavía no):",
             "Decisiones ya tomadas (aún no, pregúntame)",
             "Decisiones tomadas (por confirmar)",
@@ -2127,17 +2255,31 @@ mod tests {
             "Decisiones tomadas (quizá)",
             "Decisiones tomadas (tal vez)",
             "Decisiones tomadas (borrador)",
+            "## Decisiones tomadas (propuesta)",
+            "## Decisiones tomadas (por revisar)",
+            "## Decisiones tomadas (no definitivas)",
+            "## Decisiones ya tomadas (por definir)",
+            "## Decisiones tomadas (pendiente de confirmar)",
         ] {
             assert!(
                 decided_in(&format!("{heading}\n- Old threads stay.")).is_empty(),
                 "{heading}"
             );
         }
-        // A note that only says not to ask them is fine.
+        // A note that says they're taken, or only not to ask them, opens it, and so does none.
         for heading in [
             "Decisiones ya tomadas (no las preguntes):",
+            "Decisiones ya tomadas (No las preguntes.)",
             "Decided (don't ask):",
+            "Decided (don’t ask)",
+            "Decided (do not ask)",
             "## Decided (by me)",
+            "## Decided (final)",
+            "## Decided (final, don't ask)",
+            "## Decisiones tomadas (definitivas)",
+            "## Decisiones tomadas (por mí)",
+            "## Decisions already made (already made)",
+            "## Decided",
         ] {
             assert_eq!(
                 decided_in(&format!("{heading}\n- Old threads stay.")),
@@ -2331,10 +2473,22 @@ mod tests {
     fn markup_and_template_text_is_not_a_decision() {
         assert_eq!(
             decided_in(
-                "Decided:\n- [x]\n- -\n- **\n- <!-- list what is already decided -->\n- It stays. <!-- why: the export -->"
+                "Decided:\n- [x]\n- -\n- **\n- <!-- list what is already decided -->\n- It stays."
             ),
             ["It stays."]
         );
+        // Struck through, it may have been taken back.
+        for struck in [
+            "~~Use Redis for sessions~~",
+            "<s>Use Redis</s> for sessions",
+            "<del>Use Redis</del>",
+        ] {
+            assert_eq!(
+                decided_in(&format!("## Decided\n- Use Postgres\n- {struck}")),
+                ["Use Postgres"],
+                "{struck}"
+            );
+        }
         // A line of only `*`, `-` or `_` is a break that ends the list.
         assert_eq!(
             decided_in("Decided:\n- It stays.\n* * *\n- Not this."),
@@ -2351,11 +2505,68 @@ mod tests {
         assert!(decided_in(fenced).is_empty());
         let quoted = "Decided:\n- It stays.\n  > a customer said to drop it\n- Not after a quote.";
         assert!(decided_in(quoted).is_empty());
-        // A comment says nothing, so it cuts nothing short.
-        let commented = "Decided:\n- It stays.\n  <!-- drop it later -->\n- It counts.";
-        assert_eq!(decided_in(commented), ["It stays.", "It counts."]);
-        let within = "Decided:\n- It stays\n  <!-- drop it later -->\n  as it is.";
-        assert_eq!(decided_in(within), ["It stays as it is."]);
+    }
+
+    #[test]
+    fn an_item_with_a_comment_in_it_is_dropped_and_one_between_items_is_nothing() {
+        // A comment can hide part of what an item says, or Keel can misread where it ends.
+        for text in [
+            "## Decided\n- Delete the old threads\n  <!-- note --> only those older than a year",
+            "## Decided\n- Delete the old threads\n  <!-- note\n  --> only those older than a year",
+            "## Decided\n- Delete the old threads\n<!-- note --> only the ones from 2019",
+            "## Decided\n- Delete the old threads\n<!-- note\n--> only the ones from 2019",
+            "## Decided\n- Retention: 7 days\n  <!-- legal asked --> but only for EU users",
+            "## Decided\n- Lines starting with `<!--` are skipped until `-->`, and the rest is kept",
+            "## Decided\n- Delete generated files, except those with a `<!--` header",
+            "## Decided\n- Escape `<!--` in user content before saving it",
+            "## Decided\n- It stays. <!-- why: the export -->",
+            "## Decided\n- It stays\n  <!-- drop it later -->\n  as it is.",
+            "## Decided\n- It stays.\n  <!-- drop it later -->",
+            "## Decided\n- It stays\n<!-- drop it later -->\n  as it is.",
+        ] {
+            assert!(
+                decided_in(text).is_empty(),
+                "{text:?}: {:?}",
+                decided_in(text)
+            );
+        }
+        // The items around it stay, unless the comment may go on over them.
+        assert_eq!(
+            decided_in(
+                "## Decided\n- Retention: 7 days\n  <!-- legal asked --> but only for EU users\n- Use Postgres"
+            ),
+            ["Use Postgres"]
+        );
+        assert_eq!(
+            decided_in("## Decided\n- Delete old threads <!-- only test ones\n- Keep the rest"),
+            ["Keep the rest"]
+        );
+        assert!(
+            decided_in(
+                "## Decided\n- Keep logs\n<!-- note\n--> only the ones from 2019\n- Use Postgres"
+            )
+            .is_empty()
+        );
+        // An item that starts with one opens a comment, which may go on over what follows.
+        assert_eq!(
+            decided_in("## Decided\n- <!-- an example\n- Delete all\n-->\n- It stays."),
+            ["It stays."]
+        );
+        // A comment on lines of its own between items, or before the list, says nothing.
+        assert_eq!(
+            decided_in("Decided:\n- It stays.\n<!-- one per line -->\n- It counts."),
+            ["It stays.", "It counts."]
+        );
+        assert_eq!(
+            decided_in(
+                "## Decided\n<!--\nList what's already decided.\n- Like this.\n-->\n- It stays."
+            ),
+            ["It stays."]
+        );
+        assert_eq!(
+            decided_in("Decided:\n- It stays.\n  <!-- drop it later -->\n- It counts."),
+            ["It counts."]
+        );
     }
 
     #[test]
@@ -2405,6 +2616,32 @@ mod tests {
         assert!(
             only_long.starts_with(&format!("Keel leaves these in the request, where agents read them: they're past what it takes from its lists of what was already decided. Don't copy them into `decided`:\n- {long}\n")),
             "{only_long}"
+        );
+    }
+
+    #[test]
+    fn a_fence_is_indented_at_most_three_spaces_as_in_markdown() {
+        // Indented four, it's a line of code, and opens nothing: the fence after it does.
+        let shown = "To show a fence in Markdown, indent it:\n\n    ```bash\n    echo hi\n\nThen the template:\n\n```\n## Decided\n- Delete everything\n- Keep logs\n```";
+        assert!(decided_in(shown).is_empty(), "{:?}", decided_in(shown));
+        // Nor does a line of backticks indented four close one.
+        assert!(decided_in("```\n    ```\n## Decided\n- Use X\n\n```").is_empty());
+        assert_eq!(
+            decided_in("    ```bash\n    echo hi\n\n## Decided\n- Use X"),
+            ["Use X"]
+        );
+        // In an item, the indent counts from where its words start.
+        assert_eq!(
+            decided_in(
+                "## Decided\n- Never run\n  ```\n  ## Decided\n  - Drop it\n  ```\n\n## Decided\n- It stays."
+            ),
+            ["It stays."]
+        );
+        assert_eq!(
+            decided_in(
+                "## Decided\n1.  Never run\n    ```\n    ## Decided\n    - Drop it\n    ```\n\n## Decided\n- It stays."
+            ),
+            ["It stays."]
         );
     }
 

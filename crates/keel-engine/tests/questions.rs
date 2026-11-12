@@ -83,6 +83,9 @@ case "$schema" in
   fi
   result "$output" "" "0.$n"
   exit 0;;
+*verdict*)
+  result '{{"verdict":"approved","findings":[],"summary":"Fine","unread":[],"unchecked":[]}}' "" 0
+  exit 0;;
 *decision*)
   decision=approve
   if [ -s "{queue}/decisions" ]; then decision=$(head -1 "{queue}/decisions"); sed -i '' 1d "{queue}/decisions"; fi
@@ -597,7 +600,7 @@ fn what_the_request_already_decided_reaches_the_reviewers_as_the_persons() {
     let reviewed = w.step(&run, "review").prompt;
     assert!(reviewed.contains(r#""taken":"request""#), "{reviewed}");
     assert!(
-        reviewed.contains("Nor one whose `taken` is `request`"),
+        reviewed.contains("Lines of `decided` whose `taken` is `request` were already decided"),
         "{reviewed}"
     );
 }
@@ -634,9 +637,75 @@ fn what_an_assistant_sends_back_against_the_person_s_decision_does_not_win_over_
         "{reviewed}"
     );
     assert!(
-        reviewed.contains("Only what a person sent back below can change one, and then it wins. Where what the approver or an assistant sent back goes against one, the decision stands: report the conflict, for the person to decide."),
+        reviewed.contains("Only what a person sent back can change one of these, and then it wins. Where what the approver or an assistant sent back goes against one, the decision stands: report the conflict, for the person to decide."),
         "{reviewed}"
     );
+}
+
+/// What a reviewer's prompt says in a workflow saved before Keel read what the request decided: it
+/// only keeps what a person chose.
+const SAVED_REVIEW: &str = "You're reviewing a change you didn't write. Don't question what a person chose: a decision whose `taken` is `person`.\n{{steps.spec.output}}\n{{rework}}\n{{diff}}";
+
+#[test]
+fn every_reviewer_and_approver_keeps_to_what_the_request_decided_whatever_its_prompt_says() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let WorkflowStep::Agent(built_in) = built_in_review(&w) else {
+        panic!()
+    };
+    let steps = || {
+        vec![
+            specifier(),
+            builder(),
+            check(),
+            agent(
+                "review",
+                ToolProfile::ReadOnly,
+                StepRole::Reviewer,
+                SAVED_REVIEW,
+            ),
+            agent(
+                "built-in",
+                ToolProfile::ReadOnly,
+                StepRole::Reviewer,
+                &built_in.prompt,
+            ),
+            approver(2),
+            human(),
+        ]
+    };
+    let run = w.start_asking(
+        "Export the threads.\n\nDecided:\n- The admin export needs no login.",
+        steps(),
+    );
+    let plain = w.start(steps());
+    w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.wait_for(&plain, "human", AttemptState::WaitingApproval);
+
+    let reviewed = w.step(&run, "review").prompt;
+    assert!(
+        reviewed.ends_with("\n\nLines of `decided` whose `taken` is `request` were already decided in the request. One without an `assistant` or a `githubAccount` is the person's: don't question it, nor one of the specification's that says the same, though you can say the change doesn't follow it. One with either may not be the person's own words: report it, or one of the specification's that says the same, only if it puts security or data at risk. Only what a person sent back can change one of these, and then it wins. Where what the approver or an assistant sent back goes against one, the decision stands: report the conflict, for the person to decide."),
+        "{reviewed}"
+    );
+    let approved = w.step(&run, "approver").prompt;
+    assert!(
+        approved.ends_with("\n\nLines of `decided` whose `taken` is `request` were already decided in the request. One without an `assistant` or a `githubAccount` is the person's: discard a finding that questions it, or one of the specification's that says the same, which is neither rework nor `questioned`, but not one that says the change doesn't follow it. One with either may not be the person's own words: a finding that it, or one of the specification's that says the same, puts security or data at risk goes in `questioned`, never as rework. Only what a person sent back can change one of these, and then it wins. Where what the approver or an assistant sent back goes against one, the decision stands: put the conflict in `questioned`, never as rework."),
+        "{approved}"
+    );
+    // A prompt that says it already gets it once.
+    let built_in = w.step(&run, "built-in").prompt;
+    assert_eq!(
+        built_in
+            .matches("Lines of `decided` whose `taken` is `request`")
+            .count(),
+        1,
+        "{built_in}"
+    );
+    // Where the request decided nothing, nothing is added.
+    for step in ["review", "approver"] {
+        let prompt = w.step(&plain, step).prompt;
+        assert!(!prompt.contains("`taken` is `request`"), "{prompt}");
+    }
 }
 
 const DECIDED: &str = "Decided:\n- Old threads stay as they are.";

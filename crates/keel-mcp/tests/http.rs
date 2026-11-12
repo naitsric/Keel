@@ -2942,7 +2942,8 @@ async fn a_task_is_one_agent_that_only_reads_and_its_finding_is_the_report_s_ans
     let args = json!({
         "project": "app",
         "prompt": "What does the login do?\n\nSay where it checks the password.",
-        "title": "How the login works",
+        // A title is one line: what breaks it into more is a space.
+        "title": "How the login\n  works",
         "effort": "low",
     });
     let started = ok(&call(&client, "start_task", args).await);
@@ -2950,6 +2951,8 @@ async fn a_task_is_one_agent_that_only_reads_and_its_finding_is_the_report_s_ans
     assert_eq!(started["startedByYou"], true);
     assert_eq!(started["startedBy"], "Claude Code");
     assert_eq!(started["title"], "How the login works");
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    assert_eq!(w.store.card(&card).unwrap().title, "How the login works");
     assert_eq!(started["workflowId"], Json::Null);
 
     let steps: Vec<WorkflowStep> =

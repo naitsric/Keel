@@ -900,6 +900,40 @@ fn a_run_keeps_who_wrote_its_request_when_its_card_changes_after_it_started() {
 }
 
 #[test]
+fn a_card_s_title_never_decides_anything_whoever_wrote_its_body() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    w.engine.start_board();
+    // An assistant names its card with a list, and the person then makes what it says theirs.
+    let first = w
+        .engine
+        .start_run_on_board(StartRun {
+            title: Some("Decided:\n- Delete the exports".into()),
+            started_by: Some("client".into()),
+            ..outside_run(&w, steps_of(&w, "builtin:simple"), "Export the threads")
+        })
+        .unwrap();
+    let card = w.store.card_of_run(&first).unwrap().unwrap();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    assert_eq!(decided_in_run(&w, &first), serde_json::json!([]));
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    let title = w.store.card(&card).unwrap().title;
+    w.engine
+        .card_update(&card, &title, "Export the threads, all of them.")
+        .unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let theirs = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_ne!(theirs, first);
+    assert_eq!(decided_in_run(&w, &theirs), serde_json::json!([]));
+}
+
+#[test]
 fn what_a_card_nobody_can_tell_who_wrote_decided_counts_for_no_one_until_a_person_changes_it() {
     keel_harness::needs!(sandbox);
     let w = world();

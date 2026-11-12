@@ -2117,8 +2117,8 @@ impl Inner {
         Ok(id)
     }
 
-    /// An agent's prompt. What a person sent back has to reach whoever does the work, whatever a
-    /// saved workflow's prompt leaves out.
+    /// An agent's prompt. What a person sent back has to reach whoever does the work, and what the
+    /// request decided whoever judges it, whatever a saved workflow's prompt leaves out.
     fn agent_prompt(&self, spec: &StepSpec, run: &keel_store::Run) -> Result<String> {
         let judging = matches!(
             spec.role,
@@ -2131,6 +2131,24 @@ impl Inner {
             let decided = specs::from_request(&self.written_in_request(&run.id));
             if let Some(told) = specs::already_decided_prompt(&decided, &run.language) {
                 text.push_str(&format!("\n\n{told}"));
+            }
+        }
+        // What the request already decided is the person's, and a workflow saved before Keel read
+        // it doesn't say so: without this, its approver could send the person's decision back as
+        // rework. Only where the spec has some, so every other prompt stays as it was.
+        if let Some(rule) = workflows::request_rule(&spec.role, &run.language)
+            && !workflows::says_request_rule(&text)
+        {
+            let attempts = self.store.attempts_of_run(&run.id)?;
+            let from_request = workflows::specifying_attempt(&attempts)
+                .and_then(specs::of_attempt)
+                .is_some_and(|spec| {
+                    spec.decided
+                        .iter()
+                        .any(|decided| decided.taken == Some(specs::Taken::Request))
+                });
+            if from_request {
+                text.push_str(&format!("\n\n{rule}"));
             }
         }
         if spec.role == StepRole::Worker && spec.tools == keel_core::ToolProfile::Build {
