@@ -455,7 +455,7 @@ async fn get_run_says_which_workflow_it_used_and_what_became_of_its_pull_request
 const GH_WITH_RED_CI: &str = r#"#!/bin/bash
 case "$1 $2" in
 "auth token") echo "tok"; exit 0;;
-"pr view") echo '{"state":"OPEN","isDraft":true,"updatedAt":"2026-11-06T09:00:00Z","statusCheckRollup":[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}]}'; exit 0;;
+"api graphql") echo '{"data":{"repository":{"pullRequest":{"state":"OPEN","isDraft":true,"updatedAt":"2026-11-06T09:00:00Z","commits":{"nodes":[{"commit":{"verdict":{"state":"FAILURE"},"checks":{"contexts":{"nodes":[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}]}}}}]}}}}}'; exit 0;;
 esac
 exit 1
 "#;

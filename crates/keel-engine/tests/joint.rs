@@ -84,26 +84,31 @@ printf '%s\n' "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,
 }
 
 /// GitHub as far as Keel asks it, for any repo under `acme`. Pull requests are numbered from 7 in
-/// the order they're opened, and each keeps its description. `pr view` answers with what's in
+/// the order they're opened, and each keeps its description. `api graphql` answers with what's in
 /// `flags/pr-view-<owner>-<name>`, and fails without it.
 fn fake_gh(log: &Path, flags: &Path) -> String {
     format!(
         r##"#!/bin/bash
 echo "gh $*" >> "{log}/gh.log"
-repo=""; prev=""
-for a in "$@"; do [ "$prev" = "--repo" ] && repo="$a"; prev="$a"; done
+repo=""; owner=""; name=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "--repo" ] && repo="$a"
+  if [ "$prev" = "-f" ]; then case "$a" in owner=*) owner="${{a#owner=}}";; name=*) name="${{a#name=}}";; esac; fi
+  prev="$a"
+done
+[ -n "$owner" ] && repo="$owner/$name"
 case "$1 $2" in
 "auth token") echo "tok-SECRET"; exit 0;;
 "repo view") echo '{{"defaultBranchRef":{{"name":"main"}},"viewerPermission":"WRITE","isPrivate":true}}'; exit 0;;
+"api graphql")
+  if [ -f "{flags}/pr-view-${{repo/\//-}}" ]; then cat "{flags}/pr-view-${{repo/\//-}}"; exit 0; fi
+  echo "HTTP 502: Bad Gateway" >&2; exit 1;;
 "api "*) echo false; exit 0;;
 "pr create")
   n=$(cat "{log}/prs" 2>/dev/null || echo 6); n=$((n + 1)); echo "$n" > "{log}/prs"
   prev=""
   for a in "$@"; do [ "$prev" = "--body-file" ] && cp "$a" "{log}/pr-body-${{repo/\//-}}.md"; prev="$a"; done
   echo "https://github.com/$repo/pull/$n"; exit 0;;
-"pr view")
-  if [ -f "{flags}/pr-view-${{repo/\//-}}" ]; then cat "{flags}/pr-view-${{repo/\//-}}"; exit 0; fi
-  echo "HTTP 502: Bad Gateway" >&2; exit 1;;
 esac
 echo "unexpected: $*" >&2; exit 1
 "##,
@@ -409,11 +414,12 @@ impl World {
         std::fs::read_to_string(self.log.join(format!("pr-body-acme-{repo}.md"))).unwrap()
     }
 
-    /// What `gh pr view` says about the pull requests in `acme/<repo>`.
+    /// What GitHub says about the pull requests in `acme/<repo>`.
     fn pr_view(&self, repo: &str, view: Value) {
+        let answer = json!({ "data": { "repository": { "pullRequest": view } } });
         std::fs::write(
             self.flags.join(format!("pr-view-acme-{repo}")),
-            view.to_string(),
+            answer.to_string(),
         )
         .unwrap();
     }
@@ -1254,7 +1260,8 @@ fn each_part_opens_its_own_pull_request_saying_which_part_it_is() {
         Some(&pushed)
     );
     w.until("looking at the first part", || {
-        w.gh_log().contains("gh pr view 7 --repo acme/valora")
+        w.gh_log()
+            .contains(" -f owner=acme -f name=valora -F number=7")
     });
     let part = w.on_board(&w.app, &parts[1].id);
     assert_eq!((part.waits_for, part.warnings), (None, vec![]));
@@ -1309,7 +1316,11 @@ fn each_part_opens_its_own_pull_request_saying_which_part_it_is() {
     let log = w.gh_log();
     let writes: Vec<&str> = log
         .lines()
-        .filter(|line| !line.starts_with("gh pr view") && !line.starts_with("gh auth token"))
+        // A GraphQL question that reads starts with `query`, and one that writes with `mutation`.
+        .filter(|line| {
+            !line.starts_with("gh api graphql -f query=query(")
+                && !line.starts_with("gh auth token")
+        })
         .filter(|line| !line.starts_with("gh repo view") && !line.starts_with("gh api repos/"))
         .collect();
     assert_eq!(writes.len(), 2, "{writes:?}");

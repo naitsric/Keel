@@ -91,8 +91,8 @@ echo "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\
     )
 }
 
-/// `pr view` answers with what's in `pr-view`, and fails without it, or when asked about the checks
-/// with `no-checks` there. `pr create` refuses a description GitHub would refuse.
+/// `api graphql` answers with what's in `pr-view`, and fails without it, or when asked about the
+/// checks with `no-checks` there. `pr create` refuses a description GitHub would refuse.
 fn fake_gh(log: &Path, flags: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -109,9 +109,9 @@ case "$1 $2" in
   for a in "$@"; do [ "$prev" = "--body-file" ] && cp "$a" "{log}/pr-body.md"; prev="$a"; done
   if [ "$(wc -m < "{log}/pr-body.md")" -gt 65536 ]; then echo "Body is too long (maximum is 65536 characters)" >&2; exit 1; fi
   echo "https://github.com/acme/app/pull/12"; exit 0;;
-"pr view")
+"api graphql")
   case "$*" in *statusCheckRollup*)
-    if [ -f "{flags}/no-checks" ]; then echo "GraphQL: Resource not accessible by personal access token" >&2; exit 1; fi;;
+    if [ -f "{flags}/no-checks" ]; then echo "gh: Resource not accessible by personal access token" >&2; exit 1; fi;;
   esac
   if [ -f "{flags}/pr-view" ]; then cat "{flags}/pr-view"; exit 0; fi
   echo "HTTP 502: Bad Gateway (https://api.github.com/graphql)" >&2; exit 1;;
@@ -214,10 +214,15 @@ fn delivering_steps() -> Vec<WorkflowStep> {
     ]
 }
 
+/// How GitHub's GraphQL answers about a pull request, as `gh api graphql` prints it.
+fn answer(pull_request: &str) -> String {
+    format!(r#"{{"data":{{"repository":{{"pullRequest":{pull_request}}}}}}}"#)
+}
+
 fn pr_view(state: &str, draft: bool, at: &str) -> String {
-    format!(
+    answer(&format!(
         r#"{{"state":"{state}","isDraft":{draft},"mergedAt":"{at}","closedAt":"{at}","updatedAt":"{at}"}}"#
-    )
+    ))
 }
 
 impl World {
@@ -227,7 +232,7 @@ impl World {
 
     /// Every call, including one asked again without the checks.
     fn asked_about_prs(&self) -> usize {
-        self.gh_log().matches("gh pr view").count()
+        self.gh_log().matches("gh api graphql").count()
     }
 
     fn body(&self) -> String {
@@ -735,16 +740,16 @@ fn opening_a_run_finds_out_what_became_of_its_pull_request_and_only_reads() {
     });
     let gh = w.gh_log();
     assert!(
-        gh.contains(
-            "gh pr view 12 --repo acme/app --json state,isDraft,mergedAt,closedAt,updatedAt,headRefOid"
-        ),
+        gh.contains(" -f owner=acme -f name=app -F number=12"),
         "{gh}"
     );
-    let on_prs: Vec<&str> = gh.lines().filter(|l| l.starts_with("gh pr ")).collect();
+    let on_prs: Vec<&str> = gh
+        .lines()
+        .filter(|l| l.starts_with("gh pr ") || l.starts_with("gh api graphql"))
+        .collect();
     assert!(
-        on_prs
-            .iter()
-            .all(|l| l.starts_with("gh pr view") || l.starts_with("gh pr create")),
+        on_prs.iter().all(|l| l.starts_with("gh pr create")
+            || (l.starts_with("gh api graphql -f query=query(") && !l.contains("mutation"))),
         "after opening it, nothing writes to it: {on_prs:?}"
     );
 }
@@ -899,7 +904,8 @@ fn a_pull_request_that_was_already_there_is_unknown_until_keel_looks() {
     w.engine.look_at_pr(&run);
     w.wait_pr_state(&run, PrState::Open);
     assert!(
-        w.gh_log().contains("gh pr view 99 --repo acme/app"),
+        w.gh_log()
+            .contains(" -f owner=acme -f name=app -F number=99"),
         "{}",
         w.gh_log()
     );
@@ -1040,10 +1046,18 @@ fn a_card_shows_what_became_of_its_pull_request_and_stays_done_either_way() {
     assert_eq!(as_sent["prStateAt"], "2026-11-06T10:00:00Z");
 }
 
-/// An open pull request whose CI says this, as `gh pr view --json …,statusCheckRollup` does.
-fn pr_view_with_checks(checks: &str) -> String {
+/// An open pull request whose CI GitHub sums up as `verdict`, with these checks.
+fn pr_view_with_checks(verdict: &str, checks: &str) -> String {
+    answer(&format!(
+        r#"{{"state":"OPEN","isDraft":false,"mergedAt":null,"closedAt":null,"updatedAt":"2026-11-06T09:00:00Z",{}}}"#,
+        head_ci(verdict, checks)
+    ))
+}
+
+/// What the query asks of the head commit's CI.
+fn head_ci(verdict: &str, checks: &str) -> String {
     format!(
-        r#"{{"state":"OPEN","isDraft":false,"mergedAt":null,"closedAt":null,"updatedAt":"2026-11-06T09:00:00Z","statusCheckRollup":[{checks}]}}"#
+        r#""commits":{{"nodes":[{{"commit":{{"verdict":{{"state":"{verdict}"}},"checks":{{"contexts":{{"nodes":[{checks}]}}}}}}}}]}}"#
     )
 }
 
@@ -1078,7 +1092,11 @@ fn a_pull_request_whose_ci_fails_says_so_on_its_run_and_its_card() {
         (found.pr_ci, found.pr_ci_failed)
     };
 
-    std::fs::write(w.flags.join("pr-view"), pr_view_with_checks(LINT_FAILED)).unwrap();
+    std::fs::write(
+        w.flags.join("pr-view"),
+        pr_view_with_checks("FAILURE", LINT_FAILED),
+    )
+    .unwrap();
     w.forget_looking(&run);
     let told = w.changes.lock().unwrap().len();
     w.engine.look_at_pr(&run);
@@ -1095,10 +1113,37 @@ fn a_pull_request_whose_ci_fails_says_so_on_its_run_and_its_card() {
 
     // Fixed and pushed: the next look says so.
     let passed = LINT_FAILED.replace("FAILURE", "SUCCESS");
-    std::fs::write(w.flags.join("pr-view"), pr_view_with_checks(&passed)).unwrap();
+    std::fs::write(
+        w.flags.join("pr-view"),
+        pr_view_with_checks("SUCCESS", &passed),
+    )
+    .unwrap();
     w.forget_looking(&run);
     w.engine.look_at_pr(&run);
     w.until("the CI reading passed", || ci().0 == Some(CiState::Passed));
+    assert!(ci().1.is_empty());
+
+    // GitHub's word wins over a failed run that a later one replaced, as in psf/black#5677.
+    std::fs::write(
+        w.flags.join("pr-view"),
+        pr_view_with_checks("PENDING", &passed),
+    )
+    .unwrap();
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.until("the CI reading pending", || {
+        ci().0 == Some(CiState::Pending)
+    });
+    std::fs::write(
+        w.flags.join("pr-view"),
+        pr_view_with_checks("SUCCESS", LINT_FAILED),
+    )
+    .unwrap();
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.until("the CI reading passed again", || {
+        ci().0 == Some(CiState::Passed)
+    });
     assert!(ci().1.is_empty());
 
     // An answer that doesn't say what the CI says leaves it unknown, since it may be about another
@@ -1118,13 +1163,13 @@ fn a_new_commit_read_without_its_checks_leaves_the_ci_unknown() {
     let w = world();
     let run = w.delivered();
     let view = |head: &str, checks: &str| {
-        format!(
+        answer(&format!(
             r#"{{"state":"OPEN","isDraft":false,"updatedAt":"2026-11-06T09:00:00Z","headRefOid":"{head}"{checks}}}"#
-        )
+        ))
     };
     std::fs::write(
         w.flags.join("pr-view"),
-        view("aaa", &format!(r#","statusCheckRollup":[{LINT_FAILED}]"#)),
+        view("aaa", &format!(",{}", head_ci("FAILURE", LINT_FAILED))),
     )
     .unwrap();
     w.forget_looking(&run);
@@ -1162,7 +1207,7 @@ fn a_token_that_cannot_read_the_checks_still_follows_the_pull_request() {
     let asked: Vec<String> = w
         .gh_log()
         .lines()
-        .filter(|line| line.starts_with("gh pr view"))
+        .filter(|line| line.starts_with("gh api graphql"))
         .map(str::to_owned)
         .collect();
     assert_eq!(asked.len(), 2, "{asked:?}");

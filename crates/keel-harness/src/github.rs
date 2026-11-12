@@ -19,8 +19,16 @@ use crate::process::{SIGKILL, signal_group};
 const LOOK_LIMIT: Duration = Duration::from_secs(30);
 /// How a `gh` that went past its limit starts saying so.
 const TOOK_TOO_LONG: &str = "gh took longer than";
-/// How long after a check's runs ended another run of it is a rerun, and not a sibling.
+/// How long after a check's runs ended another run of it is a rerun, and not a sibling, for a check
+/// that doesn't say which event it ran for.
 const RERUN_AFTER_SECS: i64 = 120;
+/// What Keel reads of a pull request.
+const PR_FIELDS: &str = "state isDraft mergedAt closedAt updatedAt headRefOid";
+/// Its head commit's CI: GitHub's own word on it, and its checks, each with the workflow and the
+/// event it ran for. The word is asked apart: asked next to the checks, the same field also counts
+/// runs of a check that later ones replaced, and says FAILURE where GitHub's pull request says it
+/// passed.
+const CI_FIELDS: &str = "commits(last:1){nodes{commit{verdict:statusCheckRollup{state} checks:statusCheckRollup{contexts(first:100){nodes{__typename ... on CheckRun{name status conclusion startedAt completedAt checkSuite{workflowRun{event workflow{name}}}} ... on StatusContext{context state createdAt}}}}}}}";
 
 /// A token that can't end up in a log by accident.
 pub struct Token(String);
@@ -435,6 +443,8 @@ impl Gh {
         }
     }
 
+    /// One GraphQL question, which only reads. `gh pr view` doesn't say what GitHub makes of the
+    /// checks, only what each says.
     fn ask_about_pr(
         &self,
         token: &Token,
@@ -443,25 +453,44 @@ impl Gh {
         limit: Duration,
         with_checks: bool,
     ) -> Result<PrStatus, GhError> {
-        let number = number.to_string();
-        let fields = if with_checks {
-            "state,isDraft,mergedAt,closedAt,updatedAt,headRefOid,statusCheckRollup"
-        } else {
-            "state,isDraft,mergedAt,closedAt,updatedAt,headRefOid"
+        let unexpected = |detail: String| GhError {
+            kind: "other",
+            detail,
         };
+        let (owner, name) = repo
+            .split_once('/')
+            .filter(|(owner, name)| !owner.is_empty() && !name.is_empty() && !name.contains('/'))
+            .ok_or_else(|| unexpected(format!("not a repo on GitHub: {repo}")))?;
+        let fields = if with_checks {
+            format!("{PR_FIELDS} {CI_FIELDS}")
+        } else {
+            PR_FIELDS.to_owned()
+        };
+        let query = format!(
+            "query=query($owner:String!,$name:String!,$number:Int!){{repository(owner:$owner,name:$name){{pullRequest(number:$number){{{fields}}}}}}}"
+        );
         let text = self.run_within(
             token,
-            &["pr", "view", &number, "--repo", repo, "--json", fields],
+            &[
+                "api",
+                "graphql",
+                "-f",
+                &query,
+                "-f",
+                &format!("owner={owner}"),
+                "-f",
+                &format!("name={name}"),
+                "-F",
+                &format!("number={number}"),
+            ],
             limit,
         )?;
-        let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| GhError {
-            kind: "other",
-            detail: e.to_string(),
-        })?;
-        parse_pr_status(&value).ok_or_else(|| GhError {
-            kind: "other",
-            detail: format!("unexpected answer about pull request {number}"),
-        })
+        let value: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| unexpected(e.to_string()))?;
+        value
+            .pointer("/data/repository/pullRequest")
+            .and_then(parse_pr_status)
+            .ok_or_else(|| unexpected(format!("unexpected answer about pull request {number}")))
     }
 
     /// Opens a draft and returns its URL. Keel doesn't merge, and this module has no way to.
@@ -548,7 +577,7 @@ fn parse_pr_status(value: &serde_json::Value) -> Option<PrStatus> {
         state,
         at,
         head,
-        ci: value.get("statusCheckRollup").and_then(parse_checks),
+        ci: value.pointer("/commits/nodes/0/commit").map(parse_checks),
     })
 }
 
@@ -580,12 +609,28 @@ fn check_time(
         .filter(|time| time.year() > 1)
 }
 
-/// Of the runs of one check, those that say where it stands now. One that hasn't started is a rerun
-/// waiting its turn, so it's the newest. A run that starts two minutes or more after the ones
-/// before it ended runs them again. Runs that start closer together than that are siblings, like a
-/// push's and a pull request's, and a failure among them counts. The answer doesn't say which
-/// event started each run, so siblings and a run started again at once look the same here, and
-/// the run each one belongs to, in its `detailsUrl`, doesn't tell them apart either.
+/// Of the runs of one check for one event, the newest, as `gh pr checks` counts them, however soon
+/// after the others it started. One that hasn't started is newer than any that has.
+fn newest_run(all: &[serde_json::Value], runs: &[usize]) -> Vec<usize> {
+    let waiting: Vec<usize> = runs
+        .iter()
+        .copied()
+        .filter(|&at| check_time(&all[at], "startedAt").is_none())
+        .collect();
+    if !waiting.is_empty() {
+        return waiting;
+    }
+    runs.iter()
+        .copied()
+        .max_by_key(|&at| check_time(&all[at], "startedAt"))
+        .into_iter()
+        .collect()
+}
+
+/// Of the runs of a check that doesn't say which event it ran for, like a commit status, those
+/// that say where it stands now. One that hasn't started is a rerun waiting its turn, so it's the
+/// newest. A run that starts two minutes or more after the ones before it ended runs them again.
+/// Runs that start closer together than that are siblings, and a failure among them counts.
 fn latest_runs(all: &[serde_json::Value], runs: &[usize]) -> Vec<usize> {
     let waiting: Vec<usize> = runs
         .iter()
@@ -617,13 +662,41 @@ fn latest_runs(all: &[serde_json::Value], runs: &[usize]) -> Vec<usize> {
     latest
 }
 
-/// Each check is a check run, with a status and, once it's done, a conclusion, or a commit status,
-/// with a state. They count the way `gh pr checks` counts them: cancelled is a failure, skipped and
-/// neutral are not, and anything unfinished is pending. A check run again is its latest run, by
-/// when it started. Re-running a job replaces it in GitHub's answer, but every other run of its
-/// workflow on the commit stays there.
-fn parse_checks(rollup: &serde_json::Value) -> Option<PrChecks> {
-    let all = rollup.as_array()?;
+/// A check with the name of its workflow, the event it ran for, and when it started, next to the
+/// rest. A commit status starts when it's set.
+fn flat(check: &serde_json::Value) -> serde_json::Value {
+    let run = check.pointer("/checkSuite/workflowRun");
+    let of_run = |pointer: &str| {
+        run.and_then(|run| run.pointer(pointer))
+            .cloned()
+            .unwrap_or_default()
+    };
+    let mut flat = check.clone();
+    if let Some(fields) = flat.as_object_mut() {
+        fields.insert("workflowName".into(), of_run("/workflow/name"));
+        fields.insert("event".into(), of_run("/event"));
+        if let (false, Some(created)) = (fields.contains_key("startedAt"), check.get("createdAt")) {
+            fields.insert("startedAt".into(), created.clone());
+        }
+    }
+    flat
+}
+
+/// GitHub's own word on a commit's CI is what it says: SUCCESS passed, PENDING or EXPECTED is
+/// pending, FAILURE or ERROR failed, and a commit with no check at all has no CI. Each check is a
+/// check run, with a status and, once it's done, a conclusion, or a commit status, with a state, and
+/// they only name what failed, the way `gh pr checks` counts them: cancelled is a failure, skipped
+/// and neutral are not. Of the runs of one check, only the one that says where it stands counts.
+/// Only when GitHub's word is missing do the checks decide.
+fn parse_checks(commit: &serde_json::Value) -> PrChecks {
+    let verdict = commit
+        .pointer("/verdict/state")
+        .and_then(serde_json::Value::as_str);
+    let all: Vec<serde_json::Value> = commit
+        .pointer("/checks/contexts/nodes")
+        .and_then(serde_json::Value::as_array)
+        .map(|nodes| nodes.iter().map(flat).collect())
+        .unwrap_or_default();
     let text = |check: &serde_json::Value, key: &str| {
         check
             .get(key)
@@ -636,21 +709,29 @@ fn parse_checks(rollup: &serde_json::Value) -> Option<PrChecks> {
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| text(check, "context"))
     };
-    // The same job in another workflow is another check, and so is a commit status with its name.
+    // The same job in another workflow, or for another event, is another check, and so is a commit
+    // status with its name.
     let key = |check: &serde_json::Value| {
         (
             text(check, "__typename"),
             text(check, "workflowName"),
+            text(check, "event"),
             name(check),
         )
     };
-    let mut runs: HashMap<(String, String, String), Vec<usize>> = HashMap::new();
+    let mut runs: HashMap<(String, String, String, String), Vec<usize>> = HashMap::new();
     for (at, check) in all.iter().enumerate() {
         runs.entry(key(check)).or_default().push(at);
     }
     let kept: HashSet<usize> = runs
-        .values()
-        .flat_map(|runs| latest_runs(all, runs))
+        .iter()
+        .flat_map(|((_, _, event, _), runs)| {
+            if event.is_empty() {
+                latest_runs(&all, runs)
+            } else {
+                newest_run(&all, runs)
+            }
+        })
         .collect();
     let checks: Vec<&serde_json::Value> = all
         .iter()
@@ -681,16 +762,19 @@ fn parse_checks(rollup: &serde_json::Value) -> Option<PrChecks> {
             _ => pending = true,
         }
     }
-    let state = if !failed.is_empty() {
-        CiState::Failed
-    } else if pending {
-        CiState::Pending
-    } else if checks.is_empty() {
-        CiState::NoCi
-    } else {
-        CiState::Passed
+    let state = match verdict {
+        Some("SUCCESS") => CiState::Passed,
+        Some("PENDING" | "EXPECTED") => CiState::Pending,
+        Some("FAILURE" | "ERROR") => CiState::Failed,
+        _ if !failed.is_empty() => CiState::Failed,
+        _ if pending => CiState::Pending,
+        _ if checks.is_empty() => CiState::NoCi,
+        _ => CiState::Passed,
     };
-    Some(PrChecks { state, failed })
+    if state != CiState::Failed {
+        failed.clear();
+    }
+    PrChecks { state, failed }
 }
 
 /// The arguments that make `git` authenticate through `gh`, with nothing written to any config.
@@ -917,50 +1001,112 @@ mod tests {
         assert_eq!(status(serde_json::json!({})), None);
     }
 
+    /// A pull request whose head commit's CI GitHub sums up as `verdict`, with these checks, as the
+    /// query asks for them.
+    fn with_ci(verdict: &str, checks: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "state": "OPEN", "commits": { "nodes": [{ "commit": {
+            "verdict": { "state": verdict },
+            "checks": { "contexts": { "nodes": checks } },
+        }}]}})
+    }
+
+    fn ci_of(verdict: &str, checks: serde_json::Value) -> Option<(CiState, Vec<String>)> {
+        parse_pr_status(&with_ci(verdict, checks))
+            .and_then(|status| status.ci)
+            .map(|ci| (ci.state, ci.failed))
+    }
+
+    /// A job of a GitHub Actions workflow named `CI`, run for a pull request.
+    fn run(name: &str, status: &str, conclusion: &str) -> serde_json::Value {
+        serde_json::json!({ "__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion,
+            "checkSuite": { "workflowRun": { "event": "pull_request", "workflow": { "name": "CI" } } } })
+    }
+
+    fn context(name: &str, state: &str) -> serde_json::Value {
+        serde_json::json!({ "__typename": "StatusContext", "context": name, "state": state })
+    }
+
+    fn at(mut check: serde_json::Value, started: &str, completed: &str) -> serde_json::Value {
+        check["startedAt"] = started.into();
+        check["completedAt"] = completed.into();
+        check
+    }
+
+    fn names(failed: &[&str]) -> Vec<String> {
+        failed.iter().map(|name| (*name).to_owned()).collect()
+    }
+
     #[test]
-    fn reads_what_a_pull_requests_ci_says() {
-        let ci = |checks: serde_json::Value| {
-            parse_pr_status(&serde_json::json!({ "state": "OPEN", "statusCheckRollup": checks }))
-                .and_then(|status| status.ci)
-        };
-        let run = |name: &str, status: &str, conclusion: &str| serde_json::json!({ "__typename": "CheckRun", "name": name, "workflowName": "CI", "status": status, "conclusion": conclusion });
-        let context = |name: &str, state: &str| serde_json::json!({ "__typename": "StatusContext", "context": name, "state": state });
-        let says = |state, failed: &[&str]| {
+    fn what_github_says_of_the_ci_is_the_verdict() {
+        use CiState::{Failed, NoCi, Passed, Pending};
+        // No check and no status at all.
+        let none = serde_json::json!({ "state": "OPEN", "commits": { "nodes": [{ "commit": { "verdict": null, "checks": null } }] } });
+        assert_eq!(
+            parse_pr_status(&none).and_then(|status| status.ci),
             Some(PrChecks {
-                state,
-                failed: failed.iter().map(|name| (*name).to_owned()).collect(),
+                state: NoCi,
+                failed: Vec::new()
             })
-        };
-        assert_eq!(ci(serde_json::json!([])), says(CiState::NoCi, &[]));
+        );
+        let all_good = serde_json::json!([
+            run("test", "COMPLETED", "SUCCESS"),
+            run("docs", "COMPLETED", "SKIPPED"),
+            context("ci/circleci", "SUCCESS"),
+        ]);
+        assert_eq!(ci_of("SUCCESS", all_good), Some((Passed, vec![])));
+        // GitHub can count as passed what a run of a check that another replaced says failed:
+        // psf/black#5677 ran `changelog / check` four times in three seconds and only the first
+        // failed. Keel never contradicts GitHub.
+        let replaced = serde_json::json!([
+            at(
+                run("check", "COMPLETED", "FAILURE"),
+                "2026-11-09T06:51:03Z",
+                "2026-11-09T06:51:07Z"
+            ),
+            at(
+                run("check", "COMPLETED", "SUCCESS"),
+                "2026-11-09T06:51:01Z",
+                "2026-11-09T06:51:05Z"
+            ),
+        ]);
+        assert_eq!(ci_of("SUCCESS", replaced), Some((Passed, vec![])));
+        for waiting in ["PENDING", "EXPECTED"] {
+            assert_eq!(
+                ci_of(
+                    waiting,
+                    serde_json::json!([
+                        run("test", "IN_PROGRESS", ""),
+                        run("lint", "COMPLETED", "FAILURE")
+                    ])
+                ),
+                Some((Pending, vec![])),
+                "{waiting}"
+            );
+        }
+        // A failure names its checks, each once.
+        let broken = serde_json::json!([
+            run("lint", "COMPLETED", "FAILURE"),
+            run("test", "QUEUED", ""),
+            run("e2e", "COMPLETED", "TIMED_OUT"),
+            context("ci/circleci", "ERROR"),
+            context("ci/circleci", "ERROR"),
+        ]);
         assert_eq!(
-            ci(serde_json::json!([
-                run("test", "COMPLETED", "SUCCESS"),
-                run("docs", "COMPLETED", "SKIPPED"),
-                context("ci/circleci", "SUCCESS"),
-            ])),
-            says(CiState::Passed, &[])
+            ci_of("FAILURE", broken.clone()),
+            Some((Failed, names(&["lint", "e2e", "ci/circleci"])))
         );
         assert_eq!(
-            ci(serde_json::json!([
-                run("test", "IN_PROGRESS", ""),
-                context("ci/circleci", "SUCCESS")
-            ])),
-            says(CiState::Pending, &[])
+            ci_of("ERROR", broken),
+            Some((Failed, names(&["lint", "e2e", "ci/circleci"])))
         );
+        // GitHub says it failed even when none of the checks Keel got does, like one past the
+        // first hundred.
         assert_eq!(
-            ci(serde_json::json!([context("deploy/preview", "PENDING")])),
-            says(CiState::Pending, &[])
-        );
-        // A failure is what matters, even while the rest still runs, and each is named once.
-        assert_eq!(
-            ci(serde_json::json!([
-                run("lint", "COMPLETED", "FAILURE"),
-                run("test", "QUEUED", ""),
-                run("lint", "COMPLETED", "FAILURE"),
-                run("e2e", "COMPLETED", "TIMED_OUT"),
-                context("ci/circleci", "ERROR"),
-            ])),
-            says(CiState::Failed, &["lint", "e2e", "ci/circleci"])
+            ci_of(
+                "FAILURE",
+                serde_json::json!([run("test", "COMPLETED", "SUCCESS")])
+            ),
+            Some((Failed, vec![]))
         );
         // An answer that doesn't say leaves what Keel knew.
         assert_eq!(
@@ -971,7 +1117,7 @@ mod tests {
         let many: Vec<serde_json::Value> = (0..40)
             .map(|n| run(&format!("job {n}"), "COMPLETED", "FAILURE"))
             .collect();
-        let failed = ci(serde_json::json!(many)).unwrap().failed;
+        let (_, failed) = ci_of("FAILURE", serde_json::json!(many)).unwrap();
         assert_eq!(failed.len(), MOST_FAILED_NAMED);
         assert_eq!(failed[0], "job 0");
     }
@@ -992,32 +1138,63 @@ mod tests {
         }
     }
 
+    /// How GitHub's GraphQL answers about pull request 12, as `gh api graphql` prints it.
+    fn answer(pull_request: &str) -> String {
+        format!("echo '{{\"data\":{{\"repository\":{{\"pullRequest\":{pull_request}}}}}}}'")
+    }
+
     #[test]
     fn asking_about_a_pull_request_only_reads_and_the_token_stays_out_of_the_arguments() {
         let dir = tempfile::tempdir().unwrap();
         let gh = fake_gh(
             dir.path(),
-            r#"echo '{"state":"MERGED","isDraft":false,"mergedAt":"2026-11-06T10:00:00Z","closedAt":"2026-11-06T10:00:00Z","updatedAt":"2026-11-06T10:00:00Z"}'"#,
+            &answer(
+                r#"{"state":"MERGED","isDraft":false,"mergedAt":"2026-11-06T10:00:00Z","closedAt":"2026-11-06T10:00:00Z","updatedAt":"2026-11-06T10:00:00Z","commits":{"nodes":[{"commit":{"verdict":{"state":"FAILURE"},"checks":{"contexts":{"nodes":[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE"}]}}}}]}}"#,
+            ),
         );
         let token = Token("gho_secret".into());
         let status = gh.pr_status(&token, "acme/app", 12).unwrap();
         assert_eq!(status.state, PrState::Merged);
         assert_eq!(status.at.as_deref(), Some("2026-11-06T10:00:00Z"));
-        let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
         assert_eq!(
-            calls.trim(),
-            "pr view 12 --repo acme/app --json state,isDraft,mergedAt,closedAt,updatedAt,headRefOid,statusCheckRollup [token:gho_secret]"
+            status.ci,
+            Some(PrChecks {
+                state: CiState::Failed,
+                failed: vec!["lint".to_owned()]
+            })
+        );
+        // One question, which only reads, with GitHub's verdict asked on its own: asked next to
+        // the checks, the same field counts runs that later ones replaced.
+        let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+        let calls: Vec<&str> = calls.lines().collect();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert!(
+            calls[0].starts_with("api graphql -f query=query("),
+            "{}",
+            calls[0]
+        );
+        assert!(!calls[0].contains("mutation"), "{}", calls[0]);
+        assert!(
+            calls[0].contains("verdict:statusCheckRollup{state}"),
+            "{}",
+            calls[0]
+        );
+        assert!(calls[0].contains("event"), "{}", calls[0]);
+        assert!(
+            calls[0].ends_with(" -f owner=acme -f name=app -F number=12 [token:gho_secret]"),
+            "{}",
+            calls[0]
         );
     }
 
     #[test]
     fn a_token_that_cannot_read_the_checks_still_reads_the_pull_request() {
         let dir = tempfile::tempdir().unwrap();
-        let gh = fake_gh(
-            dir.path(),
-            r#"case "$*" in *statusCheckRollup*) echo 'GraphQL: Resource not accessible by personal access token (repository.pullRequest.statusCheckRollup)' >&2; exit 1;; esac
-echo '{"state":"MERGED","isDraft":false,"mergedAt":"2026-11-06T10:00:00Z"}'"#,
+        let reply = format!(
+            "case \"$*\" in *statusCheckRollup*) echo 'gh: Resource not accessible by personal access token' >&2; exit 1;; esac\n{}",
+            answer(r#"{"state":"MERGED","isDraft":false,"mergedAt":"2026-11-06T10:00:00Z"}"#)
         );
+        let gh = fake_gh(dir.path(), &reply);
         let status = gh
             .pr_status(&Token("gho_secret".into()), "acme/app", 12)
             .unwrap();
@@ -1027,109 +1204,145 @@ echo '{"state":"MERGED","isDraft":false,"mergedAt":"2026-11-06T10:00:00Z"}'"#,
         let calls: Vec<&str> = calls.lines().collect();
         assert_eq!(calls.len(), 2, "{calls:?}");
         assert!(calls[0].contains("statusCheckRollup"));
-        assert_eq!(
-            calls[1],
-            "pr view 12 --repo acme/app --json state,isDraft,mergedAt,closedAt,updatedAt,headRefOid [token:gho_secret]"
-        );
+        assert!(!calls[1].contains("statusCheckRollup"), "{}", calls[1]);
+        assert!(calls[1].contains("state isDraft"), "{}", calls[1]);
     }
 
     #[test]
-    fn a_check_run_again_counts_as_its_latest_run() {
-        let ci = |checks: serde_json::Value| {
-            parse_pr_status(&serde_json::json!({ "state": "OPEN", "statusCheckRollup": checks }))
-                .and_then(|status| status.ci)
-                .map(|ci| (ci.state, ci.failed))
+    fn of_the_runs_of_a_check_for_one_event_the_newest_says_where_it_stands() {
+        let event = |mut check: serde_json::Value, event: &str| {
+            check["checkSuite"]["workflowRun"]["event"] = event.into();
+            check
         };
-        let run = |name: &str, conclusion: &str, started: &str| serde_json::json!({ "__typename": "CheckRun", "name": name, "workflowName": "CI", "status": "COMPLETED", "conclusion": conclusion, "startedAt": started, "completedAt": started });
-        let failed_then_fixed = [
-            run("lint", "SUCCESS", "2026-11-06T10:10:00Z"),
-            run("lint", "FAILURE", "2026-11-06T10:00:00Z"),
-            run("test", "SUCCESS", "2026-11-06T10:00:00Z"),
+        let broken = |checks: serde_json::Value| ci_of("FAILURE", checks).map(|(_, failed)| failed);
+        // Started again for the same event, however soon: the newest is where it stands, as
+        // `gh pr checks` says.
+        let replaced = [
+            at(
+                run("lint", "COMPLETED", "FAILURE"),
+                "2026-11-06T10:00:00Z",
+                "2026-11-06T10:00:30Z",
+            ),
+            at(
+                run("lint", "COMPLETED", "SUCCESS"),
+                "2026-11-06T10:00:02Z",
+                "2026-11-06T10:00:40Z",
+            ),
+            at(
+                run("test", "COMPLETED", "FAILURE"),
+                "2026-11-06T10:00:00Z",
+                "2026-11-06T10:01:00Z",
+            ),
         ];
-        assert_eq!(
-            ci(serde_json::json!(failed_then_fixed)),
-            Some((CiState::Passed, vec![]))
-        );
-        let mut reversed = failed_then_fixed.to_vec();
+        assert_eq!(broken(serde_json::json!(replaced)), Some(names(&["test"])));
+        let mut reversed = replaced.to_vec();
         reversed.reverse();
-        assert_eq!(
-            ci(serde_json::json!(reversed)),
-            Some((CiState::Passed, vec![]))
-        );
+        assert_eq!(broken(serde_json::json!(reversed)), Some(names(&["test"])));
         let broken_again = [
-            run("lint", "SUCCESS", "2026-11-06T10:00:00Z"),
-            run("lint", "FAILURE", "2026-11-06T10:10:00Z"),
+            at(
+                run("lint", "COMPLETED", "SUCCESS"),
+                "2026-11-06T10:00:00Z",
+                "2026-11-06T10:01:00Z",
+            ),
+            at(
+                run("lint", "COMPLETED", "FAILURE"),
+                "2026-11-06T10:10:00Z",
+                "2026-11-06T10:11:00Z",
+            ),
         ];
         assert_eq!(
-            ci(serde_json::json!(broken_again)),
-            Some((CiState::Failed, vec!["lint".to_owned()]))
+            broken(serde_json::json!(broken_again)),
+            Some(names(&["lint"]))
         );
-        // A re-run that hasn't finished is what the CI says now.
-        let running_again = [
-            run("lint", "FAILURE", "2026-11-06T10:00:00Z"),
-            serde_json::json!({ "__typename": "CheckRun", "name": "lint", "workflowName": "CI", "status": "IN_PROGRESS", "conclusion": "", "startedAt": "2026-11-06T10:10:00Z" }),
-        ];
-        assert_eq!(
-            ci(serde_json::json!(running_again)),
-            Some((CiState::Pending, vec![]))
-        );
-        // The same job in another workflow is another check.
-        let two_workflows = serde_json::json!([
-            run("test", "SUCCESS", "2026-11-06T10:10:00Z"),
-            { "__typename": "CheckRun", "name": "test", "workflowName": "Nightly", "status": "COMPLETED", "conclusion": "FAILURE", "startedAt": "2026-11-06T10:00:00Z" },
+        // A push's and a pull request's runs are two checks, like psf/black#5629's.
+        let siblings = serde_json::json!([
+            at(
+                event(run("lint", "COMPLETED", "FAILURE"), "push"),
+                "2026-11-06T10:00:00Z",
+                "2026-11-06T10:00:30Z"
+            ),
+            at(
+                run("lint", "COMPLETED", "SUCCESS"),
+                "2026-11-06T10:00:02Z",
+                "2026-11-06T10:00:40Z"
+            ),
         ]);
-        assert_eq!(
-            ci(two_workflows),
-            Some((CiState::Failed, vec!["test".to_owned()]))
+        assert_eq!(broken(siblings), Some(names(&["lint"])));
+        // A run that hasn't started yet, with no time or the zero one, is the newest.
+        for unset in [
+            serde_json::json!("0001-01-01T00:00:00Z"),
+            serde_json::Value::Null,
+        ] {
+            let mut queued = run("lint", "QUEUED", "");
+            queued["startedAt"] = unset;
+            let checks = serde_json::json!([
+                at(
+                    run("lint", "COMPLETED", "FAILURE"),
+                    "2026-11-06T10:00:00Z",
+                    "2026-11-06T10:01:00Z"
+                ),
+                queued,
+                run("e2e", "COMPLETED", "FAILURE"),
+            ]);
+            assert_eq!(broken(checks), Some(names(&["e2e"])));
+        }
+        // The same job in another workflow is another check.
+        let mut nightly = at(
+            run("test", "COMPLETED", "FAILURE"),
+            "2026-11-06T10:00:00Z",
+            "2026-11-06T10:01:00Z",
         );
+        nightly["checkSuite"]["workflowRun"]["workflow"]["name"] = "Nightly".into();
+        let two_workflows = serde_json::json!([
+            at(
+                run("test", "COMPLETED", "SUCCESS"),
+                "2026-11-06T10:10:00Z",
+                "2026-11-06T10:11:00Z"
+            ),
+            nightly,
+        ]);
+        assert_eq!(broken(two_workflows), Some(names(&["test"])));
     }
 
     #[test]
-    fn checks_that_start_together_all_count_and_a_queued_rerun_is_the_newest() {
-        let ci = |checks: serde_json::Value| {
-            parse_pr_status(&serde_json::json!({ "state": "OPEN", "statusCheckRollup": checks }))
-                .and_then(|status| status.ci)
-                .map(|ci| (ci.state, ci.failed))
-        };
-        let run = |conclusion: &str, started: &str, completed: &str| serde_json::json!({ "__typename": "CheckRun", "name": "test", "workflowName": "CI", "status": "COMPLETED", "conclusion": conclusion, "startedAt": started, "completedAt": completed });
-        let failed = || Some((CiState::Failed, vec!["test".to_owned()]));
-        // A push and a pull_request run of the same job: neither is a rerun of the other.
+    fn checks_that_say_no_event_go_by_when_they_ran() {
+        let broken = |checks: serde_json::Value| ci_of("FAILURE", checks).map(|(_, failed)| failed);
+        let status = |state: &str, created: &str| serde_json::json!({ "__typename": "StatusContext", "context": "deploy", "state": state, "createdAt": created });
+        // Commit statuses set together all count. One set well after is set again.
         assert_eq!(
-            ci(serde_json::json!([
-                run("FAILURE", "2026-11-06T10:00:00Z", "2026-11-06T10:00:30Z"),
-                run("SUCCESS", "2026-11-06T10:00:02Z", "2026-11-06T10:00:40Z"),
+            broken(serde_json::json!([
+                status("FAILURE", "2026-11-06T10:00:00Z"),
+                status("SUCCESS", "2026-11-06T10:00:02Z"),
             ])),
-            failed()
+            Some(names(&["deploy"]))
         );
-        // Started well after the other ended, it's a rerun.
         assert_eq!(
-            ci(serde_json::json!([
-                run("FAILURE", "2026-11-06T10:00:00Z", "2026-11-06T10:01:00Z"),
-                run("SUCCESS", "2026-11-06T10:05:00Z", "2026-11-06T10:06:00Z"),
+            broken(serde_json::json!([
+                status("FAILURE", "2026-11-06T10:00:00Z"),
+                status("SUCCESS", "2026-11-06T10:05:00Z"),
             ])),
-            Some((CiState::Passed, vec![]))
+            Some(vec![])
+        );
+        // A check run of an app that isn't GitHub Actions has no workflow run.
+        let app = |conclusion: &str, started: &str| {
+            serde_json::json!({ "__typename": "CheckRun", "name": "CodSpeed", "status": "COMPLETED", "conclusion": conclusion,
+                "startedAt": started, "completedAt": started, "checkSuite": { "workflowRun": null } })
+        };
+        assert_eq!(
+            broken(serde_json::json!([
+                app("FAILURE", "2026-11-06T10:00:00Z"),
+                app("SUCCESS", "2026-11-06T10:10:00Z"),
+            ])),
+            Some(vec![])
         );
         // A commit status and a check run with the same name are two checks.
         assert_eq!(
-            ci(serde_json::json!([
-                { "__typename": "StatusContext", "context": "build", "state": "FAILURE", "startedAt": "2026-11-06T10:00:00Z" },
-                { "__typename": "CheckRun", "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS", "startedAt": "2026-11-06T10:10:00Z" },
+            broken(serde_json::json!([
+                { "__typename": "StatusContext", "context": "build", "state": "FAILURE", "createdAt": "2026-11-06T10:00:00Z" },
+                at(run("build", "COMPLETED", "SUCCESS"), "2026-11-06T10:10:00Z", "2026-11-06T10:11:00Z"),
             ])),
-            Some((CiState::Failed, vec!["build".to_owned()]))
+            Some(names(&["build"]))
         );
-        // A rerun that hasn't started yet has no time, or the zero one, and is what the CI says now.
-        for unset in [
-            serde_json::json!({ "__typename": "CheckRun", "name": "test", "workflowName": "CI", "status": "QUEUED", "conclusion": "", "startedAt": "0001-01-01T00:00:00Z" }),
-            serde_json::json!({ "__typename": "CheckRun", "name": "test", "workflowName": "CI", "status": "QUEUED" }),
-        ] {
-            assert_eq!(
-                ci(serde_json::json!([
-                    run("FAILURE", "2026-11-06T10:00:00Z", "2026-11-06T10:01:00Z"),
-                    unset,
-                ])),
-                Some((CiState::Pending, vec![]))
-            );
-        }
     }
 
     #[test]
@@ -1170,12 +1383,22 @@ echo '{"state":"MERGED","isDraft":false,"mergedAt":"2026-11-06T10:00:00Z"}'"#,
         assert_eq!(error.kind, "notSignedIn");
         assert_eq!(error.detail, "HTTP 401: Bad credentials for <token>");
 
+        for said in ["echo 'not what it should say'".to_owned(), answer("null")] {
+            let dir = tempfile::tempdir().unwrap();
+            let gh = fake_gh(dir.path(), &said);
+            let error = gh
+                .pr_status(&Token("gho_secret".into()), "acme/app", 12)
+                .unwrap_err();
+            assert_eq!(error.kind, "other", "{said}");
+        }
+        // A repo Keel couldn't name to GitHub isn't asked about.
         let dir = tempfile::tempdir().unwrap();
-        let gh = fake_gh(dir.path(), "echo 'not what it should say'");
-        let error = gh
-            .pr_status(&Token("gho_secret".into()), "acme/app", 12)
-            .unwrap_err();
-        assert_eq!(error.kind, "other");
+        let gh = fake_gh(dir.path(), "exit 1");
+        assert!(
+            gh.pr_status(&Token("gho_secret".into()), "acme", 12)
+                .is_err()
+        );
+        assert!(!dir.path().join("calls.log").exists());
     }
 
     #[test]
