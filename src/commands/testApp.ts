@@ -6,7 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { vi } from "vitest";
 import App from "../App";
 import i18next from "../i18n";
-import type { Attempt, AttemptState, BoardCard, Project, Run, RunRow } from "../lib/api";
+import type { Attempt, AttemptState, BoardCard, Project, Run, RunRow, ToolFolder } from "../lib/api";
 import { useApp, type View } from "../lib/store";
 import { useCommands } from "./registry";
 import { useSearchEverywhere } from "./SearchEverywhere";
@@ -40,6 +40,12 @@ let root: Root | null = null;
 let shownRuns: RunRow[] = [];
 
 export const callsTo = (command: string) => calls.filter((call) => call.command === command);
+
+/** What Keel finds a project's commands need from the home folder. Nothing unless a test says. */
+export let toolFolders: ToolFolder[] = [];
+export const setToolFolders = (folders: ToolFolder[]) => {
+  toolFolders = folders;
+};
 export const answers = () => callsTo("approval_answer");
 
 function backend(command: string, args: unknown) {
@@ -74,6 +80,8 @@ function backend(command: string, args: unknown) {
       return { settings: { enabled: false, port: 7413 }, status: { running: false, port: null, url: null, error: null }, clients: [], calls: [] };
     case "github_status":
       return { repo: "acme/demo", accounts: [], info: null, excessScopes: [], error: null };
+    case "project_tool_folders":
+      return toolFolders;
     case "overview":
       return useApp.getState().overview;
     case "max_agents_get":
@@ -105,6 +113,7 @@ export async function showApp(runs: RunRow[], view: View = { name: "home" }, pro
 export async function hideApp() {
   await act(async () => root?.unmount());
   root = null;
+  toolFolders = [];
   await settle();
   document.body.replaceChildren();
   // Radix leaves this for a dialog that closes with the page; the next test starts clean.

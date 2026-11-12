@@ -470,18 +470,24 @@ fn setup_runs_first_and_later_steps_use_their_own_cache() {
     let workspace = Path::new(&builder.workspace);
     let setup_cache = std::fs::read_to_string(workspace.join("setup-cache.txt")).unwrap();
     let check_cache = std::fs::read_to_string(workspace.join("check-cache.txt")).unwrap();
-    assert!(setup_cache.trim().ends_with("/cache"), "{setup_cache}");
+    // In the project's home, and in the run's copy of it.
     assert!(
-        check_cache
-            .trim()
-            .starts_with(&*workspace.to_string_lossy()),
-        "{check_cache}"
+        setup_cache.trim().ends_with("/cache/home/.cache"),
+        "{setup_cache}"
+    );
+    assert_eq!(
+        check_cache.trim(),
+        workspace.join(".keel-cache/home/.cache").to_string_lossy()
     );
     assert!(Path::new(setup_cache.trim()).join("from-setup").exists());
     assert!(!Path::new(setup_cache.trim()).join("from-check").exists());
 
     // What tools leave in the run's cache never gets committed.
-    assert!(workspace.join(".keel-cache/from-check").exists());
+    assert!(
+        workspace
+            .join(".keel-cache/home/.cache/from-check")
+            .exists()
+    );
     let tracked = Command::new("git")
         .current_dir(workspace)
         .args(["ls-files"])
@@ -498,28 +504,29 @@ fn what_setup_downloads_stays_in_the_project_cache_and_each_run_gets_its_own_cop
         .update_project(
             &w.project_id,
             &ProjectSettings {
+                // Where cargo and Go keep what they download, in the home folder.
                 setup_command: Some(
-                    "echo $CARGO_HOME > setup-cargo.txt; mkdir -p \"$CARGO_HOME/registry\" \"$GOPATH/pkg\"; \
-                     test -f \"$CARGO_HOME/registry/dep\" || echo downloaded >> \"$CARGO_HOME/registry/count\"; \
-                     touch \"$CARGO_HOME/registry/dep\" \"$GOPATH/pkg/mod\""
+                    "echo $HOME > setup-home.txt; mkdir -p ~/.cargo/registry ~/go/pkg; \
+                     test -f ~/.cargo/registry/dep || echo downloaded >> ~/.cargo/registry/count; \
+                     touch ~/.cargo/registry/dep ~/go/pkg/mod"
                         .into(),
                 ),
                 ..ProjectSettings::default()
             },
         )
         .unwrap();
-    let probe = "echo $CARGO_HOME > check-cargo.txt; echo \"[$CARGO_NET_OFFLINE][$GOPROXY]\" > check-offline.txt; \
-                 test -f \"$CARGO_HOME/registry/dep\" && test -f \"$GOPATH/pkg/mod\" || exit 7; \
-                 touch \"$CARGO_HOME/registry/changed-by-check\"";
+    let probe = "echo $HOME > check-home.txt; echo \"[$CARGO_NET_OFFLINE][$GOPROXY]\" > check-offline.txt; \
+                 test -f ~/.cargo/registry/dep && test -f ~/go/pkg/mod || exit 7; \
+                 touch ~/.cargo/registry/changed-by-check";
     let first = w.run(vec![check("after", probe)]);
     let after = w.wait_done(&first, "after");
     assert_eq!(after.state, "succeeded", "{}", w.check_output(&after));
     let workspace = Path::new(&after.workspace);
-    let shared = std::fs::read_to_string(workspace.join("setup-cargo.txt")).unwrap();
-    let shared = Path::new(shared.trim());
-    let own = std::fs::read_to_string(workspace.join("check-cargo.txt")).unwrap();
+    let shared = std::fs::read_to_string(workspace.join("setup-home.txt")).unwrap();
+    let shared = Path::new(shared.trim()).join(".cargo");
+    let own = std::fs::read_to_string(workspace.join("check-home.txt")).unwrap();
     assert!(
-        shared.starts_with(w.dir.path()) && shared.ends_with("cache/cargo"),
+        shared.starts_with(w.dir.path()) && shared.ends_with("cache/home/.cargo"),
         "{shared:?}"
     );
     assert!(

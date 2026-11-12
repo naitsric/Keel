@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Attempt, AttemptState, Guess, Project } from "./api";
-import { accountToSelect, checkOptionsLeft, commandNotFound, needsSetup, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withSetup, withSetupOption } from "./projects";
+import { accountToSelect, checkOptionsLeft, commandNotFound, foldersToOffer, isListed, needsSetup, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withFolders, withSetup, withSetupOption } from "./projects";
 
 const project = (fields: Partial<Project>) => ({ id: "p", name: "demo", path: "/w", githubAccount: null, githubRepo: null, setupCommand: null, checkCommand: null, allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, sensitivePaths: [], ...fields }) as Project;
 
@@ -20,6 +20,25 @@ describe("whether a project still has setup to finish", () => {
 
   it("keeps asking for an account when the repo is on GitHub", () => {
     expect(needsSetup(project({ checkCommand: "make test", githubRepo: "acme/app" }))).toBe(true);
+  });
+});
+
+describe("the folders a project reads", () => {
+  it("counts one as listed however it's written, or when a folder around it is", () => {
+    expect(isListed("~/.nvm", ["~/.nvm/"])).toBe(true);
+    expect(isListed("~/.nvm", ["/Users/you/.nvm"])).toBe(true);
+    expect(isListed("~/.cargo/bin", ["~/.cargo"])).toBe(true);
+    expect(isListed("~/.nvm", ["~/.nv", "~/.nvm-old", ""])).toBe(false);
+    expect(isListed("~/.cargo", ["~/.cargo/bin"])).toBe(false);
+  });
+
+  it("offers only what isn't listed, and adds each once, after what was there", () => {
+    const found = [
+      { folder: "~/.nvm", programs: ["node"] },
+      { folder: "~/Library/pnpm", programs: ["pnpm"] },
+    ];
+    expect(foldersToOffer(found, ["~/.nvm"])).toEqual([found[1]]);
+    expect(withFolders(["~/.nvm", "/opt/x"], ["~/Library/pnpm", "~/.nvm", "~/Library/pnpm"])).toEqual(["~/.nvm", "/opt/x", "~/Library/pnpm"]);
   });
 });
 

@@ -95,6 +95,13 @@ export interface ProjectSettings {
   sensitivePaths: string[];
 }
 
+/** A folder in the home folder where programs a project's commands use are installed. */
+export interface ToolFolder {
+  /** As a person writes it: `~/.nvm`. */
+  folder: string;
+  programs: string[];
+}
+
 /** What a project's files give away. Nothing is saved until a person says so. */
 export interface Guess {
   check: string | null;
@@ -712,7 +719,9 @@ export const api = {
   projectProposalAccept: (proposalId: string, language: string) => invoke<ProjectAdded>("project_proposal_accept", { proposalId, language }),
   projectProposalDiscard: (proposalId: string) => invoke<void>("project_proposal_discard", { proposalId }),
   projectSetup: (projectId: string) => invoke<ProjectSetup>("project_setup", { projectId }),
-  projectTryCheck: (projectId: string, setup: string, check: string, language: string) => invoke<string>("project_try_check", { projectId, setup, check, language }),
+  projectToolFolders: (projectId: string, setup: string, check: string) => invoke<ToolFolder[]>("project_tool_folders", { projectId, setup, check }),
+  /** `read` is the folders the commands may read on top of the project's, for this run only. */
+  projectTryCheck: (projectId: string, setup: string, check: string, read: string[], language: string) => invoke<string>("project_try_check", { projectId, setup, check, read, language }),
   projectRemove: (projectId: string) => invoke<void>("project_remove", { projectId }),
   githubAccounts: () => invoke<GithubAccount[]>("github_accounts"),
   openGithubLogin: () => invoke<void>("open_github_login"),

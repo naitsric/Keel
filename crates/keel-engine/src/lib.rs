@@ -38,7 +38,7 @@ use keel_core::{AttemptState, CardLane, Reason, StepCondition, StepRole, StepSpe
 use keel_harness::auth::{self, AuthStatus, VersionCheck};
 use keel_harness::github::{self, Account, Gh, GhError, Issue, RepoInfo};
 use keel_harness::process::{self, SIGINT, SIGTERM};
-use keel_harness::{Tools, settings};
+use keel_harness::{Tools, settings, toolchains};
 use keel_store::rusqlite_value::Value;
 use keel_store::{
     Decision, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
@@ -607,6 +607,28 @@ impl Engine {
         Ok(ProjectSetup { project, guess })
     }
 
+    /// The folders in the home folder where the programs these commands use are installed, for a
+    /// person to let them be read. What the repo's own files say it uses counts too, since a command
+    /// like `make test` hides what it runs. Like the guess, nothing from the repo runs: the shell is
+    /// only asked where each program is, from outside the repo. Saves nothing.
+    pub fn tool_folders(
+        &self,
+        project_id: &str,
+        setup: &str,
+        check: &str,
+    ) -> Result<Vec<toolchains::Found>> {
+        let project = self.inner.store.project(project_id)?;
+        let guess = detect::guess(Path::new(&project.path));
+        let commands: Vec<&str> = [setup, check]
+            .into_iter()
+            .chain(guess.setup.as_deref())
+            .chain(guess.check.as_deref())
+            .chain(guess.check_options.iter().map(String::as_str))
+            .collect();
+        let path_env = locked(&self.inner.tools).path_env.clone();
+        Ok(toolchains::find(&commands, &path_env, &runner::real_home()))
+    }
+
     /// Tries commands before anyone saves them, in the real sandbox and with no model. Saved
     /// settings aren't touched, and what's being tried replaces them for this run.
     pub fn try_check(
@@ -614,6 +636,19 @@ impl Engine {
         project_id: &str,
         setup: &str,
         check: &str,
+        language: &str,
+    ) -> Result<String> {
+        self.try_check_reading(project_id, setup, check, &[], language)
+    }
+
+    /// `try_check`, with folders the commands may read on top of the project's, as the person is
+    /// about to let them. Only this run gets them.
+    pub fn try_check_reading(
+        &self,
+        project_id: &str,
+        setup: &str,
+        check: &str,
+        read: &[String],
         language: &str,
     ) -> Result<String> {
         let (setup, check) = (setup.trim(), check.trim());
@@ -646,7 +681,12 @@ impl Engine {
         } else {
             format!("Try the check: {check}")
         };
-        self.start_run_in_session(
+        let read: Vec<String> = read
+            .iter()
+            .map(|folder| folder.trim().to_owned())
+            .filter(|folder| !folder.is_empty())
+            .collect();
+        self.start_run_reading(
             StartRun {
                 project_id: project_id.to_owned(),
                 title: Some(title_from(&what)),
@@ -658,6 +698,7 @@ impl Engine {
                 started_by: None,
             },
             None,
+            &read,
         )
     }
 
@@ -809,6 +850,16 @@ impl Engine {
     /// `start_run`, for a caller that has already looked at the session or doesn't need one. A run
     /// for a card is linked to it from the moment it exists.
     fn start_run_in_session(&self, request: StartRun, card: Option<&str>) -> Result<String> {
+        self.start_run_reading(request, card, &[])
+    }
+
+    /// `start_run_in_session`, for a run whose steps may also read these folders.
+    fn start_run_reading(
+        &self,
+        request: StartRun,
+        card: Option<&str>,
+        read: &[String],
+    ) -> Result<String> {
         let project = self.inner.store.project(&request.project_id)?;
         self.check_can_run(&project, &request.workflow)?;
         // Preparation always comes first, and from what's published, before any agent touches it.
@@ -859,7 +910,8 @@ impl Engine {
         };
         match card {
             Some(card) => self.inner.store.add_run_for_card(&run, card)?,
-            None => self.inner.store.add_run(&run)?,
+            None if read.is_empty() => self.inner.store.add_run(&run)?,
+            None => self.inner.store.add_run_reading(&run, read)?,
         }
         if let Err(error) = self.begin_run(&run_id) {
             // Whoever asked hears that it failed. Left open with nothing recorded, it would hold a
@@ -1902,6 +1954,7 @@ impl Inner {
     ) -> Result<String> {
         let run = self.store.run(run_id)?;
         let project = self.store.project(&run.project_id)?;
+        let read = runner::readable(&project, &run);
         let workspace = self.workspace(run_id);
         let dir = self.run_dir(run_id);
         std::fs::create_dir_all(&dir)?;
@@ -1920,7 +1973,7 @@ impl Inner {
                     settings::step_settings(
                         &workspace,
                         &project.allowed_domains,
-                        &project.allowed_read,
+                        &read,
                         // Only steps that run commands get anywhere near a service.
                         &if can_edit {
                             services::socket_dirs(&services::root_for(&project.id), &project.services)
@@ -1980,7 +2033,7 @@ impl Inner {
                 None,
                 None,
                 command.clone(),
-                json!({ "network": "internet, nothing local", "read": project.allowed_read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string(),
+                json!({ "network": "internet, nothing local", "read": read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string(),
                 format!("{stem}.log"),
             ),
             WorkflowStep::Check { run: command, .. } => (
@@ -1990,7 +2043,7 @@ impl Inner {
                 None,
                 None,
                 command.clone(),
-                json!({ "network": "none", "read": project.allowed_read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string(),
+                json!({ "network": "none", "read": read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string(),
                 format!("{stem}.log"),
             ),
             WorkflowStep::Parallel { .. } | WorkflowStep::Approval { .. } | WorkflowStep::Deliver { .. } => (
