@@ -330,12 +330,23 @@ const MIGRATIONS: &[&str] = &[
     alter table run add column extra_read text not null default '[]';
 "#,
     // 17: Which MCP client put a card back in Todo, so the run it starts is that client's, and which
-    // run it runs again. Null when the person did, and on cards from before. The run keeps who it
-    // was started for, since the card moves on to the next one.
+    // run it runs again. Null when the person did, and on cards from before. The run keeps which
+    // client it was started for, since the card moves on to the next one: the one that put its
+    // card back in Todo, or that proposed the change it's a part of. Before, a part's run was the
+    // proposing client's while its card pointed at it. It stays so only if Keel started it from
+    // the part as its change opened it: one the person put in Todo again is theirs.
     r#"
     alter table card add column queued_by_client text;
     alter table card add column rerun_of text;
     alter table run add column started_for_client text;
+    update run set started_for_client = (
+        select c.client_id from card part
+        join card agreeing on agreeing.id = part.joint_change_id
+        join mcp_call c on c.run_id = agreeing.run_id
+        where part.run_id = run.id and part.joint_position is not null
+          and part.todo_at = part.created_at
+          and c.tool = 'propose_change' and c.ok = 1
+        order by c.seq limit 1);
 "#,
 ];
 
@@ -438,22 +449,29 @@ fn mcp_client_from(r: &Row) -> rusqlite::Result<McpClient> {
 /// The tools that start a run, which is how a client's runs are told from everyone else's.
 const MCP_STARTS_A_RUN: &str = "('start_run', 'start_task', 'propose_change')";
 
-/// Whether the run `{run}` is the client `{client}`'s: it started it, the run is a part of a
-/// change across projects whose agreement it started, or the run started from a card the client
-/// put back in Todo, as the run itself keeps: the card moves on to its next run. The parts open
-/// later, from the board, with no call of the client's, and are still the client's to follow.
+/// Whether the run `{run}` is the client `{client}`'s: it started it, or Keel started it for the
+/// client from a card, as the run itself keeps: see `add_run_for_card`. Never by what a card
+/// points at now, which moves on to the next run.
 fn run_of_client(run: &str, client: &str) -> String {
     format!(
         "(exists (select 1 from mcp_call c
                   where c.run_id = {run} and c.client_id = {client}
                     and c.tool in {MCP_STARTS_A_RUN} and c.ok = 1)
-          or exists (select 1 from card part
-                     join card agreeing on agreeing.id = part.joint_change_id
-                     join mcp_call c on c.run_id = agreeing.run_id
-                     where part.run_id = {run} and part.joint_position is not null
-                       and c.client_id = {client} and c.tool = 'propose_change' and c.ok = 1)
           or exists (select 1 from run started
                      where started.id = {run} and started.started_for_client = {client}))"
+    )
+}
+
+/// The client a part, the card a query calls `{card}`, was opened for, while it's still as its
+/// change opened it: the one that proposed the change. Taking it out of Todo and back gives it a
+/// new time there, and then it's the person's. Null for any other card.
+fn part_opened_for(card: &str) -> String {
+    format!(
+        "(select c.client_id from card agreeing join mcp_call c on c.run_id = agreeing.run_id
+          where agreeing.id = {card}.joint_change_id and {card}.joint_position is not null
+            and {card}.todo_at = {card}.created_at
+            and c.tool = 'propose_change' and c.ok = 1
+          order by c.seq limit 1)"
     )
 }
 
@@ -496,32 +514,37 @@ fn card_of_client(conn: &Connection, card_id: &str, client_id: &str) -> rusqlite
     )
 }
 
-/// Whether the client closed the run itself, and nothing the person did ended it: its close_run
-/// on it went through, every close names a client rather than the person, the person asked
-/// nothing in it to stop, and nothing ran in it once the client first closed it, as it would
-/// after the person tried it again. Only such a run is the client's to run again.
+/// Whether the client closed the run itself, and nothing the person did ended it: the run is
+/// the client's, its close_run on it went through, every close names a client rather than the
+/// person, the person asked nothing in it to stop, and nothing ran in it once the client first
+/// closed it, as it would after the person tried it again. Only such a run is the client's to
+/// run again.
 fn run_closed_by_client(
     conn: &Connection,
     run_id: &str,
     client_id: &str,
 ) -> rusqlite::Result<bool> {
     conn.query_row(
-        "with first_close as (
-             select min(e.seq) as seq, min(e.at) as at from event e
-             join attempt a on a.id = e.attempt_id
-             where a.run_id = ?1 and e.kind = 'abandoned' and json_extract(e.data, '$.by') is not null)
-         select exists (select 1 from run where id = ?1 and finished_at is not null)
-            and exists (select 1 from mcp_call c where c.run_id = ?1 and c.client_id = ?2
-                                                   and c.tool = 'close_run' and c.ok = 1)
-            and (select seq from first_close) is not null
-            and not exists (select 1 from event e join attempt a on a.id = e.attempt_id
-                            where a.run_id = ?1 and e.kind in ('abandoned', 'stopRequested')
-                              and json_extract(e.data, '$.by') is null)
-            and not exists (select 1 from attempt a
-                            where a.run_id = ?1 and a.started_at > (select at from first_close))
-            and not exists (select 1 from event e join attempt a on a.id = e.attempt_id
-                            where a.run_id = ?1 and e.seq > (select seq from first_close)
-                              and e.kind <> 'abandoned')",
+        &format!(
+            "with first_close as (
+                 select min(e.seq) as seq, min(e.at) as at from event e
+                 join attempt a on a.id = e.attempt_id
+                 where a.run_id = ?1 and e.kind = 'abandoned' and json_extract(e.data, '$.by') is not null)
+             select exists (select 1 from run where id = ?1 and finished_at is not null)
+                and exists (select 1 from mcp_call c where c.run_id = ?1 and c.client_id = ?2
+                                                       and c.tool = 'close_run' and c.ok = 1)
+                and (select seq from first_close) is not null
+                and not exists (select 1 from event e join attempt a on a.id = e.attempt_id
+                                where a.run_id = ?1 and e.kind in ('abandoned', 'stopRequested')
+                                  and json_extract(e.data, '$.by') is null)
+                and not exists (select 1 from attempt a
+                                where a.run_id = ?1 and a.started_at > (select at from first_close))
+                and not exists (select 1 from event e join attempt a on a.id = e.attempt_id
+                                where a.run_id = ?1 and e.seq > (select seq from first_close)
+                                  and e.kind <> 'abandoned')
+                and {}",
+            run_of_client("?1", "?2")
+        ),
         [run_id, client_id],
         |r| r.get(0),
     )
@@ -555,21 +578,19 @@ fn may_note(conn: &Connection, card: &Card, client_id: &str) -> rusqlite::Result
 
 /// Whether the card a query calls `card` can start as far as the client that put it in Todo
 /// goes: that client may still start runs, and has fewer going than the person allows it,
-/// counting cards of its own already taken from Todo that have no run yet. A card the person put
-/// there always can.
+/// counting cards of its own already taken from Todo, as `open_runs_of_mcp_client` does. A card
+/// the person put there always can.
 fn room_for(card: &str) -> String {
     let client = format!("{card}.queued_by_client");
     format!(
         "({client} is null
           or ({may_run}
-              and (select count(*) from run r
-                   where r.finished_at is null
-                     and (r.started_for_client = {client}
-                          or exists (select 1 from mcp_call c
-                                     where c.run_id = r.id and c.client_id = {client}
-                                       and c.tool in {MCP_STARTS_A_RUN} and c.ok = 1)))
-                + (select count(*) from card k
-                   where k.queued_by_client = {client} and k.lane = 'started' and k.run_id is null)
+              and (select count(distinct r.id) from run r join mcp_call c on c.run_id = r.id
+                   where c.client_id = {client} and c.tool in {MCP_STARTS_A_RUN}
+                     and c.ok = 1 and r.finished_at is null)
+                + (select count(*) from card k left join run r on r.id = k.run_id
+                   where k.queued_by_client = {client} and k.lane = 'started'
+                     and r.finished_at is null)
                 < (select max(1, min(m.max_open_runs, {MAX_OPEN_RUNS_CEILING})) from mcp_client m
                    where m.id = {client})))",
         may_run = client_may_run(&client)
@@ -1561,7 +1582,8 @@ impl Store {
     /// Runs this client started that haven't finished, counting the cards it put back in Todo: one
     /// that could start now and waits for a place, and then its run until it finishes. One that
     /// can't start, a part waiting for the one before it or a card of a project taken out of Keel,
-    /// holds no place until it can.
+    /// holds no place until it can. The parts Keel opens for a change it proposed are its own to
+    /// follow, but hold no place: the person agreed to them.
     pub fn open_runs_of_mcp_client(&self, client_id: &str) -> Result<i64> {
         Ok(self.lock().query_row(
             &format!(
@@ -1571,13 +1593,11 @@ impl Store {
                      where c.client_id = ?1 and c.tool in {MCP_STARTS_A_RUN} and c.ok = 1
                        and r.finished_at is null
                      union
-                     select r.id from run r where r.started_for_client = ?1 and r.finished_at is null
-                     union
-                     select k.id from card k
-                     where k.queued_by_client = ?1 and k.run_id is null
+                     select coalesce(k.run_id, k.id) from card k
+                     left join run r on r.id = k.run_id
+                     where k.queued_by_client = ?1 and k.lane <> 'backlog' and r.finished_at is null
                        and (k.lane = 'started'
-                            or (k.lane = 'todo' and {}
-                                and k.project_id in (select id from project where removed_at is null))))",
+                            or ({} and k.project_id in (select id from project where removed_at is null))))",
                 ready("k")
             ),
             [client_id],
@@ -1762,32 +1782,41 @@ impl Store {
 
     /// Adds the run of a card that was just taken from Todo, and links them in one go. If the app
     /// dies, there's either a card with no run, which goes back to Todo, or both together, never a
-    /// run that nothing points at while its card starts another. A card a client put in Todo
-    /// starts a run that's that client's for good, unless the client may no longer start runs:
-    /// then `ClientMayNotRun`, with nothing added. That's looked at here, as the run is written,
-    /// so a revoke can't slip in between.
+    /// run that nothing points at while its card starts another. The run keeps which client it's
+    /// for, for good: the one that put the card back in Todo, or, for a part still as its change
+    /// opened it, the one that proposed the change. Not one the person put in Todo. A client that
+    /// put the card in Todo and may no longer start runs gets none: `ClientMayNotRun`, with
+    /// nothing added. That's looked at here, as the run is written, so a revoke can't slip in
+    /// between.
     pub fn add_run_for_card(&self, run: &NewRun, card_id: &str) -> Result<()> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
-        let client: Option<(String, String, bool)> = tx
+        let (queued_by, name, may_run, opened_for): (
+            Option<String>,
+            Option<String>,
+            bool,
+            Option<String>,
+        ) = tx
             .query_row(
                 &format!(
-                    "select k.queued_by_client, coalesce(m.name, k.queued_by_client), {}
+                    "select k.queued_by_client, coalesce(m.name, k.queued_by_client), {}, {}
                      from card k left join mcp_client m on m.id = k.queued_by_client
-                     where k.id = ?1 and k.queued_by_client is not null",
-                    client_may_run("k.queued_by_client")
+                     where k.id = ?1",
+                    client_may_run("k.queued_by_client"),
+                    part_opened_for("k")
                 ),
                 [card_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
-            .optional()?;
-        if let Some((_, name, false)) = &client {
-            return Err(Error::ClientMayNotRun(name.clone()));
+            .optional()?
+            .unwrap_or_default();
+        if queued_by.is_some() && !may_run {
+            return Err(Error::ClientMayNotRun(name.unwrap_or_default()));
         }
         insert_run(&tx, run)?;
         tx.execute(
             "update run set started_for_client = ?2 where id = ?1",
-            params![run.id, client.map(|(id, _, _)| id)],
+            params![run.id, queued_by.or(opened_for)],
         )?;
         let linked = tx.execute(
             "update card set run_id = ?2 where id = ?1 and lane = 'started' and run_id is null",
@@ -5723,6 +5752,135 @@ mod tests {
         assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 0);
     }
 
+    /// A change across projects that `c1` proposed: its agreement `plan`, on the run `r`, and its
+    /// parts `first` and `second` waiting in Todo as it opened them, the second for the first.
+    fn proposed_by_c1(store: &Store) {
+        agreed(store, &[("first", "q"), ("second", "s")]);
+        two_clients(store);
+        store
+            .lock()
+            .execute(
+                "update card set lane = 'started', run_id = 'r' where id = 'plan'",
+                [],
+            )
+            .unwrap();
+        mcp_call(store, "c1", "propose_change", "r");
+    }
+
+    #[test]
+    fn every_run_of_a_part_opened_for_a_client_s_change_stays_its_own() {
+        let (_dir, store) = store();
+        seeded(&store);
+        proposed_by_c1(&store);
+        // Keel opens the first part: its run is the client's, and doesn't count among its open
+        // runs, as the agreement does.
+        start_claimed(&store, "first", "p1");
+        assert!(store.run_started_by_mcp_client("p1", "c1").unwrap());
+        assert!(!store.run_started_by_mcp_client("p1", "c2").unwrap());
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
+
+        // The client closes it and puts the part back in Todo: both runs stay its own.
+        client_closed(&store, "c1", "p1");
+        assert!(
+            store
+                .move_card_as("first", CardLane::Todo, usize::MAX, "en", Some("c1"))
+                .unwrap()
+        );
+        assert!(
+            store.run_started_by_mcp_client("p1", "c1").unwrap(),
+            "once the card no longer points at it"
+        );
+        start_claimed(&store, "first", "p2");
+        for run in ["p1", "p2"] {
+            assert!(store.run_started_by_mcp_client(run, "c1").unwrap(), "{run}");
+            assert!(
+                !store.run_started_by_mcp_client(run, "c2").unwrap(),
+                "{run}"
+            );
+        }
+        assert_eq!(mine(&store, "c1"), ["p1", "p2", "r"]);
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 2);
+    }
+
+    #[test]
+    fn a_part_the_person_put_back_in_todo_starts_a_run_of_theirs() {
+        let (_dir, store) = store();
+        seeded(&store);
+        proposed_by_c1(&store);
+        // The person holds the first part back, and then puts it in Todo themselves.
+        assert!(
+            store
+                .move_card("first", CardLane::Backlog, 0, "en")
+                .unwrap()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(store.move_card("first", CardLane::Todo, 0, "en").unwrap());
+        start_claimed(&store, "first", "p1");
+        assert!(!store.run_started_by_mcp_client("p1", "c1").unwrap());
+        assert_eq!(mine(&store, "c1"), ["r"]);
+        assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
+
+        // Even with the client's close of it on record, it isn't the client's to run again.
+        client_closed(&store, "c1", "p1");
+        assert!(!store.run_closed_by_mcp_client("p1", "c1").unwrap());
+        assert!(
+            !store
+                .move_card_as("first", CardLane::Todo, usize::MAX, "en", Some("c1"))
+                .unwrap()
+        );
+        assert!(!store.append_to_card("first", "Mine.", "c1").unwrap());
+        assert_eq!(store.card("first").unwrap().column(), BoardColumn::Backlog);
+    }
+
+    #[test]
+    fn a_part_s_run_from_before_is_the_client_s_only_if_keel_opened_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        {
+            let store = Store::open(&path).unwrap();
+            seeded(&store);
+            proposed_by_c1(&store);
+            // Keel started the first part as it opened it. The person held the second back,
+            // put it in Todo again, and it started.
+            ran(&store, "first", "p1", None);
+            assert!(
+                store
+                    .move_card("second", CardLane::Backlog, 0, "en")
+                    .unwrap()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            assert!(store.move_card("second", CardLane::Todo, 0, "en").unwrap());
+            ran(&store, "second", "p2", None);
+            for run in ["p1", "p2"] {
+                store
+                    .add_attempt(&new_attempt(
+                        &format!("{run}-a"),
+                        run,
+                        "builder",
+                        AttemptState::Succeeded,
+                    ))
+                    .unwrap();
+            }
+        }
+        // As the version before left it.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "pragma user_version = 16;
+             alter table card drop column rerun_of;
+             alter table card drop column queued_by_client;
+             alter table run drop column started_for_client;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = Store::open(&path).unwrap();
+        assert!(store.run_started_by_mcp_client("p1", "c1").unwrap());
+        assert!(!store.run_started_by_mcp_client("p1", "c2").unwrap());
+        assert!(!store.run_started_by_mcp_client("p2", "c1").unwrap());
+        assert_eq!(mine(&store, "c1"), ["p1", "r"]);
+        assert!(!store.run_started_by_mcp_client("r", "c2").unwrap());
+    }
+
     #[test]
     fn a_part_is_a_card_of_the_client_that_proposed_the_change() {
         let (_dir, store) = store();
@@ -5918,6 +6076,7 @@ mod tests {
         };
         let closed = |client: &str| store.run_closed_by_mcp_client("r", client).unwrap();
         // Still open.
+        call("start_run");
         call("close_run");
         assert!(!closed("c1"));
 

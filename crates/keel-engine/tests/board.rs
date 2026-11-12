@@ -931,11 +931,9 @@ fn a_client_adds_a_note_to_a_card_it_closed_and_runs_its_workflow_again_as_its_o
     let workflow = answer_step(&w.engine, &w.project_id);
     w.engine.start_board();
     let client = client(&w);
-    let mut asked = outside_run(
-        &w,
-        steps_of(&w, &workflow),
-        "Add a triple function\n\nWith its test.",
-    );
+    // Code keeps its own blank lines, however many.
+    let asked_for = "Add a triple function\n\nWith its test:\n```\nfn a() {}\n\n\nfn b() {}\n```";
+    let mut asked = outside_run(&w, steps_of(&w, &workflow), asked_for);
     asked.saved_workflow = Some(
         w.engine
             .workflow(&w.project_id, &workflow, "en")
@@ -968,7 +966,7 @@ fn a_client_adds_a_note_to_a_card_it_closed_and_runs_its_workflow_again_as_its_o
         )
         .unwrap();
     let (person, notes) = split_assistant_notes(&w.card(&card).body);
-    assert_eq!(person, "Add a triple function\n\nWith its test.");
+    assert_eq!(person, asked_for);
     let [note] = notes.as_slice() else {
         panic!("{notes:?}")
     };
@@ -993,7 +991,14 @@ fn a_client_adds_a_note_to_a_card_it_closed_and_runs_its_workflow_again_as_its_o
     assert_eq!(again.language, "es");
     let (person, notes) = split_assistant_notes(&again.request);
     assert!(!person.contains("double"), "{}", again.request);
-    assert!(person.ends_with("With its test."), "{}", again.request);
+    assert_eq!(person, format!("Add a triple function\n\n{asked_for}"));
+    assert!(
+        again
+            .request
+            .starts_with(&format!("Add a triple function\n\n{asked_for}\n\n")),
+        "{}",
+        again.request
+    );
     assert_eq!(notes, std::slice::from_ref(note));
     assert!(
         again

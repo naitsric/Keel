@@ -3825,9 +3825,90 @@ async fn a_part_waiting_its_turn_takes_a_note_and_one_closed_goes_back_to_todo()
     assert!(!agreed.contains("Name it"), "{request}");
     assert_eq!(notes.len(), 1, "{request}");
     assert!(notes[0].contains("\nName it `token`.\n"), "{request}");
+    // The part's first run is still the client's, now that its card points at the next one.
+    let first_run = ok(&call(&client, "get_run", json!({ "run": part_run })).await);
+    assert_eq!(first_run["startedByYou"], true, "{first_run}");
+    let mine = ok(&call(&client, "list_runs", json!({ "mine": true })).await);
+    for run in [&part_run, &again] {
+        assert!(mine.to_string().contains(run.as_str()), "{run}: {mine}");
+    }
     for client in [client, stranger] {
         client.cancel().await.unwrap();
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_part_the_person_put_back_in_todo_runs_as_theirs() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    w.other_project("lib");
+    w.use_by_default(&w.project_id, &w.workflow_id);
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let agreement = id_of(&ok(&call(
+        &client,
+        "propose_change",
+        json!({ "project": "app", "alsoTouches": ["lib"], "request": "Log in through lib" }),
+    )
+    .await));
+    let view = settled(&client, &agreement).await;
+    w.engine
+        .answer_approval(&waiting_attempt(&view), true, "Go ahead")
+        .unwrap();
+    let mut first = None;
+    for _ in 0..200 {
+        let view = ok(&call(&client, "get_run", json!({ "run": agreement })).await);
+        first = view["jointChange"]["parts"][0]["cardId"]
+            .as_str()
+            .map(str::to_owned);
+        if first.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let first = first.expect("the parts never opened");
+
+    // Before it starts, the person holds the first part back and then puts it in Todo themselves.
+    w.engine
+        .card_move(&first, CardLane::Backlog, 0, "en")
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    w.engine.card_move(&first, CardLane::Todo, 0, "en").unwrap();
+    w.engine.start_board();
+    let theirs = next_run_of(&w, &first, None).await;
+    let view = settled(&client, &theirs).await;
+    assert_eq!(view["startedByYou"], false, "{view}");
+    // Only the next part, still as the change opened it, takes the client's note.
+    assert_eq!(
+        view["waitingFor"]["youCan"],
+        json!(["append_to_card"]),
+        "{view}"
+    );
+    let mine = ok(&call(&client, "list_runs", json!({ "mine": true })).await);
+    assert!(!mine.to_string().contains(theirs.as_str()), "{mine}");
+
+    // So the client can't close it, add to it, or put it back in Todo in its place.
+    let refusal = refused(&call(&client, "close_run", json!({ "run": theirs })).await);
+    assert!(refusal.contains("didn't start"), "{refusal}");
+    let refusal = refused(&call(&client, "append_to_card", note_args(&first, "x")).await);
+    assert!(refusal.contains("underway"), "{refusal}");
+    w.engine.abandon(&waiting_attempt(&view)).unwrap();
+    // It's in lib, not on app's board.
+    for _ in 0..100 {
+        if w.store.card(&first).unwrap().column() == BoardColumn::Backlog {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(w.store.card(&first).unwrap().column(), BoardColumn::Backlog);
+    for (tool, args) in [
+        ("append_to_card", note_args(&first, "x")),
+        ("move_card_to_todo", json!({ "card": first })),
+    ] {
+        let refusal = refused(&call(&client, tool, args).await);
+        assert!(refusal.contains("The person ended"), "{tool}: {refusal}");
+    }
+    assert_eq!(w.store.card(&first).unwrap().run_id, Some(theirs));
+    client.cancel().await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

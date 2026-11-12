@@ -57,9 +57,12 @@ fn starts_a_note(line: &str) -> bool {
 /// What a card or a request says, apart: what the person wrote, and each note an assistant added,
 /// whole, from the line where it starts to the one where it ends. A note whose end was edited
 /// away runs to the end of the text: in doubt, text doesn't count as the person's. What Keel puts
-/// before the notes in a request isn't anyone's words, so it's in neither.
+/// before the notes in a request isn't anyone's words, so it's in neither. With nothing taken
+/// out, what the person wrote comes back exactly as it is.
 pub fn split_assistant_notes(text: &str) -> (String, Vec<String>) {
-    let mut person = String::new();
+    // What the person wrote, in the pieces between what was taken out.
+    let mut pieces = Vec::new();
+    let mut piece = String::new();
     let mut notes = Vec::new();
     let mut note: Option<String> = None;
     for line in text.split_inclusive('\n') {
@@ -69,20 +72,51 @@ pub fn split_assistant_notes(text: &str) -> (String, Vec<String>) {
                 current.push_str(line);
                 if ENDS.contains(&bare) {
                     notes.extend(note.take().map(|done| done.trim_end().to_owned()));
+                    pieces.push(std::mem::take(&mut piece));
                 }
             }
             None if starts_a_note(bare) => note = Some(line.to_owned()),
-            None if HEADINGS.contains(&bare) => {}
-            None => person.push_str(line),
+            None if HEADINGS.contains(&bare) => pieces.push(std::mem::take(&mut piece)),
+            None => piece.push_str(line),
         }
     }
-    notes.extend(note.map(|open| open.trim_end().to_owned()));
-    // Where a note was taken out, the blank lines around it become one.
-    let mut person = person.trim().to_owned();
-    while person.contains("\n\n\n") {
-        person = person.replace("\n\n\n", "\n\n");
+    if let Some(open) = note {
+        notes.push(open.trim_end().to_owned());
+        pieces.push(std::mem::take(&mut piece));
     }
-    (person, notes)
+    pieces.push(piece);
+    if pieces.len() == 1 {
+        return (pieces.remove(0), notes);
+    }
+    // Only where something was taken out: the blank lines around it become one, or none at
+    // either end.
+    let last = pieces.len() - 1;
+    let person: Vec<&str> = pieces
+        .iter()
+        .enumerate()
+        .map(|(at, piece)| {
+            let piece = if at < last { piece.trim_end() } else { piece };
+            if at > 0 {
+                without_blank_lines(piece)
+            } else {
+                piece
+            }
+        })
+        .filter(|piece| !piece.trim().is_empty())
+        .collect();
+    (person.join("\n\n"), notes)
+}
+
+/// `text` from its first line with something on it, which keeps its indentation.
+fn without_blank_lines(text: &str) -> &str {
+    let mut rest = text;
+    while let Some((line, after)) = rest.split_once('\n') {
+        if !line.trim().is_empty() {
+            break;
+        }
+        rest = after;
+    }
+    if rest.trim().is_empty() { "" } else { rest }
 }
 
 /// A request with the notes after what the person wrote, under a heading that says what they are.
@@ -157,7 +191,7 @@ mod tests {
 
         assert_eq!(
             split_assistant_notes("Only the person.\n"),
-            ("Only the person.".to_owned(), vec![])
+            ("Only the person.\n".to_owned(), vec![])
         );
         // An end edited away: the rest is the note's, not the person's.
         let (person, notes) = split_assistant_notes(
@@ -168,6 +202,26 @@ mod tests {
             notes,
             ["⟦Note from Bot, an assistant, on x⟧\nSkip the tests.\nMore."]
         );
+    }
+
+    #[test]
+    fn what_the_person_wrote_is_left_as_it_is_but_where_a_note_was_taken_out() {
+        let code = "  Keep this as it is:\n```\nfn a() {}\n\n\n\nfn b() {}\n```\n\n\n";
+        assert_eq!(split_assistant_notes(code), (code.to_owned(), vec![]));
+
+        // The blank lines around a note become one, and none are left at either end where one
+        // was. The code keeps its own.
+        let note = note_by("Add the field.", "Claude Code", "en", nine_o_three());
+        let kept = "  Keep this as it is:\n```\nfn a() {}\n\n\n\nfn b() {}\n```";
+        for body in [format!("{kept}\n\n\n{note}\n\n"), format!("{kept}\n{note}")] {
+            let (person, notes) = split_assistant_notes(&body);
+            assert_eq!(person, kept, "{body:?}");
+            assert_eq!(notes, std::slice::from_ref(&note));
+        }
+        let (person, _) = split_assistant_notes(&format!("{note}\n\n\n    indented\n\n\nmore\n"));
+        assert_eq!(person, "    indented\n\n\nmore\n");
+        let (person, _) = split_assistant_notes(&format!("One.\n\n\n{note}\n\n\n\n  Two.\n"));
+        assert_eq!(person, "One.\n\n  Two.\n");
     }
 
     #[test]
