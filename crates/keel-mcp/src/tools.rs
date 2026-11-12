@@ -13,7 +13,7 @@ use keel_core::{
 use keel_engine::{
     Error, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
     Verification, WhyNotProven, can_send_back, files_changed, request_from_issue, skipped_steps,
-    spec_of_attempt, verification_of_attempt,
+    spec_of_attempt, verifications_in_round,
 };
 use keel_store::{Attempt, MAX_OPEN_RUNS_CEILING, McpClient, NewMcpCall, Project, Run};
 use schemars::JsonSchema;
@@ -1521,12 +1521,13 @@ impl McpServer {
         let mut files = files_changed(attempts);
         let more_files = files.len().saturating_sub(MAX_LISTED_FILES);
         files.truncate(MAX_LISTED_FILES);
+        let verification = verification_in_round(attempts, run.round);
         let mut report = json!({
             "answer": answer(attempts),
             "filesChanged": files,
             "check": self.check_report(run, attempts)?,
-            "notProven": not_proven(attempts),
-            "notProvenWhy": not_proven_why(attempts, run.round),
+            "notProven": not_proven(verification.as_ref()),
+            "notProvenWhy": not_proven_why(verification.as_ref(), attempts, run.round),
             "reviews": reviews(attempts),
             "skipped": skipped_steps(attempts),
             "prUrl": run.pr_url,
@@ -1567,17 +1568,13 @@ fn neighbour_view(neighbour: &keel_engine::Neighbour) -> Json {
 }
 
 /// Each step's latest attempt, in the order they came.
-fn latest_of_each_step(attempts: &[Attempt]) -> Vec<&Attempt> {
-    attempts
-        .iter()
-        .enumerate()
-        .filter(|(index, attempt)| {
-            !attempts[index + 1..]
-                .iter()
-                .any(|later| later.step_id == attempt.step_id)
-        })
-        .map(|(_, attempt)| attempt)
-        .collect()
+fn latest_of_each_step<'a>(attempts: impl IntoIterator<Item = &'a Attempt>) -> Vec<&'a Attempt> {
+    let mut latest: Vec<&Attempt> = Vec::new();
+    for attempt in attempts {
+        latest.retain(|earlier| earlier.step_id != attempt.step_id);
+        latest.push(attempt);
+    }
+    latest
 }
 
 /// The step a person has to act on, if any: looking only at each step's latest attempt, and never
@@ -1726,28 +1723,25 @@ fn answer(attempts: &[Attempt]) -> Option<String> {
         .map(|text| capped(text, MAX_TEXT))
 }
 
-/// What the latest verifier said, after Keel corrected it.
-fn latest_verification(attempts: &[Attempt]) -> Option<Verification> {
-    attempts
-        .iter()
-        .rev()
-        .find(|a| a.role == "verifier")
-        .and_then(verification_of_attempt)
+/// What the verifier said about the code as it is in this round, after Keel corrected it: the latest
+/// that answered, as the app shows it. One from an earlier round is about code that has changed since.
+fn verification_in_round(attempts: &[Attempt], round: i64) -> Option<Verification> {
+    verifications_in_round(attempts, round).pop()
 }
 
 /// What the verifier says no test proves, after Keel corrected what it said, each unproven one with
-/// `why`. Null when no verifier has answered, which isn't the same as everything being proven.
-fn not_proven(attempts: &[Attempt]) -> Json {
-    match latest_verification(attempts) {
+/// `why`. Null when no verifier has answered in this round, which isn't the same as everything
+/// being proven.
+fn not_proven(verification: Option<&Verification>) -> Json {
+    match verification {
         Some(verification) => json!(
             verification
                 .criteria
-                .into_iter()
+                .iter()
                 .filter(|checked| checked.result != Outcome::Met)
                 .map(|checked| {
-                    let why = checked.why_not_proven();
                     let mut item = json!(checked);
-                    if let Some(why) = why {
+                    if let Some(why) = checked.why_not_proven() {
                         item["why"] = json!(why);
                     }
                     item
@@ -1758,11 +1752,10 @@ fn not_proven(attempts: &[Attempt]) -> Json {
     }
 }
 
-/// How many things weren't proven, by why, as the app counts them: those no test proves, and in
-/// `byReviews` what the round's reviews couldn't check by reading the code. Null when no verifier
-/// has answered and no review left anything unchecked.
-fn not_proven_why(attempts: &[Attempt], round: i64) -> Json {
-    let verification = latest_verification(attempts);
+/// How many things weren't proven in this round, by why, as the app counts them: those no test
+/// proves, and in `byReviews` what the round's reviews couldn't check by reading the code. Null when
+/// no verifier has answered in this round and no review left anything unchecked.
+fn not_proven_why(verification: Option<&Verification>, attempts: &[Attempt], round: i64) -> Json {
     let by_reviews = unchecked_by_reviews(attempts, round);
     if verification.is_none() && by_reviews == 0 {
         return Json::Null;
@@ -1785,19 +1778,12 @@ fn not_proven_why(attempts: &[Attempt], round: i64) -> Json {
 /// How many things the round's reviews said they couldn't check by reading the code, such as how it
 /// looks on screen. Only each review's latest answer counts, and one from before Keel asked has none.
 fn unchecked_by_reviews(attempts: &[Attempt], round: i64) -> usize {
-    let reviews: Vec<&Attempt> = attempts
+    let reviews = attempts
         .iter()
-        .filter(|a| a.round == round && a.role == "reviewer")
-        .collect();
-    reviews
-        .iter()
-        .enumerate()
-        .filter(|(index, review)| {
-            !reviews[index + 1..]
-                .iter()
-                .any(|later| later.step_id == review.step_id)
-        })
-        .filter_map(|(_, review)| review.output.as_ref()?.get("unchecked")?.as_array())
+        .filter(|a| a.round == round && a.role == "reviewer");
+    latest_of_each_step(reviews)
+        .into_iter()
+        .filter_map(|review| review.output.as_ref()?.get("unchecked")?.as_array())
         .flatten()
         .filter_map(Json::as_str)
         .filter(|text| !text.trim().is_empty())
@@ -2941,6 +2927,17 @@ mod tests {
         verifier
     }
 
+    /// `notProven` in a round, as get_run's report has it.
+    fn listed(attempts: &[Attempt], round: i64) -> Json {
+        not_proven(verification_in_round(attempts, round).as_ref())
+    }
+
+    /// `notProvenWhy` in a round, as get_run's report has it.
+    fn counted(attempts: &[Attempt], round: i64) -> Json {
+        let verification = verification_in_round(attempts, round);
+        not_proven_why(verification.as_ref(), attempts, round)
+    }
+
     fn item(id: &str, result: &str, evidence: &str, more: Json) -> Json {
         let mut item =
             json!({ "id": id, "when": "w", "then": "t", "result": result, "evidence": evidence });
@@ -2983,8 +2980,8 @@ mod tests {
                 json!({})
             ),
         ]))];
-        let listed = not_proven(&attempts);
-        let whys: Vec<&Json> = listed
+        let unproven = listed(&attempts, 0);
+        let whys: Vec<&Json> = unproven
             .as_array()
             .unwrap()
             .iter()
@@ -3003,16 +3000,16 @@ mod tests {
                 &json!("seeEvidence"),
             ]
         );
-        assert_eq!(listed[3]["corrected"], "noCheckPassed");
+        assert_eq!(unproven[3]["corrected"], "noCheckPassed");
         assert_eq!(
-            not_proven_why(&attempts, 0),
+            counted(&attempts, 0),
             json!({ "notRun": 2, "noTest": 2, "noCheckPassed": 1, "seeEvidence": 1 })
         );
 
         // With no verifier, nothing says what was proven.
         let none = [attempt("review", 1)];
-        assert_eq!(not_proven(&none), Json::Null);
-        assert_eq!(not_proven_why(&none, 0), Json::Null);
+        assert_eq!(listed(&none, 0), Json::Null);
+        assert_eq!(counted(&none, 0), Json::Null);
         // With everything proven, there's nothing to count.
         let all = [verifier(json!([item(
             "C1",
@@ -3020,7 +3017,7 @@ mod tests {
             "tests/a.rs:1",
             json!({})
         )]))];
-        assert_eq!(not_proven_why(&all, 0), json!({}));
+        assert_eq!(counted(&all, 0), json!({}));
     }
 
     /// A review in a round that said it couldn't check these by reading the code.
@@ -3050,17 +3047,73 @@ mod tests {
             review("ui", 1, json!(["About code that changed since"])),
         ];
         assert_eq!(
-            not_proven_why(&attempts, 0),
+            counted(&attempts, 0),
             json!({ "byReviews": 2, "noTest": 1 })
         );
-        assert_eq!(
-            not_proven_why(&attempts, 1),
-            json!({ "byReviews": 1, "noTest": 1 })
-        );
+        // The verifier answered about round 0's code, so in round 1 only its review counts.
+        assert_eq!(counted(&attempts, 1), json!({ "byReviews": 1 }));
         // With no verifier, what the reviews couldn't check is still counted.
         let reviews_only = [review("ux", 0, json!(["How it looks in dark mode"]))];
-        assert_eq!(not_proven_why(&reviews_only, 0), json!({ "byReviews": 1 }));
+        assert_eq!(counted(&reviews_only, 0), json!({ "byReviews": 1 }));
         // The list of what no test proves is still only the verifier's.
-        assert_eq!(not_proven(&attempts).as_array().unwrap().len(), 1);
+        assert_eq!(listed(&attempts, 0).as_array().unwrap().len(), 1);
+    }
+
+    /// A verifier's attempt in a round, in a state, that answered this if it succeeded.
+    fn verifier_in(round: i64, number: i64, state: &str, criteria: Json) -> Attempt {
+        let mut verifier = verifier(criteria);
+        verifier.id = format!("verify-{number}");
+        verifier.number = number;
+        verifier.round = round;
+        verifier.state = state.into();
+        verifier
+    }
+
+    /// What a verifier said about code that has changed since says nothing about it, as in the app.
+    #[test]
+    fn only_what_the_verifier_said_in_this_round_counts_as_not_proven() {
+        let earlier = verifier_in(
+            0,
+            1,
+            "succeeded",
+            json!([
+                item("C1", "unverified", "", json!({ "why": "noTest" })),
+                item("C2", "unverified", "", json!({ "why": "noTest" })),
+            ]),
+        );
+        let answered = verifier_in(
+            1,
+            2,
+            "succeeded",
+            json!([
+                item("C1", "met", "tests/a.rs:1", json!({})),
+                item(
+                    "C2",
+                    "unverified",
+                    "tests/db.rs:12",
+                    json!({ "why": "notRun" })
+                ),
+            ]),
+        );
+        let running = |number: i64| verifier_in(1, number, "running", Json::Null);
+
+        // Round 1 before its verifier ran, and while it runs: nothing said about this code yet.
+        for attempts in [vec![earlier.clone()], vec![earlier.clone(), running(2)]] {
+            assert_eq!(listed(&attempts, 1), Json::Null);
+            assert_eq!(counted(&attempts, 1), Json::Null);
+        }
+        // Once it answered, what it said counts, even while it runs again.
+        for attempts in [
+            vec![earlier.clone(), answered.clone()],
+            vec![earlier.clone(), answered.clone(), running(3)],
+        ] {
+            let unproven = listed(&attempts, 1);
+            assert_eq!(unproven.as_array().unwrap().len(), 1, "{unproven}");
+            assert_eq!(unproven[0]["why"], "notRun");
+            assert_eq!(counted(&attempts, 1), json!({ "notRun": 1 }));
+        }
+        // What the round's reviews couldn't check counts without a verifier of the round.
+        let attempts = [earlier, review("ux", 1, json!(["How it looks on screen"]))];
+        assert_eq!(counted(&attempts, 1), json!({ "byReviews": 1 }));
     }
 }

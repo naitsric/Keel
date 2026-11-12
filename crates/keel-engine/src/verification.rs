@@ -180,7 +180,11 @@ pub fn correct(output: &Value, spec: &Spec, check_passed: bool) -> Option<Correc
             // Only for what it left unverified itself: where Keel didn't take its word, that's why.
             let why = said
                 .filter(|item| item.result == Outcome::Unverified)
-                .and_then(|item| item.why);
+                .and_then(|item| match item.why {
+                    // A test that didn't run, without saying which, is no test anyone can find.
+                    Some(Unproven::NotRun) if item.evidence.is_empty() => Some(Unproven::NoTest),
+                    why => why,
+                });
             Checked {
                 id: criterion.id.clone(),
                 when: criterion.when.clone(),
@@ -727,6 +731,42 @@ mod tests {
         let checked = &corrected.verification.criteria[0];
         assert_eq!(checked.corrected, Some(Correction::NoCheckPassed));
         assert_eq!(checked.why, None);
+    }
+
+    #[test]
+    fn a_test_that_did_not_run_but_is_not_named_is_one_nothing_proves() {
+        let items = json!([
+            { "id": "C1", "result": "unverified", "evidence": "", "why": "notRun" },
+            { "id": "C2", "result": "unverified", "evidence": " \n\t ", "why": "notRun" },
+            { "id": "C3", "result": "unverified", "evidence": "tests/db.rs:12, needs Postgres", "why": "notRun" },
+        ]);
+        let corrected = correct(&answer(items), &spec(&["C1", "C2", "C3"]), true).unwrap();
+        let whys: Vec<Option<Unproven>> = corrected
+            .verification
+            .criteria
+            .iter()
+            .map(|checked| checked.why)
+            .collect();
+        assert_eq!(
+            whys,
+            [
+                Some(Unproven::NoTest),
+                Some(Unproven::NoTest),
+                Some(Unproven::NotRun)
+            ]
+        );
+        // Nobody reads that a test exists without being told which.
+        let section = corrected.verification.pr_section(false);
+        assert!(
+            section.contains("when C1 → then C1 (it found nothing that proves it)\n"),
+            "{section}"
+        );
+        assert!(
+            section
+                .contains("(its test exists, but didn't run here: tests/db.rs:12, needs Postgres)"),
+            "{section}"
+        );
+        assert_eq!(section.matches("its test exists").count(), 1, "{section}");
     }
 
     #[test]
