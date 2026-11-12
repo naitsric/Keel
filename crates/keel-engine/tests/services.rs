@@ -472,24 +472,168 @@ fn setup_runs_first_and_later_steps_use_their_own_cache() {
     let workspace = Path::new(&builder.workspace);
     let setup_cache = std::fs::read_to_string(workspace.join("setup-cache.txt")).unwrap();
     let check_cache = std::fs::read_to_string(workspace.join("check-cache.txt")).unwrap();
-    assert!(setup_cache.trim().ends_with("/cache"), "{setup_cache}");
+    // In the project's home, and in the run's copy of it.
     assert!(
-        check_cache
-            .trim()
-            .starts_with(&*workspace.to_string_lossy()),
-        "{check_cache}"
+        setup_cache.trim().ends_with("/cache/home/.cache"),
+        "{setup_cache}"
+    );
+    assert_eq!(
+        check_cache.trim(),
+        workspace.join(".keel-cache/home/.cache").to_string_lossy()
     );
     assert!(Path::new(setup_cache.trim()).join("from-setup").exists());
     assert!(!Path::new(setup_cache.trim()).join("from-check").exists());
 
     // What tools leave in the run's cache never gets committed.
-    assert!(workspace.join(".keel-cache/from-check").exists());
+    assert!(
+        workspace
+            .join(".keel-cache/home/.cache/from-check")
+            .exists()
+    );
     let tracked = Command::new("git")
         .current_dir(workspace)
         .args(["ls-files"])
         .output()
         .unwrap();
     assert!(!String::from_utf8_lossy(&tracked.stdout).contains(".keel-cache"));
+}
+
+#[test]
+fn a_setup_once_an_agent_has_run_gets_no_more_than_the_agent() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // A workflow can set up again after its builder, as a retry with a new setup does. What it
+    // runs then may be the agent's doing: a postinstall script, a Makefile, a build backend.
+    let setup = |name: &str| WorkflowStep::Setup {
+        id: name.into(),
+        run: format!(
+            "echo $HOME > {name}-home.txt; touch \"$HOME/from-{name}\"; \
+             mkdir -p \"$XDG_CACHE_HOME\"; touch \"$XDG_CACHE_HOME/from-{name}\""
+        ),
+    };
+    let run = w.run(vec![
+        setup("first"),
+        agent("builder", ToolProfile::Build),
+        setup("again"),
+        WorkflowStep::Approval { id: "human".into() },
+    ]);
+    assert_eq!(w.wait_done(&run, "human").state, "waitingApproval");
+    let first = w.wait_done(&run, "first");
+    let again = w.wait_done(&run, "again");
+    assert_eq!(first.state, "succeeded", "{}", w.check_output(&first));
+    assert_eq!(again.state, "succeeded", "{}", w.check_output(&again));
+
+    let workspace = Path::new(&again.workspace);
+    let read = |file: &str| {
+        std::fs::read_to_string(workspace.join(file))
+            .unwrap()
+            .trim()
+            .to_owned()
+    };
+    // The first fills the project's home, in the cache its runs share.
+    let project_home = PathBuf::from(read("first-home.txt"));
+    assert!(project_home.ends_with("cache/home"), "{project_home:?}");
+    assert!(project_home.join("from-first").exists());
+    assert!(project_home.join(".cache/from-first").exists());
+    // The second works in the run's own copy of it, as a check does, and leaves nothing there.
+    let run_home = workspace.join(".keel-cache/home");
+    assert_eq!(read("again-home.txt"), run_home.to_string_lossy());
+    assert!(run_home.join("from-first").exists());
+    assert!(run_home.join("from-again").exists());
+    assert!(!project_home.join("from-again").exists());
+    assert!(!project_home.join(".cache/from-again").exists());
+
+    // Its sandbox has no way to the shared cache, home included, so it can't leave anything there
+    // for the next run to start from (`check_sandbox` tries, with the cache in the home folder as
+    // it is in a real install: here it's in a temporary folder, which every command may write to).
+    // And no network: an agent's Bash reaches only the allowed domains, and a command Keel runs
+    // can't be held to those, so it gets none.
+    let events = |attempt: &keel_store::Attempt| w.store.events(&attempt.id, 0).unwrap();
+    let profile = |attempt: &keel_store::Attempt| {
+        events(attempt)
+            .into_iter()
+            .find(|e| e.kind == "started")
+            .map(|e| e.data["profile"].as_str().unwrap_or_default().to_owned())
+            .unwrap()
+    };
+    let shared = project_home
+        .parent()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert!(profile(&first).contains(&shared));
+    assert!(!profile(&again).contains(&shared));
+    assert!(profile(&first).contains("(allow network*)"));
+    assert!(profile(&again).contains("(deny network*)"));
+    assert!(!profile(&again).contains("(allow network*)"));
+    assert_eq!(first.settings["network"], "internet, nothing local");
+    assert_eq!(again.settings["network"], "none");
+    assert_eq!(again.settings["home"], "the run's own copy");
+    // The person sees why, in its activity.
+    let limited =
+        |attempt: &keel_store::Attempt| events(attempt).iter().any(|e| e.kind == "setupLimited");
+    assert!(!limited(&first));
+    assert!(limited(&again));
+
+    // The next run starts from the project's home, with what the first setup left and nothing
+    // from the second.
+    let next = w.run(vec![
+        check("look", "ls -a \"$HOME\" \"$XDG_CACHE_HOME\" > home.txt"),
+        WorkflowStep::Approval { id: "human".into() },
+    ]);
+    let look = w.wait_done(&next, "look");
+    assert_eq!(look.state, "succeeded", "{}", w.check_output(&look));
+    let listed = std::fs::read_to_string(Path::new(&look.workspace).join("home.txt")).unwrap();
+    assert!(listed.contains("from-first"), "{listed}");
+    assert!(!listed.contains("from-again"), "{listed}");
+}
+
+#[test]
+fn a_setup_after_an_agent_that_only_reads_still_installs_with_the_network() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // A saved workflow with a setup of its own gets none put first, so its spec, which only reads,
+    // comes before the setup on every run, not only on a retry. It has no way to change a file.
+    let run = w.run(vec![
+        agent("spec", ToolProfile::ReadOnly),
+        WorkflowStep::Setup {
+            id: "install".into(),
+            run: "echo $HOME > install-home.txt; touch \"$HOME/from-install\"".into(),
+        },
+        agent("builder", ToolProfile::Build),
+        check("after", "test -f \"$HOME/from-install\""),
+        WorkflowStep::Approval { id: "human".into() },
+    ]);
+    assert_eq!(w.wait_done(&run, "human").state, "waitingApproval");
+    let install = w.wait_done(&run, "install");
+    assert_eq!(install.state, "succeeded", "{}", w.check_output(&install));
+    let after = w.wait_done(&run, "after");
+    assert_eq!(after.state, "succeeded", "{}", w.check_output(&after));
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    assert_eq!(
+        attempts
+            .iter()
+            .map(|a| a.step_id.as_str())
+            .collect::<Vec<_>>(),
+        ["spec", "install", "builder", "after", "human"]
+    );
+
+    // It's a setup as any first one is: the internet, and the project's home, which it fills.
+    let workspace = Path::new(&install.workspace);
+    let home = std::fs::read_to_string(workspace.join("install-home.txt")).unwrap();
+    let home = PathBuf::from(home.trim());
+    assert!(home.ends_with("cache/home"), "{home:?}");
+    assert!(home.join("from-install").exists());
+    assert_eq!(install.settings["network"], "internet, nothing local");
+    assert_eq!(install.settings["home"], "the project's");
+    let events = w.store.events(&install.id, 0).unwrap();
+    assert!(!events.iter().any(|e| e.kind == "setupLimited"));
+    let profile = events
+        .iter()
+        .find(|e| e.kind == "started")
+        .and_then(|e| e.data["profile"].as_str())
+        .unwrap();
+    assert!(profile.contains("(allow network*)"));
 }
 
 #[test]
@@ -500,28 +644,29 @@ fn what_setup_downloads_stays_in_the_project_cache_and_each_run_gets_its_own_cop
         .update_project(
             &w.project_id,
             &ProjectSettings {
+                // Where cargo and Go keep what they download, in the home folder.
                 setup_command: Some(
-                    "echo $CARGO_HOME > setup-cargo.txt; mkdir -p \"$CARGO_HOME/registry\" \"$GOPATH/pkg\"; \
-                     test -f \"$CARGO_HOME/registry/dep\" || echo downloaded >> \"$CARGO_HOME/registry/count\"; \
-                     touch \"$CARGO_HOME/registry/dep\" \"$GOPATH/pkg/mod\""
+                    "echo $HOME > setup-home.txt; mkdir -p ~/.cargo/registry ~/go/pkg; \
+                     test -f ~/.cargo/registry/dep || echo downloaded >> ~/.cargo/registry/count; \
+                     touch ~/.cargo/registry/dep ~/go/pkg/mod"
                         .into(),
                 ),
                 ..ProjectSettings::default()
             },
         )
         .unwrap();
-    let probe = "echo $CARGO_HOME > check-cargo.txt; echo \"[$CARGO_NET_OFFLINE][$GOPROXY]\" > check-offline.txt; \
-                 test -f \"$CARGO_HOME/registry/dep\" && test -f \"$GOPATH/pkg/mod\" || exit 7; \
-                 touch \"$CARGO_HOME/registry/changed-by-check\"";
+    let probe = "echo $HOME > check-home.txt; echo \"[$CARGO_NET_OFFLINE][$GOPROXY]\" > check-offline.txt; \
+                 test -f ~/.cargo/registry/dep && test -f ~/go/pkg/mod || exit 7; \
+                 touch ~/.cargo/registry/changed-by-check";
     let first = w.run(vec![check("after", probe)]);
     let after = w.wait_done(&first, "after");
     assert_eq!(after.state, "succeeded", "{}", w.check_output(&after));
     let workspace = Path::new(&after.workspace);
-    let shared = std::fs::read_to_string(workspace.join("setup-cargo.txt")).unwrap();
-    let shared = Path::new(shared.trim());
-    let own = std::fs::read_to_string(workspace.join("check-cargo.txt")).unwrap();
+    let shared = std::fs::read_to_string(workspace.join("setup-home.txt")).unwrap();
+    let shared = Path::new(shared.trim()).join(".cargo");
+    let own = std::fs::read_to_string(workspace.join("check-home.txt")).unwrap();
     assert!(
-        shared.starts_with(w.dir.path()) && shared.ends_with("cache/cargo"),
+        shared.starts_with(w.dir.path()) && shared.ends_with("cache/home/.cargo"),
         "{shared:?}"
     );
     assert!(

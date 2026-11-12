@@ -119,10 +119,19 @@ describe("what a specifier got wrong", () => {
     expect(spanish).not.toMatch(JARGON);
   });
 
+  it("says when Keel couldn't check the answer at all, and that it doesn't count", () => {
+    const reason = { code: "specNotChecked", detail: "no such table: joint_change" };
+    const english = reasonText(i18next.getFixedT("en"), reason);
+    expect(english).toBe("Keel couldn't read what it needed to check this answer, so it doesn't count: no such table: joint_change. Try it again.");
+    const spanish = reasonText(i18next.getFixedT("es"), reason);
+    expect(spanish).toBe("Keel no pudo leer lo que necesitaba para revisar esta respuesta, así que no cuenta: no such table: joint_change. Inténtalo de nuevo.");
+    for (const text of [english, spanish]) expect(text).not.toMatch(JARGON);
+  });
+
   it("has a sentence for everything that can go wrong, with no jargon in it", () => {
     for (const language of ["en", "es"]) {
       const problems = i18next.getResource(language, "translation", "specProblems") as Record<string, string>;
-      expect(Object.keys(problems)).toEqual(["criterionNeedsText", "questionNeedsText", "tooManyChanges", "tooManyLimits", "unreadable", "noSummary", "summaryTooLong", "noCriteria", "tooManyCriteria", "criterionTooLong", "criterionNeedsId", "repeatedCriterion", "tooManyDecided", "decidedTooLong", "tooManyQuestions", "questionTooLong", "questionNeedsId", "repeatedQuestion", "wrongNumberOfOptions", "optionTooLong", "repeatedOption", "tooManyRecommended", "leftUnresolved", "noParts", "tooManyParts", "unknownProject", "repeatedPart", "tooManyTogether"]);
+      expect(Object.keys(problems)).toEqual(["criterionNeedsText", "questionNeedsText", "tooManyChanges", "tooManyLimits", "unreadable", "noSummary", "summaryTooLong", "noCriteria", "tooManyCriteria", "criterionTooLong", "criterionNeedsId", "repeatedCriterion", "tooManyDecided", "decidedTooLong", "tooManyQuestions", "questionTooLong", "questionNeedsId", "repeatedQuestion", "wrongNumberOfOptions", "optionTooLong", "repeatedOption", "tooManyRecommended", "leftUnresolved", "noParts", "tooManyParts", "unknownProject", "repeatedPart", "tooManyTogether", "tooManyContract", "contractNeedsText", "contractTooLong", "contractUnknownProject", "contractWithoutPart"]);
       for (const text of Object.values(problems)) expect(text).not.toMatch(JARGON);
     }
   });

@@ -3,8 +3,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CommandChange, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
+import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, breakableIds, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, type FindingShown, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -12,11 +12,11 @@ import { errorText, needsProjectSettings, needsSignIn, reasonText, specProblemTe
 import { allRecommend, answerFrom, differsFromRecommended, isAnswered, needsText, type QuestionPick, recommendedAnswers, recommendedOption, startingPick } from "../lib/questions";
 import { latestSizeDecision, type SizeDecision, skippedAsSmall, skippedForRisks, skippedSteps, whyNotSmallText } from "../lib/size";
 import { useApp } from "../lib/store";
-import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
+import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge, VERIFY_TONES } from "../ui/primitives";
 import { ProposalRow } from "./BrainPage";
 import { FlowDiagram } from "./FlowDiagram";
 import { JointChangeDialog } from "./JointChangeDialog";
-import { SpecView } from "./SpecView";
+import { ContractLine, SpecView } from "./SpecView";
 
 type Tab = "understood" | "found" | "activity" | "commands" | "changes" | "prompt" | "details" | "output";
 
@@ -185,12 +185,6 @@ function ApprovalRow({ label, note, action, rowRef, children }: { label: string;
   );
 }
 
-const VERIFY_TONES: Record<CheckedCriterion["result"], string> = {
-  met: "text-success",
-  unmet: "font-medium text-warning",
-  unverified: "text-muted",
-};
-
 /** Each thing that had to be true, in its own words, with what became of it and why. */
 function VerificationItems({ verification }: { verification: VerificationOutput }) {
   const { t } = useTranslation();
@@ -306,6 +300,7 @@ function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { atte
 function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number }) {
   const { t } = useTranslation();
   const { reviewers, approver } = reviewsOfRound(attempts, round);
+  const breakable = breakableOf(attempts);
   const latest = latestOfEachStep(reviewers);
   const ran = latest.filter((review) => review.state !== "skipped");
   // Those it skipped for being small are on a line of their own, with what can be done about it.
@@ -319,7 +314,7 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
           {ran.map((review) => (
             <li key={review.id} className="flex items-baseline gap-1.5">
               <span className="font-mono text-[12px] font-medium">{review.stepId}</span>
-              <ReviewVerdict review={review} />
+              <ReviewVerdict review={review} findings={findingsOf(review.output, breakable)} />
             </li>
           ))}
         </ul>
@@ -634,6 +629,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const parts = spec?.parts ?? [];
   const agreeing = parts.length > 0;
   const together = agreeing ? (spec?.together ?? []) : [];
+  const contract = agreeing ? (spec?.contract ?? []) : [];
   // Right after working out what's asked, nobody has done anything yet. Saying it finished without
   // an explanation would read as something gone wrong.
   const nothingToExplain = asked !== null && !attempts.some((a) => a.kind === "agent" && a.role === "worker");
@@ -676,6 +672,17 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             <ul className="selectable list-disc space-y-0.5 pl-4 break-words">
               {together.map((text, index) => (
                 <li key={index}>{text}</li>
+              ))}
+            </ul>
+          </ApprovalRow>
+        )}
+        {contract.length > 0 && (
+          <ApprovalRow label={t("run.specContract")} note={t("run.generated")}>
+            <ul className="selectable list-disc space-y-0.5 pl-4 break-words">
+              {contract.map((point) => (
+                <li key={point.id}>
+                  <ContractLine point={point} />
+                </li>
               ))}
             </ul>
           </ApprovalRow>
@@ -1002,9 +1009,75 @@ export function QuestionsCard({ attempt, attempts, onError }: { attempt: Attempt
   );
 }
 
-function Actions({ attempt, projectId, onError }: { attempt: Attempt; projectId: string; onError: (message: string) => void }) {
+/**
+ * A setup or check that can start over, and the run's commands the project changed since it
+ * started. It asks again whenever the project's commands change, so "now" is what they are.
+ */
+function useCommandChanges(attempt: Attempt, projectId: string): CommandChange[] {
+  const commands = useApp((s) => {
+    const project = s.overview.projects.find((p) => p.id === projectId);
+    return JSON.stringify([project?.setupCommand ?? null, project?.checkCommand ?? null]);
+  });
+  const [found, setFound] = useState<{ key: string; changes: CommandChange[] } | null>(null);
+  const asks = (attempt.kind === "setup" || attempt.kind === "check") && ["failed", "interrupted", "blocked", "stopped"].includes(attempt.state);
+  const key = `${attempt.id}\n${commands}`;
+  useEffect(() => {
+    if (!asks) return;
+    let current = true;
+    api
+      .runCommandChanges(attempt.runId)
+      .then((changes) => current && setFound({ key, changes: changes ?? [] }))
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [asks, key, attempt.runId]);
+  return asks && found?.key === key ? found.changes : [];
+}
+
+/**
+ * Whether starting over with the project's commands runs anything else: the step's own command,
+ * or for a check, the setup that installs what it needs, which then runs again first.
+ */
+function startsOverDifferently(attempt: Attempt, changes: CommandChange[]): boolean {
+  return changes.some((change) => change.stepId === attempt.stepId || (attempt.kind === "check" && change.kind === "setup"));
+}
+
+/** Each command as the run started with it and as the project has it now. */
+function CommandChanges({ changes, setupFirst, limited }: { changes: CommandChange[]; setupFirst: boolean; limited: boolean }) {
+  const { t } = useTranslation();
+  return (
+    <div className="mt-2.5 rounded-md border border-border p-3">
+      <p className="text-[12.5px] font-medium">{t("run.commandsChanged")}</p>
+      <dl className="mt-2 space-y-2">
+        {changes.map((change) => (
+          <div key={change.stepId}>
+            <dt className="text-[11.5px] font-semibold text-muted">{change.stepId}</dt>
+            <dd className="mt-0.5 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-[12px]">
+              <span className="text-subtle">{t("run.commandBefore")}</span>
+              <code className="selectable font-mono break-all text-muted">{change.before}</code>
+              <span className="text-subtle">{t("run.commandNow")}</span>
+              <code className="selectable font-mono break-all">{change.now}</code>
+            </dd>
+          </div>
+        ))}
+      </dl>
+      {setupFirst && <p className="mt-2 text-[11.5px] text-muted">{t("run.commandsSetupFirst")}</p>}
+      {setupFirst && limited && <p className="mt-2 text-[11.5px] text-warning">{t("run.setupLimited")}</p>}
+      <p className="mt-2 text-[11.5px] text-subtle">{t("run.commandsChangedHint")}</p>
+    </div>
+  );
+}
+
+/**
+ * What can be done with a step that stopped. `agentsWrote` says whether an agent that can change files
+ * has had the run's copy: a setup started then gets no more than the agents do, and the person is told
+ * before choosing.
+ */
+export function Actions({ attempt, projectId, agentsWrote, onError }: { attempt: Attempt; projectId: string; agentsWrote: boolean; onError: (message: string) => void }) {
   const { t } = useTranslation();
   const navigate = useApp((s) => s.navigate);
+  const changes = useCommandChanges(attempt, projectId);
   const act = (run: () => Promise<unknown>) => run().catch((e) => onError(errorText(t, e)));
   if (attempt.reason?.code === "reworkLimit") {
     return (
@@ -1053,13 +1126,25 @@ function Actions({ attempt, projectId, onError }: { attempt: Attempt; projectId:
   }
   if (attempt.state === "succeeded" || attempt.state === "abandoned" || attempt.state === "rejected" || attempt.state === "skipped" || attempt.state === "returned" || attempt.state === "postponed") return null;
   const canResume = attempt.kind === "agent" && ["interrupted", "blocked", "stopped", "failed"].includes(attempt.state);
+  // Only when what it would start over runs something else now.
+  const commandChanged = startsOverDifferently(attempt, changes);
+  const setupFirst = attempt.kind !== "setup" && changes.some((change) => change.kind === "setup");
+  // Starting a setup over, with new commands or not, runs what agents may have changed.
+  const setupLimited = attempt.kind === "setup" && agentsWrote;
   return (
     <Card className="p-4">
       {attempt.reason && <p className="selectable text-[12.5px] text-warning">{reasonText(t, attempt.reason)}</p>}
-      <div className={cx("flex flex-wrap gap-2", attempt.reason && "mt-2.5")}>
+      {commandChanged && <CommandChanges changes={changes} setupFirst={setupFirst} limited={agentsWrote} />}
+      {setupLimited && <p className={cx("text-[12px] text-warning", (attempt.reason || commandChanged) && "mt-2.5")}>{t("run.setupLimited")}</p>}
+      <div className={cx("flex flex-wrap gap-2", (attempt.reason || commandChanged || setupLimited) && "mt-2.5")}>
         {needsSignIn(attempt.reason) && <Button onClick={() => void act(() => api.openClaudeLogin())}>{t("run.signIn")}</Button>}
         {needsProjectSettings(attempt.reason) && <Button onClick={() => navigate({ name: "projects", projectId })}>{t("newRun.openProject")}</Button>}
         {canResume && <Button variant="primary" onClick={() => void act(() => api.attemptRetry(attempt.id, true))}>{t("run.resume")}</Button>}
+        {commandChanged && (
+          <Button variant="primary" onClick={() => void act(() => api.attemptRetry(attempt.id, false, true))}>
+            {t("run.retryWithNewCommands")}
+          </Button>
+        )}
         <Button onClick={() => void act(() => api.attemptRetry(attempt.id, false))}>{t("run.retry")}</Button>
         <Button variant="ghost" onClick={() => void act(() => api.attemptAbandon(attempt.id))}>
           {t("run.abandon")}
@@ -1186,6 +1271,10 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       );
     case "reviewIncomplete":
       return line(t("activity.reviewIncomplete", { files: (data.unread ?? []).join(", ") }), "text-warning");
+    case "contractReplaced":
+      return line(t("activity.contractReplaced", { ids: (data.replaced ?? []).join(", ") }));
+    case "reviewBreaks":
+      return line(t("activity.reviewBreaks", { ids: (data.breaks ?? []).join(", ") }), "text-warning");
     case "verificationCorrected":
       return (
         <div>
@@ -1244,7 +1333,7 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
     case "stallCleared":
       return line(t("activity.stallCleared"));
     case "stopRequested":
-      return line(t("activity.stopRequested"));
+      return line(data.by ? t("activity.stopRequestedBy", { client: data.by }) : t("activity.stopRequested"));
     case "waitLonger":
       return line(t("activity.waitLonger"));
     case "commandKilled":
@@ -1254,6 +1343,21 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
     // Only an assistant's retry leaves one, so the person sees it wasn't them.
     case "retryRequested":
       return data.by ? line(t("activity.retryRequested", { client: data.by })) : null;
+    case "commandsUpdated":
+      return (
+        <div>
+          {line(t("activity.commandsUpdated"), "font-medium")}
+          <ul className="selectable mt-0.5 space-y-0.5 font-mono text-[11.5px] break-all text-muted">
+            {(data.changes ?? []).map((change: CommandChange) => (
+              <li key={change.stepId}>
+                {change.stepId}: {change.before} → {change.now}
+              </li>
+            ))}
+          </ul>
+        </div>
+      );
+    case "setupLimited":
+      return line(t("activity.setupLimited"), "text-warning");
     case "recovered":
       return line(t("activity.recovered"), "text-subtle");
     case "snapshotFailed":
@@ -1394,10 +1498,19 @@ function ProposalsCard({ runId, revision }: { runId: string; revision: number })
   );
 }
 
-function ReviewVerdict({ review }: { review: Attempt }) {
+/** What a finding can say the change breaks in this run: what its specification has. */
+function breakableOf(attempts: Attempt[]): string[] {
+  const asked = specifyingAttempt(attempts);
+  return breakableIds(asked ? specOf(asked) : null);
+}
+
+/** What became of a review. When Keel doesn't count it as an approval, it says why: its summary can still say all is fine. */
+function ReviewVerdict({ review, findings }: { review: Attempt; findings: FindingShown[] }) {
   const { t } = useTranslation();
   if (!review.output) return <StateBadge state={review.state} label={t(`states.${review.state}`)} />;
   if ((review.output.unread ?? []).length > 0) return <span className="text-warning">{t("run.verdictUnread")}</span>;
+  const broken = [...new Set(findings.flatMap((finding) => (finding.breaks ? [finding.breaks] : [])))];
+  if (broken.length > 0) return <span className="text-warning">{t("run.verdictBreaks", { ids: broken.join(", ") })}</span>;
   return <span className={review.output.verdict === "approved" ? "text-success" : "text-warning"}>{review.output.verdict === "approved" ? t("run.verdictApproved") : t("run.verdictChanges")}</span>;
 }
 
@@ -1417,29 +1530,38 @@ function ApproverVerdict({ output, riskClass = "text-subtle" }: { output: NonNul
 function ReviewsList({ attempts, round }: { attempts: Attempt[]; round: number }) {
   const { t } = useTranslation();
   const { reviewers, approver } = reviewsOfRound(attempts, round);
+  const breakable = breakableOf(attempts);
   // A person can ask for a review that was skipped, and then that's what became of it.
   return (
     <>
       <ul className="space-y-2">
-        {latestOfEachStep(reviewers).map((review) => (
-          <li key={review.id} className="text-[12.5px]">
-            <div className="flex flex-wrap items-baseline gap-2">
-              <span className="font-mono text-[12px] font-medium">{review.stepId}</span>
-              <ReviewVerdict review={review} />
-            </div>
-            {review.state === "skipped" && review.reason && <p className="selectable mt-0.5 text-muted">{reasonText(t, review.reason)}</p>}
-            {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
-            {(review.output?.unread ?? []).length > 0 && <p className="selectable mt-0.5 text-warning">{t("run.unreadFiles", { files: review.output?.unread?.join(", ") })}</p>}
-            {uncheckedOf(review.output).length > 0 && <p className="selectable mt-0.5 text-muted">{t("run.reviewUnchecked", { items: uncheckedOf(review.output).join("; ") })}</p>}
-            {(review.output?.findings ?? []).length > 0 && (
-              <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 text-muted">
-                {review.output?.findings.map((finding, index) => (
-                  <li key={index}>{finding}</li>
-                ))}
-              </ul>
-            )}
-          </li>
-        ))}
+        {latestOfEachStep(reviewers).map((review) => {
+          const findings = findingsOf(review.output, breakable);
+          return (
+            <li key={review.id} className="text-[12.5px]">
+              <div className="flex flex-wrap items-baseline gap-2">
+                <span className="font-mono text-[12px] font-medium">{review.stepId}</span>
+                <ReviewVerdict review={review} findings={findings} />
+              </div>
+              {review.state === "skipped" && review.reason && <p className="selectable mt-0.5 text-muted">{reasonText(t, review.reason)}</p>}
+              {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
+              {(review.output?.unread ?? []).length > 0 && <p className="selectable mt-0.5 text-warning">{t("run.unreadFiles", { files: review.output?.unread?.join(", ") })}</p>}
+              {uncheckedOf(review.output).length > 0 && <p className="selectable mt-0.5 text-muted">{t("run.reviewUnchecked", { items: uncheckedOf(review.output).join("; ") })}</p>}
+              {findings.length > 0 && (
+                <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 text-muted">
+                  {findings.map((finding, index) => (
+                    // A review's list, in its order: two findings can say the same.
+                    <li key={index}>
+                      {finding.breaks && <span className="font-medium text-warning">{t("run.findingBreaks", { id: finding.breaks })} </span>}
+                      {finding.where && <span className="font-mono text-[12px]">{finding.where} </span>}
+                      {finding.text}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          );
+        })}
       </ul>
       {approver?.output && (
         <div className="mt-3 border-t border-border pt-2.5 text-[12.5px]">
@@ -1722,7 +1844,7 @@ export function RunDetail({ runId }: { runId: string }) {
           <QuestionsCard key={latest.id} attempt={latest} attempts={attempts} onError={setError} />
         ) : (
           <>
-            <Actions attempt={latest} projectId={run.projectId} onError={setError} />
+            <Actions attempt={latest} projectId={run.projectId} agentsWrote={agentCouldHaveWritten(attempts)} onError={setError} />
             {!going && outcome}
           </>
         )}

@@ -39,7 +39,7 @@ pub fn system_prompt(
              Never run two test commands at the same time: they can share a database and block each other.\n\
              Create and change files with Edit and Write, not with cat, echo, sed or Python from Bash: Edit fails when the text does not match, while a replacement in a script can do nothing and say nothing.\n\
              Use Bash to run commands (tests, build, git). It is already in the project folder, so do not cd to its full path.\n\
-             There is no network except the domains the project allows, and the caches in the home folder are not available. Dependencies come from the cache Keel prepared for this run: if one is missing, the command fails with an error, so do not wait for a command that downloads things and do not retry it.\n",
+             There is no network except the domains the project allows. The home folder is this run's own, with the dependencies Keel prepared for it: if one is missing, the command fails with an error, so do not wait for a command that downloads things and do not retry it.\n",
         );
         text.push_str(&format!(
             "Write commit messages in {}, unless the project's instructions say otherwise.\n",
@@ -223,6 +223,7 @@ const AGREEMENT_EN: &str = r#"This request touches several projects, and you're 
 - parts: one for each project that has to change, in the order they're done: what the others depend on first. `project` is its name exactly as it's listed below, and `text` says what changes there, in up to 200 characters. A project that's only read isn't a part. Up to 5.
 - together: up to 5 things that only work with every part in place, each in one line, for a person to try once they're all done. Nobody can prove them in a single project.
 - limits: also what has to stay the same between the projects for them to keep working together, such as a name, a route or a format the other side relies on.
+- contract: up to 7 points where the parts must match exactly: a route, a field and its type, a response code or a change of state. Each point is one side, what one project does, and `projects` names only the project or projects that make it true. A promise between two parts is two points, one for each side, such as what one sends and what the other answers. `when` and `then` say it as a criterion does, within the same limit. Keel numbers them K1, K2 and so on, and each part verifies those that name it like the rest of its criteria. Leave it empty if the parts share nothing.
 
 The projects:
 {{projects}}
@@ -233,6 +234,7 @@ const AGREEMENT_ES: &str = r#"Este pedido toca varios proyectos, y estás en uno
 - parts: una por cada proyecto que tiene que cambiar, en el orden en que se hacen: primero aquello de lo que dependen los demás. `project` es su nombre exactamente como aparece abajo, y `text` dice qué cambia ahí, en hasta 200 caracteres. Un proyecto que solo se lee no es una parte. Hasta 5.
 - together: hasta 5 cosas que solo funcionan con todas las partes hechas, cada una en una línea, para que una persona las pruebe cuando estén todas. Nadie puede demostrarlas en un solo proyecto.
 - limits: también lo que tiene que quedar igual entre los proyectos para que sigan funcionando juntos, como un nombre, una ruta o un formato del que depende el otro lado.
+- contract: hasta 7 puntos en los que las partes tienen que coincidir exactamente: una ruta, un campo y su tipo, un código de respuesta o un cambio de estado. Cada punto es un solo lado, lo que hace un proyecto, y `projects` nombra solo el proyecto o los proyectos que lo hacen cumplir. Una promesa entre dos partes son dos puntos, uno por cada lado, como lo que uno envía y lo que el otro responde. `when` y `then` lo dicen como un criterio, con el mismo límite. Keel los numera K1, K2 y así, y cada parte verifica los que la nombran como el resto de sus criterios. Déjalo vacío si las partes no comparten nada.
 
 Los proyectos:
 {{projects}}
@@ -451,13 +453,14 @@ mod tests {
     }
 
     #[test]
-    fn who_runs_commands_is_told_there_is_no_network_nor_home_caches() {
+    fn who_runs_commands_is_told_there_is_no_network_and_the_home_is_the_runs() {
         let dir = tempfile::tempdir().unwrap();
         let empty = Block::default();
         for language in ["en", "es"] {
             let (builder, _) = system_prompt(dir.path(), language, ToolProfile::Build, &empty, "");
             assert!(builder.contains("There is no network except the domains the project allows"));
-            assert!(builder.contains("caches in the home folder are not available"));
+            assert!(builder.contains("The home folder is this run's own"));
+            assert!(!builder.contains("not available"));
             assert!(builder.contains("do not wait for a command that downloads things"));
             let (reader, _) =
                 system_prompt(dir.path(), language, ToolProfile::ReadOnly, &empty, "");

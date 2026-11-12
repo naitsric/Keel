@@ -1,6 +1,6 @@
 import type { TFunction } from "i18next";
 import { type AuditEvent, type Reason } from "./api";
-import { latestOfEachStep } from "./audit";
+import { latestOfEachStep, putOffForSetup } from "./audit";
 
 /** Whether the engine found a change small, on the record. It writes this, and only ever from facts. */
 export interface SizeDecision {
@@ -24,8 +24,14 @@ export const skippedAsSmall = skippedFor("treatedAsSmall");
 /** Left out because what was asked names none of the risks it looks at. That's settled before the size, so it says nothing about it. */
 export const skippedForRisks = skippedFor("noMatchingRisks");
 
+/**
+ * Whether a person asked for what was skipped to run, as `sizing::person_asked` says: that puts off
+ * their approval. A step put off for a new setup to run first is something else.
+ */
+const personAsked = (attempts: { state: string; kind?: string }[]) => attempts.some((attempt) => attempt.state === "postponed" && !putOffForSetup(attempt));
+
 /** The steps that stand skipped for being a small change: what a person can ask for. Once they've asked, all of it is on its way. */
-export const skippedSteps = <T extends { stepId: string; state: string; reason?: { code: string } | null }>(attempts: T[]): T[] => (attempts.some((attempt) => attempt.state === "postponed") ? [] : latestOfEachStep(attempts).filter(skippedAsSmall));
+export const skippedSteps = <T extends { stepId: string; state: string; kind?: string; reason?: { code: string } | null }>(attempts: T[]): T[] => (personAsked(attempts) ? [] : latestOfEachStep(attempts).filter(skippedAsSmall));
 
 /** What was last decided, if anything: a run whose workflow doesn't depend on this has nothing here. */
 export function latestSizeDecision(events: AuditEvent[]): SizeDecision | null {

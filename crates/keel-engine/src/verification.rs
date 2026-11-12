@@ -474,6 +474,7 @@ mod tests {
             questions: vec![],
             parts: vec![],
             together: vec![],
+            contract: vec![],
         }
     }
 

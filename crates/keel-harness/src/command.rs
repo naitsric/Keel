@@ -67,7 +67,13 @@ pub struct StepCommand {
     /// Folders outside the workspace the file tools may reach. They're writable too unless the
     /// settings deny it, which `settings::with_read_only` does.
     pub add_dirs: Vec<PathBuf>,
+    /// A script `claude` runs ahead of each Bash command, in the sandbox, such as `home::script`.
+    /// Only its commands get those variables: `claude` itself keeps its own.
+    pub env_file: Option<PathBuf>,
 }
+
+/// Where `claude` looks for `env_file`.
+const ENV_FILE: &str = "CLAUDE_ENV_FILE";
 
 impl StepCommand {
     /// The arguments, kept apart from process setup so tests can read them.
@@ -135,6 +141,9 @@ impl StepCommand {
             .current_dir(&self.workspace)
             .env_clear()
             .envs(clean_env(&self.path_env));
+        if let Some(file) = &self.env_file {
+            command.env(ENV_FILE, file);
+        }
         command
     }
 
@@ -176,6 +185,7 @@ mod tests {
             resume: None,
             json_schema: None,
             add_dirs: Vec::new(),
+            env_file: None,
         }
     }
 
@@ -248,6 +258,31 @@ mod tests {
         let args = c.args(&step(ToolProfile::Build));
         assert_eq!(value_after(&args, "--resume").as_deref(), Some("old"));
         assert!(value_after(&args, "--session-id").is_none());
+    }
+
+    #[test]
+    fn a_script_for_bash_leaves_claudes_own_home_alone() {
+        let var = |command: &Command, name: &str| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        let step = step(ToolProfile::Build);
+        let mut c = command();
+        assert_eq!(var(&c.command(&step), "CLAUDE_ENV_FILE"), None);
+        c.env_file = Some("/r/builder-1.env".into());
+        let with = c.command(&step);
+        assert_eq!(
+            var(&with, "CLAUDE_ENV_FILE").as_deref(),
+            Some("/r/builder-1.env")
+        );
+        assert_eq!(var(&with, "HOME"), std::env::var("HOME").ok());
+        assert_eq!(
+            var(&with, "GIT_CONFIG_GLOBAL").as_deref(),
+            Some("/dev/null")
+        );
     }
 
     #[test]
