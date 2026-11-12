@@ -172,7 +172,8 @@
     "keptAsking": "After {{rounds}} rounds of questions, it still asked something only you can decide, so Keel stopped it rather than choose for you.",
     "partsNotOpened": "You approved it, but Keel couldn't put each project's part on the board: {{detail}}. Try again once that's fixed.",
     "startsOnTheBoard": "This issue is a change across several projects, so it starts from its card on the board.",
-    "readCopyFailed": "Keel couldn't get a copy of {{project}} to read: {{detail}}. Try again once it can be reached."
+    "readCopyFailed": "Keel couldn't get a copy of {{project}} to read: {{detail}}. Try again once it can be reached.",
+    "specNotChecked": "Keel couldn't read what it needed to check this answer, so it doesn't count: {{detail}}. Try it again."
   },
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",
@@ -417,6 +418,7 @@
     "specAnswered": "What you answered",
     "specParts": "What changes in each project",
     "specTogether": "To try together",
+    "specContract": "What the parts agree on exactly",
     "verifyMet_one": "{{count}} of {{total}} met",
     "verifyMet_other": "{{count}} of {{total}} met",
     "verifyUnmet_one": "{{count}} not met",
@@ -499,6 +501,7 @@
     "questionsTaken": "After {{rounds}} rounds of questions, Keel stopped asking and took the recommended options",
     "specCorrected": "What it wrote didn't fit what Keel can show you, so Keel asked it to fix this:",
     "reviewIncomplete": "It couldn't read part of the change, so Keel doesn't count it as an approval: {{files}}",
+    "contractReplaced": "It wrote {{ids}} in its own words. Keel kept them as they were agreed.",
     "specAnswer": "It wrote down what it understood",
     "verifyAnswer": "It wrote down what it found",
     "verificationCorrected_one": "Keel didn't take its word for one thing, and it counts as not verified:",
@@ -1114,7 +1117,12 @@
     "tooManyParts": "it changes {{count}} projects, and the limit is {{limit}}",
     "unknownProject": "it names {{project}}, which isn't one of the projects you chose",
     "repeatedPart": "it lists {{project}} twice",
-    "tooManyTogether": "it lists {{count}} things to try together, and the limit is {{limit}}"
+    "tooManyTogether": "it lists {{count}} things to try together, and the limit is {{limit}}",
+    "tooManyContract": "it lists {{count}} points the parts must agree on, and the limit is {{limit}}",
+    "contractNeedsText": "{{id}} doesn't say when it happens or what must then be true",
+    "contractTooLong": "{{id}} has {{chars}} characters, and the limit is {{limit}}",
+    "contractUnknownProject": "{{id}} names {{project}}, which isn't one of the projects you chose",
+    "contractWithoutPart": "{{id}} names no project that changes"
   },
   "invalidAnswers": {
     "unknownQuestion": "That answer is for a question this step didn't ask.",
@@ -1206,6 +1214,11 @@
     "agreed": "What was agreed",
     "together": "To try together",
     "togetherHint": "No part proves these on its own. Try them once every part is in place, and mark what works.",
+    "contract": "What the parts agree on exactly",
+    "contractHint": "Each part checks the points that name it, like the rest of what it has to do.",
+    "contractPart": "Part {{position}}, {{project}}",
+    "notChecked": "Not checked yet",
+    "noVerifier": "This workflow doesn't verify",
     "stopWaiting": "Don't wait",
     "stopWaitingHint": "Lets this part start without the pull request of the one before it.",
     "openRun": "Open run",

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
 import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
 import { partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
@@ -12,11 +12,11 @@ import { errorText, needsProjectSettings, needsSignIn, reasonText, specProblemTe
 import { allRecommend, answerFrom, differsFromRecommended, isAnswered, needsText, type QuestionPick, recommendedAnswers, recommendedOption, startingPick } from "../lib/questions";
 import { latestSizeDecision, type SizeDecision, skippedAsSmall, skippedSteps, whyNotSmallText } from "../lib/size";
 import { useApp } from "../lib/store";
-import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
+import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge, VERIFY_TONES } from "../ui/primitives";
 import { ProposalRow } from "./BrainPage";
 import { FlowDiagram } from "./FlowDiagram";
 import { JointChangeDialog } from "./JointChangeDialog";
-import { SpecView } from "./SpecView";
+import { ContractLine, SpecView } from "./SpecView";
 
 type Tab = "understood" | "found" | "activity" | "commands" | "changes" | "prompt" | "details" | "output";
 
@@ -184,12 +184,6 @@ function ApprovalRow({ label, note, action, rowRef, children }: { label: string;
     </div>
   );
 }
-
-const VERIFY_TONES: Record<CheckedCriterion["result"], string> = {
-  met: "text-success",
-  unmet: "font-medium text-warning",
-  unverified: "text-muted",
-};
 
 /** Each thing that had to be true, in its own words, with what became of it and why. */
 function VerificationItems({ verification }: { verification: VerificationOutput }) {
@@ -631,6 +625,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const parts = spec?.parts ?? [];
   const agreeing = parts.length > 0;
   const together = agreeing ? (spec?.together ?? []) : [];
+  const contract = agreeing ? (spec?.contract ?? []) : [];
   // Right after working out what's asked, nobody has done anything yet. Saying it finished without
   // an explanation would read as something gone wrong.
   const nothingToExplain = asked !== null && !attempts.some((a) => a.kind === "agent" && a.role === "worker");
@@ -673,6 +668,17 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             <ul className="selectable list-disc space-y-0.5 pl-4 break-words">
               {together.map((text, index) => (
                 <li key={index}>{text}</li>
+              ))}
+            </ul>
+          </ApprovalRow>
+        )}
+        {contract.length > 0 && (
+          <ApprovalRow label={t("run.specContract")} note={t("run.generated")}>
+            <ul className="selectable list-disc space-y-0.5 pl-4 break-words">
+              {contract.map((point) => (
+                <li key={point.id}>
+                  <ContractLine point={point} />
+                </li>
               ))}
             </ul>
           </ApprovalRow>
@@ -1181,6 +1187,8 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       );
     case "reviewIncomplete":
       return line(t("activity.reviewIncomplete", { files: (data.unread ?? []).join(", ") }), "text-warning");
+    case "contractReplaced":
+      return line(t("activity.contractReplaced", { ids: (data.replaced ?? []).join(", ") }));
     case "verificationCorrected":
       return (
         <div>
