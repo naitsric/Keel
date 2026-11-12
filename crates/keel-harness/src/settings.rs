@@ -116,8 +116,10 @@ pub fn is_read_only(settings: &Value, folder: &str) -> bool {
 }
 
 /// The same policy for a `check` step, which Keel runs itself. Tests and Makefiles can be edited
-/// by an agent, so they get no more trust than the agent does. A Seatbelt profile for
-/// `sandbox-exec`: no home folder except what's listed, no network, and writes only here.
+/// by an agent, so they get no more trust than the agent does. A setup that runs after an agent
+/// that can write gets this too, for the same reason. A Seatbelt profile for `sandbox-exec`: no
+/// home folder except what's listed, no network, and writes only here. An agent's Bash may reach
+/// the project's allowed domains, but this can't be held to a list of domains, so it gets none.
 pub fn check_profile(
     workspace: &Path,
     home: &Path,
@@ -129,6 +131,9 @@ pub fn check_profile(
 
 /// A `setup` step installs dependencies, so it gets the internet and a cache. Still no home folder
 /// and no credentials, and nothing on this machine: not local ports, and only the listed sockets.
+/// Only for a setup before any agent of its run that can write, which runs what's published. An
+/// agent that only reads has no way to change a file. Once one that can write has had the run's
+/// copy, what a setup runs may be its doing, and it gets `check_profile`.
 pub fn setup_profile(
     workspace: &Path,
     home: &Path,

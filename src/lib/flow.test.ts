@@ -489,6 +489,15 @@ describe("the layout", () => {
     expect(layout.lines.map((line) => line.travelled)).toEqual([true, true, false, false]);
   });
 
+  it("doesn't count a step put off for a new setup as travelled, as it does an approval put off for more", () => {
+    const steps: WorkflowStep[] = [{ type: "check", id: "check", run: "make test" }, { type: "approval", id: "human" }];
+    const putOff = layoutFlow(flowOf(steps, [attempt("check", "failed", { kind: "check" }), attempt("check", "postponed", { kind: "check", number: 2 })]));
+    expect(putOff.lines.length).toBeGreaterThan(0);
+    expect(putOff.lines.every((line) => !line.travelled)).toBe(true);
+    const asked = layoutFlow(flowOf([{ type: "approval", id: "human" }, { type: "deliver", id: "pr" }], [attempt("human", "postponed", { kind: "approval" })]));
+    expect(asked.lines.every((line) => line.travelled)).toBe(true);
+  });
+
   it("doesn't count an out-of-date step as travelled", () => {
     const steps = [agent("a"), approver("z", "a")];
     const layout = layoutFlow(flowOf(steps, [attempt("z", "succeeded"), attempt("a", "running", { round: 1 })]));

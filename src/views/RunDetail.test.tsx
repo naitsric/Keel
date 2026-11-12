@@ -3,11 +3,11 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18next from "../i18n";
-import type { Attempt, AuditEvent, Run, Screenshot, Screenshots, SpecOutput } from "../lib/api";
+import type { Attempt, AuditEvent, CommandChange, Run, Screenshot, Screenshots, SpecOutput } from "../lib/api";
 import { type CommandRun, commandsFrom } from "../lib/audit";
 import { useApp } from "../lib/store";
 import type { SizeDecision } from "../lib/size";
-import { ActivityTab, ApprovalCard, CommandsTab, OutputTab, QuestionsCard, Summary } from "./RunDetail";
+import { Actions, ActivityTab, ApprovalCard, CommandsTab, OutputTab, QuestionsCard, Summary } from "./RunDetail";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -463,6 +463,16 @@ describe("the approval card", () => {
       expect(page()).not.toMatch(/criteria|acceptance/i);
     });
 
+    it("says when a test exists but didn't run here, apart from when there's none", async () => {
+      show([builder(["calc.py"]), check, verifier([met, { ...said("C2", "unverified", "tests/db.rs:12, needs Postgres"), why: "notRun" }, { ...said("C3", "unverified"), why: "noTest" }]), human], ["calc.py"]);
+      const list = proof()?.querySelector("ul")?.textContent ?? "";
+      expect(list).toContain("Its test exists, but didn't run here.tests/db.rs:12, needs Postgres");
+      expect(list).toContain("Not verifiedwhen c3 → then c3It found nothing that proves this.");
+      await i18next.changeLanguage("es");
+      show([builder(["calc.py"]), check, verifier([met, { ...said("C2", "unverified", "tests/db.rs:12"), why: "notRun" }]), human], ["calc.py"]);
+      expect(proof()?.querySelector("ul")?.textContent).toContain("Su prueba existe, pero no corrió aquí.");
+    });
+
     it("stands out when something isn't met", () => {
       show([builder(["calc.py"]), check, verifier([met, said("C2", "unmet", "calc.py:3")]), human], ["calc.py"]);
       const line = proof()?.querySelector("summary span");
@@ -551,6 +561,53 @@ describe("the approval card", () => {
     });
   });
 
+  describe("what the reviews found", () => {
+    const found = (stepId: string, findings: unknown[]) => attempt({ id: stepId, stepId, role: "reviewer", output: { verdict: "changes", findings, summary: "Two things.", unread: [], unchecked: [] } as unknown as Attempt["output"] });
+    const asked = specifier({ criteria: [{ id: "C2", when: "one is negative", then: "it still adds" }] });
+    const both = () => [asked, builder(["calc.py"]), check, found("security", ["app/api.py:42 doesn't call require_role"]), found("code", [{ file: "calc.py", line: 3, text: "Subtracts when one is negative", breaks: "C2" }, { file: "test_calc.py", line: null, text: "The test name could say more", breaks: null }, { file: "calc.py", line: 9, text: "Names what isn't there", breaks: "C9" }]), human];
+    const items = () => [...document.querySelectorAll('[role="dialog"] li li')].map((li) => li.textContent);
+
+    it("shows text from before Keel asked as it was, and what a finding breaks before where it is", () => {
+      show(both(), ["calc.py"]);
+      press("See the reviews");
+      expect(items()).toEqual(["app/api.py:42 doesn't call require_role", "Breaks C2. calc.py:3 Subtracts when one is negative", "test_calc.py The test name could say more", "calc.py:9 Names what isn't there"]);
+    });
+
+    it("says it in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      show(both(), ["calc.py"]);
+      press("Ver las revisiones");
+      expect(items()).toContain("Rompe C2. calc.py:3 Subtracts when one is negative");
+    });
+
+    // Keel keeps a review that approved what breaks a criterion as asking for changes, and its own summary can still say all is fine.
+    const keptAsChanges = () => [
+      asked,
+      builder(["calc.py"]),
+      check,
+      found("security", ["app/api.py:42 doesn't call require_role"]),
+      attempt({ id: "code", stepId: "code", role: "reviewer", output: { verdict: "changes", findings: [{ file: "calc.py", line: 3, text: "Subtracts when one is negative", breaks: "C2" }], summary: "Minor things, nothing that blocks.", unread: [], unchecked: [] } as unknown as Attempt["output"] }),
+      attempt({ id: "ux", stepId: "ux", role: "reviewer", output: { verdict: "approved", findings: [{ file: "calc.py", line: 9, text: "Names what isn't there", breaks: "C9" }], summary: "Fine.", unread: [], unchecked: [] } as unknown as Attempt["output"] }),
+      human,
+    ];
+    const verdicts = () => [...([...document.querySelectorAll("dt")].find((dt) => dt.textContent?.startsWith("Revi"))?.nextElementSibling?.querySelectorAll("li") ?? [])].map((li) => li.textContent);
+
+    it("says at a glance why a review whose summary sounds fine doesn't count as an approval", () => {
+      show(keptAsChanges(), ["calc.py"]);
+      expect(verdicts()).toEqual(["securityAsks for changes", "codeBreaks C2, so Keel doesn't count it as an approval", "uxNo problems"]);
+      expect(page()).toContain("code: Minor things, nothing that blocks.");
+      // The same in the full reviews.
+      press("See the reviews");
+      expect(document.querySelector('[role="dialog"]')?.textContent).toContain("codeBreaks C2, so Keel doesn't count it as an approval");
+    });
+
+    it("says why in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      show(keptAsChanges(), ["calc.py"]);
+      expect(verdicts()).toContain("codeRompe C2, así que Keel no lo cuenta como aprobación");
+    });
+  });
+
   // In a short window, "What proves it" can be far down the list, or out of it.
   describe("how much wasn't proven, where it can't scroll out of view", () => {
     const looked = (stepId: string, unchecked: string[]) => attempt({ id: stepId, stepId, role: "reviewer", output: { verdict: "approved", findings: [], summary: "Fine.", unread: [], unchecked } as unknown as Attempt["output"] });
@@ -574,6 +631,42 @@ describe("the approval card", () => {
     it("says one in the singular", () => {
       show([builder(["calc.py"]), check, verifier([met, said("C2", "unverified")]), human], ["calc.py"]);
       expect(lines("1 thing wasn't proven")).toHaveLength(1);
+    });
+
+    it("says why, counting each why apart, so a test that didn't run here doesn't read like no test", () => {
+      const notRun = (id: string) => ({ ...said(id, "unverified", `tests/db.rs:${id}`), why: "notRun" });
+      show([builder(["calc.py"]), check, verifier([met, notRun("C2"), notRun("C3"), notRun("C4"), { ...said("C5", "unverified"), why: "noTest" }, { ...said("C6", "unverified", "test_calc.py:9"), corrected: "noCheckPassed" }]), looked("ux", ["How the Save bar looks in dark mode"]), human], ["calc.py"]);
+      const found = lines("6 things weren't proven");
+      expect(found).toHaveLength(1);
+      const why = [...(found[0].parentElement?.querySelectorAll("li") ?? [])].map((li) => li.textContent);
+      expect(why).toEqual(["1: the reviews couldn't check it by reading the code", "3: their tests exist, but didn't run here", "1: no test proves it", "1: it was said to be met, but no check passed in this round"]);
+      // It stays outside the list, by the note.
+      expect(list().contains(found[0])).toBe(false);
+    });
+
+    it("says why in Spanish too", async () => {
+      await i18next.changeLanguage("es");
+      const notRun = (id: string) => ({ ...said(id, "unverified", `tests/db.rs:${id}`), why: "notRun" });
+      show([builder(["calc.py"]), check, verifier([notRun("C1"), notRun("C2"), notRun("C3"), notRun("C4"), notRun("C5")]), human], ["calc.py"]);
+      const found = lines("5 cosas quedaron sin probar");
+      expect(found).toHaveLength(1);
+      expect(found[0].parentElement?.querySelector("li")?.textContent).toBe("5: sus pruebas existen, pero no corrieron aquí");
+      show([builder(["calc.py"]), check, verifier([{ ...said("C1", "unverified", "tests/db.rs:1"), why: "notRun" }, said("C2", "unverified")]), human], ["calc.py"]);
+      const why = [...(lines("2 cosas quedaron sin probar")[0].parentElement?.querySelectorAll("li") ?? [])].map((li) => li.textContent);
+      expect(why).toEqual(["1: su prueba existe, pero no corrió aquí", "1: ninguna prueba la demuestra"]);
+    });
+
+    // The prompt from before asked to say it in what it pointed at, so Keel doesn't say nobody did.
+    it("points to what each one says when the verifier didn't give why apart", async () => {
+      const old = (id: string, evidence: string) => said(id, "unverified", evidence);
+      show([builder(["calc.py"]), check, verifier([old("C1", "tests/db.rs:12 needs Postgres, skipped"), old("C2", "tests/db.rs:30 exists, but didn't run"), { ...said("C3", "unverified", "tests/ui.spec.ts:4"), why: "" }]), human], ["calc.py"]);
+      const found = lines("3 things weren't proven");
+      expect(found).toHaveLength(1);
+      expect([...(found[0].parentElement?.querySelectorAll("li") ?? [])].map((li) => li.textContent)).toEqual(["3: see what was said about each in “What proves it”"]);
+      expect(page()).not.toMatch(/nobody said why/i);
+      await i18next.changeLanguage("es");
+      show([builder(["calc.py"]), check, verifier([old("C1", "requiere Postgres; se salta")]), human], ["calc.py"]);
+      expect(lines("1 cosa quedó sin probar")[0].parentElement?.querySelector("li")?.textContent).toBe("1: mira qué se dijo de ella en «Qué lo demuestra»");
     });
 
     it("counts each one the verifier couldn't verify when it verified none", () => {
@@ -704,6 +797,17 @@ describe("the approval card", () => {
       expect(row("Small change")).toBeNull();
     });
 
+    it("says apart what was left out for the risks of what was asked", async () => {
+      const nothing = attempt({ id: "ux", stepId: "ux", role: "reviewer", state: "skipped", reason: { code: "noMatchingPaths", paths: ["**/*.tsx"] } });
+      const state = attempt({ id: "state", stepId: "state", role: "reviewer", state: "skipped", reason: { code: "noMatchingRisks", risks: ["concurrency"] } });
+      show([builder(["calc.py"]), check, reviewer, nothing, state, human], ["calc.py"]);
+      expect(row("Reviews")).toContain("ux: skipped, nothing they cover changed");
+      expect(row("Reviews")).toContain("state: skipped, what was asked names none of the risks they look at");
+      await i18next.changeLanguage("es");
+      show([builder(["calc.py"]), check, reviewer, nothing, state, human], ["calc.py"]);
+      expect(row("Revisiones")).toContain("state: omitidas, lo pedido no nombra ninguno de los riesgos que revisan");
+    });
+
     it("never shows a review that couldn't read all of the change as no problems", () => {
       const partly = attempt({ id: "code", stepId: "code", role: "reviewer", output: { verdict: "changes", findings: [], summary: "Fine as far as I got.", unread: ["src/b.ts"] } as unknown as Attempt["output"] });
       show([builder(["calc.py"]), check, partly, human], ["calc.py"]);
@@ -775,6 +879,8 @@ describe("the approval card", () => {
       expect(dialog).toContain("add(1, 2) → it returns 3");
       expect(dialog).toContain("Changes: add stops subtracting");
       expect(dialog).toContain("What stays as it is");
+      // By the id a review names it by when it says the change breaks it.
+      expect(dialog).toContain("L1 Its signature stays");
       expect(dialog).not.toContain("{");
     });
 
@@ -864,6 +970,49 @@ describe("the approval card", () => {
           questionedBy([{ decided: "Keeps the rounding as it is", number: 3, why: "Totals now drift by a cent." }]);
           expect(line("Keeps the rounding as it is")).toContain("Totals now drift by a cent.");
           expect(line("Round up? Leave it")).not.toContain("A review questions");
+        });
+      });
+
+      describe("what the change added that nothing asks for", () => {
+        const added = { decided: "Fails the check when a thread's severity is unknown", number: null, round: 1, why: "A lost save leaves the PR unreviewed for good." };
+        const questionedBy = (questioned: unknown[], fields: Partial<SpecOutput> = { decided }) => {
+          const approver = attempt({ id: "approver", stepId: "approver", role: "approver", output: { decision: "approve", risk: "low", reasons: "The code review found a rule nothing asks for.", instructions: "", questioned } as unknown as Attempt["output"] });
+          show([specifier(fields), builder(["calc.py"]), approver, human], ["calc.py"], building);
+        };
+        const line = (text: string) => [...document.querySelectorAll("li")].find((li) => li.textContent?.startsWith(text))?.textContent ?? "";
+
+        it("shows with the other questioned ones, saying in which round it appeared, with a way to change it", () => {
+          questionedBy([{ decided: "El redondeo sigue igual", number: 1, why: "Totals now drift by a cent." }, added]);
+          expect(line("Keeps the rounding as it is")).toContain("A review questions this, and it's yours to decide: Totals now drift by a cent.");
+          expect(line(added.decided)).toContain("The change added this in round 1, and nothing asked for it. It's yours to decide: A lost save leaves the PR unreviewed for good.");
+          expect(change(added.decided)).not.toBeNull();
+          expect(page()).not.toContain("A review questions “Fails the check");
+        });
+
+        it("sends the person's words about it, as with a line it decided alone", async () => {
+          questionedBy([added]);
+          act(() => change(added.decided)?.click());
+          act(() => vi.advanceTimersByTime(800));
+          write("Drop that rule");
+          press("Send it back");
+          await settle();
+          expect(sentBack).toEqual([{ attemptId: "human", instructions: "About “Fails the check when a thread's severity is unknown”: Drop that rule" }]);
+        });
+
+        it("shows even when the specification decided nothing alone", () => {
+          questionedBy([added], {});
+          expect(page()).toContain("What it decided alone");
+          expect(line(added.decided)).toContain("The change added this in round 1");
+        });
+
+        it("reads one without a round as before, quoted after the list", () => {
+          questionedBy([
+            { decided: "Sorts by name", number: null, why: "No round." },
+            { decided: "Sorts by size", number: null, round: 0, why: "Before the first round." },
+          ]);
+          expect(page()).toContain("A review questions “Sorts by name”, and it's yours to decide: No round.");
+          expect(page()).toContain("A review questions “Sorts by size”, and it's yours to decide: Before the first round.");
+          expect(page()).not.toContain("The change added this");
         });
       });
 
@@ -1008,6 +1157,12 @@ describe("the approval card", () => {
       expect(answers).toEqual([{ attemptId: "human", approve: true, text: "" }]);
     });
 
+    it("shows what the parts agree on exactly, so it's approved along with them", () => {
+      show([specifier({ parts, contract: [{ id: "K1", when: "valora posts /session", then: "app answers 201", projects: ["valora", "app"] }] }), human], [], agreement);
+      expect(page()).toContain("What the parts agree on exactly");
+      expect(page()).toContain("K1 (valora, app): valora posts /session → app answers 201");
+    });
+
     it("is an ordinary approval when nothing has parts", () => {
       show([specifier(), human], [], agreement);
       expect(page()).not.toContain("Approve what was agreed?");
@@ -1060,6 +1215,17 @@ describe("the approval card", () => {
       showRound([builder(["calc.py"]), returned({ instructions: "Devuelve 0.", by: "Claude Code" }), again]);
       expect(page()).toContain("Por qué esta ronda");
       expect(page()).toContain("Claude Code lo devolvió:");
+    });
+
+    it("says in which round the change added what nothing asks for, which may be an earlier one", async () => {
+      const approver = (round: number, appeared: number) => attempt({ id: `approver-${round}`, stepId: "approver", role: "approver", round, output: { decision: "approve", risk: "low", reasons: "r", instructions: "", questioned: [{ decided: "Retries a lost save", number: null, round: appeared, why: "Nothing asks for it." }] } as unknown as Attempt["output"] });
+      showRound([specifier(), builder(["calc.py"]), approver(0, 1), { ...builder(["calc.py"]), id: "builder-1", round: 1 }, approver(1, 1), again]);
+      expect(page()).toContain("The change added this in round 1, and nothing asked for it. It's yours to decide: Nothing asks for it.");
+      // Only this round's approver speaks.
+      expect(page().match(/The change added this/g)).toHaveLength(1);
+      await i18next.changeLanguage("es");
+      showRound([specifier(), builder(["calc.py"]), approver(1, 2), again]);
+      expect(page()).toContain("El cambio agregó esto en la ronda 2, y nada lo pedía. Te toca decidirlo: Nothing asks for it.");
     });
   });
 });
@@ -1639,5 +1805,200 @@ describe("an answer Keel asked to fix", () => {
     expect(page()).not.toContain("Falló");
     expect(page()).toContain("Estado final: Keel pidió corregirlo");
     expect(page()).toContain("el punto 1 de lo que decidió por su cuenta tiene 141 caracteres y el límite es 140");
+  });
+
+  it("says which points of the contract a part's specifier wrote again, and that what was agreed stands", async () => {
+    const replaced = [event(1, "contractReplaced", { replaced: ["K1", "K3"] }), event(2, "finished", { state: "succeeded" })];
+    act(() => root.render(<ActivityTab events={replaced} role="specifier" corrected={false} />));
+    expect(page()).toContain("It wrote K1, K3 in its own words. Keel kept them as they were agreed.");
+    await i18next.changeLanguage("es");
+    act(() => root.render(<ActivityTab events={[...replaced]} role="specifier" corrected={false} />));
+    expect(page()).toContain("Escribió K1, K3 con sus propias palabras. Keel los dejó como se acordaron.");
+  });
+});
+
+describe("starting over a step whose command the project changed", () => {
+  let root: Root;
+  let changes: CommandChange[];
+  let retried: unknown[];
+  const page = () => document.body.textContent ?? "";
+  const button = (text: string) => [...document.querySelectorAll("button")].find((b) => b.textContent === text);
+  const settle = () => act(() => Promise.resolve());
+  const failedCheck = attempt({ id: "check-2", runId: "r1", stepId: "check", kind: "check", tools: "check", state: "failed", reason: { code: "checkFailed", exitCode: 1 }, prompt: "uv run pytest" });
+  const failedSetup = attempt({ id: "setup-1", runId: "r1", stepId: "setup", kind: "setup", tools: "setup", state: "failed", reason: { code: "setupFailed", exitCode: 1 }, prompt: "uv sync" });
+  const newSetup: CommandChange = { stepId: "setup", kind: "setup", before: "uv sync", now: "uv sync --group test" };
+  const newCheck: CommandChange = { stepId: "check", kind: "check", before: "uv run pytest", now: "uv run --group test pytest" };
+  const offered = () => button("Start over with the new commands") !== undefined;
+  const show = async (shown: Attempt, agentsWrote = false) => {
+    act(() => root.render(<Actions attempt={shown} projectId="p1" agentsWrote={agentsWrote} onError={() => {}} />));
+    await settle();
+  };
+  const limited = "This setup runs with no more permissions than the agents, because an agent that can change the code has run before it: no internet, and not the project's shared cache. An install that needs to download something may fail. If it does, start a new run.";
+  const projectHas = (setupCommand: string, checkCommand: string) => useApp.setState({ overview: { ...useApp.getState().overview, projects: [{ id: "p1", setupCommand, checkCommand }] as never } });
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    changes = [];
+    retried = [];
+    mockIPC((command, args) => {
+      if (command === "run_command_changes") return changes;
+      if (command === "attempt_retry") retried.push(args);
+      return null;
+    });
+    projectHas("uv sync", "uv run pytest");
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("offers the new commands, says which they were and which they are, and runs them only when chosen", async () => {
+    changes = [newSetup, newCheck];
+    await show(failedCheck);
+    expect(page()).toContain("The project's commands changed after this run started.");
+    for (const command of ["uv sync", "uv sync --group test", "uv run pytest", "uv run --group test pytest"]) expect(page()).toContain(command);
+    // The setup runs again first, so what it installs is there for the check.
+    expect(page()).toContain("The new setup runs first, then this step again.");
+    act(() => button("Start over")?.click());
+    await settle();
+    act(() => button("Start over with the new commands")?.click());
+    await settle();
+    expect(retried).toEqual([
+      { attemptId: "check-2", resume: false, currentCommands: false },
+      { attemptId: "check-2", resume: false, currentCommands: true },
+    ]);
+  });
+
+  it("offers them to a check when its setup changed, though the check didn't", async () => {
+    changes = [newSetup];
+    await show(failedCheck);
+    expect(offered()).toBe(true);
+    expect(page()).toContain("The new setup runs first, then this step again.");
+  });
+
+  it("offers them to a setup only when the setup changed", async () => {
+    changes = [newCheck];
+    await show(failedSetup);
+    expect(offered()).toBe(false);
+    changes = [newSetup];
+    await show({ ...failedSetup, id: "setup-2" });
+    expect(offered()).toBe(true);
+    // It is the setup, so nothing else runs before it.
+    expect(page()).not.toContain("runs first");
+  });
+
+  it("offers nothing new when what the step needs is still the project's", async () => {
+    await show(failedCheck);
+    expect(button("Start over")).toBeDefined();
+    expect(offered()).toBe(false);
+    expect(page()).not.toContain("changed after this run started");
+    // A check of the workflow's own runs the same either way.
+    changes = [newCheck];
+    await show({ ...failedCheck, id: "lint-1", stepId: "lint" });
+    expect(offered()).toBe(false);
+  });
+
+  it("asks again once the project's commands change, so what it says now is what the project has", async () => {
+    changes = [newCheck];
+    await show(failedCheck);
+    expect(page()).toContain("uv run --group test pytest");
+    changes = [{ ...newCheck, now: "uv run --group test --group dev pytest" }];
+    act(() => projectHas("uv sync", "uv run --group test --group dev pytest"));
+    await settle();
+    expect(page()).toContain("uv run --group test --group dev pytest");
+  });
+
+  it("says the new setup gets no more than the agents once they've changed the code, and that a new run is the way out", async () => {
+    changes = [newSetup];
+    await show(failedCheck, true);
+    expect(page()).toContain(limited);
+    // Before any agent, the setup runs what's published, as the first one did.
+    await show({ ...failedCheck, id: "check-3" }, false);
+    expect(page()).toContain("The new setup runs first, then this step again.");
+    expect(page()).not.toContain("no more permissions than the agents");
+  });
+
+  it("says it of a setup started over once agents have run, and not of a check started over as it was", async () => {
+    await show(failedSetup, true);
+    expect(page()).toContain(limited);
+    await show(failedCheck, true);
+    expect(page()).not.toContain("no more permissions than the agents");
+  });
+
+  it("is all in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    changes = [newSetup, newCheck];
+    await show(failedCheck, true);
+    expect(page()).toContain("Los comandos del proyecto cambiaron después de que empezó esta ejecución.");
+    expect(page()).toContain("La preparación nueva corre primero, y después este paso otra vez.");
+    expect(page()).toContain("Esta preparación corre sin más permisos que los agentes, porque antes corrió un agente que puede cambiar el código");
+    expect(button("Empezar de nuevo con los comandos nuevos")).toBeDefined();
+  });
+
+  it("says in the activity which commands the step started over with", async () => {
+    const event: AuditEvent = { seq: 1, attemptId: "check-2", at: "2026-01-01T00:00:00Z", kind: "commandsUpdated", data: { changes: [newCheck] } };
+    act(() => root.render(<ActivityTab events={[event]} role="worker" />));
+    expect(page()).toContain("Started over with the project's new commands");
+    expect(page()).toContain("check: uv run pytest → uv run --group test pytest");
+  });
+
+  it("says in a setup's activity when it ran with no more than the agents, and why", () => {
+    const event: AuditEvent = { seq: 1, attemptId: "setup-2", at: "2026-01-01T00:00:00Z", kind: "setupLimited", data: {} };
+    act(() => root.render(<ActivityTab events={[event]} role="worker" />));
+    expect(page()).toContain("Runs with no more permissions than the agents, because an agent that can change the code ran before it: no internet, and not the project's shared cache. An install that needs to download something may fail for it. Only a setup before any such agent, as at the start of a new run, gets the internet.");
+  });
+});
+
+describe("a review that approved what breaks a criterion", () => {
+  let root: Root;
+  const page = () => document.body.textContent ?? "";
+  const events: AuditEvent[] = [{ seq: 1, attemptId: "code", at: "2026-01-01T00:00:00Z", kind: "reviewBreaks", data: { breaks: ["C5", "L2"] } }];
+  const inActivity = () => act(() => root.render(<ActivityTab events={events} role="reviewer" />));
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    mockIPC(() => null);
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("says why Keel doesn't count it as an approval", () => {
+    inActivity();
+    expect(page()).toContain("It says the change breaks C5, L2, so Keel doesn't count it as an approval.");
+  });
+
+  it("says it in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    inActivity();
+    expect(page()).toContain("Dice que el cambio rompe C5, L2, así que Keel no lo cuenta como aprobación.");
+  });
+});
+
+describe("a step skipped for the risks of what was asked", () => {
+  let root: Root;
+  const page = () => document.body.textContent ?? "";
+  const skipped: AuditEvent = { seq: 1, attemptId: "state", at: "2026-01-01T00:00:00Z", kind: "skipped", data: { paths: [], reason: { code: "noMatchingRisks", risks: ["concurrency"] } } };
+
+  beforeEach(() => {
+    mockIPC(() => null);
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("says why in its activity, not that nothing changed", async () => {
+    await i18next.changeLanguage("en");
+    act(() => root.render(<ActivityTab events={[skipped]} role="reviewer" />));
+    expect(page()).toContain("Skipped: what was asked names none of the risks it looks at");
+    expect(page()).not.toContain("nothing it covers");
+    await i18next.changeLanguage("es");
+    act(() => root.render(<ActivityTab events={[{ ...skipped, seq: 2 }]} role="reviewer" />));
+    expect(page()).toContain("Omitido: lo pedido no nombra ninguno de los riesgos que revisa");
   });
 });

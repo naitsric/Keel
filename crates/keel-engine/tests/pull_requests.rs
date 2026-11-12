@@ -201,6 +201,8 @@ fn agent(id: &str, tools: ToolProfile) -> WorkflowStep {
         max_budget_usd: None,
         paths: vec![],
         when: None,
+        risks: vec![],
+        model_when_risky: None,
         role: Default::default(),
     })
 }
@@ -434,6 +436,8 @@ fn delivered_with_verifier(w: &World, verifier_says: &str, language: &str) -> St
         max_budget_usd: None,
         paths: vec![],
         when: None,
+        risks: vec![],
+        model_when_risky: None,
         role: StepRole::Specifier,
     });
     let verifier = WorkflowStep::Agent(StepSpec {
@@ -446,6 +450,8 @@ fn delivered_with_verifier(w: &World, verifier_says: &str, language: &str) -> St
         max_budget_usd: None,
         paths: vec![],
         when: None,
+        risks: vec![],
+        model_when_risky: None,
         role: StepRole::Verifier,
     });
     let steps = vec![
@@ -1283,6 +1289,8 @@ fn a_cards_run_remembers_the_workflow_it_started_with_and_a_single_step_remember
                 max_budget_usd: None,
                 paths: vec![],
                 when: None,
+                risks: vec![],
+                model_when_risky: None,
                 role: Default::default(),
             },
             "en".into(),
