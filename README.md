@@ -121,8 +121,10 @@ of its own, open a local socket or run `ps`. The tests that need one of these pr
 tests. Run `cargo test --workspace` outside Keel to run them all.
 
 `KEEL_SAMPLE_REPOS=all cargo test -p keel-engine --test samples -- --nocapture` has Keel guess the
-commands of small sample repos (npm, pnpm, pip, uv, Rust, and an npm suite that starts its own
-server) and run their setup and check in the sandbox.
+commands of small sample repos (npm, pnpm, Yarn 1, pip, uv, Poetry, Rust, Go, Maven, Gradle,
+Bundler, Composer, Swift, and an npm suite that starts its own server) and run their setup and
+check in the sandbox. A sample whose tools aren't installed says so and stops. Java and Ruby come
+from Homebrew's `openjdk` and `ruby`, which it keeps off the PATH, and Swift needs Xcode.
 They download dependencies, so they only run when asked. `KEEL_SAMPLE_REPOS=keel` does the same
 with this repo, built from scratch.
 

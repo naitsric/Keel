@@ -767,6 +767,38 @@ fn bundler() {
     });
 }
 
+#[test]
+fn swift() {
+    try_sample(Sample {
+        name: "swift",
+        programs: &["swift"],
+        path: &[],
+        finds: &[],
+        commands: Commands {
+            setup: "swift package resolve --disable-sandbox",
+            check: "swift test --disable-sandbox",
+        },
+        guessed: true,
+        downloads: None,
+        needs_download: Some((
+            "swift package --disable-sandbox add-dependency \
+             https://github.com/apple/swift-argument-parser --from 1.5.0 && \
+             swift package --disable-sandbox resolve",
+            "error: Git command",
+        )),
+        fails_within: 5,
+        // Swift's test frameworks come with Xcode, not the Command Line Tools, which is what
+        // `xcode-select` picks on this Mac. Someone who builds Swift has Xcode picked.
+        env: &[(
+            "DEVELOPER_DIR",
+            "/Applications/Xcode.app/Contents/Developer",
+        )],
+        starts_servers: false,
+        proposes_localhost: false,
+        reads_above: false,
+    });
+}
+
 /// #94: Keel's own check, from a clone with no `target/`. The app needs its frontend built to compile,
 /// as in CI.
 #[test]
