@@ -1,7 +1,8 @@
 //! Sample repos, one for each stack, through what Keel does with a new project: it guesses the
 //! commands, finds where their programs are in the home folder, and then tries them as the setup
 //! dialog does, setup with the network and the check without it, in the real sandbox, with Keel's
-//! own variables and only the folders it found. The repos are in `tests/samples`.
+//! own variables and only the folders it found. The repos are in `tests/samples`. Then a check of
+//! its own tries something setup didn't download, which has to fail in seconds (#121).
 //!
 //! They download dependencies and take minutes, so they only run when asked:
 //! `KEEL_SAMPLE_REPOS=all cargo test -p keel-engine --test samples -- --nocapture`, or a list such
@@ -22,7 +23,7 @@ use keel_store::{Attempt, ProjectSettings, Store};
 
 const VARIABLE: &str = "KEEL_SAMPLE_REPOS";
 /// What `all` runs.
-const STACKS: [&str; 4] = ["pnpm", "pip", "uv", "rust"];
+const STACKS: [&str; 5] = ["npm", "pnpm", "pip", "uv", "rust"];
 
 fn wanted(name: &str) -> bool {
     std::env::var(VARIABLE).is_ok_and(|list| {
@@ -77,6 +78,27 @@ struct Sample {
     /// Where its tool keeps what it downloads, in the home folder, unless Keel told it otherwise.
     /// Setup has to have left it in the project's home.
     downloads: &'static str,
+    /// A command that needs something setup didn't download, and what its tool says as it fails.
+    /// In a check, with no network, that has to happen in seconds and not after minutes of retries.
+    needs_download: Option<(&'static str, &'static str)>,
+}
+
+/// What took a check from when Keel started its command to when it ended.
+fn took(store: &Store, attempt: &Attempt) -> Duration {
+    let events = store.events(&attempt.id, 0).unwrap();
+    let at = |kind: &str| {
+        let event = events.iter().find(|event| event.kind == kind).unwrap();
+        chrono::DateTime::parse_from_rfc3339(&event.at).unwrap()
+    };
+    (at("checkResult") - at("started")).to_std().unwrap()
+}
+
+fn wait_for(store: &Store, run: &str, deadline: Duration) {
+    let started = Instant::now();
+    while store.run(run).unwrap().finished_at.is_none() {
+        assert!(started.elapsed() < deadline, "the run never finished");
+        std::thread::sleep(Duration::from_millis(200));
+    }
 }
 
 fn try_sample(sample: Sample) {
@@ -254,6 +276,33 @@ fn try_sample(sample: Sample) {
         (total - setup_took).as_secs_f64(),
         output(&attempts[1])
     );
+
+    // A run of its own, whose setup finds everything already downloaded. Some of it, such as pip's
+    // `.venv`, is in the run's copy of the repo.
+    let Some((command, says)) = sample.needs_download else {
+        return;
+    };
+    let run = engine
+        .try_check_reading(&id, setup, command, &read, "en")
+        .unwrap();
+    wait_for(&store, &run, Duration::from_secs(600));
+    let attempts = store.attempts_of_run(&run).unwrap();
+    let kinds: Vec<&str> = attempts.iter().map(|a| a.kind.as_str()).collect();
+    assert_eq!(kinds, ["setup", "check"]);
+    assert_eq!(attempts[0].state, "succeeded", "{}", output(&attempts[0]));
+    let check = &attempts[1];
+    let (said, took) = (output(check), took(&store, check));
+    eprintln!(
+        "sample {}: `{command}` failed in {:.1}s",
+        sample.name,
+        took.as_secs_f64()
+    );
+    assert_eq!(check.state, "failed", "`{command}`: {said}");
+    assert!(said.contains(says), "`{command}`: {said}");
+    assert!(
+        took < Duration::from_secs(5),
+        "`{command}` took {took:?}: {said}"
+    );
 }
 
 /// The folders in `dir`, this many levels down.
@@ -282,6 +331,22 @@ fn listing(dir: &Path, levels: usize) -> Vec<String> {
 }
 
 #[test]
+fn npm() {
+    try_sample(Sample {
+        name: "npm",
+        programs: &["npm", "node"],
+        finds: &[],
+        commands: Commands {
+            setup: "npm ci",
+            check: "npm test",
+        },
+        guessed: true,
+        downloads: ".npm/_cacache",
+        needs_download: Some(("npm install left-pad", "ENOTCACHED")),
+    });
+}
+
+#[test]
 fn pnpm() {
     try_sample(Sample {
         name: "pnpm",
@@ -293,6 +358,7 @@ fn pnpm() {
         },
         guessed: true,
         downloads: ".local/share/pnpm/store",
+        needs_download: Some(("pnpm add left-pad", "ERR_PNPM_")),
     });
 }
 
@@ -308,6 +374,10 @@ fn pip() {
         },
         guessed: true,
         downloads: "Library/Caches/pip",
+        needs_download: Some((
+            ".venv/bin/pip install six",
+            "No matching distribution found for six",
+        )),
     });
 }
 
@@ -323,6 +393,7 @@ fn uv() {
         },
         guessed: true,
         downloads: ".cache/uv",
+        needs_download: Some(("uv add six", "network was disabled")),
     });
 }
 
@@ -338,6 +409,7 @@ fn rust() {
         },
         guessed: true,
         downloads: ".cargo/registry",
+        needs_download: Some(("cargo add memchr", "could not be found in registry index")),
     });
 }
 
@@ -359,5 +431,6 @@ fn keel() {
         },
         guessed: false,
         downloads: ".cargo/registry",
+        needs_download: None,
     });
 }

@@ -673,7 +673,7 @@ fn what_setup_downloads_stays_in_the_project_cache_and_each_run_gets_its_own_cop
         own.trim().starts_with(&*workspace.to_string_lossy()),
         "{own}"
     );
-    // Without crates.io among the project's domains, cargo and Go fail at once.
+    // A check has no network, so cargo and Go fail at once.
     let offline = std::fs::read_to_string(workspace.join("check-offline.txt")).unwrap();
     assert_eq!(offline.trim(), "[true][off]");
     // What the run changed in its copy never reached the project's cache.
@@ -695,29 +695,6 @@ fn what_setup_downloads_stays_in_the_project_cache_and_each_run_gets_its_own_cop
     );
     assert!(attempts.iter().any(|a| a.kind == "setup"));
     assert!(!shared.join("registry/changed-by-check").exists());
-}
-
-#[test]
-fn a_project_that_allows_crates_io_is_not_forced_offline() {
-    keel_harness::needs!(sandbox);
-    let w = world();
-    w.engine
-        .update_project(
-            &w.project_id,
-            &ProjectSettings {
-                allowed_domains: vec!["index.crates.io".into(), "proxy.golang.org".into()],
-                ..ProjectSettings::default()
-            },
-        )
-        .unwrap();
-    let run = w.run(vec![check(
-        "after",
-        "echo \"[$CARGO_NET_OFFLINE][$GOPROXY]\" > offline.txt",
-    )]);
-    let after = w.wait_done(&run, "after");
-    assert_eq!(after.state, "succeeded", "{}", w.check_output(&after));
-    let text = std::fs::read_to_string(Path::new(&after.workspace).join("offline.txt")).unwrap();
-    assert_eq!(text.trim(), "[][]");
 }
 
 #[test]

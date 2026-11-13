@@ -98,12 +98,23 @@ fn allows_host(domains: &[String], host: &str) -> bool {
     })
 }
 
+/// Each tool's registry, and the variable that keeps the tool off the network. Without it a
+/// command that needs something setup didn't download retries before it gives up, for over a
+/// minute with npm and pnpm. With it, the command fails at once. Variables and not files, so
+/// nothing is written in the home the builder and the check share, and a project's own variables
+/// still win.
+const OFFLINE: [(&str, &str, &str); 6] = [
+    ("crates.io", "CARGO_NET_OFFLINE", "true"),
+    ("golang.org", "GOPROXY", "off"),
+    ("npmjs.org", "npm_config_offline", "true"),
+    // pnpm 11 on reads only its own.
+    ("npmjs.org", "pnpm_config_offline", "true"),
+    ("pypi.org", "PIP_NO_INDEX", "1"),
+    ("pypi.org", "UV_OFFLINE", "1"),
+];
+
 /// What a setup or check command runs with: the home it works in (see `home`), and the little Keel
-/// still tells tools one by one. uv copies into `.venv` rather than linking it to its cache, and Go
-/// doesn't fetch another toolchain. `domains` are those the step may reach, or `None` when it has
-/// the whole network (a setup before any agent that can write). With no way to crates.io cargo is
-/// told to work offline, and Go has no proxy, so a missing dependency is an error at once and not
-/// minutes of retries. A project that does allow them is left as it was.
+/// still tells tools one by one (see `tool_settings`).
 fn cache_env(
     home: &std::path::Path,
     real_home: &std::path::Path,
@@ -114,18 +125,22 @@ fn cache_env(
     env
 }
 
+/// uv copies into `.venv` rather than linking it to its cache, and Go doesn't fetch another
+/// toolchain. `domains` are those the step may reach, or `None` when it has the whole network (a
+/// setup before any agent that can write). Each tool whose registry isn't among them works offline
+/// (see `OFFLINE`).
 fn tool_settings(domains: Option<&[String]>) -> Vec<(String, String)> {
     let mut env = vec![
         ("UV_LINK_MODE".to_owned(), "copy".to_owned()),
         ("GOTOOLCHAIN".to_owned(), "local".to_owned()),
     ];
     if let Some(domains) = domains {
-        if !allows_host(domains, "crates.io") {
-            env.push(("CARGO_NET_OFFLINE".to_owned(), "true".to_owned()));
-        }
-        if !allows_host(domains, "golang.org") {
-            env.push(("GOPROXY".to_owned(), "off".to_owned()));
-        }
+        env.extend(
+            OFFLINE
+                .iter()
+                .filter(|(registry, _, _)| !allows_host(domains, registry))
+                .map(|(_, name, value)| ((*name).to_owned(), (*value).to_owned())),
+        );
     }
     env
 }
@@ -602,6 +617,7 @@ impl Inner {
         if let Some(project) = project {
             // Its Bash commands work in the run's home, as the check does, and find what setup
             // left. `claude` itself keeps the real home folder, where its login and sessions are.
+            // A tool works offline only if the project doesn't let the builder reach its registry.
             let run_home = run_home(&workspace);
             home::copy(&self.project_home(project_id), &run_home)?;
             if let Some(file) = &command.env_file {
@@ -694,13 +710,14 @@ impl Inner {
         screenshots::empty(&workspace, &dir)?;
         let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
         // A setup before any agent that can write writes to the project's home. Anything else
-        // works on the run's own copy of it.
+        // works on the run's own copy of it, with no network at all, whatever the project lets its
+        // builder reach.
         let home_vars = if sandbox.shares_cache {
             home::create(&home)?;
             cache_env(&home, &real_home, None)
         } else {
             home::copy(&self.project_home(project_id), &home)?;
-            cache_env(&home, &real_home, Some(&project.allowed_domains))
+            cache_env(&home, &real_home, Some(&[]))
         };
         // After the project's own variables, as for an agent, so the folder is always Keel's.
         command
@@ -1768,38 +1785,55 @@ mod tests {
             .map(|(_, value)| value.as_str())
     }
 
+    /// What keeps each tool off the network, and the registry that decides it.
+    const KEPT_OFFLINE: [(&str, &str, &str); 6] = [
+        ("index.crates.io", "CARGO_NET_OFFLINE", "true"),
+        ("proxy.golang.org", "GOPROXY", "off"),
+        ("registry.npmjs.org", "npm_config_offline", "true"),
+        ("registry.npmjs.org", "pnpm_config_offline", "true"),
+        ("pypi.org", "PIP_NO_INDEX", "1"),
+        ("pypi.org", "UV_OFFLINE", "1"),
+    ];
+
     #[test]
-    fn without_crates_io_cargo_and_go_work_offline() {
+    fn with_no_way_to_a_registry_each_tool_works_offline() {
         let env = cache_env(Path::new("/w/.keel-cache/home"), Path::new("/u"), Some(&[]));
         assert_eq!(var(&env, "HOME"), Some("/w/.keel-cache/home"));
         // Cargo and Go find what setup left in the home itself.
         assert_eq!(var(&env, "CARGO_HOME"), None);
         assert_eq!(var(&env, "GOPATH"), None);
-        assert_eq!(var(&env, "CARGO_NET_OFFLINE"), Some("true"));
-        assert_eq!(var(&env, "GOPROXY"), Some("off"));
+        for (_, name, value) in KEPT_OFFLINE {
+            assert_eq!(var(&env, name), Some(value), "{name}");
+        }
     }
 
     #[test]
-    fn a_project_that_allows_them_is_not_forced_offline() {
-        let domains = ["Index.crates.io".to_owned(), "proxy.golang.org".to_owned()];
+    fn a_project_that_allows_a_registry_is_not_forced_offline_for_it() {
+        let domains: Vec<String> = ["Index.crates.io", "proxy.golang.org", "*.npmjs.org"]
+            .map(str::to_owned)
+            .into();
         let env = cache_env(Path::new("/h"), Path::new("/u"), Some(&domains));
-        assert_eq!(var(&env, "CARGO_NET_OFFLINE"), None);
-        assert_eq!(var(&env, "GOPROXY"), None);
+        for (domain, name, value) in KEPT_OFFLINE {
+            let allowed = domain != "pypi.org";
+            assert_eq!(var(&env, name), (!allowed).then_some(value), "{name}");
+        }
         // A domain that merely ends in the same letters isn't it.
         let env = cache_env(
             Path::new("/h"),
             Path::new("/u"),
-            Some(&["notcrates.io".to_owned()]),
+            Some(&["notcrates.io".to_owned(), "notpypi.org".to_owned()]),
         );
         assert_eq!(var(&env, "CARGO_NET_OFFLINE"), Some("true"));
+        assert_eq!(var(&env, "UV_OFFLINE"), Some("1"));
     }
 
     #[test]
     fn setup_has_the_network_and_is_left_alone() {
         let env = cache_env(Path::new("/p/cache/home"), Path::new("/u"), None);
         assert_eq!(var(&env, "HOME"), Some("/p/cache/home"));
-        assert_eq!(var(&env, "CARGO_NET_OFFLINE"), None);
-        assert_eq!(var(&env, "GOPROXY"), None);
+        for (_, name, _) in KEPT_OFFLINE {
+            assert_eq!(var(&env, name), None, "{name}");
+        }
     }
 
     #[test]
