@@ -23,12 +23,14 @@ const PROJECT: Project = {
   env: [{ name: "DB_HOST", value: "{{socketDir:db}}" }],
   defaultWorkflow: "mine",
   sensitivePaths: ["billing/"],
+  allowLocalhost: true,
 };
-const NO_GUESS: Guess = { check: null, setup: null, from: [], setupOptions: [], checkOptions: [], fromCi: false, ciChecks: [], ciLeftOut: [] };
-const PNPM: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false, ciChecks: [], ciLeftOut: [] };
-const UV: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: ["uv.lock", "pyproject.toml"], setupOptions: ["--group stubs", "--group test"], checkOptions: [], fromCi: false, ciChecks: [], ciLeftOut: [] };
-const CI: Guess = { check: "zig build test", setup: "zig fetch && zig build", from: [".github/workflows/ci.yml"], setupOptions: [], checkOptions: [], fromCi: true, ciChecks: [], ciLeftOut: [] };
+const NO_GUESS: Guess = { check: null, setup: null, from: [], setupOptions: [], checkOptions: [], fromCi: false, localhost: false, ciChecks: [], ciLeftOut: [] };
+const PNPM: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false, localhost: false, ciChecks: [], ciLeftOut: [] };
+const UV: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: ["uv.lock", "pyproject.toml"], setupOptions: ["--group stubs", "--group test"], checkOptions: [], fromCi: false, localhost: false, ciChecks: [], ciLeftOut: [] };
+const CI: Guess = { check: "zig build test", setup: "zig fetch && zig build", from: [".github/workflows/ci.yml"], setupOptions: [], checkOptions: [], fromCi: true, localhost: false, ciChecks: [], ciLeftOut: [] };
 const UV_AND_CI: Guess = { ...UV, check: "uv run --frozen pytest && uv run --frozen ruff check . && uv run --frozen pyright", from: ["uv.lock", ".github/workflows/ci.yml"], ciChecks: ["uv run --frozen ruff check .", "uv run --frozen pyright"], ciLeftOut: [{ command: "semgrep ci", why: "offline" }, { command: "uv run mypy .", why: "mayFail" }] };
+const GRADLE: Guess = { check: "./gradlew test", setup: "./gradlew test --test-dry-run", from: ["build.gradle.kts", "gradlew"], setupOptions: [], checkOptions: [], fromCi: false, localhost: true, ciChecks: [], ciLeftOut: [] };
 const ACCOUNT = (login: string) => ({ login, active: false, ok: true, scopes: ["repo"] });
 
 interface Scene {
@@ -398,6 +400,50 @@ describe("the setup dialog", () => {
     });
   });
 
+  describe("opening localhost", () => {
+    const CLOSED = { ...PROJECT, allowLocalhost: false };
+    const box = () => document.querySelector<HTMLInputElement>('input[type="checkbox"]');
+
+    it("ticks it when the check can't run without it, and tries and saves the commands with it open", async () => {
+      await show({ project: CLOSED, guess: GRADLE, attempts: [{ id: "a", kind: "check", state: "succeeded", exitCode: 0, reason: null }] });
+      expect(page()).toContain(i18next.t("setup.localhost"));
+      expect(page()).toContain(i18next.t("setup.localhostWhy"));
+      expect(box()?.checked).toBe(true);
+      expect(called("project_update")).toEqual([]);
+
+      await click("Try it");
+      expect(called("project_try_check")[0].args.localhost).toBe(true);
+      await click("Save");
+      expect((called("project_update")[0].args.settings as Project).allowLocalhost).toBe(true);
+    });
+
+    it("leaves it closed when the person unticks it", async () => {
+      await show({ project: CLOSED, guess: GRADLE, attempts: [{ id: "a", kind: "check", state: "succeeded", exitCode: 0, reason: null }] });
+      await act(async () => box()?.click());
+      await settle();
+      await click("Try it");
+      expect(called("project_try_check")[0].args.localhost).toBe(false);
+      await click("Save");
+      expect((called("project_update")[0].args.settings as Project).allowLocalhost).toBe(false);
+    });
+
+    it("asks nothing when the project has it open already, or the check doesn't need it", async () => {
+      await show({ guess: GRADLE });
+      expect(box()).toBeNull();
+      expect(page()).not.toContain(i18next.t("setup.localhost"));
+      await click("Save");
+      expect((called("project_update")[0].args.settings as Project).allowLocalhost).toBe(true);
+
+      await act(async () => root.unmount());
+      root = createRoot(document.body.appendChild(document.createElement("div")));
+      calls = [];
+      await show({ project: CLOSED, guess: PNPM });
+      expect(page()).not.toContain(i18next.t("setup.localhost"));
+      await click("Save");
+      expect((called("project_update")[0].args.settings as Project).allowLocalhost).toBe(false);
+    });
+  });
+
   describe("trying it", () => {
     const check = (fields: Partial<Attempt>): Partial<Attempt> => ({ id: "a", kind: "check", state: "succeeded", exitCode: 0, reason: null, ...fields });
 
@@ -405,7 +451,7 @@ describe("the setup dialog", () => {
       await show({ guess: PNPM, attempts: [check({})], events: [{ seq: 1, attemptId: "a", at: "", kind: "checkResult", data: { stdout: "all good", stderr: "" } }] });
       await type(inputs()[0], "pnpm test:unit");
       await click("Try it");
-      expect(called("project_try_check")[0].args).toEqual({ projectId: "p1", setup: "pnpm install --frozen-lockfile", check: "pnpm test:unit", read: [], language: "en" });
+      expect(called("project_try_check")[0].args).toEqual({ projectId: "p1", setup: "pnpm install --frozen-lockfile", check: "pnpm test:unit", read: [], localhost: false, language: "en" });
       expect(called("project_update")).toEqual([]);
       expect(page()).toContain(i18next.t("setup.passed"));
 

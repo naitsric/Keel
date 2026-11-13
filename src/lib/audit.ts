@@ -115,6 +115,17 @@ export function filesChangedBy(attempts: { filesChanged: string[] | null; runFil
 export const touchesWorkflows = (files: string[]) => files.some((f) => f.startsWith(".github/workflows/"));
 
 /**
+ * Whether any of the run's steps had localhost open, from what each was given as it started: a check,
+ * or a builder's commands. Not the project's setting now, which may have changed since.
+ */
+export function localhostOpenIn(attempts: { settings: unknown }[]): boolean {
+  return attempts.some((attempt) => {
+    const settings = attempt.settings as { localhost?: unknown; sandbox?: { network?: { allowLocalBinding?: unknown } } } | null | undefined;
+    return settings?.localhost === true || settings?.sandbox?.network?.allowLocalBinding === true;
+  });
+}
+
+/**
  * The attempts whose final messages explain the run: every one that could change files, since after
  * rework there's one per round, and else the last worker.
  */

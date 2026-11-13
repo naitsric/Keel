@@ -1,8 +1,24 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
-import { errorText, needsSignIn, reasonText } from "./reason";
+import { errorText, needsProjectSettings, needsSignIn, reasonText } from "./reason";
 
 const t = (language: string) => i18next.getFixedT(language);
+
+describe("a check whose tests were refused localhost", () => {
+  const refused = { code: "checkFailed", exitCode: 1, localhostRefused: true };
+
+  it("says so and names the setting that opens it, in both languages", () => {
+    expect(reasonText(t("en"), refused)).toBe(`The check failed with code 1. Its tests tried to start or reach a server on localhost, which this project keeps closed. If they need to, turn on “${i18next.t("settings.localhost", { lng: "en" })}” in the project's settings.`);
+    expect(reasonText(t("es"), refused)).toBe(`La verificación falló con código 1. Sus pruebas intentaron levantar o usar un servidor en localhost, que este proyecto tiene cerrado. Si lo necesitan, activa «${i18next.t("settings.localhost", { lng: "es" })}» en los ajustes del proyecto.`);
+  });
+
+  it("is fixed in the project's settings, and any other failed check isn't", () => {
+    expect(needsProjectSettings(refused)).toBe(true);
+    expect(needsProjectSettings({ code: "checkFailed", exitCode: 1 })).toBe(false);
+    expect(needsProjectSettings({ code: "checkFailed", exitCode: 1, localhostRefused: false })).toBe(false);
+    expect(reasonText(t("en"), { code: "checkFailed", exitCode: 1 })).toBe("The check failed with code 1.");
+  });
+});
 
 describe("reasonText", () => {
   it("names the stuck command, in both languages", () => {

@@ -364,6 +364,23 @@ describe("the approval card", () => {
     expect(page()).toContain("ux: skipped");
   });
 
+  it("says when the run's tests and builder had localhost open, from what its steps ran with", async () => {
+    const open = i18next.t("run.localhostOpen");
+    const closedCheck = { ...check, settings: { network: "none", read: [], sockets: [], localhost: false } } as Attempt;
+    const openCheck = { ...check, settings: { network: "localhost only", read: [], sockets: [], localhost: true } } as Attempt;
+    const openBuilder = { ...builder(["calc.py"]), settings: { sandbox: { network: { allowedDomains: [], allowLocalBinding: true } } } } as Attempt;
+    show([builder(["calc.py"]), closedCheck, human], ["calc.py"]);
+    expect(page()).not.toContain(open);
+    show([builder(["calc.py"]), openCheck, human], ["calc.py"]);
+    expect(page()).toContain(open);
+    show([openBuilder, human], ["calc.py"]);
+    expect(page()).toContain(open);
+    await i18next.changeLanguage("es");
+    show([builder(["calc.py"]), openCheck, human], ["calc.py"]);
+    expect(page()).toContain(i18next.t("run.localhostOpen"));
+    expect(i18next.t("run.localhostOpen")).not.toBe(open);
+  });
+
   it("warns about workflow files even when the list of files is cut", () => {
     const files = [...Array.from({ length: 8 }, (_, i) => `f${i}.py`), ".github/workflows/ci.yml"];
     show([builder(files), human], files);

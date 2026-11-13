@@ -11,7 +11,7 @@ export const needsSetup = (project: Project) => !project.checkCommand || (Boolea
  * What to send when only these fields change. `project_update` replaces every field, so everything
  * else goes back as it came, including any field added later.
  */
-export const withSetup = (project: Project, change: Pick<ProjectSettings, "githubAccount" | "setupCommand" | "checkCommand"> & Partial<Pick<ProjectSettings, "allowedRead">>): ProjectSettings => ({ ...project, ...change });
+export const withSetup = (project: Project, change: Pick<ProjectSettings, "githubAccount" | "setupCommand" | "checkCommand"> & Partial<Pick<ProjectSettings, "allowedRead" | "allowLocalhost">>): ProjectSettings => ({ ...project, ...change });
 
 /** One way of writing each folder: with `~` for the home folder and no `/` at the end. */
 const sameFolder = (folder: string) => shortPath(folder.trim()).replace(/\/+$/, "");

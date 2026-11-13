@@ -87,6 +87,8 @@ export interface Project {
   defaultWorkflow: string | null;
   /** Too sensitive for a change to count as small, on top of what always is. */
   sensitivePaths: string[];
+  /** Its tests start servers on localhost, so its check and its builder's commands may reach anything there. */
+  allowLocalhost: boolean;
 }
 
 export interface ProjectSettings {
@@ -99,6 +101,7 @@ export interface ProjectSettings {
   env: EnvVar[];
   defaultWorkflow: string | null;
   sensitivePaths: string[];
+  allowLocalhost: boolean;
 }
 
 /** A folder in the home folder where programs a project's commands use are installed. */
@@ -119,6 +122,8 @@ export interface Guess {
   checkOptions: string[];
   /** It's what the project's CI runs, since nothing else here says how it installs and tests. */
   fromCi: boolean;
+  /** Its check can't run with localhost closed: its tool talks to the processes it starts there. */
+  localhost: boolean;
   /** What the check runs because the project's CI does, though nothing else here names it, as Keel runs it with no network. */
   ciChecks: string[];
   /** What else the CI checks, as it runs it, and why the check doesn't. */
@@ -803,7 +808,7 @@ export const api = {
   projectCiGap: (projectId: string) => invoke<CiGap>("project_ci_gap", { projectId }),
   projectToolFolders: (projectId: string, setup: string, check: string) => invoke<ToolFolder[]>("project_tool_folders", { projectId, setup, check }),
   /** `read` is the folders the commands may read on top of the project's, for this run only. */
-  projectTryCheck: (projectId: string, setup: string, check: string, read: string[], language: string) => invoke<string>("project_try_check", { projectId, setup, check, read, language }),
+  projectTryCheck: (projectId: string, setup: string, check: string, read: string[], localhost: boolean, language: string) => invoke<string>("project_try_check", { projectId, setup, check, read, localhost, language }),
   projectRemove: (projectId: string) => invoke<void>("project_remove", { projectId }),
   githubAccounts: () => invoke<GithubAccount[]>("github_accounts"),
   openGithubLogin: () => invoke<void>("open_github_login"),

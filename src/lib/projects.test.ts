@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Attempt, AttemptState, Guess, Project } from "./api";
 import { accountToSelect, checkOptionsLeft, commandNotFound, foldersToOffer, isListed, needsSetup, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withFolders, withSetup, withSetupOption } from "./projects";
 
-const project = (fields: Partial<Project>) => ({ id: "p", name: "demo", path: "/w", githubAccount: null, githubRepo: null, setupCommand: null, checkCommand: null, allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, sensitivePaths: [], ...fields }) as Project;
+const project = (fields: Partial<Project>) => ({ id: "p", name: "demo", path: "/w", githubAccount: null, githubRepo: null, setupCommand: null, checkCommand: null, allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, sensitivePaths: [], allowLocalhost: false, ...fields }) as Project;
 
 describe("whether a project still has setup to finish", () => {
   it("is done with a check and, on GitHub, an account", () => {
@@ -117,8 +117,8 @@ describe("a path as a person says it", () => {
 });
 
 describe("what the repo offers to add to a command", () => {
-  const uv: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: [], setupOptions: ["--group stubs", "--group test", "--group test-uv"], checkOptions: [], fromCi: false, ciChecks: [], ciLeftOut: [] };
-  const pnpm: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: [], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false, ciChecks: [], ciLeftOut: [] };
+  const uv: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: [], setupOptions: ["--group stubs", "--group test", "--group test-uv"], checkOptions: [], fromCi: false, localhost: false, ciChecks: [], ciLeftOut: [] };
+  const pnpm: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: [], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false, localhost: false, ciChecks: [], ciLeftOut: [] };
 
   it("leaves out what the command already has, as whole words", () => {
     expect(setupOptionsLeft("uv sync --frozen --group test", uv)).toEqual(["--group stubs", "--group test-uv"]);

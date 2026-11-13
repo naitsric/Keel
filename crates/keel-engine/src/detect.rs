@@ -32,6 +32,9 @@ pub struct Guess {
     pub check_options: Vec<String>,
     /// It's what the project's CI runs, since nothing else here says how it installs and tests.
     pub from_ci: bool,
+    /// Its check can't run with localhost closed, whatever its tests do: its tool talks to the
+    /// processes it starts there. For a person to open it.
+    pub localhost: bool,
     /// What the check runs because the project's CI does, though nothing else here names it, as
     /// Keel runs it with no network.
     pub ci_checks: Vec<String>,
@@ -96,6 +99,7 @@ struct Stack {
     from: Vec<String>,
     setup_options: Vec<String>,
     check_options: Vec<String>,
+    localhost: bool,
 }
 
 /// Regular files only, so a link or a pipe in the repo can't make this hang or read elsewhere.
@@ -709,11 +713,17 @@ fn with_wrapper(root: &Path, manifest: &str, wrapper: &str, tool: &str) -> (Stri
     }
 }
 
+/// `dependency:go-offline` leaves out what Surefire runs the tests with, which it downloads only
+/// once it runs them. So setup runs them too, with a filter no test can match: it names a method,
+/// so every class is looked at and Surefire gets what it needs, and no method has `-` in its name.
 fn maven(root: &Path) -> Option<Stack> {
     is_file(root, "pom.xml").then(|| {
         let (tool, from) = with_wrapper(root, "pom.xml", "mvnw", "mvn");
         Stack {
-            setup: Some(format!("{tool} dependency:go-offline")),
+            setup: Some(format!(
+                "{tool} dependency:go-offline test -Dtest='#keel-setup-runs-no-tests' \
+                 -Dsurefire.failIfNoSpecifiedTests=false"
+            )),
             check: Some(format!("{tool} test")),
             from,
             ..Stack::default()
@@ -721,7 +731,21 @@ fn maven(root: &Path) -> Option<Stack> {
     })
 }
 
-/// `testClasses` compiles the code and its tests, which downloads what both need.
+/// The Gradle a wrapper downloads, as `(major, minor)`, from the name of what it downloads.
+fn wrapper_version(root: &Path) -> Option<(u32, u32)> {
+    let properties = read(root, "gradle/wrapper/gradle-wrapper.properties")?;
+    let url = properties
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("distributionUrl="))?;
+    let name = url.rsplit('/').next()?.strip_prefix("gradle-")?;
+    let mut parts = name.split(['.', '-']);
+    Some((parts.next()?.parse().ok()?, parts.next()?.parse().ok()?))
+}
+
+/// A dry run of the tests compiles the code and its tests and resolves what they run with, which
+/// `testClasses` leaves out, without running any. It came in Gradle 8.3, so an older wrapper, or
+/// one whose version doesn't show, gets `testClasses`. Gradle talks to its own processes on
+/// localhost, so its check can't run without it.
 fn gradle(root: &Path) -> Option<Stack> {
     let build = [
         "build.gradle.kts",
@@ -732,10 +756,17 @@ fn gradle(root: &Path) -> Option<Stack> {
     .into_iter()
     .find(|name| is_file(root, name))?;
     let (tool, from) = with_wrapper(root, build, "gradlew", "gradle");
+    let dry_run =
+        tool == "gradle" || wrapper_version(root).is_some_and(|version| version >= (8, 3));
     Some(Stack {
-        setup: Some(format!("{tool} testClasses")),
+        setup: Some(if dry_run {
+            format!("{tool} test --test-dry-run")
+        } else {
+            format!("{tool} testClasses")
+        }),
         check: Some(format!("{tool} test")),
         from,
+        localhost: true,
         ..Stack::default()
     })
 }
@@ -840,14 +871,15 @@ fn dotnet(root: &Path) -> Option<Stack> {
     })
 }
 
-/// `swift test` fails on a package with no test target.
+/// `swift test` fails on a package with no test target. SwiftPM runs the manifest in a sandbox of
+/// its own, which macOS won't start inside the step's, and the step's is there anyway.
 fn swift(root: &Path) -> Option<Stack> {
     let manifest = read(root, "Package.swift")?;
     Some(Stack {
-        setup: Some("swift package resolve".to_owned()),
+        setup: Some("swift package resolve --disable-sandbox".to_owned()),
         check: manifest
             .contains(".testTarget(")
-            .then(|| "swift test".to_owned()),
+            .then(|| "swift test --disable-sandbox".to_owned()),
         from: vec!["Package.swift".to_owned()],
         ..Stack::default()
     })
@@ -882,15 +914,29 @@ fn elixir(root: &Path) -> Option<Stack> {
     })
 }
 
-/// Commands chained so that each has to pass. A command with a `#` or a new line in it is left
+/// Commands chained so that each has to pass. A command with a comment or a new line in it is left
 /// out: under `sh -c` it could turn every command after it into a comment, or run without having
 /// to pass.
 fn chained(parts: Vec<String>) -> Option<String> {
     let parts: Vec<String> = parts
         .into_iter()
-        .filter(|part| !part.trim().is_empty() && !part.contains(['#', '\n']))
+        .filter(|part| !part.trim().is_empty() && !part.contains('\n') && !has_comment(part))
         .collect();
     (!parts.is_empty()).then(|| parts.join(" && "))
+}
+
+/// Whether `sh` reads the rest of `command` as a comment: a `#` that starts a word, at the start or
+/// after a blank or an operator. One inside a word is the word's, as in Maven's
+/// `-Dtest='#method'`. A `#` in quotes after a blank counts too, which only leaves out more.
+fn has_comment(command: &str) -> bool {
+    let mut before: Option<char> = None;
+    for c in command.chars() {
+        if c == '#' && before.is_none_or(|b| b.is_whitespace() || ";&|()<>".contains(b)) {
+            return true;
+        }
+        before = Some(c);
+    }
+    false
 }
 
 /// A Makefile's `test` target is what the project itself calls testing, so it wins. Every stack found
@@ -928,6 +974,7 @@ pub fn guess(root: &Path) -> Guess {
     // With a single stack and no Makefile its check is the guess itself, or what it already offers.
     let offer_checks = stacks.len() > 1 || makefile.is_some();
     guess.setup = setup;
+    guess.localhost = stacks.iter().any(|stack| stack.localhost);
     if guess.check.is_none() {
         guess.check = check;
     }
@@ -999,6 +1046,26 @@ mod tests {
         assert_eq!(
             chained(parts(&["make test", "cargo test"])),
             Some("make test && cargo test".to_owned())
+        );
+        // A `#` that starts a word, after a blank or an operator, starts a comment.
+        for hides in [
+            "make test;# x",
+            "make test&&#x",
+            "make test |#x",
+            "(#x)",
+            "a\t#b",
+        ] {
+            assert_eq!(
+                chained(parts(&[hides, "cargo test"])),
+                Some("cargo test".to_owned()),
+                "{hides}"
+            );
+        }
+        // One inside a word is the word's, as Maven's filter on a test method is.
+        let maven = "mvn test -Dtest='#keel-setup-runs-no-tests'";
+        assert_eq!(
+            chained(parts(&[maven, "echo a#b"])),
+            Some(format!("{maven} && echo a#b"))
         );
     }
 
@@ -1447,32 +1514,69 @@ mod tests {
         );
     }
 
+    /// Setup has to leave all a check needs. What runs the tests comes only once they run, so
+    /// Maven's setup runs them with a filter no test matches, and Gradle's pretends to.
     #[test]
     fn maven_and_gradle_use_the_wrapper_they_bring() {
+        let maven_setup = |tool: &str| {
+            format!(
+                "{tool} dependency:go-offline test -Dtest='#keel-setup-runs-no-tests' \
+                 -Dsurefire.failIfNoSpecifiedTests=false"
+            )
+        };
         assert_eq!(
             found(&[("pom.xml", "<project/>")]),
-            both("mvn test", "mvn dependency:go-offline")
+            both("mvn test", &maven_setup("mvn"))
         );
         let maven = guess(repo(&[("pom.xml", "<project/>"), ("mvnw", "#!/bin/sh\n")]).path());
         assert_eq!(maven.check.as_deref(), Some("./mvnw test"));
-        assert_eq!(maven.setup.as_deref(), Some("./mvnw dependency:go-offline"));
+        assert_eq!(maven.setup, Some(maven_setup("./mvnw")));
         assert_eq!(maven.from, ["pom.xml", "mvnw"]);
+        assert!(!maven.localhost);
 
+        let gradle = guess(repo(&[("build.gradle", "")]).path());
         assert_eq!(
-            found(&[("build.gradle", "")]),
-            both("gradle test", "gradle testClasses")
+            (gradle.check, gradle.setup),
+            both("gradle test", "gradle test --test-dry-run")
         );
-        let gradle = guess(
-            repo(&[
-                ("settings.gradle.kts", ""),
-                ("build.gradle.kts", ""),
-                ("gradlew", "#!/bin/sh\n"),
-            ])
-            .path(),
-        );
+        // Gradle talks to the processes it starts on localhost, so its check needs it open.
+        assert!(gradle.localhost);
+        let wrapper = |version: &str| {
+            guess(
+                repo(&[
+                    ("settings.gradle.kts", ""),
+                    ("build.gradle.kts", ""),
+                    ("gradlew", "#!/bin/sh\n"),
+                    (
+                        "gradle/wrapper/gradle-wrapper.properties",
+                        &format!(
+                            "distributionUrl=https\\://services.gradle.org/distributions/gradle-{version}-bin.zip\n"
+                        ),
+                    ),
+                ])
+                .path(),
+            )
+        };
+        let gradle = wrapper("9.9.0");
         assert_eq!(gradle.check.as_deref(), Some("./gradlew test"));
-        assert_eq!(gradle.setup.as_deref(), Some("./gradlew testClasses"));
+        assert_eq!(
+            gradle.setup.as_deref(),
+            Some("./gradlew test --test-dry-run")
+        );
         assert_eq!(gradle.from, ["build.gradle.kts", "gradlew"]);
+        assert!(gradle.localhost);
+        assert_eq!(
+            wrapper("8.3").setup.as_deref(),
+            Some("./gradlew test --test-dry-run")
+        );
+        // Before 8.3 there was no dry run, and it would stop at the option.
+        for old in ["8.2.1", "7.6", "bad"] {
+            assert_eq!(
+                wrapper(old).setup.as_deref(),
+                Some("./gradlew testClasses"),
+                "{old}"
+            );
+        }
     }
 
     fn gem_lock(gems: &str) -> String {
@@ -1565,16 +1669,21 @@ mod tests {
         assert_eq!(found(&[("a b.sln", "")]), (None, None));
     }
 
+    /// SwiftPM runs a package's manifest in a sandbox of its own, which macOS won't start inside
+    /// the step's.
     #[test]
     fn swift_tests_only_a_package_with_test_targets() {
         let package = r#"let package = Package(name: "A", targets: [.target(name: "A"), .testTarget(name: "ATests")])"#;
         assert_eq!(
             found(&[("Package.swift", package)]),
-            both("swift test", "swift package resolve")
+            both(
+                "swift test --disable-sandbox",
+                "swift package resolve --disable-sandbox"
+            )
         );
         assert_eq!(
             found(&[("Package.swift", r#"let package = Package(name: "A")"#)]),
-            setup_only("swift package resolve")
+            setup_only("swift package resolve --disable-sandbox")
         );
     }
 
@@ -1673,7 +1782,11 @@ mod tests {
         );
         assert_eq!(
             guess.setup.as_deref(),
-            Some("pnpm install --frozen-lockfile && mvn dependency:go-offline && mix deps.get")
+            Some(
+                "pnpm install --frozen-lockfile && mvn dependency:go-offline test \
+                 -Dtest='#keel-setup-runs-no-tests' -Dsurefire.failIfNoSpecifiedTests=false && \
+                 mix deps.get"
+            )
         );
         assert_eq!(
             guess.check.as_deref(),

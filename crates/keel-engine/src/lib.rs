@@ -8,6 +8,7 @@ mod detect;
 mod diffs;
 mod git;
 mod joint;
+mod localhost;
 mod notes;
 mod project_commands;
 mod project_proposals;
@@ -599,6 +600,7 @@ impl Engine {
             env: Vec::new(),
             default_workflow: None,
             sensitive_paths: Vec::new(),
+            allow_localhost: false,
         };
         self.inner.store.add_project(&project)?;
         Ok((project, AddOutcome::New))
@@ -693,6 +695,20 @@ impl Engine {
         read: &[String],
         language: &str,
     ) -> Result<String> {
+        self.try_check_opening(project_id, setup, check, read, false, language)
+    }
+
+    /// `try_check_reading`, and with localhost open to the check if `localhost`, as the person is
+    /// about to open it to the project. Only this run gets it, and its setup never does.
+    pub fn try_check_opening(
+        &self,
+        project_id: &str,
+        setup: &str,
+        check: &str,
+        read: &[String],
+        localhost: bool,
+        language: &str,
+    ) -> Result<String> {
         let (setup, check) = (setup.trim(), check.trim());
         if check.is_empty() {
             return Err(Error::Blocked(Reason::InvalidSetting {
@@ -741,6 +757,7 @@ impl Engine {
             },
             None,
             &read,
+            localhost,
         )
     }
 
@@ -892,15 +909,17 @@ impl Engine {
     /// `start_run`, for a caller that has already looked at the session or doesn't need one. A run
     /// for a card is linked to it from the moment it exists.
     fn start_run_in_session(&self, request: StartRun, card: Option<&str>) -> Result<String> {
-        self.start_run_reading(request, card, &[])
+        self.start_run_reading(request, card, &[], false)
     }
 
-    /// `start_run_in_session`, for a run whose steps may also read these folders.
+    /// `start_run_in_session`, for a run whose steps may also read these folders, and whose check
+    /// gets localhost if `localhost`.
     fn start_run_reading(
         &self,
         request: StartRun,
         card: Option<&str>,
         read: &[String],
+        localhost: bool,
     ) -> Result<String> {
         let project = self.inner.store.project(&request.project_id)?;
         self.check_can_run(&project, &request.workflow)?;
@@ -975,8 +994,8 @@ impl Engine {
         };
         match card {
             Some(card) => self.inner.store.add_run_for_card(&run, card)?,
-            None if read.is_empty() => self.inner.store.add_run(&run)?,
-            None => self.inner.store.add_run_reading(&run, read)?,
+            None if read.is_empty() && !localhost => self.inner.store.add_run(&run)?,
+            None => self.inner.store.add_run_reading(&run, read, localhost)?,
         }
         if let Err(error) = self.begin_run(&run_id) {
             // Whoever asked hears that it failed. Left open with nothing recorded, it would hold a
@@ -2236,7 +2255,10 @@ impl Inner {
         let (model, effort, tools, turns, budget, prompt, settings_json, raw_name) = match step {
             WorkflowStep::Agent(spec) => {
                 let text = match &resume {
-                    Some(Resume { prompt: Some(prompt), .. }) => prompt.clone(),
+                    Some(Resume {
+                        prompt: Some(prompt),
+                        ..
+                    }) => prompt.clone(),
                     Some(_) => RESUME_PROMPT.to_owned(),
                     None => self.agent_prompt(spec, &run)?,
                 };
@@ -2248,19 +2270,25 @@ impl Inner {
                         &read,
                         // Only steps that run commands get anywhere near a service.
                         &if can_edit {
-                            services::socket_dirs(&services::root_for(&project.id), &project.services)
+                            services::socket_dirs(
+                                &services::root_for(&project.id),
+                                &project.services,
+                            )
                         } else {
                             Vec::new()
                         },
                     ),
                     &self.read_only_dirs(run_id, &spec.role)?,
                 );
+                // Its Bash runs the project's tests, so it gets localhost when they do. A step
+                // without Bash has nothing to open it for.
+                if can_edit && project.allow_localhost {
+                    agent_settings = settings::with_local_binding(agent_settings);
+                }
                 // Builders changed files from Bash even when told to use Edit and Write, and an
                 // edit there that matches nothing says nothing. Only a step that can edit has Bash.
                 let git = locked(&self.tools).git.clone();
-                if can_edit
-                    && let (Some(program), Some(git)) = (&self.config.bash_hook, git)
-                {
+                if can_edit && let (Some(program), Some(git)) = (&self.config.bash_hook, git) {
                     // Beside the workspace, where the sandbox can't write. The hook's git runs in
                     // the sandbox Keel's own git gets on a workspace, and without it, no hook.
                     let state = dir.join("hook");
@@ -2308,27 +2336,42 @@ impl Inner {
                 {
                     // As the runner decides when it starts: after an agent that can write, what a
                     // check gets.
-                    let (network, home) =
-                        if runner::before_any_agent_could_write(&self.store.attempts_of_run(run_id)?) {
-                            ("internet, nothing local", "the project's")
-                        } else {
-                            ("none", "the run's own copy")
-                        };
+                    let (network, home) = if runner::before_any_agent_could_write(
+                        &self.store.attempts_of_run(run_id)?,
+                    ) {
+                        ("internet, nothing local", "the project's")
+                    } else {
+                        ("none", "the run's own copy")
+                    };
                     json!({ "network": network, "home": home, "read": read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string()
                 },
                 format!("{stem}.log"),
             ),
-            WorkflowStep::Check { run: command, .. } => (
+            // Whether localhost is open is decided here, and the check runs with what's written
+            // down, so its record and its approval say what it really had. A run a person is trying
+            // can open it before the project does.
+            WorkflowStep::Check { run: command, .. } => {
+                let localhost = project.allow_localhost || run.extra_localhost;
+                (
                 String::new(),
                 None,
                 "check".to_owned(),
                 None,
                 None,
                 command.clone(),
-                json!({ "network": "none", "read": read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string(),
+                json!({
+                    "network": if localhost { "localhost only" } else { "none" },
+                    "localhost": localhost,
+                    "read": read,
+                    "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services),
+                })
+                .to_string(),
                 format!("{stem}.log"),
-            ),
-            WorkflowStep::Parallel { .. } | WorkflowStep::Approval { .. } | WorkflowStep::Deliver { .. } => (
+            )
+            }
+            WorkflowStep::Parallel { .. }
+            | WorkflowStep::Approval { .. }
+            | WorkflowStep::Deliver { .. } => (
                 String::new(),
                 None,
                 "none".to_owned(),

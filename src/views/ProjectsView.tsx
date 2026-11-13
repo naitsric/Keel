@@ -84,6 +84,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
   const [env, setEnv] = useState(project.env.map((v) => `${v.name}=${v.value}`).join("\n"));
   const [workflow, setWorkflow] = useState(project.defaultWorkflow ?? FULL_WORKFLOW);
   const [sensitive, setSensitive] = useState(project.sensitivePaths.join("\n"));
+  const [localhost, setLocalhost] = useState(project.allowLocalhost);
   const [workflows, setWorkflows] = useState<Workflow[] | null>(null);
   const [ciGap, setCiGap] = useState<CiGap | null>(null);
   const [status, setStatus] = useState<GithubStatus | null>(null);
@@ -171,6 +172,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
         env: parsed.env,
         defaultWorkflow: workflow === FULL_WORKFLOW ? null : workflow,
         sensitivePaths: lines(sensitive),
+        allowLocalhost: localhost,
       });
       await refreshOverview();
       onSaved();
@@ -329,6 +331,13 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
               <FolderOffers folders={offered} onAdd={(folder) => setPaths(withFolders(lines(paths), [folder]).join("\n"))} />
             </div>
           </div>
+          <label className="flex items-start gap-2">
+            <input type="checkbox" className="mt-0.5" checked={localhost} onChange={(e) => setLocalhost(e.target.checked)} />
+            <span className="min-w-0">
+              <span className="block text-[12px] font-medium text-muted">{t("settings.localhost")}</span>
+              <span className="mt-0.5 block text-[11.5px] text-subtle">{t("settings.localhostHint")}</span>
+            </span>
+          </label>
           <Field label={t("settings.sensitive")} hint={t("settings.sensitiveHint")}>
             <textarea rows={3} value={sensitive} onChange={(e) => setSensitive(e.target.value)} className={`${inputClass} resize-y font-mono`} />
           </Field>

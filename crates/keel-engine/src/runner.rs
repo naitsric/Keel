@@ -20,8 +20,8 @@ use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
 use crate::specs::{self, Verdict};
 use crate::{
-    Error, Inner, Result, Resume, Turn, brain, joint, locked, notes, prompts, screenshots, sizing,
-    skipped_tests, verification, workflows,
+    Error, Inner, Result, Resume, Turn, brain, joint, localhost, locked, notes, prompts,
+    screenshots, sizing, skipped_tests, verification, workflows,
 };
 
 /// Tool output kept in the database. The raw file always has all of it.
@@ -58,6 +58,8 @@ pub(crate) struct Monitor {
     result: Option<ResultEvent>,
     /// Stops the step's services when dropped.
     services: Option<ServiceSet>,
+    /// A check that ran with localhost open.
+    localhost_open: bool,
 }
 
 impl Monitor {
@@ -86,6 +88,7 @@ impl Monitor {
             block: None,
             result: None,
             services: None,
+            localhost_open: opens_localhost(attempt),
         }
     }
 }
@@ -103,7 +106,7 @@ fn allows_host(domains: &[String], host: &str) -> bool {
 /// minute with npm and pnpm. With it, the command fails at once. Variables and not files, so
 /// nothing is written in the home the builder and the check share, and a project's own variables
 /// still win.
-const OFFLINE: [(&str, &str, &str); 6] = [
+const OFFLINE: [(&str, &str, &str); 7] = [
     ("crates.io", "CARGO_NET_OFFLINE", "true"),
     ("golang.org", "GOPROXY", "off"),
     ("npmjs.org", "npm_config_offline", "true"),
@@ -111,6 +114,8 @@ const OFFLINE: [(&str, &str, &str); 6] = [
     ("npmjs.org", "pnpm_config_offline", "true"),
     ("pypi.org", "PIP_NO_INDEX", "1"),
     ("pypi.org", "UV_OFFLINE", "1"),
+    // Maven 3.9 on. Maven Central is repo.maven.apache.org.
+    ("maven.apache.org", "MAVEN_ARGS", "--offline"),
 ];
 
 /// What a setup or check command runs with: the home it works in (see `home`), and the little Keel
@@ -125,16 +130,39 @@ fn cache_env(
     env
 }
 
-/// uv copies into `.venv` rather than linking it to its cache, and Go doesn't fetch another
-/// toolchain. `domains` are those the step may reach, or `None` when it has the whole network (a
-/// setup before any agent that can write). Each tool whose registry isn't among them works offline
-/// (see `OFFLINE`).
+/// What each tool is told in every step. A run keeps its copy of the repo from setup to its check,
+/// while the check works on a copy of the home, at another path, so what a tool installs with
+/// paths in it goes in the repo, as pip's and uv's `.venv` does.
+const SETTINGS: [(&str, &str); 5] = [
+    // uv copies into `.venv` rather than linking it to its cache.
+    ("UV_LINK_MODE", "copy"),
+    // Go doesn't fetch another toolchain.
+    ("GOTOOLCHAIN", "local"),
+    // Poetry's environment in the home has programs that name the project's home.
+    ("POETRY_VIRTUALENVS_IN_PROJECT", "true"),
+    // Bundler would install in Ruby's own folder, which no step can write to.
+    ("BUNDLE_PATH", ".bundle"),
+    // Gradle's daemon outlives the step, out of its process group, for hours. Without it, a
+    // build's process ends with the build.
+    ("GRADLE_OPTS", "-Dorg.gradle.daemon=false"),
+];
+
+/// Java reaches localhost on IPv4-mapped addresses (`::ffff:127.0.0.1`), which the sandbox doesn't
+/// count as localhost, so a check with localhost open still refused Gradle its own processes and a
+/// test its server. Not for setup: its rule that closes localhost misses those addresses just the
+/// same, and they're the only way Gradle's setup reaches the processes it starts.
+const JAVA_ON_IPV4: (&str, &str) = ("JDK_JAVA_OPTIONS", "-Djava.net.preferIPv4Stack=true");
+
+/// `SETTINGS`, and for a step with `domains`, those it may reach, rather than the whole network as
+/// a setup before any agent that can write has with `None`: Java on IPv4, and each tool whose
+/// registry isn't among them offline (see `OFFLINE`).
 fn tool_settings(domains: Option<&[String]>) -> Vec<(String, String)> {
-    let mut env = vec![
-        ("UV_LINK_MODE".to_owned(), "copy".to_owned()),
-        ("GOTOOLCHAIN".to_owned(), "local".to_owned()),
-    ];
+    let mut env: Vec<(String, String)> = SETTINGS
+        .iter()
+        .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+        .collect();
     if let Some(domains) = domains {
+        env.push((JAVA_ON_IPV4.0.to_owned(), JAVA_ON_IPV4.1.to_owned()));
         env.extend(
             OFFLINE
                 .iter()
@@ -221,6 +249,11 @@ pub(crate) fn readable(project: &keel_store::Project, run: &keel_store::Run) -> 
         }
     }
     read
+}
+
+/// Whether a check runs with localhost open, as was written down when it was set going.
+fn opens_localhost(attempt: &Attempt) -> bool {
+    attempt.kind == "check" && attempt.settings["localhost"] == json!(true)
 }
 
 fn runs_commands(kind: &str, tools: Option<ToolProfile>) -> bool {
@@ -677,12 +710,17 @@ impl Inner {
             std::fs::create_dir_all(&shared_cache)?;
         }
         let home = sandbox.home;
+        // Only a check, and only when it was set going with localhost open: a setup stays closed.
+        let profile = if opens_localhost(attempt) {
+            settings::with_localhost(sandbox.profile)
+        } else {
+            sandbox.profile
+        };
         let stem = format!("{}-{}", attempt.step_id, attempt.number);
         let prompt_file = dir.join(format!("{stem}.stdin"));
         let raw_path = PathBuf::from(&attempt.raw_path);
         let stderr_path = dir.join(format!("{stem}.stderr.txt"));
-        let profile =
-            settings::with_own_output(sandbox.profile, &[&prompt_file, &raw_path, &stderr_path]);
+        let profile = settings::with_own_output(profile, &[&prompt_file, &raw_path, &stderr_path]);
 
         // So the person sees why an install that needs the internet failed here.
         if is_setup && !sandbox.shares_cache {
@@ -1193,6 +1231,8 @@ impl Inner {
             }
         }
 
+        // A check that failed because its tests were refused localhost, which the project can open.
+        let mut localhost_refused = false;
         if m.kind == "check" || m.kind == "setup" {
             let stderr_path = m.raw_path.with_file_name(format!(
                 "{}.stderr.txt",
@@ -1211,6 +1251,12 @@ impl Inner {
                     "skipped_tests",
                     skipped.map_or(Value::Null, |count| Value::Integer(i64::from(count))),
                 ));
+                // With it open, what was refused was something else, and the setting can't help.
+                localhost_refused = exit_code != Some(0)
+                    && !m.localhost_open
+                    && [&output, &stderr]
+                        .iter()
+                        .any(|bytes| localhost::refused(&String::from_utf8_lossy(bytes)));
             }
             let tail = |bytes: &[u8]| {
                 String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(EVENT_TEXT_LIMIT)..])
@@ -1266,6 +1312,13 @@ impl Inner {
         let _ = store.patch_attempt(&m.attempt_id, &fields);
 
         let (mut state, mut reason) = classify(&m, exit_code, stop_requested, process_lost);
+        if let Some(Reason::CheckFailed {
+            localhost_refused: refused,
+            ..
+        }) = &mut reason
+        {
+            *refused = localhost_refused;
+        }
         // If Keel can't tell what the step changed, it can't say the step went well.
         if snapshot_failed && state == AttemptState::Succeeded {
             state = AttemptState::Failed;
@@ -1709,7 +1762,10 @@ fn classify(
             if m.kind == "setup" {
                 Reason::SetupFailed { exit_code }
             } else {
-                Reason::CheckFailed { exit_code }
+                Reason::CheckFailed {
+                    exit_code,
+                    localhost_refused: false,
+                }
             }
         };
         return match exit_code {
@@ -1786,13 +1842,14 @@ mod tests {
     }
 
     /// What keeps each tool off the network, and the registry that decides it.
-    const KEPT_OFFLINE: [(&str, &str, &str); 6] = [
+    const KEPT_OFFLINE: [(&str, &str, &str); 7] = [
         ("index.crates.io", "CARGO_NET_OFFLINE", "true"),
         ("proxy.golang.org", "GOPROXY", "off"),
         ("registry.npmjs.org", "npm_config_offline", "true"),
         ("registry.npmjs.org", "pnpm_config_offline", "true"),
         ("pypi.org", "PIP_NO_INDEX", "1"),
         ("pypi.org", "UV_OFFLINE", "1"),
+        ("repo.maven.apache.org", "MAVEN_ARGS", "--offline"),
     ];
 
     #[test]
@@ -1814,7 +1871,7 @@ mod tests {
             .into();
         let env = cache_env(Path::new("/h"), Path::new("/u"), Some(&domains));
         for (domain, name, value) in KEPT_OFFLINE {
-            let allowed = domain != "pypi.org";
+            let allowed = !["pypi.org", "repo.maven.apache.org"].contains(&domain);
             assert_eq!(var(&env, name), (!allowed).then_some(value), "{name}");
         }
         // A domain that merely ends in the same letters isn't it.
@@ -1825,6 +1882,32 @@ mod tests {
         );
         assert_eq!(var(&env, "CARGO_NET_OFFLINE"), Some("true"));
         assert_eq!(var(&env, "UV_OFFLINE"), Some("1"));
+    }
+
+    /// Each tool installs in the repo, which a run keeps from setup to its check, and not in a home
+    /// whose copy the check works on. And a tool leaves nothing running once its step ends.
+    #[test]
+    fn tools_install_in_the_repo_and_leave_nothing_running_in_every_step() {
+        for domains in [None, Some(&[][..])] {
+            let env = cache_env(Path::new("/h"), Path::new("/u"), domains);
+            assert_eq!(var(&env, "UV_LINK_MODE"), Some("copy"));
+            assert_eq!(var(&env, "POETRY_VIRTUALENVS_IN_PROJECT"), Some("true"));
+            assert_eq!(var(&env, "BUNDLE_PATH"), Some(".bundle"));
+            assert_eq!(var(&env, "GRADLE_OPTS"), Some("-Dorg.gradle.daemon=false"));
+        }
+    }
+
+    /// Java reaches localhost on IPv4-mapped addresses, which the sandbox doesn't count as
+    /// localhost, so a check with localhost open still refused Gradle its own processes.
+    #[test]
+    fn java_reaches_localhost_where_a_check_can_open_it() {
+        let check = cache_env(Path::new("/h"), Path::new("/u"), Some(&[]));
+        assert_eq!(
+            var(&check, "JDK_JAVA_OPTIONS"),
+            Some("-Djava.net.preferIPv4Stack=true")
+        );
+        let setup = cache_env(Path::new("/h"), Path::new("/u"), None);
+        assert_eq!(var(&setup, "JDK_JAVA_OPTIONS"), None);
     }
 
     #[test]

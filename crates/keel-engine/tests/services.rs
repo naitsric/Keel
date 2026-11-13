@@ -129,9 +129,37 @@ impl World {
                     env,
                     default_workflow: None,
                     sensitive_paths: vec![],
+                    allow_localhost: false,
                 },
             )
             .unwrap();
+    }
+
+    /// Opens localhost to the project's tests and builder, or closes it.
+    fn open_localhost(&self, open: bool) {
+        self.engine
+            .update_project(
+                &self.project_id,
+                &ProjectSettings {
+                    allow_localhost: open,
+                    ..ProjectSettings::default()
+                },
+            )
+            .unwrap();
+    }
+
+    /// The Seatbelt profile a step that Keel runs itself ran in.
+    fn profile(&self, attempt: &keel_store::Attempt) -> String {
+        self.store
+            .events(&attempt.id, 0)
+            .unwrap()
+            .into_iter()
+            .find(|e| e.kind == "started")
+            .unwrap()
+            .data["profile"]
+            .as_str()
+            .unwrap()
+            .to_owned()
     }
 
     fn run(&self, workflow: Vec<WorkflowStep>) -> String {
@@ -380,6 +408,169 @@ fn agents_that_run_commands_get_the_socket_and_read_only_ones_do_not() {
         .clone();
     assert_eq!(dirs.len(), 1);
     assert!(dirs[0].as_str().unwrap().ends_with("/db"));
+}
+
+/// A suite that starts a server on localhost, on a port the system picks, and talks to it.
+const OWN_SERVER: &str = "python3 - <<'EOF'
+import asyncio
+
+async def main():
+    server = await asyncio.start_server(lambda reader, writer: writer.close(), '127.0.0.1', 0)
+    port = server.sockets[0].getsockname()[1]
+    reader, writer = await asyncio.open_connection('127.0.0.1', port)
+    writer.close()
+    server.close()
+    print('answered')
+
+asyncio.run(main())
+EOF";
+
+fn setup(id: &str, run: &str) -> WorkflowStep {
+    WorkflowStep::Setup {
+        id: id.into(),
+        run: run.into(),
+    }
+}
+
+fn reason_of(attempt: &keel_store::Attempt) -> Reason {
+    serde_json::from_value(attempt.reason.clone().unwrap()).unwrap()
+}
+
+/// #123: localhost is closed to every step of a project that hasn't opened it, as it always was:
+/// the builder's Bash, the check and setup. The check that needed it says so, and one that failed
+/// for anything else doesn't.
+#[test]
+fn with_localhost_closed_no_step_can_start_a_server_and_the_check_says_why() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.run(vec![
+        agent("builder", ToolProfile::Build),
+        check("tests", OWN_SERVER),
+    ]);
+    let builder = w.wait_done(&run, "builder");
+    assert_eq!(builder.state, "succeeded");
+    assert_eq!(
+        builder
+            .settings
+            .pointer("/sandbox/network/allowLocalBinding"),
+        None
+    );
+    let log = std::fs::read_to_string(w.log.join("claude.log")).unwrap();
+    assert!(!log.contains("allowLocalBinding"), "{log}");
+    let tests = w.wait_done(&run, "tests");
+    assert_eq!(tests.state, "failed", "{}", w.check_output(&tests));
+    assert_eq!(
+        reason_of(&tests),
+        Reason::CheckFailed {
+            exit_code: Some(1),
+            localhost_refused: true
+        },
+        "{}",
+        w.check_output(&tests)
+    );
+    assert_eq!(tests.settings["localhost"], false);
+    let profile = w.profile(&tests);
+    assert!(profile.contains("(deny network*)"), "{profile}");
+    assert!(!profile.contains("network-bind"), "{profile}");
+
+    let run = w.run(vec![check("other", "echo 'no such table' >&2; exit 3")]);
+    let other = w.wait_done(&run, "other");
+    assert_eq!(
+        reason_of(&other),
+        Reason::CheckFailed {
+            exit_code: Some(3),
+            localhost_refused: false
+        }
+    );
+
+    let run = w.run(vec![setup("setup", OWN_SERVER)]);
+    let installing = w.wait_done(&run, "setup");
+    assert_eq!(
+        installing.state,
+        "failed",
+        "{}",
+        w.check_output(&installing)
+    );
+    assert_eq!(
+        reason_of(&installing),
+        Reason::SetupFailed { exit_code: Some(1) }
+    );
+}
+
+/// Open, the check runs a suite that starts its own server, and the builder's Bash can as well:
+/// Claude Code's own switch for it. Setup stays closed, and a step with no Bash has nothing to
+/// open.
+#[test]
+fn with_localhost_open_the_check_and_the_builder_get_it_and_setup_does_not() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.open_localhost(true);
+    let run = w.run(vec![
+        agent("reader", ToolProfile::ReadOnly),
+        agent("builder", ToolProfile::Build),
+        check("tests", OWN_SERVER),
+    ]);
+    let tests = w.wait_done(&run, "tests");
+    assert_eq!(tests.state, "succeeded", "{}", w.check_output(&tests));
+    assert!(w.check_output(&tests).contains("answered"));
+    assert_eq!(tests.settings["localhost"], true);
+    let profile = w.profile(&tests);
+    assert!(
+        profile.contains("(allow network-bind network-inbound (local ip \"localhost:*\"))"),
+        "{profile}"
+    );
+    let builder = w.wait_done(&run, "builder");
+    assert_eq!(
+        builder.settings["sandbox"]["network"]["allowLocalBinding"],
+        true
+    );
+    let reader = w.wait_done(&run, "reader");
+    assert_eq!(
+        reader
+            .settings
+            .pointer("/sandbox/network/allowLocalBinding"),
+        None
+    );
+    let log = std::fs::read_to_string(w.log.join("claude.log")).unwrap();
+    let mut sections = log.split("=== tools=").skip(1);
+    assert!(!sections.next().unwrap().contains("allowLocalBinding"));
+    assert!(
+        sections
+            .next()
+            .unwrap()
+            .contains("\"allowLocalBinding\":true")
+    );
+
+    // A check that fails while it's open isn't sent to open it.
+    let run = w.run(vec![check(
+        "prints",
+        "echo 'Error: listen EPERM: operation not permitted 127.0.0.1' >&2; exit 1",
+    )]);
+    assert_eq!(
+        reason_of(&w.wait_done(&run, "prints")),
+        Reason::CheckFailed {
+            exit_code: Some(1),
+            localhost_refused: false
+        }
+    );
+
+    let run = w.run(vec![setup("setup", OWN_SERVER)]);
+    let installing = w.wait_done(&run, "setup");
+    assert_eq!(
+        installing.state,
+        "failed",
+        "{}",
+        w.check_output(&installing)
+    );
+    let profile = w.profile(&installing);
+    assert!(!profile.contains("network-bind"), "{profile}");
+
+    // Closed again, the next run is closed.
+    w.open_localhost(false);
+    let run = w.run(vec![check("tests", OWN_SERVER)]);
+    let tests = w.wait_done(&run, "tests");
+    assert_eq!(tests.state, "failed");
+    assert_eq!(tests.settings["localhost"], false);
 }
 
 #[test]

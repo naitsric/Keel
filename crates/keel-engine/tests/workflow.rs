@@ -170,6 +170,7 @@ fn world() -> World {
                 env: vec![],
                 default_workflow: None,
                 sensitive_paths: vec![],
+                allow_localhost: false,
             },
         )
         .unwrap();
@@ -448,7 +449,13 @@ fn a_failed_check_stops_the_run_and_can_be_retried_alone() {
     let w = world();
     let run = w.start(Some("test -f approved-by-test || exit 3"));
     let check = w.wait(&run, "check", AttemptState::Failed);
-    assert_eq!(reason(&check), Reason::CheckFailed { exit_code: Some(3) });
+    assert_eq!(
+        reason(&check),
+        Reason::CheckFailed {
+            exit_code: Some(3),
+            localhost_refused: false
+        }
+    );
     assert_eq!(check.exit_code, Some(3));
     assert!(
         w.step(&run, "approval").is_none(),
@@ -575,7 +582,10 @@ fn a_retry_with_the_fixed_setup_runs_it_first_and_then_the_step_that_failed() {
     let first = w.store.attempt(&failed.id).unwrap();
     assert_eq!(
         serde_json::from_value::<Reason>(first.reason.unwrap()).unwrap(),
-        Reason::CheckFailed { exit_code: Some(1) }
+        Reason::CheckFailed {
+            exit_code: Some(1),
+            localhost_refused: false
+        }
     );
     assert_eq!(
         w.log("claude.log").matches("=== CLAUDE").count(),

@@ -252,6 +252,7 @@ fn main() {
                 env: vec![],
                 default_workflow: None,
                 sensitive_paths: vec![],
+                allow_localhost: false,
             },
         )
         .unwrap();

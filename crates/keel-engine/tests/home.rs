@@ -503,18 +503,20 @@ fn a_resumed_builder_runs_its_commands_in_the_same_home() {
 }
 
 /// The registries of cargo, Go, npm and pnpm, and pip and uv.
-const REGISTRIES: [&str; 4] = [
+const REGISTRIES: [&str; 5] = [
     "index.crates.io",
     "proxy.golang.org",
     "registry.npmjs.org",
     "pypi.org",
+    "repo.maven.apache.org",
 ];
 
-/// What a command is told about the network, tool by tool: cargo, Go, npm, pnpm, pip and uv.
+/// What a command is told about the network, tool by tool: cargo, Go, npm, pnpm, pip, uv and
+/// Maven.
 const OFFLINE: &str = "echo \"offline=[$CARGO_NET_OFFLINE][$GOPROXY][$npm_config_offline]\
-                       [$pnpm_config_offline][$PIP_NO_INDEX][$UV_OFFLINE]\"";
-const ALL_OFFLINE: &str = "[true][off][true][true][1][1]";
-const NONE_OFFLINE: &str = "[][][][][][]";
+                       [$pnpm_config_offline][$PIP_NO_INDEX][$UV_OFFLINE][$MAVEN_ARGS]\"";
+const ALL_OFFLINE: &str = "[true][off][true][true][1][1][--offline]";
+const NONE_OFFLINE: &str = "[][][][][][][]";
 
 /// #121: a check has no network, so every tool works offline there, even in a project whose builder
 /// may reach the registries. That builder is left as it was.
@@ -569,7 +571,7 @@ struct Download {
 const PACKAGE: &str = "{ \"name\": \"probe\", \"version\": \"1.0.0\", \"private\": true }\n";
 
 /// One for each tool of #121 that may be on a Mac, each in a folder of its own.
-const DOWNLOADS: [Download; 6] = [
+const DOWNLOADS: [Download; 8] = [
     Download {
         program: "npm",
         files: &[("npm/package.json", PACKAGE)],
@@ -622,6 +624,25 @@ const DOWNLOADS: [Download; 6] = [
         ],
         command: "cd cargo && cargo add memchr",
         says: "could not be found in registry index",
+    },
+    Download {
+        program: "go",
+        files: &[("go/go.mod", "module probe\n\ngo 1.22\n")],
+        command: "cd go && go get golang.org/x/text@v0.20.0",
+        says: "GOPROXY=off",
+    },
+    // #124: with an empty home it doesn't even have the plugin that would download it, so the
+    // plugin is named in full: by its prefix alone Maven would give up before it looked.
+    Download {
+        program: "mvn",
+        files: &[(
+            "maven/pom.xml",
+            "<project><modelVersion>4.0.0</modelVersion><groupId>p</groupId>\
+             <artifactId>probe</artifactId><version>1</version></project>\n",
+        )],
+        command: "cd maven && mvn -q org.apache.maven.plugins:maven-dependency-plugin:3.8.1:get \
+                  -Dartifact=org.apache.commons:commons-lang3:3.17.0",
+        says: "in offline mode",
     },
 ];
 

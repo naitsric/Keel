@@ -129,6 +129,20 @@ function OptionButtons({ options, onAdd }: { options: string[]; onAdd: (option: 
   );
 }
 
+/** Localhost, ticked when the check can't run with it closed, unless the person unticks it. */
+function LocalhostChoice({ chosen, onToggle }: { chosen: boolean; onToggle: (chosen: boolean) => void }) {
+  const { t } = useTranslation();
+  return (
+    <label className="flex items-start gap-2 text-[12px]">
+      <input type="checkbox" className="mt-0.5" checked={chosen} onChange={(e) => onToggle(e.target.checked)} />
+      <span className="min-w-0">
+        <span>{t("setup.localhost")}</span>
+        <span className="mt-0.5 block text-subtle">{t("setup.localhostWhy")}</span>
+      </span>
+    </label>
+  );
+}
+
 function MapLine({ map, onOpenBrain }: { map: MapStart; onOpenBrain: () => void }) {
   const { t } = useTranslation();
   if (map.status === "started") return <p className="text-[12px] text-muted">{t("setup.mapStarted")}</p>;
@@ -189,6 +203,10 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
   const [skipped, setSkipped] = useState<string[]>([]);
   const offered = foldersToOffer(found ?? [], info?.project.allowedRead ?? []);
   const chosen = offered.map((f) => f.folder).filter((folder) => !skipped.includes(folder));
+  // Localhost the same way, when the check can't run without it and the project keeps it closed.
+  const [localhostSkipped, setLocalhostSkipped] = useState(false);
+  const offerLocalhost = info !== null && info.guess.localhost && !info.project.allowLocalhost;
+  const openLocalhost = offerLocalhost && !localhostSkipped;
 
   const loadGithub = useCallback(async () => {
     const latest = ++latestRequest.current;
@@ -265,13 +283,17 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
     setSkipped((list) => (tick ? list.filter((f) => f !== folder) : [...list, folder]));
     forgetTrial();
   };
+  const toggleLocalhost = (tick: boolean) => {
+    setLocalhostSkipped(!tick);
+    forgetTrial();
+  };
 
   const tryIt = async () => {
     setError(null);
     forgetTrial();
     setTrying(true);
     try {
-      setRunId(await api.projectTryCheck(projectId, setup, check, chosen, i18n.language));
+      setRunId(await api.projectTryCheck(projectId, setup, check, chosen, openLocalhost, i18n.language));
       void refreshOverview();
     } catch (e) {
       setTrying(false);
@@ -290,7 +312,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
     if (!project) return;
     setBusy(true);
     try {
-      await api.projectUpdate(projectId, withSetup(project, { githubAccount: showAccounts ? selected : project.githubAccount, setupCommand: setup, checkCommand: check, allowedRead: withFolders(project.allowedRead, chosen) }));
+      await api.projectUpdate(projectId, withSetup(project, { githubAccount: showAccounts ? selected : project.githubAccount, setupCommand: setup, checkCommand: check, allowedRead: withFolders(project.allowedRead, chosen), allowLocalhost: project.allowLocalhost || openLocalhost }));
       await refreshOverview();
       closeSetup();
     } catch (e) {
@@ -393,6 +415,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
         {guess && <OptionButtons options={setupOptionsLeft(setup, guess)} onAdd={(option) => changeSetup(withSetupOption(setup, guess, option))} />}
       </div>
       <FolderChoices folders={offered} skipped={skipped} onToggle={toggleFolder} />
+      {offerLocalhost && <LocalhostChoice chosen={openLocalhost} onToggle={toggleLocalhost} />}
 
       <div className="space-y-0.5 text-[11.5px] leading-snug text-subtle">
         <p>

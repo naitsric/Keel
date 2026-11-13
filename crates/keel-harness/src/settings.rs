@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 pub const TOOL_DIRS: [&str; 2] = ["~/.local", "~/.claude/local"];
 
 /// `sockets` are the folders of the project's service sockets. Only these open up, and they're the
-/// only way a sandboxed command reaches a local server: TCP on localhost would expose all of them.
+/// only way a sandboxed command reaches a local server: TCP on localhost would expose all of them,
+/// so it stays closed unless the project opens it (see `with_local_binding`).
 pub fn step_settings(
     workspace: &Path,
     allowed_domains: &[String],
@@ -119,7 +120,8 @@ pub fn is_read_only(settings: &Value, folder: &str) -> bool {
 /// by an agent, so they get no more trust than the agent does. A setup that runs after an agent
 /// that can write gets this too, for the same reason. A Seatbelt profile for `sandbox-exec`: no
 /// home folder except what's listed, no network, and writes only here. An agent's Bash may reach
-/// the project's allowed domains, but this can't be held to a list of domains, so it gets none.
+/// the project's allowed domains, but this can't be held to a list of domains, so it gets none. A
+/// project can open localhost to a check (see `with_localhost`).
 pub fn check_profile(
     workspace: &Path,
     home: &Path,
@@ -174,7 +176,10 @@ fn profile(
         .collect();
     let workspace = quote(&workspace.to_string_lossy());
     // Git would run whatever these name, so nothing here gets to change them. Moving `.git` away
-    // and making another would get around that, so `.git` itself stays put as well.
+    // and making another would get around that, so `.git` itself stays put as well. So does the
+    // workspace, but asked whether it can be written to, it says yes: macOS answers that by the
+    // folder itself, Gradle won't build in a folder it's told is read-only, and the answer moves
+    // nothing.
     let git_rules = format!(
         "(literal \"{workspace}\") (literal \"{workspace}/.git\") (literal \"{workspace}/.git/config\") \
          (literal \"{workspace}/.git/config.worktree\") (literal \"{workspace}/.git/commondir\") \
@@ -218,8 +223,27 @@ fn profile(
          (deny file-write*)\n\
          (allow file-write* {write_rules} (subpath \"/private/tmp\") (subpath \"/private/var/folders\") (literal \"/dev/null\") (literal \"/dev/stdout\") (literal \"/dev/stderr\") (literal \"/dev/tty\") (regex #\"^/dev/fd/\"))\n\
          (deny file-write* {git_rules})\n\
+         (allow file-write-data (literal \"{workspace}\"))\n\
          (deny mach-lookup (global-name \"com.apple.SecurityServer\") (global-name \"com.apple.securityd\") (global-name \"com.apple.secd\") (global-name \"com.apple.securityd.xpc\"))\n"
     )
+}
+
+/// Opens localhost to a check whose project's tests start servers there (#123): they can listen on
+/// any port, a port the system picks included, and reach anything that listens, this Mac's own
+/// services too. Seatbelt can't open some ports and not others in a way a test can use, so it's all
+/// of them (#117). It takes all three, and only localhost: the internet and sockets stay closed. For
+/// a check only, never setup.
+pub fn with_localhost(profile: String) -> String {
+    format!(
+        "{profile}(allow network-bind network-inbound (local ip \"localhost:*\"))\n\
+         (allow network-outbound (remote ip \"localhost:*\"))\n"
+    )
+}
+
+/// The same for an agent's Bash: Claude Code's own switch, which is all of localhost or none.
+pub fn with_local_binding(mut settings: Value) -> Value {
+    settings["sandbox"]["network"]["allowLocalBinding"] = json!(true);
+    settings
 }
 
 /// A command's stdin, stdout and stderr are files beside its workspace. Node asks about them as it
@@ -412,5 +436,44 @@ mod tests {
                 .is_none(),
             "that would open every local port"
         );
+    }
+
+    /// #123: a project whose tests start servers on localhost opens all of it, to its check and to
+    /// its builder's Bash, and only then. Seatbelt can't open some ports and not others in a way a
+    /// test can use, and Claude Code only has the switch for all of it (#117).
+    #[test]
+    fn localhost_opens_only_for_a_project_whose_tests_start_servers() {
+        let workspace = Path::new("/h/w");
+        let closed = check_profile(workspace, Path::new("/h"), &[], &[]);
+        assert!(!closed.contains("network-bind"), "{closed}");
+        assert!(!closed.contains("localhost"), "{closed}");
+        let open = with_localhost(closed.clone());
+        assert!(open.starts_with(&closed), "nothing else changes");
+        // After the rule that closes the network, or it would take them back.
+        let deny = open.find("(deny network*)").unwrap();
+        for rule in [
+            "(allow network-bind network-inbound (local ip \"localhost:*\"))",
+            "(allow network-outbound (remote ip \"localhost:*\"))",
+        ] {
+            assert!(open.find(rule).is_some_and(|at| at > deny), "{rule}");
+        }
+
+        let builder = step_settings(workspace, &["pypi.org".into()], &[], &[]);
+        assert!(
+            builder["sandbox"]["network"]
+                .get("allowLocalBinding")
+                .is_none()
+        );
+        let opened = with_local_binding(builder.clone());
+        assert_eq!(opened["sandbox"]["network"]["allowLocalBinding"], true);
+        assert_eq!(
+            opened["sandbox"]["network"]["allowedDomains"],
+            json!(["pypi.org"])
+        );
+        assert_eq!(
+            opened["sandbox"]["filesystem"],
+            builder["sandbox"]["filesystem"]
+        );
+        assert_eq!(opened["permissions"], builder["permissions"]);
     }
 }

@@ -9,7 +9,7 @@ use std::process::Command;
 
 use keel_harness::clean_env;
 use keel_harness::home;
-use keel_harness::settings::{check_profile, setup_profile, with_own_output};
+use keel_harness::settings::{check_profile, setup_profile, with_localhost, with_own_output};
 use keel_harness::toolchains;
 
 struct Sandbox {
@@ -42,11 +42,18 @@ fn sandbox() -> Sandbox {
 }
 
 impl Sandbox {
+    fn profile(&self) -> String {
+        check_profile(self.workspace.path(), &self.home, &[], &[])
+    }
+
     fn run(&self, script: &str) -> std::process::Output {
-        let profile = check_profile(self.workspace.path(), &self.home, &[], &[]);
+        self.run_in(&self.profile(), script)
+    }
+
+    fn run_in(&self, profile: &str, script: &str) -> std::process::Output {
         // The environment a real check gets.
         Command::new("/usr/bin/sandbox-exec")
-            .args(["-p", &profile, "/bin/sh", "-c", script])
+            .args(["-p", profile, "/bin/sh", "-c", script])
             .current_dir(self.workspace.path())
             .env_clear()
             .envs(clean_env(&std::env::var("PATH").unwrap()))
@@ -139,6 +146,29 @@ fn a_check_cannot_change_what_git_will_run() {
 
     // Ordinary work still happens, and that's why the rest of `.git` stays open.
     assert!(s.allowed("git add -A && git commit -qm work && git branch other && git status"));
+}
+
+/// Gradle asks whether the folder it builds in can be written to, and won't build if it can't.
+/// macOS answers that by the rules for the folder itself, which a check can't move, remove or
+/// replace. It's told yes, and the folder still stays where it is.
+#[test]
+fn a_check_can_tell_its_workspace_is_writable_and_still_cannot_move_it() {
+    keel_harness::needs!(sandbox);
+    let s = sandbox();
+    // `test -w` asks as Java does, with access(2).
+    assert!(s.allowed("test -w ."), "the workspace says it's read-only");
+    let elsewhere = tempfile::tempdir().unwrap();
+    let away = elsewhere.path().join("moved");
+    for attack in [
+        format!("mv \"$PWD\" {}", quoted(&away)),
+        "rmdir \"$PWD\"".to_owned(),
+        "touch \"$PWD\"".to_owned(),
+        "xattr -w keel.probe 1 \"$PWD\"".to_owned(),
+    ] {
+        assert!(!s.allowed(&attack), "{attack}");
+    }
+    assert!(s.workspace.path().join("ok.txt").exists());
+    assert!(!away.exists());
 }
 
 #[test]
@@ -510,6 +540,71 @@ fn there_is_no_network() {
         "curl -fsS -m 3 -o /dev/null http://127.0.0.1:{port}/"
     )));
     assert!(!s.allowed("curl -fsS -m 4 -o /dev/null https://example.com"));
+}
+
+/// A server a test starts on localhost, on a port the system picks, and talks to: on 127.0.0.1
+/// and on ::1, as supertest and most suites do.
+const OWN_SERVER: &str = "python3 -c \"
+import socket
+for family, host in ((socket.AF_INET, '127.0.0.1'), (socket.AF_INET6, '::1')):
+    server = socket.socket(family)
+    server.bind((host, 0))
+    server.listen(1)
+    client = socket.create_connection(server.getsockname()[:2], 2)
+    peer, _ = server.accept()
+    client.sendall(b'hi')
+    assert peer.recv(2) == b'hi'
+print('answered')
+\"";
+
+/// #123: a project whose tests start servers on localhost opens it to its check. Closed, as every
+/// project is unless a person says so, the same suite is refused.
+#[test]
+fn with_localhost_open_a_check_can_start_a_server_and_reach_it() {
+    keel_harness::needs!(sandbox);
+    let s = sandbox();
+    refused(&s.run(OWN_SERVER), "localhost closed");
+    let open = s.run_in(&with_localhost(s.profile()), OWN_SERVER);
+    assert!(
+        open.status.success(),
+        "{}",
+        String::from_utf8_lossy(&open.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&open.stdout).trim(), "answered");
+}
+
+/// Open, it's all of localhost: whatever listens on this Mac outside the sandbox too, which is the
+/// risk the setting says it takes. Here that's a server this test starts. Nothing further opens.
+#[test]
+fn with_localhost_open_a_check_reaches_what_listens_on_this_mac_and_nothing_further() {
+    keel_harness::needs!(sandbox);
+    let s = sandbox();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let connect =
+        format!("python3 -c \"import socket; socket.create_connection(('127.0.0.1', {port}), 2)\"");
+    refused(&s.run(&connect), "localhost closed");
+    let open = with_localhost(s.profile());
+    let reached = s.run_in(&open, &connect);
+    assert!(
+        reached.status.success(),
+        "{}",
+        String::from_utf8_lossy(&reached.stderr)
+    );
+    assert!(
+        !s.run_in(&open, "curl -fsS -m 4 -o /dev/null https://example.com")
+            .status
+            .success(),
+        "the internet"
+    );
+    // Nor the sockets of this Mac, which only a project's services open.
+    let path = s.canary_dir.path().join("s.sock");
+    let _unix = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let unix = format!(
+        "python3 -c \"import socket; c = socket.socket(socket.AF_UNIX); c.connect('{}')\"",
+        path.display()
+    );
+    refused(&s.run_in(&open, &unix), "a unix socket");
 }
 
 /// Keel's own tests run inside a check when it works on itself, and those that need what it takes

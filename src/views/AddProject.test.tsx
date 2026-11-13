@@ -32,6 +32,7 @@ const project = (id: string, fields: Partial<Project> = {}): Project => ({
   env: [],
   defaultWorkflow: null,
   sensitivePaths: [],
+  allowLocalhost: false,
   ...fields,
 });
 const READY = project("ready", { checkCommand: "make test" });

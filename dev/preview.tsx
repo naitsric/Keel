@@ -278,11 +278,17 @@ const correctedEvents: AuditEvent[] = [
   { seq: 101, attemptId: "c1", at: at(2), kind: "finished", data: { state: "failed", reason: { code: "specNotUsable", problems: didNotFit } } },
   { seq: 102, attemptId: "c1", at: at(2), kind: "specCorrected", data: { problems: didNotFit } },
 ];
-const builtAttempt: Attempt = { ...attempt, state: "succeeded", reason: null, shaAfter: "28c696fd11223344556677889900aabbccddeeff", finishedAt: at(1), rawSha256: "9f2c", resultText: builtText, filesChanged: builtFiles, runFiles: builtFiles };
+// localhost=1 has the project open localhost to its tests (view=projects shows the setting on), and the
+// run's check and builder ran with it, which the approval says (flow=approval). localhost=refused has the
+// check fail because its tests were refused it, which says so and leads to the project: flow=failed, and
+// try=localhost in the setup dialog (dialog=setup&added=new&try=localhost&click=Try it).
+const localhostScene = params.get("localhost");
+const localhostOpen = localhostScene === "1";
+const builtAttempt: Attempt = { ...attempt, state: "succeeded", reason: null, shaAfter: "28c696fd11223344556677889900aabbccddeeff", finishedAt: at(1), rawSha256: "9f2c", resultText: builtText, filesChanged: builtFiles, runFiles: builtFiles, ...(localhostOpen ? { settings: { sandbox: { ...(attempt.settings as { sandbox: object }).sandbox, network: { allowedDomains: [], allowLocalBinding: true } } } } : {}) };
 // skipped=385 has the check pass with that many tests skipped, as its test tools said: the approval
 // (flow=approval), the run once delivered (flow=delivered) and the check's Output (node=check) say so.
 const skippedShown = params.get("skipped") === null ? null : Number(params.get("skipped"));
-const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", round, state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: skippedShown ? "cargo test --workspace" : "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12", skippedTests: skippedShown };
+const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "check", tools: "check", round, state: "succeeded", reason: null, exitCode: 0, modelActual: null, modelRequested: "", prompt: skippedShown ? "cargo test --workspace" : "make test", filesChanged: null, resultText: null, finishedAt: at(1), rawSha256: "ab12", skippedTests: skippedShown, settings: { network: localhostOpen ? "localhost only" : "none", localhost: localhostOpen, read: ["~/.nvm"], sockets: [] } };
 const approvalAttempt: Attempt = { ...attempt, id: "a3", stepId: "approval", kind: "approval", tools: "none", round, state: delivered ? "succeeded" : "waitingApproval", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, rawSha256: null, finishedAt: delivered ? at(0) : null };
 const prAttempt: Attempt = { ...attempt, id: "a4", stepId: "pull-request", kind: "deliver", tools: "none", state: "succeeded", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: "https://github.com/acme/app/pull/12", rawSha256: null, finishedAt: at(0) };
 const reworkAttempt: Attempt = { ...builtAttempt, id: "a1b", number: 2, round: 1, resultText: "I added the role check the security review asked for, in app/api.py.\n\nTests: `make test` passes." };
@@ -388,7 +394,7 @@ const ran = (stepId: string, s: AttemptState, fields: Partial<Attempt> = {}): At
 const setupRan = ran("setup", "succeeded", { kind: "setup", tools: "setup", modelRequested: "", modelActual: null });
 const specRan = ran("spec", "succeeded", { modelRequested: "opus", modelActual: "claude-opus-5-5", resultText: "1. add returns the sum.\n2. The tests pass." });
 const builderRan = (fields: Partial<Attempt> = {}) => ran("builder", "succeeded", { tools: "build", filesChanged: ["calc.py"], runFiles: ["calc.py"], resultText: "I fixed add in calc.py.", ...fields });
-const checkRan = (s: AttemptState = "succeeded", fields: Partial<Attempt> = {}) => ran("check", s, { kind: "check", tools: "check", modelRequested: "", modelActual: null, prompt: "make test", exitCode: s === "succeeded" ? 0 : 1, reason: s === "failed" ? { code: "checkFailed", exitCode: 1 } : null, ...fields });
+const checkRan = (s: AttemptState = "succeeded", fields: Partial<Attempt> = {}) => ran("check", s, { kind: "check", tools: "check", modelRequested: "", modelActual: null, prompt: "make test", exitCode: s === "succeeded" ? 0 : 1, reason: s === "failed" ? { code: "checkFailed", exitCode: 1, ...(localhostScene === "refused" ? { localhostRefused: true } : {}) } : null, ...fields });
 const reviewRan = (id: string, s: AttemptState, fields: Partial<Attempt> = {}) => ran(id, s, { role: "reviewer", reason: s === "skipped" ? { code: "noMatchingPaths", paths: ["**/*.tsx"] } : null, ...fields });
 const verdict = (v: "approved" | "changes") => ({ output: { verdict: v, findings: [], summary: v === "approved" ? "No problems." : "The endpoint skips the role check." } as unknown as Attempt["output"] });
 const decided = (decision: "approve" | "rework") => ran("approver", "succeeded", { role: "approver", modelRequested: "opus", modelActual: "claude-opus-5-5", output: { decision, risk: "medium", reasons: "The finding is real.", instructions: "Add the role check." } as unknown as Attempt["output"] });
@@ -620,7 +626,7 @@ const mcpOverview = () => {
 };
 
 let defaultWorkflow: string | null = params.get("defaultWorkflow");
-const demoProject: Project = { sensitivePaths: params.get("sensitive") === "1" ? ["billing/", "*.proto"] : [],  id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: noCheck ? null : "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.nvm"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }], defaultWorkflow };
+const demoProject: Project = { sensitivePaths: params.get("sensitive") === "1" ? ["billing/", "*.proto"] : [],  id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: noCheck ? null : "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.nvm"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }], defaultWorkflow, allowLocalhost: localhostOpen };
 // A second project on the board, with one card, to try the selector and coming back from a run.
 const otherProject: Project = { ...demoProject, id: "p2", name: "payments", path: "/Users/you/payments", services: [], env: [], defaultWorkflow: null };
 const projects = view === "board" || palette || params.get("drafts") === "1" ? [demoProject, otherProject] : [demoProject];
@@ -631,7 +637,7 @@ const projects = view === "board" || palette || params.get("drafts") === "1" ? [
 // accounts=one|several|readonly|none, gh=missing and repo=none are what GitHub has to say.
 // added=new|existing|restored says how it got here (with session=out or map=failed for a map that
 // didn't start), and leaving it out is reopening it from "Finish setup".
-// try=pass|fail|setupfail|notfound|running is how Try it ends, with click=Try it to press it.
+// try=pass|fail|setupfail|notfound|localhost|running is how Try it ends, with click=Try it to press it.
 // projects=mixed puts a project that needs setup beside one that doesn't. remove=refused refuses
 // removing, addError=1 refuses the folder, picker=cancel closes the picker, and history=1 with empty=1
 // keeps the runs of projects that are all gone.
@@ -658,7 +664,7 @@ const addedAnswer = (): { project: Project; outcome: string; map: unknown } => {
   const map = params.get("map") === "failed" ? { status: "notStarted", reason: { code: "gitMissing" } } : params.get("session") === "out" ? { status: "notStarted", reason: { code: "claudeLoggedOut" } } : { status: "started" };
   return { project: freshProject, outcome, map };
 };
-const tryOutput = { pass: { stdout: "> shop@1.0.0 test\n> vitest run\n\n ✓ 42 tests passed\n", stderr: "" }, fail: { stdout: " ✗ 1 test failed: checkout > applies the discount\n", stderr: "" }, setupfail: { stdout: "", stderr: "ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with \"frozen-lockfile\"\n" }, notfound: { stdout: "", stderr: "/bin/sh: pnpm: command not found\n" }, running: { stdout: "", stderr: "" } } as const;
+const tryOutput = { pass: { stdout: "> shop@1.0.0 test\n> vitest run\n\n ✓ 42 tests passed\n", stderr: "" }, fail: { stdout: " ✗ 1 test failed: checkout > applies the discount\n", stderr: "" }, setupfail: { stdout: "", stderr: "ERR_PNPM_OUTDATED_LOCKFILE  Cannot install with \"frozen-lockfile\"\n" }, notfound: { stdout: "", stderr: "/bin/sh: pnpm: command not found\n" }, localhost: { stdout: "✖ a server the test starts on localhost answers it (2.3ms)\n  Error: listen EPERM: operation not permitted 127.0.0.1\n      at Server.setupListenHandle [as _listen2] (node:net:2368:21)\nℹ tests 1\nℹ pass 0\nℹ fail 1\n", stderr: "" }, running: { stdout: "", stderr: "" } } as const;
 const tryAttempt = (id: string, kind: "setup" | "check", s: AttemptState, reason: Reason | null, exitCode: number | null): Attempt => ({ ...attempt, id, runId: "try1", stepId: kind === "check" ? "try-check" : "setup", kind, tools: kind, state: s, reason, exitCode, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, finishedAt: s === "running" ? null : at(0) });
 const tryAttempts = (): Attempt[] => {
   const setup = tryAttempt("try-setup", "setup", "succeeded", null, 0);
@@ -669,6 +675,8 @@ const tryAttempts = (): Attempt[] => {
       return [tryAttempt("try-setup", "setup", "failed", { code: "setupFailed", exitCode: 1 }, 1)];
     case "notfound":
       return [setup, tryAttempt("try-check", "check", "failed", { code: "checkFailed", exitCode: 127 }, 127)];
+    case "localhost":
+      return [setup, tryAttempt("try-check", "check", "failed", { code: "checkFailed", exitCode: 1, localhostRefused: true }, 1)];
     case "running":
       return [tryAttempt("try-setup", "setup", "running", null, null)];
     default:
