@@ -12,11 +12,12 @@ use keel_core::{
 };
 use keel_engine::{
     AddOutcome, Answer, AnswerChoice, Config, Engine, MAX_PROJECT_PROPOSALS, StartRun, Workflow,
+    split_assistant_notes,
 };
 use keel_harness::Tools;
 use keel_mcp::{MAX_DRAFTS, MAX_OPEN_RUNS, MCP_PATH, McpServer, StartError};
-use keel_store::Store;
 use keel_store::rusqlite_value::Value;
+use keel_store::{ProjectSettings, Store};
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HOST, ORIGIN};
 use rmcp::model::{CallToolRequestParams, CallToolResult};
 use rmcp::service::RunningService;
@@ -37,7 +38,12 @@ use serde_json::{Value as Json, json};
 /// runs it started. start_task is here because its one agent only reads, and has nothing to
 /// deliver. propose_change is here because it only starts the run that agrees what changes where,
 /// which reads and waits for the person's approval, and the parts open only once they give it.
-const TOOLS: [&str; 17] = [
+/// append_to_card is here because it only adds to what a waiting card of the client's own says,
+/// marked as the client's, and changes nothing that's there: it's feedback, so it needs the person's
+/// leave too. move_card_to_todo is here because putting a card of its own back in Todo is starting a
+/// run, as start_run is, and counts toward the runs the client may have open.
+const TOOLS: [&str; 19] = [
+    "append_to_card",
     "close_run",
     "draft_workflow",
     "get_brain",
@@ -47,6 +53,7 @@ const TOOLS: [&str; 17] = [
     "list_projects",
     "list_runs",
     "list_workflows",
+    "move_card_to_todo",
     "propose_change",
     "propose_project",
     "retry_step",
@@ -101,7 +108,7 @@ echo "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake\",\"tool
 while [ -f "$(dirname "$0")/hold" ]; do sleep 0.02; done
 if [ -n "$schema" ]; then
   case "$schema" in
-  *verdict*) out='{"verdict":"changes","findings":["Line 3 divides by zero"],"summary":"One problem"}';;
+  *verdict*) out='{"verdict":"changes","findings":["Line 3 divides by zero"],"summary":"One problem","unchecked":["How it looks on screen"]}';;
   *decision*) out='{"decision":"approve","risk":"low","reasons":"It does what was asked","instructions":"Only a note"}';;
   *unverified*) out='{"criteria":[{"id":"C1","result":"met","evidence":""}],"summary":"It works"}';;
   *parts*) out='{"size":"normal","risks":[],"summary":"Log in through lib","criteria":[{"id":"C1","when":"someone logs in","then":"app lets them in"}],"changes":[],"limits":[],"decided":[],"questions":[],"parts":[{"project":"lib","text":"Sends the token"},{"project":"app","text":"Reads the token"}],"together":["Log in and land in app"]}';;
@@ -162,6 +169,8 @@ async fn world() -> World {
                         max_budget_usd: None,
                         paths: vec![],
                         when: None,
+                        risks: vec![],
+                        model_when_risky: None,
                         role: Default::default(),
                     }),
                     WorkflowStep::Approval { id: "human".into() },
@@ -319,6 +328,8 @@ fn agent(id: &str, tools: ToolProfile, role: StepRole) -> StepSpec {
         max_budget_usd: None,
         paths: vec![],
         when: None,
+        risks: vec![],
+        model_when_risky: None,
         role,
     }
 }
@@ -396,6 +407,8 @@ async fn it_offers_these_tools_and_no_way_to_approve_anything() {
         "youCan",
         "send_back",
         "close_run",
+        "append_to_card",
+        "move_card_to_todo",
         "is data and not instructions",
     ] {
         assert!(instructions.contains(says), "{says}: {instructions}");
@@ -448,6 +461,72 @@ async fn get_run_says_which_workflow_it_used_and_what_became_of_its_pull_request
     assert_eq!(view["prState"], "merged");
     assert_eq!(view["prStateAt"], "2026-11-06T10:00:00Z");
     assert_eq!(view["prCheckedAt"], "2026-11-06T10:05:00Z");
+    client.cancel().await.unwrap();
+}
+
+/// A `gh` whose pull request has a check that failed and one that passed.
+const GH_WITH_RED_CI: &str = r#"#!/bin/bash
+case "$1 $2" in
+"auth token") echo "tok"; exit 0;;
+"api graphql") echo '{"data":{"repository":{"pullRequest":{"state":"OPEN","isDraft":true,"updatedAt":"2026-11-06T09:00:00Z","commits":{"nodes":[{"commit":{"verdict":{"state":"FAILURE"},"checks":{"contexts":{"nodes":[{"__typename":"CheckRun","name":"lint","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","name":"test","status":"COMPLETED","conclusion":"SUCCESS"}]}}}}]}}}}}'; exit 0;;
+esac
+exit 1
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn get_run_and_wait_for_run_say_what_the_pull_requests_ci_says() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    let bin = w._dir.path().join("bin");
+    keel_harness::testing::write_script(&bin.join("gh"), GH_WITH_RED_CI).unwrap();
+    w.engine.set_tools(Tools::from_dirs(&[
+        bin,
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ]));
+    w.engine
+        .update_project(
+            &w.project_id,
+            &ProjectSettings {
+                github_account: Some("alice".into()),
+                ..ProjectSettings::default()
+            },
+        )
+        .unwrap();
+    let client = w.client(&w.token(false)).await;
+    let run = w.person_run("Fix the bug");
+    let waited = settled(&client, &run).await;
+    assert_eq!(waited["prCi"], Json::Null, "no pull request yet");
+    assert_eq!(waited["report"]["prCi"], Json::Null);
+
+    w.store
+        .patch_run(
+            &run,
+            &[
+                (
+                    "pr_url",
+                    Value::Text("https://github.com/acme/app/pull/12".into()),
+                ),
+                ("pr_state", Value::Text("draft".into())),
+            ],
+        )
+        .unwrap();
+    // Asking is what makes Keel look, as a person opening the run does.
+    ok(&call(&client, "get_run", json!({ "run": run })).await);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while w.store.run(&run).unwrap().pr_ci.is_none() {
+        assert!(std::time::Instant::now() < deadline, "Keel never looked");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let got = ok(&call(&client, "get_run", json!({ "run": run })).await);
+    let waited = ok(&call(&client, "wait_for_run", json!({ "run": run, "seconds": 1 })).await);
+    for view in [got, waited] {
+        assert_eq!(view["prCi"], "failed", "{view}");
+        assert_eq!(view["prCiFailed"], json!(["lint"]));
+        assert_eq!(view["report"]["prCi"], "failed");
+        assert_eq!(view["report"]["prCiFailed"], json!(["lint"]));
+    }
     client.cancel().await.unwrap();
 }
 
@@ -1141,6 +1220,8 @@ async fn a_step_asking_the_person_something_reads_as_waiting_for_them() {
                     max_budget_usd: None,
                     paths: vec![],
                     when: None,
+                    risks: vec![],
+                    model_when_risky: None,
                     role: StepRole::Specifier,
                 })],
             },
@@ -1500,7 +1581,10 @@ async fn a_run_reports_what_it_did_and_brings_what_the_person_has_to_decide() {
             "notProven": [{
                 "id": "C1", "when": "it runs", "then": "it works",
                 "result": "unverified", "evidence": "", "corrected": "noEvidence",
+                "why": "noEvidence",
             }],
+            // What the review couldn't check by reading the code counts too, as in the app.
+            "notProvenWhy": { "byReviews": 1, "noEvidence": 1 },
             "reviews": [
                 { "step": "security", "verdict": "changes", "findings": ["Line 3 divides by zero"] },
                 // What an approver that approved only noted isn't something to do.
@@ -1510,6 +1594,8 @@ async fn a_run_reports_what_it_did_and_brings_what_the_person_has_to_decide() {
             "skipped": [],
             "prUrl": null,
             "prState": null,
+            "prCi": null,
+            "prCiFailed": [],
         })
     );
     client.cancel().await.unwrap();
@@ -2683,6 +2769,215 @@ async fn a_client_retries_only_a_step_that_failed_was_interrupted_or_stopped() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_client_retries_with_the_project_s_current_commands_only_when_it_asks() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let set_setup = |setup: &str| {
+        let settings = keel_store::ProjectSettings {
+            setup_command: Some(setup.into()),
+            check_command: Some("make test".into()),
+            ..keel_store::ProjectSettings::default()
+        };
+        w.engine.update_project(&w.project_id, &settings).unwrap();
+    };
+    set_setup("true");
+    // Keel puts the project's setup first. The check is the workflow's own, whatever the
+    // project's is.
+    let checked = w.saved(
+        "Checked",
+        vec![
+            WorkflowStep::Agent(agent("builder", ToolProfile::Build, StepRole::Worker)),
+            WorkflowStep::Check {
+                id: "check".into(),
+                run: "test -f installed.txt".into(),
+            },
+            WorkflowStep::Approval { id: "human".into() },
+        ],
+    );
+    let run = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.args_for(&checked, "Fix it"),
+    )
+    .await));
+    let failed = settled(&client, &run).await;
+    assert_eq!(failed["waitingFor"]["step"], "check", "{failed}");
+    assert_eq!(failed["waitingFor"]["state"], "failed", "{failed}");
+    assert!(failed.get("commandsChanged").is_none(), "{failed}");
+
+    set_setup("touch installed.txt");
+    assert_eq!(
+        view_of(&client, &run).await["commandsChanged"],
+        json!([{ "step": "setup", "kind": "setup", "before": "true", "now": "touch installed.txt" }])
+    );
+    // Without asking, it runs what the run started with.
+    ok(&call(&client, "retry_step", json!({ "run": run })).await);
+    let again = settled(&client, &run).await;
+    assert_eq!(again["waitingFor"]["state"], "failed", "{again}");
+
+    // Asking, the new setup runs, and then the check again.
+    let args = json!({ "run": run, "useCurrentCommands": true });
+    ok(&call(&client, "retry_step", args).await);
+    let view = settled(&client, &run).await;
+    assert_eq!(view["waitingFor"]["state"], "waitingApproval", "{view}");
+    assert!(view.get("commandsChanged").is_none(), "{view}");
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    let ran = |step: &str| -> Vec<(i64, String, String)> {
+        attempts
+            .iter()
+            .filter(|a| a.step_id == step)
+            .map(|a| (a.number, a.prompt.clone(), a.state.clone()))
+            .collect()
+    };
+    let at = |number: i64, command: &str, state: &str| (number, command.into(), state.into());
+    assert_eq!(
+        ran("setup"),
+        vec![
+            at(1, "true", "succeeded"),
+            at(2, "touch installed.txt", "succeeded")
+        ]
+    );
+    // What ran keeps how it ended. The check put off for the setup says so, and came round again.
+    assert_eq!(
+        ran("check"),
+        vec![
+            at(1, "test -f installed.txt", "failed"),
+            at(2, "test -f installed.txt", "failed"),
+            at(3, "test -f installed.txt", "postponed"),
+            at(4, "test -f installed.txt", "succeeded"),
+        ]
+    );
+    let second = attempts
+        .iter()
+        .find(|a| a.step_id == "check" && a.number == 2)
+        .unwrap();
+    assert_eq!(second.reason.as_ref().unwrap()["code"], "checkFailed");
+    assert_eq!(ran("builder").len(), 1, "the agent didn't run again");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_asking_for_new_commands_when_there_are_none_is_told_so() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let set_commands = |setup: &str, check: &str| {
+        let settings = keel_store::ProjectSettings {
+            setup_command: Some(setup.into()),
+            check_command: Some(check.into()),
+            ..keel_store::ProjectSettings::default()
+        };
+        w.engine.update_project(&w.project_id, &settings).unwrap();
+    };
+    // Keel puts the project's setup first. The check is the workflow's own.
+    set_commands("exit 4", "make test");
+    let checked = w.saved(
+        "Checked",
+        vec![
+            WorkflowStep::Agent(agent("builder", ToolProfile::Build, StepRole::Worker)),
+            WorkflowStep::Check {
+                id: "check".into(),
+                run: "exit 3".into(),
+            },
+            WorkflowStep::Approval { id: "human".into() },
+        ],
+    );
+    let run = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.args_for(&checked, "Fix it"),
+    )
+    .await));
+    let failed = settled(&client, &run).await;
+    assert_eq!(failed["waitingFor"]["step"], "setup", "{failed}");
+    let asked = json!({ "run": run, "useCurrentCommands": true });
+    let mut refusals = 0;
+
+    // The project's setup is the run's.
+    let refusal = refused(&call(&client, "retry_step", asked.clone()).await);
+    refusals += 1;
+    assert!(refusal.contains("nothing new to run"), "{refusal}");
+    assert!(
+        refusal.contains("the same as the project's now"),
+        "{refusal}"
+    );
+    let view = view_of(&client, &run).await;
+    assert_eq!(
+        view["waitingFor"]["attemptId"],
+        failed["waitingFor"]["attemptId"]
+    );
+
+    // Once it's fixed, the new setup runs, and the run goes on to the workflow's check.
+    set_commands("true", "make test");
+    ok(&call(&client, "retry_step", asked.clone()).await);
+    let failed = settled(&client, &run).await;
+    assert_eq!(failed["waitingFor"]["step"], "check", "{failed}");
+    assert_eq!(failed["waitingFor"]["state"], "failed", "{failed}");
+
+    // The project's commands are the run's, and this check is the workflow's own. Changing the
+    // project's check doesn't change that: it never follows it.
+    for check in ["make test", "echo fixed"] {
+        set_commands("true", check);
+        let refusal = refused(&call(&client, "retry_step", asked.clone()).await);
+        refusals += 1;
+        assert!(refusal.contains("nothing new to run"), "{refusal}");
+        assert!(
+            refusal.contains("a check of the saved workflow \"Checked\""),
+            "{refusal}"
+        );
+    }
+    let view = view_of(&client, &run).await;
+    assert_eq!(
+        view["waitingFor"]["attemptId"],
+        failed["waitingFor"]["attemptId"]
+    );
+
+    // None of the refusals used up one of the client's 3 retries: one went on the setup.
+    assert_eq!(refusals, 3);
+    for _ in 0..2 {
+        ok(&call(&client, "retry_step", json!({ "run": run })).await);
+        let again = settled(&client, &run).await;
+        assert_eq!(again["waitingFor"]["state"], "failed", "{again}");
+    }
+    refused(&call(&client, "retry_step", json!({ "run": run })).await);
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_takes_new_commands_only_for_a_setup_or_a_check() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let hold = w.hold();
+    let run = id_of(&ok(
+        &call(&client, "start_run", w.start_args("Fix that")).await
+    ));
+    for _ in 0..100 {
+        if view_of(&client, &run).await["steps"][0]["state"] == "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    ok(&call(&client, "stop_run", json!({ "run": run })).await);
+    let stopped = settled(&client, &run).await;
+    assert_eq!(stopped["waitingFor"]["step"], "builder", "{stopped}");
+    std::fs::remove_file(&hold).unwrap();
+
+    let args = json!({ "run": run, "useCurrentCommands": true, "resume": true });
+    let refusal = refused(&call(&client, "retry_step", args).await);
+    assert!(refusal.contains("setup or a check"), "{refusal}");
+    assert_eq!(
+        settled(&client, &run).await["waitingFor"]["state"],
+        "stopped"
+    );
+    ok(&call(&client, "retry_step", json!({ "run": run, "resume": true })).await);
+    let view = settled(&client, &run).await;
+    assert_eq!(view["waitingFor"]["state"], "waitingApproval", "{view}");
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_client_closes_its_waiting_run_with_nothing_delivered_and_never_one_that_works() {
     keel_harness::needs!(sandbox, sockets);
     let w = world().await;
@@ -2942,7 +3237,8 @@ async fn a_task_is_one_agent_that_only_reads_and_its_finding_is_the_report_s_ans
     let args = json!({
         "project": "app",
         "prompt": "What does the login do?\n\nSay where it checks the password.",
-        "title": "How the login works",
+        // A title is one line: what breaks it into more is a space.
+        "title": "How the login\n  works",
         "effort": "low",
     });
     let started = ok(&call(&client, "start_task", args).await);
@@ -2950,6 +3246,8 @@ async fn a_task_is_one_agent_that_only_reads_and_its_finding_is_the_report_s_ans
     assert_eq!(started["startedByYou"], true);
     assert_eq!(started["startedBy"], "Claude Code");
     assert_eq!(started["title"], "How the login works");
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    assert_eq!(w.store.card(&card).unwrap().title, "How the login works");
     assert_eq!(started["workflowId"], Json::Null);
 
     let steps: Vec<WorkflowStep> =
@@ -3488,4 +3786,513 @@ async fn once_the_person_agrees_the_parts_open_and_are_the_client_s_to_follow_an
     for client in [steering, stranger] {
         client.cancel().await.unwrap();
     }
+}
+
+fn note_args(card: &str, text: &str) -> Json {
+    json!({ "card": card, "text": text })
+}
+
+/// The run a card has now, once it has one other than `before`.
+async fn next_run_of(w: &World, card: &str, before: Option<&str>) -> String {
+    for _ in 0..200 {
+        let now = w.store.card(card).unwrap().run_id;
+        if let Some(run) = now.filter(|run| Some(run.as_str()) != before) {
+            return run;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    panic!("card {card} started no run");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_adds_a_note_and_puts_back_in_todo_only_a_waiting_card_of_its_own() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    w.use_by_default(&w.project_id, &w.workflow_id);
+    let (row, token) = w.server.create_client("Claude Code", true).unwrap();
+    w.store.set_mcp_client_can_steer(&row.id, true).unwrap();
+    w.store.set_mcp_client_max_open_runs(&row.id, 1).unwrap();
+    let client = w.client(&token).await;
+    // Not the project's default: running the card again keeps it.
+    let workflow = w.saved(
+        "Also builds",
+        vec![
+            WorkflowStep::Agent(agent("builder", ToolProfile::Build, StepRole::Worker)),
+            WorkflowStep::Approval { id: "human".into() },
+        ],
+    );
+
+    let first = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.args_for(&workflow, "Fix the bug\n\nAnd its test."),
+    )
+    .await));
+    let view = settled(&client, &first).await;
+    let card = view["cardId"].as_str().unwrap().to_owned();
+    // While its run is open, the card is Keel's, and nothing says otherwise.
+    assert_eq!(
+        view["waitingFor"]["youCan"],
+        json!(["send_back", "close_run"])
+    );
+    let refusal = refused(
+        &call(
+            &client,
+            "append_to_card",
+            note_args(&card, "Also the docs."),
+        )
+        .await,
+    );
+    assert!(refusal.contains("underway"), "{refusal}");
+    let refusal = refused(&call(&client, "move_card_to_todo", json!({ "card": card })).await);
+    assert!(refusal.contains("close_run"), "{refusal}");
+
+    ok(&call(&client, "close_run", json!({ "run": first })).await);
+    w.card_in(&first, BoardColumn::Backlog).await;
+    let second = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.start_args("Something else"),
+    )
+    .await));
+    settled(&client, &second).await;
+
+    // Closed, the card waits in the Backlog: a note goes at its end, saying who added it.
+    let noted = ok(&call(
+        &client,
+        "append_to_card",
+        note_args(&card, "Also the docs."),
+    )
+    .await);
+    assert_eq!(noted["cardId"], json!(card));
+    assert_eq!(noted["column"], "backlog");
+    let body = w.store.card(&card).unwrap().body;
+    let (person, notes) = split_assistant_notes(&body);
+    assert_eq!(person, "Fix the bug\n\nAnd its test.");
+    assert_eq!(notes.len(), 1, "{body}");
+    assert!(
+        notes[0].starts_with("⟦Note from Claude Code, an assistant, on "),
+        "{body}"
+    );
+    assert!(
+        notes[0].ends_with("⟧\nAlso the docs.\n⟦End of the note⟧"),
+        "{body}"
+    );
+    assert_eq!(noted["body"], json!(body));
+    // It can't go back to Todo while the client has as many runs open as it may.
+    assert_eq!(noted["youCan"], json!(["append_to_card"]));
+    let refusal = refused(&call(&client, "move_card_to_todo", json!({ "card": card })).await);
+    assert!(refusal.contains("runs open"), "{refusal}");
+
+    // Nobody else's to touch, and each needs its own permission.
+    let stranger = w.client(&w.steering_token("Someone else")).await;
+    let refusal = refused(&call(&stranger, "append_to_card", note_args(&card, "Mine.")).await);
+    assert!(refusal.contains("didn't start"), "{refusal}");
+    let refusal = refused(&call(&stranger, "move_card_to_todo", json!({ "card": card })).await);
+    assert!(refusal.contains("didn't start"), "{refusal}");
+    let reader = w.client(&w.token(false)).await;
+    let refusal = refused(&call(&reader, "move_card_to_todo", json!({ "card": card })).await);
+    assert!(refusal.contains("may only read"), "{refusal}");
+    let no_feedback = w.client(&w.token(true)).await;
+    let refusal = refused(&call(&no_feedback, "append_to_card", note_args(&card, "Mine.")).await);
+    assert!(refusal.contains("may not give feedback"), "{refusal}");
+    let refusal = refused(&call(&client, "append_to_card", note_args("nope", "x")).await);
+    assert!(refusal.contains("no card"), "{refusal}");
+    let refusal = refused(&call(&client, "append_to_card", note_args(&card, "  ")).await);
+    assert!(refusal.contains("`text`"), "{refusal}");
+    assert_eq!(w.store.card(&card).unwrap().body, body, "nothing changed");
+
+    // With room again, it goes back to Todo and counts as a run the client has open.
+    ok(&call(&client, "close_run", json!({ "run": second })).await);
+    let moved = ok(&call(&client, "move_card_to_todo", json!({ "card": card })).await);
+    assert_eq!(moved["column"], "todo");
+    assert_eq!(moved["youCan"], json!(["append_to_card"]));
+    assert_eq!(w.store.open_runs_of_mcp_client(&row.id).unwrap(), 1);
+    let refusal = refused(&call(&client, "start_run", w.start_args("One more")).await);
+    assert!(refusal.contains("runs open"), "{refusal}");
+    let refusal = refused(&call(&client, "move_card_to_todo", json!({ "card": card })).await);
+    assert!(refusal.contains("already in Todo"), "{refusal}");
+    ok(&call(
+        &client,
+        "append_to_card",
+        note_args(&card, "And the changelog."),
+    )
+    .await);
+
+    // The run it starts is the client's to follow, says who asked for it, runs the same workflow,
+    // and keeps the notes apart from what the person wrote.
+    w.engine.start_board();
+    let again = next_run_of(&w, &card, None).await;
+    let view = settled(&client, &again).await;
+    assert_eq!(view["startedByYou"], true, "{view}");
+    assert_eq!(view["startedBy"], "Claude Code");
+    assert_eq!(view["workflowId"], json!(workflow));
+    assert_eq!(
+        view["waitingFor"]["youCan"],
+        json!(["send_back", "close_run"])
+    );
+    let request = ok(&call(&client, "get_run", json!({ "run": again })).await)["request"].clone();
+    let (person, notes) = split_assistant_notes(request.as_str().unwrap());
+    assert!(!person.contains("docs"), "{request}");
+    assert_eq!(notes.len(), 2, "{request}");
+    assert!(notes[1].contains("\nAnd the changelog.\n"), "{request}");
+    let mine = ok(&call(&client, "list_runs", json!({ "mine": true })).await);
+    assert!(mine.to_string().contains(&again), "{mine}");
+
+    let calls = w.store.mcp_calls(100).unwrap();
+    for tool in ["append_to_card", "move_card_to_todo"] {
+        assert!(calls.iter().any(|c| c.tool == tool && c.ok), "{tool}");
+        assert!(calls.iter().any(|c| c.tool == tool && !c.ok), "{tool}");
+    }
+    for client in [client, stranger, reader, no_feedback] {
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn every_run_of_a_card_a_client_keeps_putting_back_in_todo_is_its_own() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    w.use_by_default(&w.project_id, &w.workflow_id);
+    let client = w.client(&w.token(true)).await;
+    let first = id_of(&ok(&call(
+        &client,
+        "start_run",
+        w.start_args("Fix the bug"),
+    )
+    .await));
+    let card = settled(&client, &first).await["cardId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    w.engine.start_board();
+    let mut runs = vec![first];
+    // Closed and put back in Todo twice: the card only points at the last run.
+    for _ in 0..2 {
+        let last = runs.last().unwrap().clone();
+        ok(&call(&client, "close_run", json!({ "run": last })).await);
+        w.card_in(&last, BoardColumn::Backlog).await;
+        ok(&call(&client, "move_card_to_todo", json!({ "card": card })).await);
+        let again = next_run_of(&w, &card, Some(&last)).await;
+        settled(&client, &again).await;
+        runs.push(again);
+    }
+    let mine = ok(&call(&client, "list_runs", json!({ "mine": true })).await);
+    for run in &runs {
+        assert!(mine.to_string().contains(run.as_str()), "{run}: {mine}");
+        let view = ok(&call(&client, "get_run", json!({ "run": run })).await);
+        assert_eq!(view["startedByYou"], true, "{run}: {view}");
+    }
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_part_waiting_its_turn_takes_a_note_and_one_closed_goes_back_to_todo() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    w.other_project("lib");
+    w.use_by_default(&w.project_id, &w.workflow_id);
+    w.engine.start_board();
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let agreement = id_of(&ok(&call(
+        &client,
+        "propose_change",
+        json!({ "project": "app", "alsoTouches": ["lib"], "request": "Log in through lib" }),
+    )
+    .await));
+    let view = settled(&client, &agreement).await;
+    w.engine
+        .answer_approval(&waiting_attempt(&view), true, "Go ahead")
+        .unwrap();
+    let mut parts = json!([]);
+    for _ in 0..200 {
+        let view = ok(&call(&client, "get_run", json!({ "run": agreement })).await);
+        parts = view["jointChange"]["parts"].clone();
+        if parts.as_array().is_some_and(|p| p.len() == 2) && parts[0]["runId"].is_string() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let part_run = parts[0]["runId"].as_str().unwrap().to_owned();
+    let first = parts[0]["cardId"].as_str().unwrap().to_owned();
+    let second = parts[1]["cardId"].as_str().unwrap().to_owned();
+
+    // The second part waits for its turn: the client that proposed the change may add to it, and
+    // the part it follows says so.
+    let part = settled(&client, &part_run).await;
+    assert_eq!(
+        part["waitingFor"]["youCan"],
+        json!(["send_back", "close_run", "append_to_card"])
+    );
+    assert_eq!(part["jointChange"]["parts"][0]["youCan"], json!([]));
+    assert_eq!(
+        part["jointChange"]["parts"][1]["youCan"],
+        json!(["append_to_card"])
+    );
+    let noted = ok(&call(
+        &client,
+        "append_to_card",
+        note_args(&second, "Send `expiresAt` too."),
+    )
+    .await);
+    assert_eq!(noted["column"], "todo");
+    let (agreed, notes) = split_assistant_notes(&w.store.card(&second).unwrap().body);
+    assert!(!agreed.contains("expiresAt"), "{agreed}");
+    assert!(
+        notes[0].starts_with("⟦Note from Claude Code, an assistant, on "),
+        "{notes:?}"
+    );
+    assert!(notes[0].contains("\nSend `expiresAt` too.\n"), "{notes:?}");
+    // Not on the part that's underway, and not for another client.
+    let refusal = refused(&call(&client, "append_to_card", note_args(&first, "x")).await);
+    assert!(refusal.contains("underway"), "{refusal}");
+    let stranger = w.client(&w.steering_token("Someone else")).await;
+    let refusal = refused(&call(&stranger, "append_to_card", note_args(&second, "x")).await);
+    assert!(refusal.contains("didn't start"), "{refusal}");
+    let seen = ok(&call(&stranger, "get_run", json!({ "run": part_run })).await);
+    assert_eq!(seen["jointChange"]["parts"][1]["youCan"], json!([]));
+    assert_eq!(seen["waitingFor"]["youCan"], json!([]));
+
+    // The person holds the second part back in the Backlog: it's theirs from now on.
+    w.engine
+        .card_move(&second, CardLane::Backlog, 0, "en")
+        .unwrap();
+    for (tool, args) in [
+        ("append_to_card", note_args(&second, "x")),
+        ("move_card_to_todo", json!({ "card": second })),
+    ] {
+        let refusal = refused(&call(&client, tool, args).await);
+        assert!(refusal.contains("the person"), "{tool}: {refusal}");
+    }
+    // Nor does putting it back in Todo give it back: the person put it there.
+    w.engine
+        .card_move(&second, CardLane::Todo, 0, "en")
+        .unwrap();
+    let refusal = refused(&call(&client, "append_to_card", note_args(&second, "x")).await);
+    assert!(
+        refusal.contains("The person put this card in Todo"),
+        "{refusal}"
+    );
+    let part = ok(&call(&client, "get_run", json!({ "run": part_run })).await);
+    assert_eq!(part["jointChange"]["parts"][1]["youCan"], json!([]));
+    assert_eq!(
+        part["waitingFor"]["youCan"],
+        json!(["send_back", "close_run"])
+    );
+
+    // A part it closes goes back to Todo with a note, and its new run is the client's.
+    ok(&call(&client, "close_run", json!({ "run": part_run })).await);
+    let mut parts = json!([]);
+    for _ in 0..200 {
+        let view = ok(&call(&client, "get_run", json!({ "run": agreement })).await);
+        parts = view["jointChange"]["parts"].clone();
+        if parts[0]["column"] == "backlog" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        parts[0]["youCan"],
+        json!(["append_to_card", "move_card_to_todo"]),
+        "{parts}"
+    );
+    ok(&call(
+        &client,
+        "append_to_card",
+        note_args(&first, "Name it `token`."),
+    )
+    .await);
+    ok(&call(&client, "move_card_to_todo", json!({ "card": first })).await);
+    let again = next_run_of(&w, &first, Some(&part_run)).await;
+    let view = settled(&client, &again).await;
+    assert_eq!(view["startedByYou"], true, "{view}");
+    assert_eq!(view["startedBy"], "Claude Code");
+    // The note stays out of what was agreed for the part, which wins over the request.
+    let request = ok(&call(&client, "get_run", json!({ "run": again })).await)["request"].clone();
+    let (agreed, notes) = split_assistant_notes(request.as_str().unwrap());
+    assert!(agreed.contains("In this project: "), "{request}");
+    assert!(!agreed.contains("Name it"), "{request}");
+    assert_eq!(notes.len(), 1, "{request}");
+    assert!(notes[0].contains("\nName it `token`.\n"), "{request}");
+    // The part's first run is still the client's, now that its card points at the next one.
+    let first_run = ok(&call(&client, "get_run", json!({ "run": part_run })).await);
+    assert_eq!(first_run["startedByYou"], true, "{first_run}");
+    let mine = ok(&call(&client, "list_runs", json!({ "mine": true })).await);
+    for run in [&part_run, &again] {
+        assert!(mine.to_string().contains(run.as_str()), "{run}: {mine}");
+    }
+    for client in [client, stranger] {
+        client.cancel().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_part_the_person_put_back_in_todo_runs_as_theirs() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    w.other_project("lib");
+    w.use_by_default(&w.project_id, &w.workflow_id);
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let agreement = id_of(&ok(&call(
+        &client,
+        "propose_change",
+        json!({ "project": "app", "alsoTouches": ["lib"], "request": "Log in through lib" }),
+    )
+    .await));
+    let view = settled(&client, &agreement).await;
+    w.engine
+        .answer_approval(&waiting_attempt(&view), true, "Go ahead")
+        .unwrap();
+    let mut first = None;
+    for _ in 0..200 {
+        let view = ok(&call(&client, "get_run", json!({ "run": agreement })).await);
+        first = view["jointChange"]["parts"][0]["cardId"]
+            .as_str()
+            .map(str::to_owned);
+        if first.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let first = first.expect("the parts never opened");
+
+    // Before it starts, the person holds the first part back and then puts it in Todo themselves.
+    w.engine
+        .card_move(&first, CardLane::Backlog, 0, "en")
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    w.engine.card_move(&first, CardLane::Todo, 0, "en").unwrap();
+    w.engine.start_board();
+    let theirs = next_run_of(&w, &first, None).await;
+    let view = settled(&client, &theirs).await;
+    assert_eq!(view["startedByYou"], false, "{view}");
+    // Only the next part, still as the change opened it, takes the client's note.
+    assert_eq!(
+        view["waitingFor"]["youCan"],
+        json!(["append_to_card"]),
+        "{view}"
+    );
+    let mine = ok(&call(&client, "list_runs", json!({ "mine": true })).await);
+    assert!(!mine.to_string().contains(theirs.as_str()), "{mine}");
+
+    // So the client can't close it, add to it, or put it back in Todo in its place.
+    let refusal = refused(&call(&client, "close_run", json!({ "run": theirs })).await);
+    assert!(refusal.contains("didn't start"), "{refusal}");
+    let refusal = refused(&call(&client, "append_to_card", note_args(&first, "x")).await);
+    assert!(refusal.contains("underway"), "{refusal}");
+    w.engine.abandon(&waiting_attempt(&view)).unwrap();
+    // It's in lib, not on app's board.
+    for _ in 0..100 {
+        if w.store.card(&first).unwrap().column() == BoardColumn::Backlog {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(w.store.card(&first).unwrap().column(), BoardColumn::Backlog);
+    for (tool, args) in [
+        ("append_to_card", note_args(&first, "x")),
+        ("move_card_to_todo", json!({ "card": first })),
+    ] {
+        let refusal = refused(&call(&client, tool, args).await);
+        assert!(refusal.contains("The person ended"), "{tool}: {refusal}");
+    }
+    assert_eq!(w.store.card(&first).unwrap().run_id, Some(theirs));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_cannot_add_to_or_run_again_what_the_person_ended() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    w.other_project("lib");
+    w.use_by_default(&w.project_id, &w.workflow_id);
+    let client = w.client(&w.steering_token("Claude Code")).await;
+    let started = |request: &'static str| {
+        let args = w.start_args(request);
+        let client = &client;
+        async move {
+            let run = id_of(&ok(&call(client, "start_run", args).await));
+            let approval = waiting_attempt(&settled(client, &run).await);
+            (run, approval)
+        }
+    };
+    let refuses = async |run: &str, says: &str| {
+        let card = w.store.card_of_run(run).unwrap().unwrap();
+        let note = refused(&call(&client, "append_to_card", note_args(&card, "x")).await);
+        assert!(note.contains(says), "{note}");
+        let moved = refused(&call(&client, "move_card_to_todo", json!({ "card": card })).await);
+        assert!(moved.contains(says), "{moved}");
+    };
+
+    // The person rejected it.
+    let (rejected, approval) = started("Rejected").await;
+    w.engine
+        .answer_approval(&approval, false, "Not like this")
+        .unwrap();
+    w.card_in(&rejected, BoardColumn::Backlog).await;
+    refuses(&rejected, "rejected").await;
+
+    // The client closed it, then the person tried it again and closed it themselves.
+    let (closed, approval) = started("Closed").await;
+    ok(&call(&client, "close_run", json!({ "run": closed })).await);
+    w.engine.retry(&approval, false).unwrap();
+    let approval = waiting_attempt(&settled(&client, &closed).await);
+    w.engine.abandon(&approval).unwrap();
+    w.card_in(&closed, BoardColumn::Backlog).await;
+    refuses(&closed, "The person ended").await;
+
+    // The person tried it again after the client closed it, and the client closed it once more:
+    // trying it again was the person's say, so it stays theirs.
+    let (reopened, approval) = started("Reopened").await;
+    ok(&call(&client, "close_run", json!({ "run": reopened })).await);
+    w.engine.retry(&approval, false).unwrap();
+    settled(&client, &reopened).await;
+    ok(&call(&client, "close_run", json!({ "run": reopened })).await);
+    w.card_in(&reopened, BoardColumn::Backlog).await;
+    refuses(&reopened, "tried it again").await;
+
+    // The person stopped it, though it was the client that closed it after.
+    let hold = w.hold();
+    let stopped = id_of(&ok(
+        &call(&client, "start_run", w.start_args("Stopped")).await
+    ));
+    let builder = loop {
+        let attempts = w.store.attempts_of_run(&stopped).unwrap();
+        if let Some(running) = attempts.iter().find(|a| a.state == "running") {
+            break running.id.clone();
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    w.engine.stop(&builder).unwrap();
+    std::fs::remove_file(&hold).unwrap();
+    settled(&client, &stopped).await;
+    ok(&call(&client, "close_run", json!({ "run": stopped })).await);
+    w.card_in(&stopped, BoardColumn::Backlog).await;
+    refuses(&stopped, "The person ended").await;
+
+    // Where a change across projects is agreed starts with propose_change, even closed by the client.
+    let agreement = id_of(&ok(&call(
+        &client,
+        "propose_change",
+        json!({ "project": "app", "alsoTouches": ["lib"], "request": "Log in through lib" }),
+    )
+    .await));
+    settled(&client, &agreement).await;
+    ok(&call(&client, "close_run", json!({ "run": agreement })).await);
+    w.card_in(&agreement, BoardColumn::Backlog).await;
+    refuses(&agreement, "propose_change").await;
+
+    // One it stopped and closed itself is its own to run again.
+    let hold = w.hold();
+    let own = id_of(&ok(
+        &call(&client, "start_run", w.start_args("Its own")).await
+    ));
+    stop_once_running(&client, &own).await;
+    std::fs::remove_file(&hold).unwrap();
+    ok(&call(&client, "close_run", json!({ "run": own })).await);
+    let card = w.card_in(&own, BoardColumn::Backlog).await;
+    ok(&call(&client, "append_to_card", note_args(&card.id, "Try again.")).await);
+    let moved = ok(&call(&client, "move_card_to_todo", json!({ "card": card.id })).await);
+    assert_eq!(moved["column"], "todo");
+    client.cancel().await.unwrap();
 }

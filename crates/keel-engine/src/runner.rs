@@ -8,19 +8,20 @@ use std::time::{Duration, Instant};
 
 use keel_core::{AttemptState, Reason, StepSpec, ToolProfile, WorkflowStep};
 use keel_harness::auth::{self, AuthStatus};
+use keel_harness::github::Issue;
 use keel_harness::process::{self, SIGINT, SIGTERM, Tail};
 use keel_harness::stream::ResultEvent;
 use keel_harness::{Parsed, StepCommand, home, parse_line, settings};
 use keel_store::rusqlite_value::Value;
-use keel_store::{Attempt, now};
+use keel_store::{Attempt, Card, Writer, now};
 use serde_json::json;
 
 use crate::git::{Git, RUN_CACHE};
 use crate::services::{self, ServiceSet};
 use crate::specs::{self, Verdict};
 use crate::{
-    Error, Inner, Result, Resume, Turn, brain, joint, localhost, locked, prompts, screenshots,
-    skipped_tests, verification, workflows,
+    Error, Inner, Result, Resume, Turn, brain, joint, localhost, locked, notes, prompts,
+    screenshots, sizing, skipped_tests, verification, workflows,
 };
 
 /// Tool output kept in the database. The raw file always has all of it.
@@ -153,8 +154,8 @@ const SETTINGS: [(&str, &str); 5] = [
 const JAVA_ON_IPV4: (&str, &str) = ("JDK_JAVA_OPTIONS", "-Djava.net.preferIPv4Stack=true");
 
 /// `SETTINGS`, and for a step with `domains`, those it may reach, rather than the whole network as
-/// setup has with `None`: Java on IPv4, and each tool whose registry isn't among them offline (see
-/// `OFFLINE`).
+/// a setup before any agent that can write has with `None`: Java on IPv4, and each tool whose
+/// registry isn't among them offline (see `OFFLINE`).
 fn tool_settings(domains: Option<&[String]>) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = SETTINGS
         .iter()
@@ -170,6 +171,62 @@ fn tool_settings(domains: Option<&[String]>) -> Vec<(String, String)> {
         );
     }
     env
+}
+
+/// Whether nothing an agent did can be in the run's copy yet: no agent of the run has had a way to
+/// change it. One that only reads has Read, Grep and Glob, and no Bash, Edit or Write (see
+/// `ToolProfile::tools`), so it doesn't count, and neither does one that was skipped. Any other
+/// does, however it ended, and so do tools Keel doesn't know. Only before that does a setup run
+/// what's published. `attempts` are the run's.
+pub(crate) fn before_any_agent_could_write(attempts: &[Attempt]) -> bool {
+    !attempts.iter().any(|a| {
+        a.kind == "agent"
+            && a.state != AttemptState::Skipped.as_str()
+            && ToolProfile::parse(&a.tools) != Some(ToolProfile::ReadOnly)
+    })
+}
+
+/// The sandbox a setup or check runs in, and the home its tools work in.
+#[derive(Debug)]
+struct CommandSandbox {
+    profile: String,
+    home: PathBuf,
+    /// Whether it gets the internet and writes to the project's cache, its home included, which
+    /// the project's runs share.
+    shares_cache: bool,
+}
+
+/// Only a setup before any agent that can write gets the internet and writes to what the project's
+/// runs share: its cache, and the project's home in it, which each run's home is a copy of. Once
+/// such an agent has had the run's copy, a postinstall script, a Makefile target or a build backend
+/// may be its doing, so a setup then gets exactly what a check gets: no network, the reads an agent
+/// has, and the run's own copy of the project's home. Otherwise it could send out what it reads, or
+/// leave something in the project's home or cache for the next run to start from before any agent.
+/// See `before_any_agent_could_write`. `attempts` are the run's.
+#[allow(clippy::too_many_arguments)]
+fn command_sandbox(
+    is_setup: bool,
+    attempts: &[Attempt],
+    workspace: &std::path::Path,
+    real_home: &std::path::Path,
+    read: &[String],
+    sockets: &[String],
+    shared_cache: &std::path::Path,
+    project_home: &std::path::Path,
+) -> CommandSandbox {
+    if is_setup && before_any_agent_could_write(attempts) {
+        CommandSandbox {
+            profile: settings::setup_profile(workspace, real_home, read, sockets, shared_cache),
+            home: project_home.to_owned(),
+            shares_cache: true,
+        }
+    } else {
+        CommandSandbox {
+            profile: settings::check_profile(workspace, real_home, read, sockets),
+            home: run_home(workspace),
+            shares_cache: false,
+        }
+    }
 }
 
 /// The run's own copy of the project's home, inside its private copy of the repo.
@@ -379,12 +436,15 @@ impl Inner {
         }
     }
 
-    /// What setup downloads for a project, shared by its runs. Only setup writes there.
+    /// What setup downloads for a project, shared by its runs. Only a setup before any agent that
+    /// can write writes there: see `command_sandbox`.
     fn shared_cache(&self, project_id: &str) -> PathBuf {
         self.mirror(project_id).with_file_name("cache")
     }
 
-    /// The home setup fills for a project, in its cache. Each run works in a copy of it.
+    /// The home setup fills for a project, in its cache, before any agent of a run that can write.
+    /// Each run works in a copy of it, and so does a setup after such an agent: see
+    /// `command_sandbox`.
     fn project_home(&self, project_id: &str) -> PathBuf {
         self.shared_cache(project_id).join(home::FOLDER)
     }
@@ -495,7 +555,7 @@ impl Inner {
                 })
                 .collect();
             let copies = self.prepare_read_copies(attempt, &wanted)?;
-            let joint = self.joint_text(&attempt.run_id, &copies)?;
+            let joint = self.joint_text(&attempt.run_id, &copies, &spec.role)?;
             (copies, joint)
         } else {
             (Vec::new(), String::new())
@@ -610,7 +670,8 @@ impl Inner {
     }
 
     /// A check is Keel running a command, with no model. It's sandboxed like an agent's commands,
-    /// because tests and Makefiles are files an agent may have just edited.
+    /// because tests and Makefiles are files an agent may have just edited. So is a setup after an
+    /// agent of the run that can write, for the same reason: see `command_sandbox`.
     fn spawn_command(
         &self,
         attempt: &Attempt,
@@ -629,24 +690,31 @@ impl Inner {
         let dir = self.run_dir(&attempt.run_id);
         let real_home = real_home();
         let sockets = services::socket_dirs(&services::root_for(project_id), &project.services);
-        // Setup fills a home shared by the project's runs, in its cache. Everything after it works
-        // in the run's own copy, inside the private copy, so nothing an agent wrote can reach the
-        // next run.
+        // A setup before any agent that can write fills a home shared by the project's runs, in
+        // its cache. Everything else works in the run's own copy, inside the private copy, so
+        // nothing an agent wrote can reach the next run. Looked at here, as it starts, whatever
+        // started it.
         let shared_cache = self.shared_cache(project_id);
-        let (profile, home) = if is_setup {
+        let attempts = store.attempts_of_run(&attempt.run_id)?;
+        let sandbox = command_sandbox(
+            is_setup,
+            &attempts,
+            &workspace,
+            &real_home,
+            &read,
+            &sockets,
+            &shared_cache,
+            &self.project_home(project_id),
+        );
+        if sandbox.shares_cache {
             std::fs::create_dir_all(&shared_cache)?;
-            (
-                settings::setup_profile(&workspace, &real_home, &read, &sockets, &shared_cache),
-                self.project_home(project_id),
-            )
+        }
+        let home = sandbox.home;
+        // Only a check, and only when it was set going with localhost open: a setup stays closed.
+        let profile = if opens_localhost(attempt) {
+            settings::with_localhost(sandbox.profile)
         } else {
-            let profile = settings::check_profile(&workspace, &real_home, &read, &sockets);
-            let profile = if opens_localhost(attempt) {
-                settings::with_localhost(profile)
-            } else {
-                profile
-            };
-            (profile, run_home(&workspace))
+            sandbox.profile
         };
         let stem = format!("{}-{}", attempt.step_id, attempt.number);
         let prompt_file = dir.join(format!("{stem}.stdin"));
@@ -654,6 +722,10 @@ impl Inner {
         let stderr_path = dir.join(format!("{stem}.stderr.txt"));
         let profile = settings::with_own_output(profile, &[&prompt_file, &raw_path, &stderr_path]);
 
+        // So the person sees why an install that needs the internet failed here.
+        if is_setup && !sandbox.shares_cache {
+            store.append_event(&attempt.id, "setupLimited", &json!({}))?;
+        }
         store.append_event(
             &attempt.id,
             "started",
@@ -675,9 +747,10 @@ impl Inner {
             );
         screenshots::empty(&workspace, &dir)?;
         let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
-        // Setup writes to the project's home. Any other step works on the run's own copy of it,
-        // with no network at all, whatever the project lets its builder reach.
-        let home_vars = if is_setup {
+        // A setup before any agent that can write writes to the project's home. Anything else
+        // works on the run's own copy of it, with no network at all, whatever the project lets its
+        // builder reach.
+        let home_vars = if sandbox.shares_cache {
             home::create(&home)?;
             cache_env(&home, &real_home, None)
         } else {
@@ -1255,8 +1328,8 @@ impl Inner {
         let mut correction = None;
         if state == AttemptState::Succeeded && m.role == "specifier" {
             match self.judge_spec(&m) {
-                Verdict::Ready(output) => self.keep_output(&m, &output),
-                Verdict::Ask { output, questions } => {
+                Ok(Verdict::Ready(output)) => self.keep_output(&m, &output),
+                Ok(Verdict::Ask { output, questions }) => {
                     self.keep_output(&m, &output);
                     state = AttemptState::WaitingAnswers;
                     let _ = store.append_event(
@@ -1265,11 +1338,11 @@ impl Inner {
                         &json!({ "questions": questions }),
                     );
                 }
-                Verdict::TookRecommended {
+                Ok(Verdict::TookRecommended {
                     output,
                     settled,
                     rounds,
-                } => {
+                }) => {
                     self.keep_output(&m, &output);
                     let _ = store.append_event(
                         &m.attempt_id,
@@ -1277,21 +1350,30 @@ impl Inner {
                         &json!({ "settled": settled, "rounds": rounds }),
                     );
                 }
-                Verdict::Correct(problems) => {
+                Ok(Verdict::Correct(problems)) => {
                     state = AttemptState::Failed;
                     reason = Some(Reason::SpecNotUsable {
                         problems: problems.clone(),
                     });
                     correction = Some(problems);
                 }
-                Verdict::Stop(problems) => {
+                Ok(Verdict::Stop(problems)) => {
                     state = AttemptState::Blocked;
                     reason = Some(Reason::SpecNotUsable { problems });
                 }
-                Verdict::KeptAsking { output, rounds } => {
+                Ok(Verdict::KeptAsking { output, rounds }) => {
                     self.keep_output(&m, &output);
                     state = AttemptState::Blocked;
                     reason = Some(Reason::KeptAsking { rounds });
+                }
+                // Without what the store holds, a part would be judged without its points of the
+                // contract, and an agreement as a plain spec. As with a verifier's answer Keel
+                // can't correct, it doesn't count, and a person tries it again.
+                Err(error) => {
+                    state = AttemptState::Failed;
+                    reason = Some(Reason::SpecNotChecked {
+                        detail: error.to_string(),
+                    });
                 }
             }
         }
@@ -1379,8 +1461,9 @@ impl Inner {
         found
     }
 
-    fn judge_spec(&self, m: &Monitor) -> Verdict {
-        let attempts = self.store.attempts_of_run(&m.run_id).unwrap_or_default();
+    /// What Keel makes of a specifier's answer. An error is the store's, not the answer's.
+    fn judge_spec(&self, m: &Monitor) -> Result<Verdict> {
+        let attempts = self.store.attempts_of_run(&m.run_id)?;
         let this = attempts.iter().find(|a| a.id == m.attempt_id);
         let fixing_a_limit = m.resumed_from.as_deref().is_some_and(|from| {
             attempts.iter().any(|a| {
@@ -1399,12 +1482,148 @@ impl Inner {
             })
             .count();
         let output = this.and_then(|attempt| attempt.output.as_ref());
-        match self.agreement(&m.run_id).ok().flatten() {
-            Some(agreement) => {
-                specs::judge_agreement(output, fixing_a_limit, rounds_answered, &agreement.names())
-            }
-            None => specs::judge(output, fixing_a_limit, rounds_answered),
+        let written = self.written_in_request(&m.run_id);
+        if let Some(agreement) = self.agreement(&m.run_id)? {
+            return Ok(specs::judge_agreement(
+                output,
+                &written,
+                fixing_a_limit,
+                rounds_answered,
+                &agreement.names(),
+            ));
         }
+        // A part of a change across projects also keeps the points of the contract that name it,
+        // as they are now: as agreed, or as a person corrected them since. Once what it wrote is
+        // kept, the record says which points it was given, so Keel can tell when they're corrected
+        // again, and which of them it wrote again in other words.
+        let part = self.part_contract(&m.run_id)?;
+        let contract = part
+            .as_ref()
+            .map(|(own, _)| own.clone())
+            .unwrap_or_default();
+        let verdict =
+            specs::judge_part(output, &written, fixing_a_limit, rounds_answered, &contract);
+        let replaced = specs::replaced_by_contract(output, &contract);
+        if verdict.output().is_some() {
+            // Without this record Keel would take it for what was agreed, so it's not kept
+            // without it.
+            if let Some((own, every)) = &part {
+                self.store.append_event(
+                    &m.attempt_id,
+                    joint::CONTRACT_GIVEN,
+                    &json!({ "points": own, "contract": every }),
+                )?;
+            }
+            if !replaced.is_empty() {
+                let _ = self.store.append_event(
+                    &m.attempt_id,
+                    "contractReplaced",
+                    &json!({ "replaced": replaced }),
+                );
+            }
+        }
+        Ok(verdict)
+    }
+
+    /// What the person wrote in a run's request, or an assistant they allowed to start it, or an
+    /// issue written with the project's GitHub account, which is where Keel finds what they already
+    /// decided. It's what Keel knew when the run started: see [`Inner::written_at_start`]. A run
+    /// from before Keel kept that has nothing to tell by, so nothing counts.
+    pub(crate) fn written_in_request(&self, run_id: &str) -> Vec<specs::Written> {
+        self.store
+            .request_written(run_id)
+            .ok()
+            .flatten()
+            .and_then(|written| serde_json::from_value(written).ok())
+            .unwrap_or_default()
+    }
+
+    /// Who wrote each piece of a run's request, as Keel knows when it starts, from how it starts,
+    /// never from what the request says: the assistant that started it, if one did, the card it
+    /// came from, the issue, and the project's GitHub account. Keel's own words around it never
+    /// count. It's kept with the run, so neither the card nor the project can change it afterwards.
+    pub(crate) fn written_at_start(
+        &self,
+        request: &str,
+        started_by: Option<&str>,
+        issue: Option<&Issue>,
+        card: Option<&Card>,
+        account: Option<&str>,
+    ) -> Result<Vec<specs::Written>> {
+        // A part's request is the one its change was agreed from, and what was agreed for it is an
+        // agent's.
+        if let Some(part) = card.filter(|card| card.joint_position.is_some()) {
+            return self.asked_written_of(part);
+        }
+        // An assistant that started it wrote what it asks. Started from a card, it's in the words
+        // of whoever wrote the card, which a person running it again doesn't change.
+        let writer = match (started_by, card) {
+            (Some(assistant), _) => Writer::Assistant(assistant.to_owned()),
+            (None, None) => Writer::Person,
+            (None, Some(card)) => card.body_by.clone(),
+        };
+        // A note an assistant added to a card is that assistant's, whoever wrote the rest, so it's
+        // never the person's words. One that doesn't say whose it is counts for no one. On a card
+        // nobody can tell who wrote, neither do its notes: anyone could have written one there.
+        let notes_by_their_assistants = |notes: &[String]| -> Vec<specs::Written> {
+            if writer == Writer::Unknown {
+                return Vec::new();
+            }
+            notes
+                .iter()
+                .filter_map(|note| {
+                    Some(specs::Written {
+                        text: note.clone(),
+                        assistant: Some(notes::note_author(note)?.to_owned()),
+                        github_account: None,
+                    })
+                })
+                .collect()
+        };
+        let by_writer = |text: &str| -> Vec<specs::Written> {
+            let assistant = match &writer {
+                Writer::Person => None,
+                Writer::Assistant(assistant) => Some(assistant.clone()),
+                // What a card says that nobody can tell who wrote counts for no one.
+                Writer::Unknown => return Vec::new(),
+            };
+            let (said, notes) = notes::split_assistant_notes(text);
+            let mut written = vec![specs::Written {
+                text: said,
+                assistant,
+                github_account: None,
+            }];
+            written.extend(notes_by_their_assistants(&notes));
+            written
+        };
+        let Some(issue) = issue else {
+            // From a card, only what it says counts. Its title is only a name, and who wrote it
+            // isn't kept: an assistant's can stay on a card whose words the person made theirs.
+            let said = card.map_or(request, |card| card.body.as_str());
+            return Ok(by_writer(said));
+        };
+        let mut written = Vec::new();
+        // Someone else's issue counts for no one. One written with the project's account is that
+        // account's: an assistant may have written it through `gh`, and anyone who can edit it
+        // may have changed it, with its author still the account.
+        let author = json!({ "author": issue.author });
+        if let Some(account) = account
+            && sizing::why_from_issue(Some(&author), Some(account)).is_none()
+        {
+            written.push(specs::Written {
+                text: issue.body.clone(),
+                assistant: None,
+                github_account: Some(account.trim().to_owned()),
+            });
+        }
+        // What was added to the issue comes before the notes Keel puts at the end of a card's
+        // request.
+        let (asked, notes) = notes::without_notes(request);
+        if let Some(added) = prompts::added_to_issue(asked, issue) {
+            written.extend(by_writer(&added));
+        }
+        written.extend(notes_by_their_assistants(&notes));
+        Ok(written)
     }
 
     /// What it answered, without anything an agent added beyond the structure. The whole answer as
@@ -1455,24 +1674,38 @@ impl Inner {
         true
     }
 
-    /// A review that couldn't read part of the change isn't an approval of it, and the record says
-    /// what it left out. What it answered as it came stays in the `result` event.
+    /// A review that couldn't read part of the change, or that says it breaks a criterion or a
+    /// limit, isn't an approval of it, and the record says why. What it answered as it came stays
+    /// in the `result` event.
     fn correct_review(&self, m: &Monitor) {
-        let Some((kept, unread)) = self
-            .store
-            .attempt(&m.attempt_id)
-            .ok()
-            .and_then(|attempt| attempt.output)
-            .and_then(|output| workflows::review_as_kept(&output))
+        let Ok(attempts) = self.store.attempts_of_run(&m.run_id) else {
+            return;
+        };
+        let Some((kept, why)) = attempts
+            .iter()
+            .find(|a| a.id == m.attempt_id)
+            .and_then(|attempt| attempt.output.as_ref())
+            .and_then(|output| {
+                workflows::review_as_kept(output, &workflows::breakable_ids(&attempts))
+            })
         else {
             return;
         };
         self.keep_output(m, &kept);
-        let _ = self.store.append_event(
-            &m.attempt_id,
-            "reviewIncomplete",
-            &json!({ "unread": unread }),
-        );
+        if !why.unread.is_empty() {
+            let _ = self.store.append_event(
+                &m.attempt_id,
+                "reviewIncomplete",
+                &json!({ "unread": why.unread }),
+            );
+        }
+        if !why.breaks.is_empty() {
+            let _ = self.store.append_event(
+                &m.attempt_id,
+                "reviewBreaks",
+                &json!({ "breaks": why.breaks }),
+            );
+        }
     }
 
     /// Resumes the same session once, saying exactly what to fix.
@@ -1504,6 +1737,7 @@ impl Inner {
                 from: attempt.id.clone(),
                 prompt: Some(specs::correction_prompt(problems, &attempt.language)),
             }),
+            None,
         )?;
         Ok(())
     }
@@ -1683,5 +1917,82 @@ mod tests {
         for (_, name, _) in KEPT_OFFLINE {
             assert_eq!(var(&env, name), None, "{name}");
         }
+    }
+
+    #[test]
+    fn a_setup_once_an_agent_that_can_write_has_had_the_workspace_gets_no_more_than_an_agent() {
+        use crate::testing::recorded;
+        use AttemptState::{Failed, Queued, Skipped, Stopped, Succeeded};
+        let dir = tempfile::tempdir().unwrap();
+        let real_home = dir.path().to_owned();
+        let workspace = real_home.join("runs/r/workspace");
+        let shared = real_home.join("projects/p/cache");
+        let project_home = shared.join(home::FOLDER);
+        let shared_text = shared.to_string_lossy().into_owned();
+        let sandbox = |is_setup: bool, attempts: &[Attempt]| {
+            command_sandbox(
+                is_setup,
+                attempts,
+                &workspace,
+                &real_home,
+                &[],
+                &[],
+                &shared,
+                &project_home,
+            )
+        };
+
+        // Before any agent that can write, what it runs is what's published: the internet, and the
+        // project's cache and home, which its runs share. An agent that only reads, as a spec
+        // does, has no Bash, Edit or Write, however it ended.
+        let mut before = vec![
+            vec![],
+            recorded(&[("setup", "setup", "setup", Failed)]),
+            recorded(&[("check", "check", "check", Succeeded)]),
+            recorded(&[("security", "agent", "build", Skipped)]),
+        ];
+        for state in [Succeeded, Failed, Stopped, Queued] {
+            before.push(recorded(&[("spec", "agent", "readOnly", state)]));
+        }
+        for attempts in &before {
+            let setup = sandbox(true, attempts);
+            assert!(setup.shares_cache, "{attempts:?}");
+            assert_eq!(setup.home, project_home);
+            assert!(setup.profile.contains("(allow network*)"));
+            assert!(setup.profile.contains(&shared_text));
+        }
+
+        // Once one has, a postinstall script or a Makefile may be its doing, however it ended. So
+        // with tools Keel doesn't know.
+        let after = [Succeeded, Failed, Stopped, Queued]
+            .map(|state| ("build", state))
+            .into_iter()
+            .chain([("someday", Succeeded)]);
+        for (tools, state) in after {
+            let attempts = recorded(&[
+                ("spec", "agent", "readOnly", Succeeded),
+                ("setup", "setup", "setup", Succeeded),
+                ("builder", "agent", tools, state),
+                ("check", "check", "check", Failed),
+            ]);
+            let late = sandbox(true, &attempts);
+            assert!(!late.shares_cache, "{tools} {state:?}");
+            // The run's own copy of the project's home, never the project's.
+            assert_eq!(late.home, run_home(&workspace));
+            assert!(late.home.starts_with(&workspace));
+            assert!(late.profile.contains("(deny network*)"));
+            assert!(!late.profile.contains("(allow network*)"));
+            assert!(!late.profile.contains(&shared_text));
+            // Exactly what a check gets.
+            let check = sandbox(false, &attempts);
+            assert_eq!(late.profile, check.profile);
+            assert_eq!(late.home, check.home);
+        }
+
+        // A check never gets them.
+        let check = sandbox(false, &[]);
+        assert!(!check.shares_cache);
+        assert_eq!(check.home, run_home(&workspace));
+        assert!(check.profile.contains("(deny network*)"));
     }
 }

@@ -117,6 +117,13 @@ pub struct StepSpec {
     /// never skipped this way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub when: Option<StepCondition>,
+    /// Runs only if the specification names one of these risks. Empty means always.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub risks: Vec<String>,
+    /// The model it runs with instead of `model` when the change is risky. The engine decides that
+    /// from the specification and the change, once both exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_when_risky: Option<String>,
 }
 
 /// Something a project's commands need, such as a test database. Keel runs these outside the
@@ -388,6 +395,10 @@ pub enum Reason {
     NoMatchingPaths {
         paths: Vec<String>,
     },
+    /// The specification names none of the risks the step looks at.
+    NoMatchingRisks {
+        risks: Vec<String>,
+    },
     /// The engine found the change small, going by what it could see for itself, and the step only
     /// runs for one that isn't. `lines` and `files` are the size of the change at that moment.
     TreatedAsSmall {
@@ -439,6 +450,16 @@ pub enum Reason {
     SpecNotUsable {
         problems: Vec<SpecProblem>,
     },
+    /// Keel couldn't read what it needed to check a specifier's answer, such as what a change across
+    /// projects agreed, so the answer doesn't count. Trying again asks the agent again.
+    SpecNotChecked {
+        detail: String,
+    },
+    /// A person's correction of what the parts of a change agree on exactly breaks the rules the
+    /// agreement's contract kept, so the contract stays as it was.
+    ContractNotValid {
+        problems: Vec<SpecProblem>,
+    },
     /// An answer to a step's questions doesn't belong to them. `problem` is a code the UI
     /// translates: `unknownQuestion`, `repeatedQuestion`, `unanswered`, `optionNotOffered` or
     /// `emptyText`. `question` is the one it's about.
@@ -468,6 +489,19 @@ pub enum Reason {
     ReadCopyFailed {
         project: String,
         detail: String,
+    },
+    /// Only a setup or a check takes the project's commands as they are now. Any other step, a
+    /// delivery included, retries as it is.
+    NewCommandsNeedSetupOrCheck,
+    /// An assistant put the card back in Todo, and the person has since revoked it or taken away
+    /// its leave to start runs, so the card is back with them. `client` is its name.
+    AssistantMayNotRun {
+        client: String,
+    },
+    /// An assistant put the card back in Todo to run its last run again, and the saved workflow
+    /// that run used, called `workflow`, was deleted meanwhile.
+    RerunWorkflowMissing {
+        workflow: String,
     },
 }
 
@@ -631,6 +665,34 @@ pub enum SpecProblem {
         count: usize,
         limit: usize,
     },
+    TooManyContract {
+        count: usize,
+        limit: usize,
+    },
+    /// A point of the contract between the parts with no `when` or no `then`. Keel gives each point
+    /// its `id`, so the agent that wrote it knows it by its `position`, from 1.
+    ContractNeedsText {
+        id: String,
+        position: usize,
+    },
+    /// A point of the contract whose `when` and `then` together go past the limit of a criterion.
+    ContractTooLong {
+        id: String,
+        position: usize,
+        chars: usize,
+        limit: usize,
+    },
+    /// A point of the contract names a project that isn't one of those the change touches.
+    ContractUnknownProject {
+        id: String,
+        position: usize,
+        project: String,
+    },
+    /// A point of the contract that names no project with a part, so no part would check it.
+    ContractWithoutPart {
+        id: String,
+        position: usize,
+    },
 }
 
 impl Reason {
@@ -687,10 +749,13 @@ impl Reason {
             | Self::NoStructuredOutput
             | Self::ReworkLimit { .. }
             | Self::NoMatchingPaths { .. }
+            | Self::NoMatchingRisks { .. }
             | Self::NothingToDeliver
             | Self::RejectionNeedsReason
             | Self::UnsafeBranch { .. }
             | Self::SpecNotUsable { .. }
+            | Self::SpecNotChecked { .. }
+            | Self::ContractNotValid { .. }
             | Self::InvalidAnswer { .. }
             | Self::SendBackNeedsInstructions
             | Self::NothingToSendBackTo
@@ -698,9 +763,12 @@ impl Reason {
             | Self::NothingSkippedToRun
             | Self::KeptAsking { .. }
             | Self::PartsNotOpened { .. }
-            | Self::StartsOnTheBoard => false,
+            | Self::StartsOnTheBoard
+            | Self::AssistantMayNotRun { .. }
+            | Self::RerunWorkflowMissing { .. } => false,
             // One project that's only read. Its account being signed out must not hold up the rest.
             Self::ReadCopyFailed { .. } => false,
+            Self::NewCommandsNeedSetupOrCheck => false,
         }
     }
 }
@@ -734,6 +802,36 @@ impl PrState {
             "closed" => Some(Self::Closed),
             _ => None,
         }
+    }
+}
+
+/// What a pull request's CI says about its latest commit, as GitHub tells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CiState {
+    /// Something hasn't finished, and nothing has failed yet.
+    Pending,
+    Passed,
+    /// At least one check failed.
+    Failed,
+    /// The pull request has no checks.
+    NoCi,
+}
+
+impl CiState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Passed => "passed",
+            Self::Failed => "failed",
+            Self::NoCi => "noCi",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        [Self::Pending, Self::Passed, Self::Failed, Self::NoCi]
+            .into_iter()
+            .find(|state| state.as_str() == value)
     }
 }
 
@@ -961,6 +1059,7 @@ mod tests {
             (Reason::NoStructuredOutput, false),
             (Reason::ReworkLimit { rounds: 1 }, false),
             (Reason::NoMatchingPaths { paths: vec![] }, false),
+            (Reason::NoMatchingRisks { risks: vec![] }, false),
             (
                 Reason::InvalidWorkflow {
                     problem: text(),
@@ -1007,6 +1106,7 @@ mod tests {
             ),
             (Reason::ProjectRemoved, false),
             (Reason::SpecNotUsable { problems: vec![] }, false),
+            (Reason::SpecNotChecked { detail: text() }, false),
             (
                 Reason::InvalidAnswer {
                     problem: text(),
@@ -1028,6 +1128,10 @@ mod tests {
                 },
                 false,
             ),
+            (Reason::NewCommandsNeedSetupOrCheck, false),
+            (Reason::AssistantMayNotRun { client: text() }, false),
+            (Reason::RerunWorkflowMissing { workflow: text() }, false),
+            (Reason::ContractNotValid { problems: vec![] }, false),
         ]
     }
 
@@ -1081,6 +1185,12 @@ mod tests {
             Reason::PartsNotOpened { .. } => 44,
             Reason::StartsOnTheBoard => 45,
             Reason::ReadCopyFailed { .. } => 46,
+            Reason::SpecNotChecked { .. } => 47,
+            Reason::NewCommandsNeedSetupOrCheck => 48,
+            Reason::AssistantMayNotRun { .. } => 49,
+            Reason::RerunWorkflowMissing { .. } => 50,
+            Reason::NoMatchingRisks { .. } => 51,
+            Reason::ContractNotValid { .. } => 52,
         }
     }
 
@@ -1094,7 +1204,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=46).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=52).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]
@@ -1186,6 +1296,20 @@ mod tests {
     }
 
     #[test]
+    fn a_ci_state_reads_back_as_itself() {
+        for state in [
+            CiState::Pending,
+            CiState::Passed,
+            CiState::Failed,
+            CiState::NoCi,
+        ] {
+            assert_eq!(CiState::parse(state.as_str()), Some(state));
+            assert_eq!(serde_json::to_value(state).unwrap(), state.as_str());
+        }
+        assert_eq!(CiState::parse("FAILURE"), None);
+    }
+
+    #[test]
     fn a_specifier_is_a_role_of_its_own_and_states_read_back_as_themselves() {
         assert_eq!(StepRole::Specifier.as_str(), "specifier");
         assert_eq!(StepRole::Verifier.as_str(), "verifier");
@@ -1211,6 +1335,8 @@ mod tests {
             paths: vec![],
             role: StepRole::Reviewer,
             when: None,
+            risks: vec![],
+            model_when_risky: None,
         }
     }
 
@@ -1233,6 +1359,22 @@ mod tests {
             serde_json::from_value::<StepSpec>(without).unwrap(),
             a_step()
         );
+    }
+
+    #[test]
+    fn risks_and_a_model_for_a_risky_change_only_show_up_on_a_step_that_has_them() {
+        let without = serde_json::to_value(a_step()).unwrap();
+        assert_eq!(without.get("risks"), None, "what was saved before stays");
+        assert_eq!(without.get("modelWhenRisky"), None);
+        let with = StepSpec {
+            risks: vec!["concurrency".into()],
+            model_when_risky: Some("opus".into()),
+            ..a_step()
+        };
+        let value = serde_json::to_value(&with).unwrap();
+        assert_eq!(value["risks"], serde_json::json!(["concurrency"]));
+        assert_eq!(value["modelWhenRisky"], "opus");
+        assert_eq!(serde_json::from_value::<StepSpec>(value).unwrap(), with);
     }
 
     #[test]

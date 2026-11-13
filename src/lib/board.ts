@@ -153,6 +153,8 @@ export function cardLabel(t: TFunction, card: BoardCard): CardLabel | null {
       return { state, label: t(`board.labels.${state}`, { defaultValue: t(`states.${state}`) }), detail: reason ?? t(`board.needed.${state}`, { defaultValue: "" }) };
     case "done":
       if (!card.prState) return null;
+      // Only while it can still be merged: a red CI is what's in the way.
+      if (card.prCi === "failed" && (card.prState === "open" || card.prState === "draft")) return { state: "failed", label: t(`board.pr.${card.prState}`), detail: card.prCiFailed.length > 0 ? t("board.ciFailed", { checks: card.prCiFailed.join(", ") }) : t("board.ciFailedUnnamed") };
       return { state: PR_BADGES[card.prState], label: t(`board.pr.${card.prState}`), detail: card.prStateAt && (card.prState === "merged" || card.prState === "closed") ? formatDateTime(card.prStateAt) : null };
     default:
       return null;
@@ -170,6 +172,15 @@ export function waitsForText(t: TFunction, part: PartOf): string | null {
 
 export const partWarningText = (t: TFunction, warning: PartWarning) => t(`board.joint.warnings.${warning.kind}`, { position: warning.position, project: warning.project });
 
+/** What a part says when it was specified with points of the contract as they no longer are. Null when it wasn't. */
+export const contractChangedText = (t: TFunction, part: PartOf): string | null => (part.contractChanged.length > 0 ? t("board.joint.contractChanged", { points: part.contractChanged.join(", ") }) : null);
+
+/** Everything a part warns about: what became of the parts before it, then its own contract. */
+export const partWarningTexts = (t: TFunction, part: PartOf): string[] => {
+  const contract = contractChangedText(t, part);
+  return [...part.warnings.map((warning) => partWarningText(t, warning)), ...(contract ? [contract] : [])];
+};
+
 export interface JointLabel {
   /** A part, or where a change across projects is agreed. */
   text: string;
@@ -183,7 +194,7 @@ export interface JointLabel {
  * where a part waits, so this comes on top of it. `nameOf` gives a project's name by its id.
  */
 export function jointLabel(t: TFunction, card: BoardCard, nameOf: (projectId: string) => string): JointLabel | null {
-  if (card.part) return { text: partText(t, card.part), detail: waitsForText(t, card.part), warnings: card.part.warnings.map((warning) => partWarningText(t, warning)) };
+  if (card.part) return { text: partText(t, card.part), detail: waitsForText(t, card.part), warnings: partWarningTexts(t, card.part) };
   if (!card.jointChangeId) return null;
   const others = card.alsoTouches.map(nameOf);
   return { text: t("board.joint.agreeing"), detail: others.length > 0 ? t("board.joint.alsoTouches", { projects: others.join(", ") }) : null, warnings: [] };

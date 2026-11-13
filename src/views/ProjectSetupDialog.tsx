@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type Attempt, type AuditEvent, type GithubStatus, type MapStart, type ProjectSetup } from "../lib/api";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
-import { accountToSelect, checkOptionsLeft, commandNotFound, foldersToOffer, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withFolders, withSetup, withSetupOption } from "../lib/projects";
+import { accountToSelect, checkOptionsLeft, commandNotFound, foldersToOffer, needsNode, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withFolders, withSetup, withSetupOption } from "../lib/projects";
 import { errorText, needsSignIn, reasonText } from "../lib/reason";
 import { type ProjectSetupRequest, useApp } from "../lib/store";
 import { Button, cx, Field, inputClass, Modal } from "../ui/primitives";
@@ -255,6 +255,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
   const guess = info?.guess;
   const fromGuess = (guess?.check != null && check === guess.check && !info?.project.checkCommand) || (guess?.setup != null && setup === guess.setup && !info?.project.setupCommand);
   const nothingToGo = known && !guess?.check && !guess?.setup && !info?.project.checkCommand && !info?.project.setupCommand;
+  const fromCiChecks = guess && guess.ciChecks.length > 0 && check === guess.check ? guess.ciChecks : [];
 
   const openOnGithub = (url: string) => {
     setError(null);
@@ -419,6 +420,9 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
       <div className="space-y-0.5 text-[11.5px] leading-snug text-subtle">
         <p>
           {fromGuess && `${t(guess?.fromCi ? "setup.fromCi" : "setup.guessed", { files: guess?.from.join(", ") })} `}
+          {fromCiChecks.length > 0 && `${t("setup.fromCiChecks", { commands: fromCiChecks.join(", ") })} `}
+          {needsNode(fromCiChecks) && `${t("projects.pyrightNode")} `}
+          {guess && guess.ciLeftOut.length > 0 && `${t("setup.ciLeftOut", { commands: guess.ciLeftOut.map((left) => `${left.command} (${t(`projects.ciWhy.${left.why}`)})`).join(", ") })} `}
           {nothingToGo && `${t("setup.noGuess")} `}
           {t("setup.tryNote")}
         </p>

@@ -8,7 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use keel_core::{AttemptState, MASK, Reason, WorkflowStep};
-use keel_engine::{Config, Engine, Error, StartRun, full_workflow, request_from_issue};
+use keel_engine::{
+    Config, Engine, Error, RetryOptions, StartRun, Workflow, full_workflow, request_from_issue,
+};
 use keel_harness::Tools;
 use keel_harness::github::Issue;
 use keel_store::{ProjectSettings, Store};
@@ -478,6 +480,289 @@ fn a_failed_check_stops_the_run_and_can_be_retried_alone() {
         "agents don't run again"
     );
     assert_eq!(w.step(&run, "check").unwrap().number, 2);
+}
+
+impl World {
+    fn set_commands(&self, setup: &str, check: &str) {
+        let settings = ProjectSettings {
+            github_account: Some("alice".into()),
+            setup_command: Some(setup.into()),
+            check_command: Some(check.into()),
+            ..ProjectSettings::default()
+        };
+        self.engine
+            .update_project(&self.project_id, &settings)
+            .unwrap();
+    }
+
+    /// A run of a workflow as the app starts it: the built-in ones take the project's check.
+    fn start_workflow(&self, workflow: &Workflow) -> String {
+        self.engine
+            .start_run(StartRun {
+                project_id: self.project_id.clone(),
+                title: None,
+                request: "Fix the bug".into(),
+                workflow: workflow.steps.clone(),
+                language: "en".into(),
+                source_issue: None,
+                saved_workflow: Some(workflow.reference()),
+                started_by: None,
+            })
+            .unwrap()
+    }
+
+    fn start_builtin(&self) -> String {
+        let simple = self
+            .engine
+            .workflow(&self.project_id, "builtin:simple", "en")
+            .unwrap()
+            .unwrap();
+        self.start_workflow(&simple)
+    }
+
+    /// Each attempt at a step: its number, what it ran and how it ended.
+    fn ran(&self, run: &str, step: &str) -> Vec<(i64, String, String)> {
+        self.store
+            .attempts_of_run(run)
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.step_id == step)
+            .map(|a| (a.number, a.prompt, a.state))
+            .collect()
+    }
+}
+
+/// A retry by the person, with the project's setup and check as they are now.
+const NEW_COMMANDS: RetryOptions<'static> = RetryOptions {
+    resume: false,
+    by: None,
+    current_commands: true,
+};
+
+fn ran(number: i64, command: &str, state: AttemptState) -> (i64, String, String) {
+    (number, command.into(), state.as_str().into())
+}
+
+#[test]
+fn a_retry_with_the_fixed_setup_runs_it_first_and_then_the_step_that_failed() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_commands("true", "test -f installed.txt");
+    let run = w.start_builtin();
+    let failed = w.wait(&run, "check", AttemptState::Failed);
+
+    // The fix is to what the setup installs.
+    w.set_commands("touch installed.txt", "test -f installed.txt");
+    assert_eq!(
+        serde_json::to_value(w.engine.command_changes(&run).unwrap()).unwrap(),
+        serde_json::json!([
+            { "stepId": "setup", "kind": "setup", "before": "true", "now": "touch installed.txt" },
+        ])
+    );
+    let agents_before = w.log("claude.log").matches("=== CLAUDE").count();
+    w.engine.retry_with(&failed.id, NEW_COMMANDS).unwrap();
+    w.wait(&run, "approval", AttemptState::WaitingApproval);
+    use AttemptState::{Failed, Postponed, Succeeded};
+    assert_eq!(
+        w.ran(&run, "setup"),
+        vec![
+            ran(1, "true", Succeeded),
+            ran(2, "touch installed.txt", Succeeded)
+        ]
+    );
+    // What ran keeps how it ended. The step put off for the setup says so, and comes round again.
+    assert_eq!(
+        w.ran(&run, "check"),
+        vec![
+            ran(1, "test -f installed.txt", Failed),
+            ran(2, "test -f installed.txt", Postponed),
+            ran(3, "test -f installed.txt", Succeeded),
+        ]
+    );
+    let first = w.store.attempt(&failed.id).unwrap();
+    assert_eq!(
+        serde_json::from_value::<Reason>(first.reason.unwrap()).unwrap(),
+        Reason::CheckFailed {
+            exit_code: Some(1),
+            localhost_refused: false
+        }
+    );
+    assert_eq!(
+        w.log("claude.log").matches("=== CLAUDE").count(),
+        agents_before,
+        "nothing in between runs again"
+    );
+    // Agents have had the code, so the new setup gets no more than they do, and says why.
+    let setup = w.step(&run, "setup").unwrap();
+    assert_eq!(setup.settings["network"], "none");
+    let events = w.store.events(&setup.id, 0).unwrap();
+    assert!(events.iter().any(|e| e.kind == "setupLimited"));
+}
+
+#[test]
+fn a_retry_takes_the_project_s_fixed_check_only_when_asked_to() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_commands("echo setup", "exit 3");
+    let run = w.start_builtin();
+    let failed = w.wait(&run, "check", AttemptState::Failed);
+    assert_eq!(w.engine.command_changes(&run).unwrap(), vec![]);
+
+    // The person fixes the project's check while the run waits.
+    w.set_commands("echo setup", "echo fixed");
+    let changes = w.engine.command_changes(&run).unwrap();
+    assert_eq!(
+        serde_json::to_value(&changes).unwrap(),
+        serde_json::json!([
+            { "stepId": "check", "kind": "check", "before": "exit 3", "now": "echo fixed" },
+        ])
+    );
+
+    // A plain retry runs what the run started with.
+    w.engine.retry(&failed.id, false).unwrap();
+    let again = w.wait(&run, "check", AttemptState::Failed);
+    assert_eq!((again.number, again.prompt.as_str()), (2, "exit 3"));
+
+    // Asked to, it runs the project's, and the run keeps it for what comes after.
+    w.engine.retry_with(&again.id, NEW_COMMANDS).unwrap();
+    w.wait(&run, "approval", AttemptState::WaitingApproval);
+    use AttemptState::{Failed, Succeeded};
+    assert_eq!(
+        w.ran(&run, "check"),
+        vec![
+            ran(1, "exit 3", Failed),
+            ran(2, "exit 3", Failed),
+            ran(3, "echo fixed", Succeeded)
+        ]
+    );
+    assert_eq!(w.ran(&run, "setup").len(), 1, "the setup didn't change");
+    let steps: Vec<WorkflowStep> =
+        serde_json::from_value(w.store.run(&run).unwrap().workflow).unwrap();
+    assert!(steps.contains(&WorkflowStep::Check {
+        id: "check".into(),
+        run: "echo fixed".into()
+    }));
+    assert_eq!(w.engine.command_changes(&run).unwrap(), vec![]);
+    // Where the person sees it, on the attempt that was retried.
+    let updated = w
+        .store
+        .events(&again.id, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "commandsUpdated")
+        .unwrap();
+    assert_eq!(
+        updated.data,
+        serde_json::json!({ "changes": serde_json::to_value(&changes).unwrap() })
+    );
+}
+
+#[test]
+fn a_saved_workflow_s_own_check_keeps_its_command() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_commands("echo setup", "echo the project's check");
+    // Its check is called `check`, as the first one a person adds in the editor is.
+    let mine = w
+        .engine
+        .save_workflow(
+            &w.project_id,
+            &Workflow {
+                id: String::new(),
+                name: "Mine".into(),
+                builtin: false,
+                steps: full_workflow("en", "opus", "sonnet", Some("exit 3")),
+            },
+        )
+        .unwrap();
+    let run = w.start_workflow(&mine);
+    let failed = w.wait(&run, "check", AttemptState::Failed);
+    assert_eq!(w.engine.command_changes(&run).unwrap(), vec![]);
+    w.engine.retry_with(&failed.id, NEW_COMMANDS).unwrap();
+    let again = w.wait(&run, "check", AttemptState::Failed);
+    assert_eq!((again.number, again.prompt.as_str()), (2, "exit 3"));
+}
+
+#[test]
+fn only_a_setup_or_a_check_starts_over_with_new_commands() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_commands("true", "true");
+    w.flag("pr-sso");
+    let run = w.start_builtin();
+    let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let failed = w.wait(&run, "pull-request", AttemptState::Blocked);
+
+    // A failed delivery retries only the delivery: the setup, with its network, doesn't run again.
+    w.set_commands("touch installed.txt", "true");
+    assert_eq!(
+        blocked_reason(w.engine.retry_with(&failed.id, NEW_COMMANDS)),
+        Reason::NewCommandsNeedSetupOrCheck
+    );
+    assert_eq!(w.ran(&run, "setup").len(), 1);
+    assert_eq!(w.step(&run, "pull-request").unwrap().state, "blocked");
+    assert_eq!(w.engine.command_changes(&run).unwrap().len(), 1);
+}
+
+fn blocked_reason<T: std::fmt::Debug>(result: Result<T, Error>) -> Reason {
+    match result {
+        Err(Error::Blocked(reason)) => reason,
+        other => panic!("expected it to be refused with a reason, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_retry_that_cannot_start_leaves_the_run_s_commands_as_they_were() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_commands("echo setup", "exit 3");
+    let run = w.start_builtin();
+    let failed = w.wait(&run, "check", AttemptState::Failed);
+    w.set_commands("echo setup", "echo fixed");
+    let before = w.store.run(&run).unwrap().workflow;
+
+    // Nothing can start while its folder can't be made.
+    let folder = Path::new(&failed.workspace).parent().unwrap().to_owned();
+    let away = folder.with_extension("away");
+    std::fs::rename(&folder, &away).unwrap();
+    std::fs::write(&folder, "").unwrap();
+    assert!(w.engine.retry_with(&failed.id, NEW_COMMANDS).is_err());
+    // Nor does a client's, which would say it asked.
+    assert!(
+        w.engine
+            .retry_with(
+                &failed.id,
+                RetryOptions {
+                    by: Some("Claude Code"),
+                    ..NEW_COMMANDS
+                },
+            )
+            .is_err()
+    );
+    assert!(w.engine.retry_by(&failed.id, false, "Claude Code").is_err());
+    assert_eq!(w.store.run(&run).unwrap().workflow, before);
+    assert_eq!(w.engine.command_changes(&run).unwrap().len(), 1);
+    assert_eq!(w.step(&run, "check").unwrap().state, "failed");
+    assert_eq!(w.step(&run, "check").unwrap().id, failed.id);
+    let events = w.store.events(&failed.id, 0).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| e.kind == "commandsUpdated" || e.kind == "retryRequested"),
+        "{events:?}"
+    );
+
+    // A run the person left stays closed when trying it again can't start.
+    w.engine.abandon(&failed.id).unwrap();
+    assert!(w.store.run(&run).unwrap().finished_at.is_some());
+    assert!(w.engine.retry(&failed.id, false).is_err());
+    assert!(w.store.run(&run).unwrap().finished_at.is_some());
+
+    std::fs::remove_file(&folder).unwrap();
+    std::fs::rename(&away, &folder).unwrap();
+    w.engine.retry_with(&failed.id, NEW_COMMANDS).unwrap();
+    w.wait(&run, "approval", AttemptState::WaitingApproval);
 }
 
 #[test]

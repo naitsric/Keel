@@ -4,6 +4,7 @@ import { type FocusEvent, Fragment, type KeyboardEvent, useEffect, useLayoutEffe
 import { useTranslation } from "react-i18next";
 import type { AttemptState, StepRole } from "../lib/api";
 import { type Flow, type FlowAttempt, type FlowNode, layoutFlow, nextItem, type PlacedNode, scrollToShow } from "../lib/flow";
+import { putOffForSetup } from "../lib/audit";
 import { skippedAsSmall } from "../lib/size";
 import { cx, StateBadge } from "../ui/primitives";
 
@@ -71,9 +72,12 @@ function roundText(t: TFunction, node: FlowNode<FlowAttempt>): string | null {
 
 const skippedForBeingSmall = (node: FlowNode<FlowAttempt>) => node.attempt !== null && skippedAsSmall(node.attempt);
 
+/** A node's state in a word or two. A step put off for a new setup isn't a person asking for more. */
+const stateLabel = (t: TFunction, node: FlowNode<FlowAttempt>) => (node.attempt && putOffForSetup(node.attempt) ? t("states.afterSetup") : t(`states.${node.state}`));
+
 function stateText(t: TFunction, node: FlowNode<FlowAttempt>): string {
   if (skippedForBeingSmall(node)) return t("flow.skippedSmallWhy");
-  return node.state === "pending" ? t("run.pending") : t(`states.${node.state}`);
+  return node.state === "pending" ? t("run.pending") : stateLabel(t, node);
 }
 
 /** Everything a node shows, in words, for screen readers and as its tooltip. */
@@ -140,7 +144,7 @@ function NodeButton<T extends FlowAttempt>({ placed, live, selected, tabbable, p
           {node.state === "pending" || node.outdated ? (
             <span className="min-w-0 truncate text-[11.5px] text-subtle">{node.outdated ? t("flow.lastRan", { number: node.round + 1 }) : t("run.pending")}</span>
           ) : (
-            <StateBadge state={node.state} label={skippedForBeingSmall(node) ? t("flow.skippedSmall") : t(`states.${node.state}`)} />
+            <StateBadge state={node.state} label={skippedForBeingSmall(node) ? t("flow.skippedSmall") : stateLabel(t, node)} />
           )}
         </span>
       )}

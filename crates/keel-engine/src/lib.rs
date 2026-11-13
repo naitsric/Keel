@@ -9,6 +9,8 @@ mod diffs;
 mod git;
 mod joint;
 mod localhost;
+mod notes;
+mod project_commands;
 mod project_proposals;
 mod prompts;
 mod pull_requests;
@@ -18,6 +20,8 @@ mod services;
 mod sizing;
 mod skipped_tests;
 mod specs;
+#[cfg(test)]
+mod testing;
 mod verification;
 mod workflows;
 
@@ -29,9 +33,12 @@ use std::time::{Duration, Instant};
 
 pub use board::{Board, BoardCard, BoardIssue};
 pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
-pub use detect::Guess;
+pub use detect::{CiGap, CiLeftOut, CiWhy, Guess};
 pub use git::{ChangeSize, Git, GitError, Snapshot};
-pub use joint::{JointCard, JointChangeView, Named, Neighbour, PartOf, PartWarning, RunJoint};
+pub use joint::{
+    ContractEdit, ContractPart, ContractView, JointCard, JointChangeView, Named, Neighbour, PartOf,
+    PartWarning, RunJoint,
+};
 use keel_core::{AttemptState, CardLane, Reason, StepCondition, StepRole, StepSpec, WorkflowStep};
 use keel_harness::auth::{self, AuthStatus, VersionCheck};
 use keel_harness::github::{self, Account, Gh, GhError, Issue, RepoInfo};
@@ -41,6 +48,8 @@ use keel_store::rusqlite_value::Value;
 use keel_store::{
     Decision, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
 };
+pub use notes::split_assistant_notes;
+pub use project_commands::{CommandChange, CommandKind, retry_runs_something_new};
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
 pub use prompts::full_workflow;
 pub use screenshots::{Screenshot, Screenshots};
@@ -50,9 +59,12 @@ use serde_json::json;
 pub use sizing::skipped_steps;
 pub use specs::of_attempt as spec_of_attempt;
 pub use specs::{Answer, AnswerChoice, Spec};
-pub use verification::of_attempt as verification_of_attempt;
-pub use verification::{Outcome, Verification};
-pub use workflows::{Workflow, WorkflowDraft, can_send_back, files_changed};
+pub use verification::in_round as verifications_in_round;
+pub use verification::{Outcome, Verification, WhyNotProven};
+pub use workflows::{
+    Finding, Workflow, WorkflowDraft, breakable_ids, can_send_back, files_changed, findings_of,
+    limits_with_ids,
+};
 
 const RESUME_PROMPT: &str = "Continue where you left off.";
 
@@ -146,6 +158,22 @@ impl Config {
 pub struct WorkflowRef {
     pub id: String,
     pub name: String,
+}
+
+/// How a step is tried again. See `Engine::retry_with`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RetryOptions<'a> {
+    /// An agent continues its session instead of starting a new one. Any other step starts over.
+    pub resume: bool,
+    /// The MCP client that asked, which the step it retries says so the person sees it. A client
+    /// only retries what went wrong, and never reopens a run that ended. `None` for the person.
+    pub by: Option<&'a str>,
+    /// A setup or check takes the project's setup and check as they are now, and the run keeps them
+    /// for the rest of its steps and rounds (see `Engine::command_changes`). A new setup runs
+    /// first, and the step comes round again once it's through. After an agent that can write,
+    /// that setup gets what a check gets: see `runner::command_sandbox`. Any other step is
+    /// refused.
+    pub current_commands: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -329,6 +357,9 @@ pub(crate) struct Resume {
 struct SizeThisPass {
     decision: Option<sizing::Decision>,
     said: bool,
+    /// The change, once read: `Some(None)` if it couldn't be. The size and a step's model both go by
+    /// it, and it's the same change for both.
+    change: Option<Option<git::ChangeSize>>,
 }
 
 #[derive(Default)]
@@ -628,6 +659,20 @@ impl Engine {
         Ok(toolchains::find(&commands, &path_env, &runner::real_home()))
     }
 
+    /// What the project's CI checks and its saved check doesn't run, for a person to add. Only
+    /// reads the repo. A project with no check saved has its setup to finish instead.
+    pub fn project_ci_gap(&self, id: &str) -> Result<CiGap> {
+        let project = self.inner.store.project(id)?;
+        Ok(match project.check_command {
+            Some(check) if !check.trim().is_empty() => detect::ci_gap(
+                Path::new(&project.path),
+                project.setup_command.as_deref().unwrap_or_default(),
+                &check,
+            ),
+            _ => CiGap::default(),
+        })
+    }
+
     /// Tries commands before anyone saves them, in the real sandbox and with no model. Saved
     /// settings aren't touched, and what's being tried replaces them for this run.
     pub fn try_check(
@@ -880,6 +925,7 @@ impl Engine {
         self.check_can_run(&project, &request.workflow)?;
         // Preparation always comes first, and from what's published, before any agent touches it.
         let mut workflow = request.workflow;
+        let mut project_setup = None;
         if let Some(run) = project
             .setup_command
             .as_deref()
@@ -908,18 +954,40 @@ impl Engine {
                     run: run.to_owned(),
                 },
             );
+            project_setup = Some(id);
         }
+        // So a retry knows which commands are the project's, and can take them as they are then.
+        let saved_id = request
+            .saved_workflow
+            .as_ref()
+            .map(|saved| saved.id.as_str());
+        let workflow = project_commands::marked(&workflow, project_setup, saved_id);
         let run_id = new_id();
+        let source_issue = request.source_issue.as_ref().map(|issue| {
+            json!({ "number": issue.number, "title": issue.title, "author": issue.author, "url": issue.url }).to_string()
+        });
+        // Who wrote each piece of what it asks, as Keel knows now: only what the person wrote can
+        // settle anything for them, and a card or a project can change afterwards. Kept apart from
+        // what the run shows, since its request already says all of it.
+        let from_card = card.map(|id| self.inner.store.card(id)).transpose()?;
+        let written = self.inner.written_at_start(
+            &request.request,
+            request.started_by.as_deref(),
+            request.source_issue.as_ref(),
+            from_card.as_ref(),
+            project.github_account.as_deref(),
+        )?;
         let run = NewRun {
             id: run_id.clone(),
             project_id: project.id,
-            title: request.title.unwrap_or_else(|| title_from(&request.request)),
+            title: request
+                .title
+                .unwrap_or_else(|| title_from(&request.request)),
             request: request.request,
-            workflow: serde_json::to_string(&workflow).unwrap_or_else(|_| "[]".into()),
+            workflow: workflow.to_string(),
             language: request.language,
-            source_issue: request.source_issue.as_ref().map(|issue| {
-                json!({ "number": issue.number, "title": issue.title, "author": issue.author, "url": issue.url }).to_string()
-            }),
+            source_issue,
+            request_written: serde_json::to_string(&written).ok(),
             workflow_id: request.saved_workflow.as_ref().map(|w| w.id.clone()),
             workflow_name: request.saved_workflow.map(|w| w.name),
             started_by: request.started_by,
@@ -1056,6 +1124,7 @@ impl Engine {
                             from: attempt.id.clone(),
                             prompt: Some(specs::answered_prompt(&given, &attempt.language)),
                         }),
+                        None,
                     )
                 });
             if let Err(error) = started {
@@ -1162,6 +1231,16 @@ impl Engine {
     /// Asks a step to stop. A queued step never starts; a running one gets SIGINT, and the
     /// monitor escalates if it doesn't answer.
     pub fn stop(&self, attempt_id: &str) -> Result<()> {
+        self.stop_as(attempt_id, None)
+    }
+
+    /// `stop` for a client over MCP. Its event names the client, so a stop the person asked for
+    /// can be told from one a client did.
+    pub fn stop_by(&self, attempt_id: &str, by: &str) -> Result<()> {
+        self.stop_as(attempt_id, Some(by))
+    }
+
+    fn stop_as(&self, attempt_id: &str, by: Option<&str>) -> Result<()> {
         let attempt = self.inner.store.attempt(attempt_id)?;
         let state = AttemptState::parse(&attempt.state).ok_or(Error::InvalidState)?;
         if !state.is_active() {
@@ -1173,9 +1252,13 @@ impl Engine {
             control.stop_requested = true;
             control.pid
         };
+        let data = match by {
+            Some(by) => json!({ "by": by }),
+            None => json!({}),
+        };
         self.inner
             .store
-            .append_event(attempt_id, "stopRequested", &json!({}))?;
+            .append_event(attempt_id, "stopRequested", &data)?;
         if let Some(pid) = pid {
             process::signal_group(pid, SIGINT);
         }
@@ -1231,18 +1314,65 @@ impl Engine {
         Ok(())
     }
 
-    /// Tries a step again in the same workspace. With `resume`, an agent continues its session
-    /// instead of starting a new one. A failed delivery retries only the delivery.
+    /// Tries a step again in the same workspace, as the person does. A failed delivery retries only
+    /// the delivery. See `retry_with`.
     pub fn retry(&self, attempt_id: &str, resume: bool) -> Result<String> {
-        self.retry_as(attempt_id, resume, None)
+        self.retry_with(
+            attempt_id,
+            RetryOptions {
+                resume,
+                ..RetryOptions::default()
+            },
+        )
     }
 
-    /// `retry` for a client over MCP. The step it retries says who asked, so the person sees it.
+    /// `retry` for a client over MCP. See `retry_with`.
     pub fn retry_by(&self, attempt_id: &str, resume: bool, by: &str) -> Result<String> {
-        self.retry_as(attempt_id, resume, Some(by))
+        self.retry_with(
+            attempt_id,
+            RetryOptions {
+                resume,
+                by: Some(by),
+                ..RetryOptions::default()
+            },
+        )
     }
 
-    fn retry_as(&self, attempt_id: &str, resume: bool, by: Option<&str>) -> Result<String> {
+    /// The run's setup and check whose command the project has changed since the run started. A
+    /// run that tries a command keeps the one it tries.
+    pub fn command_changes(&self, run_id: &str) -> Result<Vec<CommandChange>> {
+        let run = self.inner.store.run(run_id)?;
+        self.command_changes_of(&run)
+    }
+
+    /// `command_changes`, for a run already read.
+    pub fn command_changes_of(&self, run: &keel_store::Run) -> Result<Vec<CommandChange>> {
+        if is_trial(run) {
+            return Ok(Vec::new());
+        }
+        let project = self.inner.store.project(&run.project_id)?;
+        Ok(project_commands::changed(
+            &run.workflow,
+            run.workflow_id.as_deref(),
+            project.setup_command.as_deref(),
+            project.check_command.as_deref(),
+        ))
+    }
+
+    /// Whether this step of the run takes its command from the project. A saved workflow's own
+    /// setup or check keeps its command whatever the project's is.
+    pub fn follows_project(run: &keel_store::Run, step_id: &str) -> bool {
+        project_commands::follows_project(&run.workflow, run.workflow_id.as_deref(), step_id)
+    }
+
+    /// Tries a step again in the same workspace. A failed delivery retries only the delivery. See
+    /// `RetryOptions` for how.
+    pub fn retry_with(&self, attempt_id: &str, options: RetryOptions) -> Result<String> {
+        let RetryOptions {
+            resume,
+            by,
+            current_commands,
+        } = options;
         let store = &self.inner.store;
         // Held from looking at the attempt until its next try is on the record, so two retries, or
         // a retry and a close, can't both go through. `start_step` never takes it: `advance` and
@@ -1272,6 +1402,11 @@ impl Engine {
         {
             return Err(Error::InvalidState);
         }
+        // Only a step that runs one of them has a command to take. Anything else retries as it is,
+        // and a delivery never runs the setup again.
+        if current_commands && !matches!(attempt.kind.as_str(), "setup" | "check") {
+            return Err(Error::Blocked(Reason::NewCommandsNeedSetupOrCheck));
+        }
         let run = store.run(&attempt.run_id)?;
         if by.is_some() && run.finished_at.is_some() {
             return Err(Error::InvalidState);
@@ -1290,29 +1425,72 @@ impl Engine {
             return Err(Error::InvalidState);
         }
         let number = workflows::next_number(&attempts, &attempt.step_id);
-        let steps: Vec<WorkflowStep> =
-            serde_json::from_value(run.workflow.clone()).unwrap_or_default();
+        let changes = if current_commands {
+            self.command_changes_of(&run)?
+        } else {
+            Vec::new()
+        };
+        let workflow = project_commands::with_changes(&run.workflow, &changes);
+        let steps: Vec<WorkflowStep> = serde_json::from_value(workflow.clone()).unwrap_or_default();
         let step = workflows::find_step(&steps, &attempt.step_id).ok_or(Error::InvalidState)?;
+        // What a new setup installs, the steps after it need: it runs first, and this step comes
+        // round again once it's through, with nothing in between run again. Once an agent that can
+        // write has had the run's copy, that setup gets no more than it does: see
+        // `runner::command_sandbox`.
+        let setup_first = changes
+            .iter()
+            .filter(|change| change.kind == CommandKind::Setup && change.step_id != step.id())
+            .find_map(|change| workflows::find_step(&steps, &change.step_id));
         let resume = (resume && attempt.kind == "agent").then(|| Resume {
             session: attempt.session_id.clone(),
             from: attempt.id.clone(),
             prompt: resumed_prompt(&attempt),
         });
+        // Recorded with the attempt it starts, all at once, so a retry that can't start leaves the
+        // run as it was, and nobody sees one part without the rest. Every later step and round
+        // reads the run's copy, so they run the same commands, and each attempt keeps the one it
+        // ran.
+        let workflow = workflow.to_string();
+        let changed = json!({ "changes": changes });
         // What really happens: a step that isn't an agent has no session to continue.
-        if let Some(by) = by {
-            store.append_event(
-                attempt_id,
-                "retryRequested",
-                &json!({ "by": by, "resume": resume.is_some() }),
-            )?;
+        let requested = by.map(|by| json!({ "by": by, "resume": resume.is_some() }));
+        // Only a setup or a check takes new commands, as above, so the step runs one.
+        let put_off = match (&setup_first, &step) {
+            (
+                Some(_),
+                WorkflowStep::Setup { run: command, .. } | WorkflowStep::Check { run: command, .. },
+            ) => Some(put_off_attempt(&attempt, command, &run, number)),
+            _ => None,
+        };
+        let retry = keel_store::Retry {
+            run_id: &attempt.run_id,
+            retried: attempt_id,
+            found: state,
+            requested: requested.as_ref(),
+            // Before the step starts: a quick one can be over, and have closed the run, by the
+            // time `start_step` returns.
+            reopens: run.finished_at.is_some(),
+            commands: (!changes.is_empty()).then_some(keel_store::RetryCommands {
+                workflow: &workflow,
+                event: &changed,
+            }),
+            put_off: put_off.as_ref(),
+        };
+        match &setup_first {
+            Some(setup) => {
+                let number = workflows::next_number(&attempts, setup.id());
+                self.inner
+                    .start_step_with(&attempt.run_id, setup, number, None, Some(&retry), None)
+            }
+            None => self.inner.start_step_with(
+                &attempt.run_id,
+                &step,
+                number,
+                resume,
+                Some(&retry),
+                None,
+            ),
         }
-        // Before the step starts: a quick one can be over, and have closed the run, by the time
-        // `start_step` returns.
-        if run.finished_at.is_some() {
-            store.patch_run(&attempt.run_id, &[("finished_at", Value::Null)])?;
-        }
-        self.inner
-            .start_step(&attempt.run_id, &step, number, resume)
     }
 
     pub fn abandon(&self, attempt_id: &str) -> Result<()> {
@@ -1696,6 +1874,41 @@ impl Engine {
     }
 }
 
+/// The step a retry puts off for a new setup to run first, as an attempt of its own that says so.
+/// It never runs: the step comes round again once the setup is through, as `sizing::due_again`
+/// says. The attempt that ran keeps how it ended. `command` is what the step will run.
+fn put_off_attempt(
+    attempt: &keel_store::Attempt,
+    command: &str,
+    run: &keel_store::Run,
+    number: i64,
+) -> NewAttempt {
+    NewAttempt {
+        id: new_id(),
+        run_id: attempt.run_id.clone(),
+        step_id: attempt.step_id.clone(),
+        kind: attempt.kind.clone(),
+        role: attempt.role.clone(),
+        round: run.round,
+        number,
+        state: AttemptState::Postponed,
+        model_requested: String::new(),
+        effort: None,
+        tools: attempt.tools.clone(),
+        max_turns: None,
+        max_budget_usd: None,
+        language: run.language.clone(),
+        prompt: command.to_owned(),
+        system_prompt_sources: "[]".to_owned(),
+        settings: "{}".to_owned(),
+        session_id: new_id(),
+        resumed_from: None,
+        workspace: attempt.workspace.clone(),
+        raw_path: String::new(),
+        started_at: now(),
+    }
+}
+
 /// What an attempt being resumed by hand is told. A limit it broke has to be said again, and answers
 /// it may never have got shouldn't be lost to a bare "go on".
 fn resumed_prompt(attempt: &keel_store::Attempt) -> Option<String> {
@@ -1959,14 +2172,75 @@ impl Inner {
         })
     }
 
+    /// The step with the model it runs with this time. A fresh start decides it, since the
+    /// specification and the change only exist once a run gets there: a step's model for a risky
+    /// change, if it has one and the change is. Going on with a session keeps the model it began with.
+    fn with_its_model(
+        &self,
+        run_id: &str,
+        step: &WorkflowStep,
+        resume: Option<&Resume>,
+        pass: Option<&mut SizeThisPass>,
+    ) -> Result<WorkflowStep> {
+        let WorkflowStep::Agent(spec) = step else {
+            return Ok(step.clone());
+        };
+        let model = match resume {
+            Some(resume) => Some(self.store.attempt(&resume.from)?.model_requested)
+                .filter(|model| !model.is_empty()),
+            None if spec.model_when_risky.is_some() => {
+                let attempts = self.store.attempts_of_run(run_id)?;
+                // Before any step has run there's no change yet, which isn't one that can't be read.
+                let lines = || {
+                    if attempts.is_empty() {
+                        return Some(0);
+                    }
+                    let change = match pass {
+                        Some(pass) => self.change_this_pass(run_id, &attempts, pass),
+                        None => self.change_of_run(run_id, &attempts),
+                    };
+                    // What git won't count in lines could be any size, as it is for being small.
+                    change
+                        .filter(|change| change.without_lines.is_empty())
+                        .map(|change| change.lines)
+                };
+                workflows::model_for_the_change(spec, &workflows::named_risks(&attempts), lines)
+                    .map(str::to_owned)
+            }
+            None => None,
+        };
+        Ok(match model {
+            Some(model) => WorkflowStep::Agent(StepSpec {
+                model,
+                ..spec.clone()
+            }),
+            None => step.clone(),
+        })
+    }
+
     /// Records a step and sets it going. Every caller holds `advancing`, so this never takes it:
-    /// the step itself runs on a thread of its own.
+    /// the step itself runs on a thread of its own. `pass` is what `advance` has read so far, when
+    /// it's the one starting it.
     fn start_step(
         self: &Arc<Self>,
         run_id: &str,
         step: &WorkflowStep,
         number: i64,
         resume: Option<Resume>,
+        pass: Option<&mut SizeThisPass>,
+    ) -> Result<String> {
+        self.start_step_with(run_id, step, number, resume, None, pass)
+    }
+
+    /// `start_step`, recording what a retry changes along with the attempt, in one go.
+    fn start_step_with(
+        self: &Arc<Self>,
+        run_id: &str,
+        step: &WorkflowStep,
+        number: i64,
+        resume: Option<Resume>,
+        retry: Option<&keel_store::Retry>,
+        pass: Option<&mut SizeThisPass>,
     ) -> Result<String> {
         let run = self.store.run(run_id)?;
         let project = self.store.project(&run.project_id)?;
@@ -1974,13 +2248,17 @@ impl Inner {
         let workspace = self.workspace(run_id);
         let dir = self.run_dir(run_id);
         std::fs::create_dir_all(&dir)?;
+        let step = &self.with_its_model(run_id, step, resume.as_ref(), pass)?;
 
         let stem = format!("{}-{number}", step.id());
         let id = new_id();
         let (model, effort, tools, turns, budget, prompt, settings_json, raw_name) = match step {
             WorkflowStep::Agent(spec) => {
                 let text = match &resume {
-                    Some(Resume { prompt: Some(prompt), .. }) => prompt.clone(),
+                    Some(Resume {
+                        prompt: Some(prompt),
+                        ..
+                    }) => prompt.clone(),
                     Some(_) => RESUME_PROMPT.to_owned(),
                     None => self.agent_prompt(spec, &run)?,
                 };
@@ -1992,7 +2270,10 @@ impl Inner {
                         &read,
                         // Only steps that run commands get anywhere near a service.
                         &if can_edit {
-                            services::socket_dirs(&services::root_for(&project.id), &project.services)
+                            services::socket_dirs(
+                                &services::root_for(&project.id),
+                                &project.services,
+                            )
                         } else {
                             Vec::new()
                         },
@@ -2007,9 +2288,7 @@ impl Inner {
                 // Builders changed files from Bash even when told to use Edit and Write, and an
                 // edit there that matches nothing says nothing. Only a step that can edit has Bash.
                 let git = locked(&self.tools).git.clone();
-                if can_edit
-                    && let (Some(program), Some(git)) = (&self.config.bash_hook, git)
-                {
+                if can_edit && let (Some(program), Some(git)) = (&self.config.bash_hook, git) {
                     // Beside the workspace, where the sandbox can't write. The hook's git runs in
                     // the sandbox Keel's own git gets on a workspace, and without it, no hook.
                     let state = dir.join("hook");
@@ -2054,7 +2333,18 @@ impl Inner {
                 None,
                 None,
                 command.clone(),
-                json!({ "network": "internet, nothing local", "read": read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string(),
+                {
+                    // As the runner decides when it starts: after an agent that can write, what a
+                    // check gets.
+                    let (network, home) = if runner::before_any_agent_could_write(
+                        &self.store.attempts_of_run(run_id)?,
+                    ) {
+                        ("internet, nothing local", "the project's")
+                    } else {
+                        ("none", "the run's own copy")
+                    };
+                    json!({ "network": network, "home": home, "read": read, "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services) }).to_string()
+                },
                 format!("{stem}.log"),
             ),
             // Whether localhost is open is decided here, and the check runs with what's written
@@ -2079,7 +2369,9 @@ impl Inner {
                 format!("{stem}.log"),
             )
             }
-            WorkflowStep::Parallel { .. } | WorkflowStep::Approval { .. } | WorkflowStep::Deliver { .. } => (
+            WorkflowStep::Parallel { .. }
+            | WorkflowStep::Approval { .. }
+            | WorkflowStep::Deliver { .. } => (
                 String::new(),
                 None,
                 "none".to_owned(),
@@ -2091,7 +2383,7 @@ impl Inner {
             ),
         };
         let session_id = resume.as_ref().map_or_else(new_id, |r| r.session.clone());
-        self.store.add_attempt(&NewAttempt {
+        let attempt = NewAttempt {
             id: id.clone(),
             run_id: run_id.to_owned(),
             step_id: step.id().to_owned(),
@@ -2121,7 +2413,11 @@ impl Inner {
             workspace: workspace.to_string_lossy().into_owned(),
             raw_path: dir.join(raw_name).to_string_lossy().into_owned(),
             started_at: now(),
-        })?;
+        };
+        match retry {
+            Some(retry) => self.store.add_retry_attempt(&attempt, retry)?,
+            None => self.store.add_attempt(&attempt)?,
+        }
         self.changed(run_id);
         if matches!(step, WorkflowStep::Approval { .. }) {
             self.store.append_event(&id, "waiting", &json!({}))?;
@@ -2138,35 +2434,86 @@ impl Inner {
         Ok(id)
     }
 
-    /// An agent's prompt. What a person sent back has to reach whoever does the work, whatever a
-    /// saved workflow's prompt leaves out.
+    /// An agent's prompt. What a person sent back has to reach whoever does the work, and what the
+    /// request decided whoever judges it, whatever a saved workflow's prompt leaves out.
     fn agent_prompt(&self, spec: &StepSpec, run: &keel_store::Run) -> Result<String> {
         let judging = matches!(
             spec.role,
             StepRole::Reviewer | StepRole::Verifier | StepRole::Approver { .. }
         );
-        let mut text = self.render_prompt(&spec.prompt, run, judging)?;
+        let attempts = self.store.attempts_of_run(&run.id)?;
+        let mut text = self.render_prompt(&spec.prompt, run, &attempts, judging)?;
+        // What Keel adds from the request itself, and what it leaves there, the specifier has to
+        // know of to leave it out, whatever a saved workflow's prompt says.
+        if spec.role == StepRole::Specifier {
+            let decided = specs::from_request(&self.written_in_request(&run.id));
+            if let Some(told) = specs::already_decided_prompt(&decided, &run.language) {
+                text.push_str(&format!("\n\n{told}"));
+            }
+        }
+        // What the request already decided is the person's, and a workflow saved before Keel read
+        // it doesn't say so: without this, its approver could send the person's decision back as
+        // rework. Only where the spec has some, so every other prompt stays as it was. Whether the
+        // prompt says it is looked at as the workflow has it, and the rule goes after anything else
+        // Keel adds, such as what the builder said, which is only its claim.
+        let request_rule = workflows::request_rule(&spec.role, &run.language).filter(|_| {
+            !workflows::says_request_rule(&text)
+                && workflows::specifying_attempt(&attempts)
+                    .and_then(specs::of_attempt)
+                    .is_some_and(|spec| {
+                        spec.decided
+                            .iter()
+                            .any(|decided| decided.taken == Some(specs::Taken::Request))
+                    })
+        });
         if spec.role == StepRole::Worker && spec.tools == keel_core::ToolProfile::Build {
-            let attempts = self.store.attempts_of_run(&run.id)?;
             if workflows::returned_before(&attempts, run.round) {
                 let rework = workflows::rework_text(&attempts, run.round, &run.language);
                 if !text.contains(&rework) {
                     text.push_str(&format!("\n\n{rework}"));
                 }
             }
+            // An approver is told this is where the builder lists what it added, so every step
+            // that can change files is told to, also one of a workflow saved or started before.
+            let added = prompts::added_apart(&run.language);
+            if !text.contains(&added) {
+                text.push_str(&format!("\n\n{added}"));
+            }
+        }
+        // Every approver can say in which round something the change added appeared, so every one
+        // is told which round this is, and what the builder said it added, whatever its prompt says.
+        if matches!(spec.role, StepRole::Approver { .. }) {
+            let builder = workflows::builder_text(&attempts, &run.language);
+            let rounds = workflows::round_text(&attempts, run.round, &run.language);
+            for part in [builder, rounds].iter().filter(|part| !part.is_empty()) {
+                text.push_str(&format!("\n\n{part}"));
+            }
+        }
+        // A review can call what breaks a criterion minor and approve, so the approver hears it
+        // apart, whatever a saved workflow's prompt leaves out.
+        if matches!(spec.role, StepRole::Approver { .. }) {
+            let attempts = self.store.attempts_of_run(&run.id)?;
+            let broken = workflows::broken_text(&attempts, &run.language);
+            if !broken.is_empty() {
+                text.push_str(&format!("\n\n{broken}"));
+            }
+        }
+        if let Some(rule) = request_rule {
+            text.push_str(&format!("\n\n{rule}"));
         }
         Ok(text)
     }
 
-    /// What a step's prompt becomes right now. The answers come from this run's latest round.
-    /// `judging` is for an agent that decides on the change, which has to read all of it.
+    /// What a step's prompt becomes right now, from the run's `attempts` so far. The answers come
+    /// from this run's latest round. `judging` is for an agent that decides on the change, which
+    /// has to read all of it.
     fn render_prompt(
         &self,
         template: &str,
         run: &keel_store::Run,
+        attempts: &[keel_store::Attempt],
         judging: bool,
     ) -> Result<String> {
-        let attempts = self.store.attempts_of_run(&run.id)?;
         let steps: Vec<WorkflowStep> =
             serde_json::from_value(run.workflow.clone()).unwrap_or_default();
         let workspace = self.workspace(&run.id);
@@ -2188,20 +2535,20 @@ impl Inner {
                     .join(head.get(..12).unwrap_or(&head));
                 Some(diffs::for_prompt(diff, &folder, &run.language, judging))
             }
-            "rework" => Some(workflows::rework_text(&attempts, run.round, &run.language)),
-            "answers" => Some(workflows::answers_text(&attempts, &run.language)),
+            "rework" => Some(workflows::rework_text(attempts, run.round, &run.language)),
+            "answers" => Some(workflows::answers_text(attempts, &run.language)),
             "projects" => self
                 .agreement(&run.id)
                 .ok()
                 .flatten()
                 .map(|agreement| agreement.projects_text(&run.language)),
             "check" => Some(verification::check_text(
-                &verification::checks_in_round(&steps, &attempts, run.round),
+                &verification::checks_in_round(&steps, attempts, run.round),
                 &run.language,
             )),
             _ => {
                 let id = name.strip_prefix("steps.")?.strip_suffix(".output")?;
-                Some(workflows::output_of(&attempts, id))
+                Some(workflows::output_of(attempts, id))
             }
         }))
     }
@@ -2236,13 +2583,21 @@ impl Inner {
             for (index, step) in steps.iter().enumerate() {
                 if let WorkflowStep::Parallel { steps: group, .. } = step {
                     let changed = workflows::files_changed(&attempts);
+                    let named = workflows::named_risks(&attempts);
                     let mut pending = false;
                     for spec in group {
                         match latest(&spec.id, index) {
                             None => {
-                                let small = self
-                                    .treated_as_small(&run, &steps, &attempts, spec, &mut size)?;
-                                let id = if let Some(reason) = small {
+                                // Before the size, which has nothing to do with it: a step that
+                                // could never run on a small change isn't one to offer for it.
+                                let id = if !workflows::risks_match(&spec.risks, &named) {
+                                    let reason = Reason::NoMatchingRisks {
+                                        risks: spec.risks.clone(),
+                                    };
+                                    self.record_skipped(run_id, spec, &attempts, reason)?
+                                } else if let Some(reason) =
+                                    self.treated_as_small(&run, &steps, &attempts, spec, &mut size)?
+                                {
                                     self.record_skipped(run_id, spec, &attempts, reason)?
                                 } else if !workflows::paths_match(&spec.paths, &changed) {
                                     let reason = Reason::NoMatchingPaths {
@@ -2257,6 +2612,7 @@ impl Inner {
                                         &WorkflowStep::Agent(spec.clone()),
                                         number,
                                         None,
+                                        Some(&mut size),
                                     )?
                                 };
                                 self.say_size(spec, &id, &run, &attempts, &mut size)?;
@@ -2277,6 +2633,17 @@ impl Inner {
                         WorkflowStep::Agent(spec) if spec.when.is_some() => Some(spec),
                         _ => None,
                     };
+                    // Before the size, as in a group.
+                    if let WorkflowStep::Agent(spec) = step
+                        && !workflows::risks_match(&spec.risks, &workflows::named_risks(&attempts))
+                    {
+                        let reason = Reason::NoMatchingRisks {
+                            risks: spec.risks.clone(),
+                        };
+                        let id = self.record_skipped(run_id, spec, &attempts, reason)?;
+                        self.say_size(spec, &id, &run, &attempts, &mut size)?;
+                        continue 'round;
+                    }
                     if let Some(spec) = conditional
                         && let Some(reason) =
                             self.treated_as_small(&run, &steps, &attempts, spec, &mut size)?
@@ -2286,14 +2653,14 @@ impl Inner {
                         continue 'round;
                     }
                     let number = workflows::next_number(&attempts, step.id());
-                    let id = self.start_step(run_id, step, number, None)?;
+                    let id = self.start_step(run_id, step, number, None, Some(&mut size))?;
                     if let Some(spec) = conditional {
                         self.say_size(spec, &id, &run, &attempts, &mut size)?;
                     }
                     return Ok(());
                 };
-                // Only a condition gets a step here that stands alone. It holds nothing up, and it has
-                // no answer to act on: an approver that didn't run sends nothing back.
+                // Only a condition or its risks skip a step here that stands alone. It holds nothing
+                // up, and it has no answer to act on: an approver that didn't run sends nothing back.
                 if attempt.state == AttemptState::Skipped.as_str() {
                     continue;
                 }
@@ -2364,7 +2731,8 @@ impl Inner {
             return Ok(None);
         };
         if size.decision.is_none() {
-            size.decision = Some(self.size_of_run(run, steps, attempts)?);
+            let decision = self.size_of_run(run, steps, attempts, size)?;
+            size.decision = Some(decision);
         }
         Ok(match size.decision {
             Some(sizing::Decision::Small { lines, files }) => {
@@ -2380,6 +2748,7 @@ impl Inner {
         run: &keel_store::Run,
         steps: &[WorkflowStep],
         attempts: &[keel_store::Attempt],
+        pass: &mut SizeThisPass,
     ) -> Result<sizing::Decision> {
         if sizing::already_up(steps, attempts) {
             return Ok(sizing::Decision::StaysUp);
@@ -2410,9 +2779,21 @@ impl Inner {
             started_by: run.started_by.as_deref(),
             sensitive: &project.sensitive_paths,
             commands: &commands,
-            change: self.change_of_run(&run.id, attempts),
+            change: self.change_this_pass(&run.id, attempts, pass),
             part_of_joint_change: self.is_part(&run.id)?,
         }))
+    }
+
+    /// The change as this pass read it, reading it the first time anything asks.
+    fn change_this_pass(
+        &self,
+        run_id: &str,
+        attempts: &[keel_store::Attempt],
+        pass: &mut SizeThisPass,
+    ) -> Option<git::ChangeSize> {
+        pass.change
+            .get_or_insert_with(|| self.change_of_run(run_id, attempts))
+            .clone()
     }
 
     /// `None` if it can't be read, whatever the reason.
@@ -2431,7 +2812,8 @@ impl Inner {
     }
 
     /// Puts what was decided on the record, on the first step it applied to. Results count from this.
-    /// Being small again later in the same round isn't a new decision.
+    /// Being small again later in the same round isn't a new decision. A step its risks left out had
+    /// nothing decided for it, and leaves that to the next one.
     fn say_size(
         &self,
         spec: &StepSpec,
@@ -2440,6 +2822,9 @@ impl Inner {
         attempts: &[keel_store::Attempt],
         size: &mut SizeThisPass,
     ) -> Result<()> {
+        let Some(decision) = &size.decision else {
+            return Ok(());
+        };
         if spec.when.is_none() || size.said {
             return Ok(());
         }
@@ -2447,10 +2832,9 @@ impl Inner {
         let told = attempts
             .iter()
             .any(|a| a.round == run.round && sizing::skipped_as_small(a));
-        let data = match &size.decision {
-            Some(sizing::Decision::Small { .. }) if told => None,
-            Some(decision) => decision.on_record(run.round),
-            None => None,
+        let data = match decision {
+            sizing::Decision::Small { .. } if told => None,
+            decision => decision.on_record(run.round),
         };
         if let Some(data) = data {
             self.store.append_event(attempt_id, "sizeDecided", &data)?;
@@ -2564,6 +2948,8 @@ mod tests {
             max_budget_usd: None,
             paths: vec![],
             when: None,
+            risks: vec![],
+            model_when_risky: None,
             role: Default::default(),
         });
         let back: WorkflowStep =

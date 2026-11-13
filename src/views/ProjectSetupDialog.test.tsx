@@ -25,11 +25,12 @@ const PROJECT: Project = {
   sensitivePaths: ["billing/"],
   allowLocalhost: true,
 };
-const NO_GUESS: Guess = { check: null, setup: null, from: [], setupOptions: [], checkOptions: [], fromCi: false, localhost: false };
-const PNPM: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false, localhost: false };
-const UV: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: ["uv.lock", "pyproject.toml"], setupOptions: ["--group stubs", "--group test"], checkOptions: [], fromCi: false, localhost: false };
-const CI: Guess = { check: "zig build test", setup: "zig fetch && zig build", from: [".github/workflows/ci.yml"], setupOptions: [], checkOptions: [], fromCi: true, localhost: false };
-const GRADLE: Guess = { check: "./gradlew test", setup: "./gradlew test --test-dry-run", from: ["build.gradle.kts", "gradlew"], setupOptions: [], checkOptions: [], fromCi: false, localhost: true };
+const NO_GUESS: Guess = { check: null, setup: null, from: [], setupOptions: [], checkOptions: [], fromCi: false, localhost: false, ciChecks: [], ciLeftOut: [] };
+const PNPM: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false, localhost: false, ciChecks: [], ciLeftOut: [] };
+const UV: Guess = { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: ["uv.lock", "pyproject.toml"], setupOptions: ["--group stubs", "--group test"], checkOptions: [], fromCi: false, localhost: false, ciChecks: [], ciLeftOut: [] };
+const CI: Guess = { check: "zig build test", setup: "zig fetch && zig build", from: [".github/workflows/ci.yml"], setupOptions: [], checkOptions: [], fromCi: true, localhost: false, ciChecks: [], ciLeftOut: [] };
+const UV_AND_CI: Guess = { ...UV, check: "uv run --frozen pytest && uv run --frozen ruff check . && uv run --frozen pyright", from: ["uv.lock", ".github/workflows/ci.yml"], ciChecks: ["uv run --frozen ruff check .", "uv run --frozen pyright"], ciLeftOut: [{ command: "semgrep ci", why: "offline" }, { command: "uv run mypy .", why: "mayFail" }] };
+const GRADLE: Guess = { check: "./gradlew test", setup: "./gradlew test --test-dry-run", from: ["build.gradle.kts", "gradlew"], setupOptions: [], checkOptions: [], fromCi: false, localhost: true, ciChecks: [], ciLeftOut: [] };
 const ACCOUNT = (login: string) => ({ login, active: false, ok: true, scopes: ["repo"] });
 
 interface Scene {
@@ -235,9 +236,25 @@ describe("the setup dialog", () => {
       expect(page()).not.toContain("Taken from your CI");
     });
 
+    it("says which commands of the check come from the project's CI", async () => {
+      await show({ guess: UV_AND_CI, accounts: { "you-work": "WRITE" } });
+      expect(inputs()[0].value).toBe("uv run --frozen pytest && uv run --frozen ruff check . && uv run --frozen pyright");
+      expect(page()).toContain("Guessed from uv.lock, .github/workflows/ci.yml.");
+      expect(page()).toContain("From your CI: uv run --frozen ruff check ., uv run --frozen pyright.");
+      // Each with why, in a few words.
+      expect(page()).toContain("Left out of the check, though your CI runs them: semgrep ci (Keel can't run it offline as CI does), uv run mypy . (CI lets it fail).");
+      expect(page()).toContain(i18next.t("projects.pyrightNode"));
+      expect(called("project_update")).toEqual([]);
+      await type(inputs()[0], "uv run --frozen pytest");
+      expect(page()).not.toContain("From your CI");
+    });
+
     it("stops calling it a guess once it's been changed", async () => {
       await show({ guess: { ...PNPM, setup: null } });
       expect(page()).toContain("Guessed from");
+      expect(page()).not.toContain("From your CI");
+      expect(page()).not.toContain("Left out of the check");
+      expect(page()).not.toContain(i18next.t("projects.pyrightNode"));
       await type(inputs()[0], "pnpm test:unit");
       expect(page()).not.toContain("Guessed from");
     });

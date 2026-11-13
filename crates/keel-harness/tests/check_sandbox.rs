@@ -749,6 +749,30 @@ fn setup_can_reach_the_internet_and_its_cache() {
     );
 }
 
+/// What a check gets, and so does a setup once an agent has run: the cache the project's runs
+/// share is out of reach, and the project's home in it, which each run's home starts as a copy of.
+/// So nothing can be left there for the next run to start from.
+#[test]
+fn only_setup_before_any_agent_reaches_the_cache_runs_share() {
+    keel_harness::needs!(sandbox);
+    let s = sandbox();
+    let cache = tempfile::Builder::new()
+        .prefix(".keel-sandbox-cache")
+        .tempdir_in(&s.home)
+        .unwrap();
+    let project_home = cache.path().join("home");
+    std::fs::create_dir_all(project_home.join(".cache")).unwrap();
+    std::fs::write(project_home.join(".gitconfig"), "[user]\n").unwrap();
+    for folder in [cache.path(), &project_home, &project_home.join(".cache")] {
+        let plant = format!("echo x > {}", quoted(&folder.join("planted")));
+        assert!(!s.allowed(&plant), "{folder:?}");
+        assert!(!folder.join("planted").exists());
+        assert!(run_setup(&s, cache.path(), &plant), "{folder:?}");
+        assert!(folder.join("planted").exists());
+    }
+    assert!(!s.allowed(&format!("cat {}", quoted(&project_home.join(".gitconfig")))));
+}
+
 #[test]
 fn setup_still_cannot_reach_anything_on_this_machine() {
     keel_harness::needs!(sandbox);

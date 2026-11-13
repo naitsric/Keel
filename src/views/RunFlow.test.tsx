@@ -157,6 +157,38 @@ describe("the run page's flow", () => {
       expect(page()).toContain("Pull request still a draft");
       expect(page()).toContain("Review and merge the draft on GitHub");
     });
+
+    it("says when its CI fails, and which checks", async () => {
+      delivered({ prState: "draft", prStateAt: "2026-11-06T10:00:00Z", prCi: "failed", prCiFailed: ["lint", "pyright"] });
+      await open();
+      expect(page()).toContain("CI failed: lint, pyright");
+      // Red with no check named says only that.
+      delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z", prCi: "failed", prCiFailed: [] });
+      await update();
+      expect(page()).toContain("CI failed");
+      expect(page()).not.toContain("CI failed:");
+      delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z", prCi: "pending", prCiFailed: [] });
+      await update();
+      expect(page()).toContain("CI running");
+      expect(page()).not.toContain("CI failed");
+      delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z", prCi: "passed", prCiFailed: [] });
+      await update();
+      expect(page()).toContain("CI passed");
+    });
+
+    it("says nothing about CI it doesn't know, a repo without it, or a pull request that's over", async () => {
+      // A run from before Keel followed the CI has nothing about it.
+      delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z" });
+      await open();
+      expect(page()).toContain("Pull request open");
+      expect(page()).not.toMatch(/CI (failed|running|passed)/);
+      for (const fields of [{ prCi: null }, { prCi: "noCi" }, { prState: "merged", prCi: "failed", prCiFailed: ["lint"] }] as Partial<Run>[]) {
+        delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z", prCiFailed: [], ...fields });
+        await update();
+        expect(page()).toContain(fields.prState === "merged" ? "Pull request merged" : "Pull request open");
+        expect(page()).not.toMatch(/CI (failed|running|passed)/);
+      }
+    });
   });
 
   describe("a workflow that fits the change", () => {
@@ -711,6 +743,26 @@ describe("the run page's flow", () => {
       expect(page()).not.toContain('"criteria"');
     });
 
+    it("lists what the request already decided apart, saying when an assistant or the project's GitHub account wrote it", async () => {
+      const decided = [
+        { text: "If its author resolves it, it counts for now.", taken: "request" },
+        { text: "Old threads stay as they are.", taken: "request", assistant: "Claude Code" },
+        { text: "Invoices already sent keep their total.", taken: "request", githubAccount: "alice" },
+        { text: "Keeps the rounding" },
+      ];
+      attempts = [specifier("succeeded", { output: { ...output, decided } as unknown as Attempt["output"] }), attempt("builder", "running")];
+      await open();
+      await choose(node("spec"));
+      await choose(radio("What it understood"));
+      const list = (title: string) => [...document.querySelectorAll("h4")].find((h4) => h4.textContent === title)?.parentElement?.textContent ?? "";
+      expect(list("Decided in the request")).toContain("If its author resolves it, it counts for now.");
+      expect(list("Decided in the request")).toContain("Old threads stay as they are.Claude Code wrote it");
+      expect(list("Decided in the request")).toContain("Invoices already sent keep their total.Written with the project's GitHub account");
+      expect(list("Decided in the request")).not.toContain("Keeps the rounding");
+      expect(list("What it decided alone")).toContain("Keeps the rounding");
+      expect(list("What it decided alone")).not.toContain("Old threads stay");
+    });
+
     it("says it gave its answer in the activity, instead of printing it", async () => {
       const spec = specifier("succeeded");
       attempts = [spec, attempt("builder", "running")];
@@ -795,6 +847,24 @@ describe("the run page's flow", () => {
       await open();
       await choose(radio("Attempt 1"));
       expect(page()).toContain("Claude Code tried it again");
+    });
+
+    it("says which assistant asked a step to stop", async () => {
+      const stopped = attempt("builder", "stopped");
+      attempts = [attempt("spec", "succeeded"), stopped];
+      events = { [stopped.id]: [event(stopped.id, "stopRequested", { by: "Claude Code" })] };
+      await open();
+      expect(page()).toContain("Claude Code asked it to stop");
+      expect(page()).not.toContain("You asked it to stop");
+    });
+
+    it("keeps a stop the person asked for as theirs", async () => {
+      const stopped = attempt("builder", "stopped");
+      attempts = [attempt("spec", "succeeded"), stopped];
+      events = { [stopped.id]: [event(stopped.id, "stopRequested", {})] };
+      await open();
+      expect(page()).toContain("You asked it to stop");
+      expect(page()).not.toContain("Claude Code asked it to stop");
     });
 
     it("looks just as before when it was the person", async () => {

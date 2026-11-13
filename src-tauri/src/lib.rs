@@ -12,9 +12,10 @@ use keel_core::{
     serialize_masked,
 };
 use keel_engine::{
-    AddedProject, Answer, Board, BrainView, Config, Engine, Error as EngineError, GithubStatus,
-    JointChangeView, Preflight, ProjectProposalReview, ProjectSetup, RawCheck, RunJoint, StartRun,
-    Workflow, WorkflowDraft, request_from_issue, title_from_issue,
+    AddedProject, Answer, Board, BrainView, CiGap, CommandChange, Config, ContractEdit, Engine,
+    Error as EngineError, GithubStatus, JointChangeView, Preflight, ProjectProposalReview,
+    ProjectSetup, RawCheck, RetryOptions, RunJoint, StartRun, Workflow, WorkflowDraft,
+    request_from_issue, title_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
@@ -204,6 +205,12 @@ fn project_proposal_discard(state: State<'_, AppState>, proposal_id: String) -> 
 fn project_setup(state: State<'_, AppState>, project_id: String) -> CommandResult<ProjectSetup> {
     state.ready.wait();
     Ok(state.engine.project_setup(&project_id)?)
+}
+
+/// Not masked either: what it lists can be added to the check, which is saved back.
+#[tauri::command(async)]
+fn project_ci_gap(state: State<'_, AppState>, project_id: String) -> CommandResult<CiGap> {
+    Ok(state.engine.project_ci_gap(&project_id)?)
 }
 
 /// Where in the home folder the programs these commands use are, for the person to let them be
@@ -426,6 +433,8 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
                 max_budget_usd: None,
                 paths: vec![],
                 when: None,
+                risks: vec![],
+                model_when_risky: None,
                 role: Default::default(),
             });
             (vec![step], None)
@@ -528,6 +537,16 @@ fn joint_check_set(
     works: bool,
 ) -> CommandResult<()> {
     Ok(state.engine.joint_check_set(&change_id, seq, works)?)
+}
+
+/// Only from here too: no agent and no assistant can correct what the parts agree on.
+#[tauri::command(async)]
+fn joint_contract_set(
+    state: State<'_, AppState>,
+    change_id: String,
+    points: Vec<ContractEdit>,
+) -> CommandResult<()> {
+    Ok(state.engine.joint_contract_set(&change_id, &points)?)
 }
 
 #[tauri::command(async)]
@@ -761,8 +780,23 @@ fn attempt_retry(
     state: State<'_, AppState>,
     attempt_id: String,
     resume: bool,
+    current_commands: bool,
 ) -> CommandResult<String> {
-    Ok(state.engine.retry(&attempt_id, resume)?)
+    let options = RetryOptions {
+        resume,
+        by: None,
+        current_commands,
+    };
+    Ok(state.engine.retry_with(&attempt_id, options)?)
+}
+
+/// The run's setup and check whose command the project changed after it started.
+#[tauri::command(async)]
+fn run_command_changes(
+    state: State<'_, AppState>,
+    run_id: String,
+) -> CommandResult<Masked<Vec<CommandChange>>> {
+    Ok(Masked(state.engine.command_changes(&run_id)?))
 }
 
 #[tauri::command(async)]
@@ -998,6 +1032,7 @@ pub fn run() {
             overview,
             project_add,
             project_setup,
+            project_ci_gap,
             project_tool_folders,
             project_try_check,
             project_remove,
@@ -1031,6 +1066,7 @@ pub fn run() {
             card_stop_waiting,
             joint_change_get,
             joint_check_set,
+            joint_contract_set,
             run_joint,
             max_agents_get,
             max_agents_set,
@@ -1063,6 +1099,7 @@ pub fn run() {
             attempt_wait,
             attempt_kill_command,
             attempt_retry,
+            run_command_changes,
             attempt_abandon,
             language_get,
             language_set,
@@ -1211,6 +1248,8 @@ mod tests {
                 pr_url: None,
                 pr_state: None,
                 pr_state_at: None,
+                pr_ci: None,
+                pr_ci_failed: Vec::new(),
                 rejection: Some(said.clone()),
                 start_blocked: Some(failed.clone()),
                 created_at: "2026-11-05T10:00:00Z".into(),

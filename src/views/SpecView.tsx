@@ -1,5 +1,9 @@
 import { useTranslation } from "react-i18next";
-import type { SpecOutput } from "../lib/api";
+import type { SpecDecided, SpecOutput } from "../lib/api";
+import { limitId } from "../lib/audit";
+
+/** Whether a line is what the request already decided, word for word, rather than what the agent decided. */
+export const fromRequest = (decided: SpecDecided) => decided.taken === "request";
 
 function SpecList({ title, items }: { title: string; items: React.ReactNode[] }) {
   if (items.length === 0) return null;
@@ -16,7 +20,16 @@ function SpecList({ title, items }: { title: string; items: React.ReactNode[] })
   );
 }
 
-/** What a specifier understood, as text to read. Where a change across projects is agreed, also each part and what's tried together. */
+/** A point the parts agree on exactly: its id, the projects whose part keeps it, and what it says. */
+export function ContractLine({ point }: { point: NonNullable<SpecOutput["contract"]>[number] }) {
+  return (
+    <>
+      <span className="font-mono text-[12px] text-muted">{point.id}</span> ({point.projects.join(", ")}): {point.when} → {point.then}
+    </>
+  );
+}
+
+/** What a specifier understood, as text to read. Where a change across projects is agreed, also each part, what's tried together and what the parts agree on exactly. */
 export function SpecView({ spec }: { spec: SpecOutput }) {
   const { t } = useTranslation();
   const kinds = { adds: "run.specAdds", changes: "run.specAlters", removes: "run.specRemoves" };
@@ -40,17 +53,38 @@ export function SpecView({ spec }: { spec: SpecOutput }) {
         ))}
       />
       <SpecList title={t("run.specChanges")} items={spec.changes.map((change) => `${t(kinds[change.kind])}: ${change.text}`)} />
-      <SpecList title={t("run.specLimits")} items={spec.limits} />
-      <SpecList title={t("run.specTogether")} items={spec.together ?? []} />
       <SpecList
-        title={t("run.decidedTitle")}
-        items={spec.decided.map((decided) => (
+        title={t("run.specLimits")}
+        items={spec.limits.map((limit, index) => (
+          // Reviews name a limit the change breaks by this id, as they do a criterion.
           <>
-            {decided.text}
-            {decided.taken === "person" && <span className="block text-[11.5px] text-subtle">{t("run.decidedYouChose")}</span>}
-            {decided.taken === "roundsLimit" && <span className="block text-[11.5px] text-warning">{t("run.decidedKeelTook")}</span>}
+            <span className="font-mono text-[12px] text-muted">{limitId(index)}</span> {limit}
           </>
         ))}
+      />
+      <SpecList title={t("run.specTogether")} items={spec.together ?? []} />
+      <SpecList title={t("run.specContract")} items={(spec.contract ?? []).map((point) => <ContractLine point={point} />)} />
+      <SpecList
+        title={t("run.decidedInRequest")}
+        items={spec.decided.filter(fromRequest).map((decided) => (
+          <>
+            {decided.text}
+            {decided.assistant && <span className="block text-[11.5px] text-subtle">{t("run.decidedWrittenBy", { client: decided.assistant })}</span>}
+            {!decided.assistant && decided.githubAccount && <span className="block text-[11.5px] text-subtle">{t("run.decidedWrittenWithAccount")}</span>}
+          </>
+        ))}
+      />
+      <SpecList
+        title={t("run.decidedTitle")}
+        items={spec.decided
+          .filter((decided) => !fromRequest(decided))
+          .map((decided) => (
+            <>
+              {decided.text}
+              {decided.taken === "person" && <span className="block text-[11.5px] text-subtle">{t("run.decidedYouChose")}</span>}
+              {decided.taken === "roundsLimit" && <span className="block text-[11.5px] text-warning">{t("run.decidedKeelTook")}</span>}
+            </>
+          ))}
       />
       <SpecList title={t("run.specAsked")} items={spec.questions.map((question) => `${question.text} ${question.options.map((option) => option.label).join(" / ")}`)} />
       <SpecList title={t("run.specAnswered")} items={(spec.answered ?? []).map((answer) => `${answer.asked} ${answer.answer}`)} />
