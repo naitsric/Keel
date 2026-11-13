@@ -19,13 +19,19 @@ export type AttemptState =
   | "skipped"
   | "abandoned";
 
-/** What the app calls a state. `corrected` is a failed answer that Keel had fixed at once: see `shownState`. */
-export type ShownState = AttemptState | "corrected";
+/**
+ * What the app calls a state. `corrected` is a failed answer that Keel had fixed at once, and
+ * `afterSetup` a step put off for a new setup to run first: see `shownState`.
+ */
+export type ShownState = AttemptState | "corrected" | "afterSetup";
 
 export type ToolProfile = "readOnly" | "build";
 
 /** What became of a pull request after Keel opened it, as of the last time it looked. */
 export type PrState = "open" | "draft" | "merged" | "closed";
+
+/** What a pull request's CI said about its latest commit, as of the last time Keel looked. */
+export type CiState = "pending" | "passed" | "failed" | "noCi";
 
 /** A code with its data. The backend sends no sentences; `reasonText` writes them. */
 export type Reason = { code: string } & Record<string, unknown>;
@@ -113,6 +119,29 @@ export interface Guess {
   checkOptions: string[];
   /** It's what the project's CI runs, since nothing else here says how it installs and tests. */
   fromCi: boolean;
+  /** What the check runs because the project's CI does, though nothing else here names it, as Keel runs it with no network. */
+  ciChecks: string[];
+  /** What else the CI checks, as it runs it, and why the check doesn't. */
+  ciLeftOut: CiLeftOut[];
+}
+
+/** Why a command the CI runs isn't added to the check: Keel can't be sure it runs in its sandbox, with no network, as in CI. */
+export type CiWhy = "offline" | "mayFail" | "env" | "sometimes" | "installs" | "template";
+
+/** A command the CI runs, as it runs it, and why the check doesn't. */
+export interface CiLeftOut {
+  command: string;
+  why: CiWhy;
+}
+
+/** What a project's CI checks and its saved check doesn't run. Keel never adds them by itself. */
+export interface CiGap {
+  /** As Keel runs them with no network, for a person to add. */
+  commands: string[];
+  /** As the CI runs them, and why a check doesn't. */
+  leftOut: CiLeftOut[];
+  /** The CI's files they're in. */
+  from: string[];
 }
 
 export interface ProjectSetup {
@@ -148,7 +177,7 @@ export interface McpClient {
   name: string;
   tokenPrefix: string;
   canRun: boolean;
-  /** May send work back, retry and close the runs it started. Only with `canRun`. */
+  /** May send work back and retry on the runs it started, and add a note to their cards while they wait. Only with `canRun`. */
   canSteer: boolean;
   /** How many of its runs may be open at once, counting those that wait for the person. */
   maxOpenRuns: number;
@@ -257,6 +286,10 @@ export interface StepSpec {
   role?: StepRole;
   /** Runs only if this holds. Absent means always. */
   when?: StepCondition;
+  /** Runs only if what was asked names one of these risks. Absent means always. */
+  risks?: string[];
+  /** The model it runs with instead when the change is risky. Absent keeps `model`. */
+  modelWhenRisky?: string;
 }
 
 export type WorkflowStep =
@@ -292,8 +325,12 @@ export interface SpecQuestion {
 
 export interface SpecDecided {
   text: string;
-  /** Who settled it, if it was once a question: a person, or Keel when the rounds of them ran out. */
-  taken?: "person" | "roundsLimit";
+  /** Who settled it, if it was once a question: a person, or Keel when the rounds of them ran out. Or the request, in a list of what was already decided, which `text` is word for word. */
+  taken?: "person" | "roundsLimit" | "request";
+  /** The assistant that wrote that request for the person, when one did. */
+  assistant?: string;
+  /** Or the project's GitHub account, for an issue written with it, which isn't proven to be the person. */
+  githubAccount?: string;
 }
 
 /** An answer to a question, as the engine keeps it. */
@@ -322,6 +359,8 @@ export interface SpecOutput {
   parts?: { project: string; text: string }[];
   /** Only there too: what only works with every part in place, for a person to try. */
   together?: string[];
+  /** Only there too: what the parts agree on exactly. Keel numbers them K1, K2… and each part that a point names keeps it as one of its own. */
+  contract?: { id: string; when: string; then: string; projects: string[] }[];
 }
 
 /** One thing the specifier said has to be true, in its words, and what became of it. */
@@ -333,6 +372,8 @@ export interface CheckedCriterion {
   evidence: string;
   /** Why it isn't what the verifier said. Only the engine writes this. */
   corrected?: "noEvidence" | "noCheckPassed" | "leftOut";
+  /** Why nothing proves it, as the verifier said. Answers from before it did don't say. */
+  why?: "noTest" | "notRun";
 }
 
 /** A verifier's answer, once the engine has corrected it. */
@@ -362,10 +403,16 @@ export interface ProjectProposal {
   gone: boolean;
 }
 
+/**
+ * One problem a review found: where, what, and the id of the criterion it breaks, or `L<n>` for the
+ * specification's limit number n. Older answers wrote only text.
+ */
+export type Finding = string | { file: string | null; line: number | null; text: string; breaks: string | null };
+
 /** A reviewer's answer. */
 export interface Verdict {
   verdict: "approved" | "changes";
-  findings: string[];
+  findings: Finding[];
   summary: string;
   /** Files of the change it couldn't read. Keel never counts such a review as an approval. Older answers don't have it. */
   unread?: string[];
@@ -373,12 +420,17 @@ export interface Verdict {
   unchecked?: string[];
 }
 
-/** A line of what the specification decided on its own that a review questions, and why. */
+/**
+ * A line of what the specification decided on its own that a review questions, and why. Or else
+ * something the change added that nothing asks for, which has no number and says its round.
+ */
 export interface Questioned {
   /** The line, quoted, maybe in other words. */
   decided: string;
   /** Its place in the list, from 1. Older answers don't have it, and an agent can get it wrong. */
-  number?: number;
+  number?: number | null;
+  /** For something the change added, the round it appeared in, from 1. Older answers don't have it. */
+  round?: number | null;
   why: string;
 }
 
@@ -388,7 +440,7 @@ export interface Decision_ {
   risk: "low" | "medium" | "high";
   reasons: string;
   instructions: string;
-  /** What the specification decided on its own that a review questions, for the person to settle. Older answers don't have it. */
+  /** What the specification decided on its own, or the change added, that a review questions, for the person to settle. Older answers don't have it. */
   questioned?: Questioned[];
   overriddenByPerson?: boolean;
 }
@@ -418,6 +470,10 @@ export interface Run {
   /** When that happened, going by GitHub. */
   prStateAt: string | null;
   prCheckedAt: string | null;
+  /** Null until Keel knows. */
+  prCi: CiState | null;
+  /** The checks that failed, by name. */
+  prCiFailed: string[];
 }
 
 /** How a workflow's runs in a project have gone. */
@@ -483,6 +539,14 @@ export interface Totals {
   tokens: number;
   durationMs: number;
   costUsd: number;
+}
+
+/** A run's setup or check whose command the project changed after the run started. */
+export interface CommandChange {
+  stepId: string;
+  kind: "setup" | "check";
+  before: string;
+  now: string;
 }
 
 export interface Overview {
@@ -583,6 +647,8 @@ export interface BoardCard {
   prUrl: string | null;
   prState: PrState | null;
   prStateAt: string | null;
+  prCi: CiState | null;
+  prCiFailed: string[];
   /** What the person wrote when rejecting. It may be empty. */
   rejection: string | null;
   startBlocked: Reason | null;
@@ -610,6 +676,8 @@ export interface PartOf {
   /** The part it starts after, while it still waits for that one's pull request. */
   waitsFor: { cardId: string; position: number | null; project: string } | null;
   warnings: PartWarning[];
+  /** The points of the contract it was specified with as they no longer are: corrected, added or removed since. Empty until it's specified. */
+  contractChanged: string[];
 }
 
 export interface JointCard {
@@ -645,6 +713,39 @@ export interface JointChange {
   /** What it touches that no part changes. */
   readOnly: { id: string; name: string }[];
   checks: JointCheck[];
+  /** What the parts agree on exactly, point by point, as a person corrected it since, if they did. Empty until it's agreed, and for an agreement without any. */
+  contract: ContractPoint[];
+  /** The number the next new point takes: K{contractNext}. Null until it's agreed. */
+  contractNext: number | null;
+}
+
+/** A point the parts agree on exactly, and what each part that keeps it found. */
+export interface ContractPoint {
+  id: string;
+  when: string;
+  then: string;
+  /** The projects it names, by the names they go by in what was agreed. */
+  projects: string[];
+  /** First to last. */
+  parts: {
+    cardId: string;
+    position: number;
+    project: string;
+    /** What its verifier said of it in its run's latest round. Null until it said something. */
+    result: CheckedCriterion["result"] | null;
+    /** False once its run shows a workflow with no verifier, which never will. */
+    verifies: boolean;
+    /** Its part was specified with this point as it was before a person corrected it, or before it was added. Then `result` is null. */
+    earlier: boolean;
+  }[];
+}
+
+/** A point of the contract as a person corrects it: one already there by its id, a new one without. */
+export interface ContractEdit {
+  id: string | null;
+  when: string;
+  then: string;
+  projects: string[];
 }
 
 /** What a run's page says about the change across projects it's in. */
@@ -698,6 +799,8 @@ export const api = {
   projectProposalAccept: (proposalId: string, language: string) => invoke<ProjectAdded>("project_proposal_accept", { proposalId, language }),
   projectProposalDiscard: (proposalId: string) => invoke<void>("project_proposal_discard", { proposalId }),
   projectSetup: (projectId: string) => invoke<ProjectSetup>("project_setup", { projectId }),
+  /** Only reads the repo. */
+  projectCiGap: (projectId: string) => invoke<CiGap>("project_ci_gap", { projectId }),
   projectToolFolders: (projectId: string, setup: string, check: string) => invoke<ToolFolder[]>("project_tool_folders", { projectId, setup, check }),
   /** `read` is the folders the commands may read on top of the project's, for this run only. */
   projectTryCheck: (projectId: string, setup: string, check: string, read: string[], language: string) => invoke<string>("project_try_check", { projectId, setup, check, read, language }),
@@ -753,7 +856,9 @@ export const api = {
   attemptStop: (attemptId: string) => invoke<void>("attempt_stop", { attemptId }),
   attemptWait: (attemptId: string) => invoke<void>("attempt_wait", { attemptId }),
   attemptKillCommand: (attemptId: string) => invoke<void>("attempt_kill_command", { attemptId }),
-  attemptRetry: (attemptId: string, resume: boolean) => invoke<string>("attempt_retry", { attemptId, resume }),
+  /** With `currentCommands`, the run takes the project's setup and check as they are now. */
+  attemptRetry: (attemptId: string, resume: boolean, currentCommands = false) => invoke<string>("attempt_retry", { attemptId, resume, currentCommands }),
+  runCommandChanges: (runId: string) => invoke<CommandChange[]>("run_command_changes", { runId }),
   attemptAbandon: (attemptId: string) => invoke<void>("attempt_abandon", { attemptId }),
   languageGet: () => invoke<string | null>("language_get"),
   languageSet: (language: string) => invoke<void>("language_set", { language }),
@@ -774,6 +879,7 @@ export const api = {
   jointChangeGet: (changeId: string) => invoke<JointChange>("joint_change_get", { changeId }),
   /** Only a person, from here, says what only works with every part in place works. */
   jointCheckSet: (changeId: string, seq: number, works: boolean) => invoke<void>("joint_check_set", { changeId, seq, works }),
+  jointContractSet: (changeId: string, points: ContractEdit[]) => invoke<void>("joint_contract_set", { changeId, points }),
   runJoint: (runId: string) => invoke<RunJoint | null>("run_joint", { runId }),
   maxAgentsGet: () => invoke<number>("max_agents_get"),
   maxAgentsSet: (value: number) => invoke<void>("max_agents_set", { value }),

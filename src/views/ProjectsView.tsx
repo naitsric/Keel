@@ -1,9 +1,9 @@
 import { AlertTriangle, Check, Search } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type EnvVar, type GithubStatus, type Project, type Service, type Workflow } from "../lib/api";
+import { api, type CiGap, type EnvVar, type GithubStatus, type Project, type Service, type Workflow } from "../lib/api";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
-import { foldersToOffer, needsSetup, withFolders } from "../lib/projects";
+import { ciCommandsLeft, ciLeftOutLeft, foldersToOffer, needsNode, needsSetup, withCheckOption, withFolders } from "../lib/projects";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass } from "../ui/primitives";
@@ -85,6 +85,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
   const [workflow, setWorkflow] = useState(project.defaultWorkflow ?? FULL_WORKFLOW);
   const [sensitive, setSensitive] = useState(project.sensitivePaths.join("\n"));
   const [workflows, setWorkflows] = useState<Workflow[] | null>(null);
+  const [ciGap, setCiGap] = useState<CiGap | null>(null);
   const [status, setStatus] = useState<GithubStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
@@ -130,6 +131,18 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
       .catch((e) => setError(errorText(t, e)));
   }, [project.id, i18n.language, t]);
 
+  // Against the saved check. A hint, so one that can't be had shows nothing.
+  useEffect(() => {
+    let current = true;
+    api
+      .projectCiGap(project.id)
+      .then((gap) => current && setCiGap(gap))
+      .catch(() => current && setCiGap(null));
+    return () => {
+      current = false;
+    };
+  }, [project.id]);
+
   const openOnGithub = (url: string) => {
     setError(null);
     api.openGithubUrl(url).catch((e) => setError(errorText(t, e)));
@@ -172,6 +185,8 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
   const access = githubAccess(status);
   const needsAccess = selected !== null && (access === "none" || access === "readOnly");
   const workflowGone = workflows !== null && !workflows.some((w) => w.id === workflow);
+  const ciMissing = ciGap ? ciCommandsLeft(check, ciGap.commands) : [];
+  const ciLeftOut = ciGap ? ciLeftOutLeft(check, ciGap.leftOut) : [];
   const removeProject = () => setRemoving(true);
   return (
     <div className="space-y-4">
@@ -207,6 +222,36 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
           <Field label={t("settings.checkCommand")} hint={t("settings.checkCommandHint")}>
             <input value={check} onChange={(e) => setCheck(e.target.value)} placeholder={t("settings.checkCommandPlaceholder")} className={`${inputClass} font-mono`} />
           </Field>
+          {(ciMissing.length > 0 || ciLeftOut.length > 0) && (
+            <div className="space-y-2 rounded-md border border-border-strong bg-inset px-3 py-2.5">
+              {ciMissing.length > 0 && (
+                <div>
+                  <p className="flex gap-1.5 text-[12.5px] text-warning">
+                    <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                    {t("projects.ciMissing")}
+                  </p>
+                  <CommandList commands={ciMissing} />
+                  {needsNode(ciMissing) && <p className="mt-1 text-[12px] text-muted">{t("projects.pyrightNode")}</p>}
+                  <Button className="mt-2" onClick={() => setCheck(ciMissing.reduce(withCheckOption, check))}>
+                    {t("projects.ciMissingAdd")}
+                  </Button>
+                </div>
+              )}
+              {ciLeftOut.length > 0 && (
+                <div>
+                  <p className="text-[12px] text-muted">{t("projects.ciLeftOut")}</p>
+                  <ul className="mt-1 space-y-0.5 pl-5 text-[11.5px] text-muted">
+                    {ciLeftOut.map((left) => (
+                      <li key={left.command} className="break-all">
+                        <span className="selectable font-mono">{left.command}</span>
+                        <span className="text-subtle"> · {t(`projects.ciWhy.${left.why}`)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
         </Section>
 
         <Section title={t("projects.sectionGithub")}>
@@ -339,6 +384,18 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
       </Card>
       <RemoveProjectDialog project={project} open={removing} onOpenChange={setRemoving} />
     </div>
+  );
+}
+
+function CommandList({ commands }: { commands: string[] }) {
+  return (
+    <ul className="mt-1 space-y-0.5 pl-5 font-mono text-[11.5px] text-muted">
+      {commands.map((command) => (
+        <li key={command} className="selectable break-all">
+          {command}
+        </li>
+      ))}
+    </ul>
   );
 }
 

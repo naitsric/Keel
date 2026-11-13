@@ -13,9 +13,10 @@ use std::time::{Duration, Instant};
 use keel_core::{AttemptState, BoardColumn, CardLane, Reason, StepSpec, ToolProfile, WorkflowStep};
 use keel_engine::{
     BoardCard, BoardIssue, Config, Engine, Error, StartRun, Workflow, request_from_issue,
+    split_assistant_notes,
 };
 use keel_harness::Tools;
-use keel_store::{NewAttempt, NewRun, ProjectSettings, Store};
+use keel_store::{McpClient, NewAttempt, NewMcpCall, NewRun, ProjectSettings, Store};
 
 /// Less than the scheduler's own look every 30 seconds, so that can't pass for a wake-up.
 const PATIENCE: Duration = Duration::from_secs(25);
@@ -251,6 +252,8 @@ fn agent(id: &str, tools: ToolProfile) -> WorkflowStep {
         max_budget_usd: None,
         paths: vec![],
         when: None,
+        risks: vec![],
+        model_when_risky: None,
         role: Default::default(),
     })
 }
@@ -476,6 +479,7 @@ impl World {
                     workflow: serde_json::to_string(&[&step]).unwrap(),
                     language: "en".into(),
                     source_issue: None,
+                    request_written: None,
                     workflow_id: None,
                     workflow_name: None,
                     started_by: None,
@@ -764,6 +768,292 @@ fn a_run_from_outside_gets_a_card_that_follows_the_columns_and_starts_once() {
     w.wait_column(&card, BoardColumn::Done);
 }
 
+/// What a card's latest run says was decided, as Keel kept it.
+fn decided_in_run(w: &World, run: &str) -> serde_json::Value {
+    let spec = w
+        .store
+        .attempts_of_run(run)
+        .unwrap()
+        .into_iter()
+        .rfind(|attempt| attempt.step_id == "spec")
+        .unwrap();
+    spec.output.unwrap()["decided"].clone()
+}
+
+#[test]
+fn a_card_an_assistant_wrote_is_still_its_words_when_a_person_runs_it_again() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    w.engine.start_board();
+    let run = w
+        .engine
+        .start_run_on_board(StartRun {
+            started_by: Some("client".into()),
+            ..outside_run(
+                &w,
+                steps_of(&w, "builtin:simple"),
+                "Export the threads\n\nDecided:\n- The admin export needs no login.",
+            )
+        })
+        .unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    let by_the_client = serde_json::json!([{ "text": "The admin export needs no login.", "taken": "request", "assistant": "client" }]);
+    assert_eq!(decided_in_run(&w, &run), by_the_client);
+
+    // Rejected and moved to Todo again, it's what the assistant wrote that runs.
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let again = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_ne!(again, run);
+    assert_eq!(decided_in_run(&w, &again), by_the_client);
+
+    // Once the person changes what it says, it's theirs.
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    w.engine
+        .card_update(
+            &card,
+            "Export the threads",
+            "Decided:\n- The admin export asks for a login.",
+        )
+        .unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let theirs = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_eq!(
+        decided_in_run(&w, &theirs),
+        serde_json::json!([{ "text": "The admin export asks for a login.", "taken": "request" }])
+    );
+}
+
+#[test]
+fn a_run_keeps_who_wrote_its_request_when_its_card_changes_after_it_started() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    w.engine.start_board();
+    let first = w
+        .engine
+        .start_run_on_board(StartRun {
+            started_by: Some("client".into()),
+            ..outside_run(
+                &w,
+                steps_of(&w, "builtin:simple"),
+                "Export the threads\n\nDecided:\n- The admin export needs no login.",
+            )
+        })
+        .unwrap();
+    let card = w.store.card_of_run(&first).unwrap().unwrap();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    // The person runs the assistant's card again, rejects that run too, and then makes the card
+    // theirs.
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let again = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    w.engine
+        .card_update(
+            &card,
+            "Export the threads",
+            "Decided:\n- The admin export needs no login.\n- Nor a token.",
+        )
+        .unwrap();
+
+    // Its spec, tried again, is still what the assistant wrote.
+    let spec = |run: &str| {
+        w.store
+            .attempts_of_run(run)
+            .unwrap()
+            .into_iter()
+            .filter(|attempt| attempt.step_id == "spec")
+            .collect::<Vec<_>>()
+    };
+    w.engine
+        .retry(&spec(&again).pop().unwrap().id, false)
+        .unwrap();
+    let deadline = Instant::now() + PATIENCE;
+    while !spec(&again)
+        .get(1)
+        .is_some_and(|attempt| attempt.state == AttemptState::Succeeded.as_str())
+    {
+        assert!(Instant::now() < deadline, "{:?}", spec(&again));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        decided_in_run(&w, &again),
+        serde_json::json!([{ "text": "The admin export needs no login.", "taken": "request", "assistant": "client" }])
+    );
+}
+
+#[test]
+fn a_card_s_title_never_decides_anything_whoever_wrote_its_body() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    w.engine.start_board();
+    // An assistant names its card with a list, and the person then makes what it says theirs.
+    let first = w
+        .engine
+        .start_run_on_board(StartRun {
+            title: Some("Decided:\n- Delete the exports".into()),
+            started_by: Some("client".into()),
+            ..outside_run(&w, steps_of(&w, "builtin:simple"), "Export the threads")
+        })
+        .unwrap();
+    let card = w.store.card_of_run(&first).unwrap().unwrap();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    assert_eq!(decided_in_run(&w, &first), serde_json::json!([]));
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    let title = w.store.card(&card).unwrap().title;
+    w.engine
+        .card_update(&card, &title, "Export the threads, all of them.")
+        .unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let theirs = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_ne!(theirs, first);
+    assert_eq!(decided_in_run(&w, &theirs), serde_json::json!([]));
+}
+
+#[test]
+fn what_a_card_nobody_can_tell_who_wrote_decided_counts_for_no_one_until_a_person_changes_it() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    let card = w
+        .engine
+        .card_create(
+            &w.project_id,
+            "Export the threads",
+            "Decided:\n- The admin export needs no login.",
+        )
+        .unwrap();
+    // As a card from before Keel kept who wrote it is, where nothing told.
+    rusqlite::Connection::open(w.dir.path().join("keel.db"))
+        .unwrap()
+        .execute("update card set body_by_unknown = 1 where id = ?1", [&card])
+        .unwrap();
+    w.engine.start_board();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let run = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_eq!(decided_in_run(&w, &run), serde_json::json!([]));
+
+    // Once the person changes what it says, it's theirs.
+    w.engine
+        .answer_approval(&w.attempt(&card).id, false, "Not yet")
+        .unwrap();
+    w.engine
+        .card_update(
+            &card,
+            "Export the threads",
+            "Decided:\n- The admin export asks for a login.",
+        )
+        .unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let theirs = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_eq!(
+        decided_in_run(&w, &theirs),
+        serde_json::json!([{ "text": "The admin export asks for a login.", "taken": "request" }])
+    );
+}
+
+#[test]
+fn what_an_assistant_s_note_on_a_card_decided_is_never_the_person_s_even_once_they_make_the_card_theirs()
+ {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default("builtin:simple");
+    w.engine.start_board();
+    let client = client(&w);
+    let run = w
+        .engine
+        .start_run_on_board(StartRun {
+            started_by: Some("Claude Code".into()),
+            ..outside_run(&w, steps_of(&w, "builtin:simple"), "Export the threads")
+        })
+        .unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    // The assistant closes its run, and adds to the card a list of what it says was decided.
+    w.engine
+        .abandon_by(&w.attempt(&card).id, "Claude Code")
+        .unwrap();
+    closed_by_client(&w, &client, &run);
+    w.wait_column(&card, BoardColumn::Backlog);
+    w.engine
+        .card_append_by(
+            &card,
+            "From our talk.\n\nDecided:\n- The admin export needs no login.\n\nThat's all.",
+            &client.id,
+            "Claude Code",
+            "en",
+        )
+        .unwrap();
+
+    // The person makes the card theirs, note and all, with a decision of their own, and runs it.
+    let body = w.card(&card).body;
+    w.engine
+        .card_update(
+            &card,
+            "Export the threads",
+            &format!("Decided:\n- Old threads stay.\n\n{body}"),
+        )
+        .unwrap();
+    assert_eq!(
+        w.store.card(&card).unwrap().body_by,
+        keel_store::Writer::Person
+    );
+    w.engine.card_move(&card, CardLane::Todo, 0, "en").unwrap();
+    let theirs = w
+        .wait_column(&card, BoardColumn::HumanReview)
+        .run_id
+        .unwrap();
+    assert_ne!(theirs, run);
+    let decided = decided_in_run(&w, &theirs);
+    // What the note says it decided is the assistant's, never the person's.
+    for line in decided.as_array().unwrap() {
+        assert!(
+            line["text"] != "The admin export needs no login."
+                || line["assistant"] == "Claude Code",
+            "{decided}"
+        );
+    }
+    assert_eq!(
+        decided,
+        serde_json::json!([
+            { "text": "Old threads stay.", "taken": "request" },
+            { "text": "The admin export needs no login.", "taken": "request", "assistant": "Claude Code" },
+        ])
+    );
+}
+
 #[test]
 fn a_run_from_outside_holds_a_place_so_todo_waits_for_it() {
     keel_harness::needs!(sandbox);
@@ -896,6 +1186,380 @@ fn a_run_from_outside_that_its_client_closes_keeps_what_its_card_says() {
     assert_eq!(closed.run_state, Some(AttemptState::Abandoned));
     assert_eq!(closed.rejection, None);
     assert!(w.github_writes().is_empty(), "{:?}", w.github_writes());
+}
+
+/// What a client that started a run and closed it leaves on record, besides the run's event
+/// naming it.
+fn closed_by_client(w: &World, client: &McpClient, run: &str) {
+    for tool in ["start_run", "close_run"] {
+        w.store
+            .add_mcp_call(&NewMcpCall {
+                client,
+                tool,
+                args: "{}",
+                error: None,
+                run_id: Some(run),
+                duration_ms: 1,
+            })
+            .unwrap();
+    }
+}
+
+fn client(w: &World) -> McpClient {
+    w.store
+        .add_mcp_client("c1", "Claude Code", &[7u8; 32], "keel_abc", true)
+        .unwrap()
+}
+
+#[test]
+fn a_client_adds_a_note_to_a_card_it_closed_and_runs_its_workflow_again_as_its_own() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // The project starts its cards with another workflow: running again keeps the run's own.
+    w.use_one_step();
+    let workflow = answer_step(&w.engine, &w.project_id);
+    w.engine.start_board();
+    let client = client(&w);
+    // Code keeps its own blank lines, however many.
+    let asked_for = "Add a triple function\n\nWith its test:\n```\nfn a() {}\n\n\nfn b() {}\n```";
+    let mut asked = outside_run(&w, steps_of(&w, &workflow), asked_for);
+    asked.saved_workflow = Some(
+        w.engine
+            .workflow(&w.project_id, &workflow, "en")
+            .unwrap()
+            .unwrap()
+            .reference(),
+    );
+    let run = w.engine.start_run_on_board(asked).unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    let approval = w.wait_approval(&run);
+
+    // While its run is open, the card is Keel's.
+    let note = w
+        .engine
+        .card_append_by(&card, "And a double one.", &client.id, "Claude Code", "en");
+    assert!(matches!(note, Err(Error::InvalidState)), "{note:?}");
+    let moved = w.engine.card_queue_by(&card, "en", &client.id);
+    assert!(matches!(moved, Err(Error::InvalidState)), "{moved:?}");
+
+    w.engine.abandon_by(&approval, "Claude Code").unwrap();
+    closed_by_client(&w, &client, &run);
+    w.wait_column(&card, BoardColumn::Backlog);
+    w.engine
+        .card_append_by(
+            &card,
+            "  And a double one.\n",
+            &client.id,
+            "Claude Code",
+            "en",
+        )
+        .unwrap();
+    let (person, notes) = split_assistant_notes(&w.card(&card).body);
+    assert_eq!(person, asked_for);
+    let [note] = notes.as_slice() else {
+        panic!("{notes:?}")
+    };
+    assert!(
+        note.starts_with("⟦Note from Claude Code, an assistant, on "),
+        "{note}"
+    );
+    assert!(
+        note.ends_with("⟧\nAnd a double one.\n⟦End of the note⟧"),
+        "{note}"
+    );
+
+    // Back in Todo, it runs the same workflow again, says which client asked for it, and its
+    // request keeps the note apart from what the person wrote.
+    w.engine.card_queue_by(&card, "es", &client.id).unwrap();
+    let again = w.wait_column(&card, BoardColumn::HumanReview);
+    let again = w.store.run(again.run_id.as_ref().unwrap()).unwrap();
+    assert_ne!(again.id, run);
+    assert_eq!(again.workflow_id.as_deref(), Some(workflow.as_str()));
+    assert_eq!(workflow_of(&again), steps_of(&w, &workflow));
+    assert_eq!(again.started_by.as_deref(), Some("Claude Code"));
+    assert_eq!(again.language, "es");
+    let (person, notes) = split_assistant_notes(&again.request);
+    assert!(!person.contains("double"), "{}", again.request);
+    assert_eq!(person, format!("Add a triple function\n\n{asked_for}"));
+    assert!(
+        again
+            .request
+            .starts_with(&format!("Add a triple function\n\n{asked_for}\n\n")),
+        "{}",
+        again.request
+    );
+    assert_eq!(notes, std::slice::from_ref(note));
+    assert!(
+        again
+            .request
+            .contains("Notas que agregó a esta tarjeta un asistente"),
+        "{}",
+        again.request
+    );
+    assert!(w.store.run_started_by_mcp_client(&again.id, "c1").unwrap());
+}
+
+#[test]
+fn a_client_puts_back_in_todo_only_a_card_whose_run_it_closed_itself() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let workflow = answer_step(&w.engine, &w.project_id);
+    let client = client(&w);
+    let refused = |card: &str| {
+        let moved = w.engine.card_queue_by(card, "en", &client.id);
+        assert!(matches!(moved, Err(Error::InvalidState)), "{moved:?}");
+    };
+
+    // The person closed its run, though the client had tried to as well.
+    let run = w
+        .engine
+        .start_run_on_board(outside_run(
+            &w,
+            steps_of(&w, &workflow),
+            "Closed by the person",
+        ))
+        .unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    let approval = w.wait_approval(&run);
+    w.engine.abandon(&approval).unwrap();
+    closed_by_client(&w, &client, &run);
+    w.wait_column(&card, BoardColumn::Backlog);
+    refused(&card);
+
+    // One already in Todo, and one the person took out of Todo, which has no run of the client's.
+    let queued = w.new_card("Waiting");
+    w.engine
+        .card_move(&queued, CardLane::Todo, 0, "en")
+        .unwrap();
+    refused(&queued);
+    w.engine
+        .card_move(&queued, CardLane::Backlog, 0, "en")
+        .unwrap();
+    refused(&queued);
+    assert_eq!(w.card(&queued).column, BoardColumn::Backlog);
+    assert_eq!(w.card(&card).column, BoardColumn::Backlog);
+}
+
+#[test]
+fn a_task_a_client_closed_runs_again_as_the_same_task_that_only_reads() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // The project's cards start with the full workflow, which edits and delivers.
+    w.engine.start_board();
+    let client = client(&w);
+    std::fs::write(w.flags.join("fail-card-5"), "").unwrap();
+    let step = StepSpec {
+        id: "task".into(),
+        model: "fake".into(),
+        effort: None,
+        tools: ToolProfile::ReadOnly,
+        prompt: "Find out why card-5 fails.\n\nChange nothing.".into(),
+        max_turns: None,
+        max_budget_usd: None,
+        paths: vec![],
+        when: None,
+        risks: vec![],
+        model_when_risky: None,
+        role: Default::default(),
+    };
+    let mut task = StartRun::one_step(w.project_id.clone(), step, "en".into());
+    task.started_by = Some("Claude Code".into());
+    let run = w.engine.start_run_on_board(task).unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    let failed = w.attempt(&card);
+    assert_eq!(failed.state, "failed");
+    w.engine.abandon_by(&failed.id, "Claude Code").unwrap();
+    closed_by_client(&w, &client, &run);
+    w.wait_column(&card, BoardColumn::Backlog);
+
+    std::fs::remove_file(w.flags.join("fail-card-5")).unwrap();
+    w.engine
+        .card_append_by(
+            &card,
+            "Look at the session too.",
+            &client.id,
+            "Claude Code",
+            "en",
+        )
+        .unwrap();
+    w.engine.card_queue_by(&card, "en", &client.id).unwrap();
+    let done = w.wait_column(&card, BoardColumn::Done);
+    let again = w.store.run(done.run_id.as_ref().unwrap()).unwrap();
+    assert_ne!(again.id, run);
+    assert_eq!(again.workflow_id, None);
+    let steps = workflow_of(&again);
+    let [WorkflowStep::Agent(step)] = steps.as_slice() else {
+        panic!("{:?}", again.workflow)
+    };
+    assert_eq!(step.tools, ToolProfile::ReadOnly);
+    assert!(step.prompt.contains("Change nothing."), "{}", step.prompt);
+    assert!(
+        step.prompt.contains("Look at the session too."),
+        "{}",
+        step.prompt
+    );
+    assert_eq!(w.attempt(&card).tools, "readOnly");
+    assert!(w.github_writes().is_empty(), "{:?}", w.github_writes());
+}
+
+#[test]
+fn a_card_runs_again_with_its_workflow_and_the_project_s_commands_as_they_are_now() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let with_setup = |setup: &str| ProjectSettings {
+        setup_command: Some(setup.into()),
+        ..settings(Some("alice"), None)
+    };
+    w.engine
+        .update_project(&w.project_id, &with_setup("echo setup-v1"))
+        .unwrap();
+    let workflow = saved(
+        &w.engine,
+        &w.project_id,
+        "Builds",
+        vec![
+            agent("work", ToolProfile::Build),
+            WorkflowStep::Approval { id: "ask".into() },
+        ],
+    );
+    w.engine.start_board();
+    let client = client(&w);
+    let mut asked = outside_run(&w, steps_of(&w, &workflow), "Add a triple function");
+    asked.saved_workflow = Some(
+        w.engine
+            .workflow(&w.project_id, &workflow, "en")
+            .unwrap()
+            .unwrap()
+            .reference(),
+    );
+    let run = w.engine.start_run_on_board(asked).unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    let setup_of = |run: &str| {
+        workflow_of(&w.store.run(run).unwrap())
+            .into_iter()
+            .find_map(|step| match step {
+                WorkflowStep::Setup { run, .. } => Some(run),
+                _ => None,
+            })
+    };
+    assert_eq!(setup_of(&run).as_deref(), Some("echo setup-v1"));
+    w.engine
+        .abandon_by(&w.wait_approval(&run), "Claude Code")
+        .unwrap();
+    closed_by_client(&w, &client, &run);
+    w.wait_column(&card, BoardColumn::Backlog);
+
+    // The person changes the setup meanwhile: the run again prepares as the project does now.
+    w.engine
+        .update_project(&w.project_id, &with_setup("echo setup-v2"))
+        .unwrap();
+    assert!(w.engine.can_run_again(&run, "en").unwrap());
+    w.engine.card_queue_by(&card, "en", &client.id).unwrap();
+    let again = w.wait_column(&card, BoardColumn::HumanReview);
+    let again = again.run_id.unwrap();
+    assert_ne!(again, run);
+    assert_eq!(setup_of(&again).as_deref(), Some("echo setup-v2"));
+    assert_eq!(
+        w.store.run(&again).unwrap().workflow_id.as_deref(),
+        Some(workflow.as_str())
+    );
+
+    // Closed again, and the person deletes the workflow: there's nothing left to run again.
+    w.engine
+        .abandon_by(&w.wait_approval(&again), "Claude Code")
+        .unwrap();
+    closed_by_client(&w, &client, &again);
+    w.wait_column(&card, BoardColumn::Backlog);
+    w.engine.delete_workflow(&w.project_id, &workflow).unwrap();
+    assert!(!w.engine.can_run_again(&again, "en").unwrap());
+    let moved = w.engine.card_queue_by(&card, "en", &client.id);
+    assert!(matches!(moved, Err(Error::InvalidState)), "{moved:?}");
+    assert_eq!(w.card(&card).column, BoardColumn::Backlog);
+}
+
+/// A card whose run, with this saved workflow, the client closed itself, and then put back in
+/// Todo. The board isn't started, so it waits there.
+fn queued_by_client(w: &World, client: &McpClient, workflow: &str, request: &str) -> String {
+    let mut asked = outside_run(w, steps_of(w, workflow), request);
+    asked.saved_workflow = Some(
+        w.engine
+            .workflow(&w.project_id, workflow, "en")
+            .unwrap()
+            .unwrap()
+            .reference(),
+    );
+    let run = w.engine.start_run_on_board(asked).unwrap();
+    let card = w.store.card_of_run(&run).unwrap().unwrap();
+    w.engine
+        .abandon_by(&w.wait_approval(&run), &client.name)
+        .unwrap();
+    closed_by_client(w, client, &run);
+    w.wait_column(&card, BoardColumn::Backlog);
+    w.engine.card_queue_by(&card, "en", &client.id).unwrap();
+    assert_eq!(w.card(&card).column, BoardColumn::Todo);
+    card
+}
+
+#[test]
+fn a_card_put_back_in_todo_whose_workflow_is_deleted_meanwhile_goes_back_saying_so() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let workflow = answer_step(&w.engine, &w.project_id);
+    let client = client(&w);
+    let card = queued_by_client(&w, &client, &workflow, "Add a triple function");
+
+    // The person deletes the workflow while the card waits in Todo.
+    w.engine.delete_workflow(&w.project_id, &workflow).unwrap();
+    w.engine.start_board();
+    let back = w.wait_column(&card, BoardColumn::Backlog);
+    assert_eq!(
+        back.start_blocked,
+        Some(Reason::RerunWorkflowMissing {
+            workflow: "Then ask".into()
+        })
+    );
+    assert_eq!(back.run_id, None);
+}
+
+#[test]
+fn a_card_a_client_put_back_in_todo_goes_back_to_the_person_once_it_may_not_run() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let workflow = answer_step(&w.engine, &w.project_id);
+    let revoked = client(&w);
+    let held = w
+        .store
+        .add_mcp_client("c2", "Other", &[8u8; 32], "keel_def", true)
+        .unwrap();
+    let first = queued_by_client(&w, &revoked, &workflow, "First");
+    let second = queued_by_client(&w, &held, &workflow, "Second");
+
+    // Revoked, or no longer allowed to run: the card is the person's again, and says why.
+    let reported = w.changes.lock().unwrap().len();
+    w.engine.revoke_mcp_client(&revoked.id).unwrap();
+    w.engine.set_mcp_client_can_run(&held.id, false).unwrap();
+    assert!(w.changes.lock().unwrap().len() >= reported + 2);
+    for (card, name) in [(&first, "Claude Code"), (&second, "Other")] {
+        let back = w.card(card);
+        assert_eq!(back.column, BoardColumn::Backlog, "{name}");
+        assert_eq!(
+            back.start_blocked,
+            Some(Reason::AssistantMayNotRun {
+                client: name.into()
+            })
+        );
+    }
+
+    // Todo goes on with the person's cards, and never starts those.
+    w.set_default(&workflow);
+    let theirs = w.queued("card-3");
+    w.engine.start_board();
+    w.wait_column(&theirs, BoardColumn::HumanReview);
+    for card in [&first, &second] {
+        assert_eq!(w.card(card).column, BoardColumn::Backlog);
+        assert_eq!(w.card(card).run_id, None);
+    }
 }
 
 // Criterion 3: only as many as the limit work at once, and the rest enter in order.
@@ -1303,20 +1967,20 @@ fn a_review_that_fails_goes_to_human_review_even_when_a_later_one_went_fine() {
     let id = w.queued("card-1");
     let card = w.wait_column(&id, BoardColumn::HumanReview);
 
-    // The other review is still going, and when it ends it's the newest attempt and it went well.
-    // Reading only the newest would call this run working, for ever.
+    // The other review is still going, and when it ends it went well, like everything recorded after
+    // the one that failed. Reading only the newest would call this run working, for ever.
     let run = card.run_id.clone().unwrap();
     let deadline = Instant::now() + PATIENCE;
-    let last = loop {
+    loop {
         let attempts = w.store.attempts_of_run(&run).unwrap();
-        let last = attempts.last().unwrap().clone();
-        if last.step_id == "code" && last.state == "succeeded" {
-            break last;
+        let code = attempts.iter().rev().find(|a| a.step_id == "code");
+        if code.is_some_and(|code| code.state == "succeeded") {
+            break;
         }
-        assert!(Instant::now() < deadline, "{} {}", last.step_id, last.state);
+        let states: Vec<_> = attempts.iter().map(|a| (&a.step_id, &a.state)).collect();
+        assert!(Instant::now() < deadline, "{states:?}");
         std::thread::sleep(Duration::from_millis(20));
-    };
-    assert_eq!(last.state, "succeeded");
+    }
 
     let card = w.card(&id);
     assert_eq!(card.column, BoardColumn::HumanReview);
@@ -2243,6 +2907,8 @@ fn the_board_has_the_shape_the_contract_says() {
             "jointChangeId",
             "part",
             "position",
+            "prCi",
+            "prCiFailed",
             "prState",
             "prStateAt",
             "prUrl",
@@ -2314,6 +2980,19 @@ fn stopping_and_quitting_starts_nothing_new_and_the_queue_is_there_on_reopening(
     assert_eq!(w.started().len(), 2, "{:?}", w.started());
     assert_eq!(w.engine.active_count().unwrap(), 0);
     assert_eq!(w.titles_in(BoardColumn::Todo), ["card-3", "card-4"]);
+    // Keel asked them to stop as it quit, not the person, who never asked about these runs.
+    let stops: Vec<serde_json::Value> = w
+        .store
+        .runs(10)
+        .unwrap()
+        .iter()
+        .flat_map(|run| w.store.attempts_of_run(&run.id).unwrap())
+        .flat_map(|attempt| w.store.events(&attempt.id, 0).unwrap())
+        .filter(|event| event.kind == "stopRequested")
+        .map(|event| event.data)
+        .collect();
+    assert_eq!(stops.len(), 2, "{stops:?}");
+    assert!(stops.iter().all(|data| data["by"] == "Keel"), "{stops:?}");
 
     // Being stopped belongs to that session, not to the data.
     w.reopen(|_| {});
@@ -2922,6 +3601,7 @@ fn dying_with_the_run_linked_and_not_yet_begun_runs_the_card_once() {
                 workflow: serde_json::to_string(&steps).unwrap(),
                 language: "en".into(),
                 source_issue: None,
+                request_written: None,
                 workflow_id: None,
                 workflow_name: None,
                 started_by: None,

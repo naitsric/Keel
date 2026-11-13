@@ -3,20 +3,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CheckedCriterion, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, approvalOutcome, askedText, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, focusAttempt, gist, latestOfEachStep, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf } from "../lib/audit";
-import { partText, partWarningText } from "../lib/board";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CommandChange, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
+import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, breakableIds, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, type FindingShown, focusAttempt, gist, latestOfEachStep, notProvenInRound, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf, whyNotProven } from "../lib/audit";
+import { contractChangedText, partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText, specProblemText } from "../lib/reason";
 import { allRecommend, answerFrom, differsFromRecommended, isAnswered, needsText, type QuestionPick, recommendedAnswers, recommendedOption, startingPick } from "../lib/questions";
-import { latestSizeDecision, type SizeDecision, skippedAsSmall, skippedSteps, whyNotSmallText } from "../lib/size";
+import { latestSizeDecision, type SizeDecision, skippedAsSmall, skippedForRisks, skippedSteps, whyNotSmallText } from "../lib/size";
 import { useApp } from "../lib/store";
-import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge } from "../ui/primitives";
+import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge, VERIFY_TONES } from "../ui/primitives";
 import { ProposalRow } from "./BrainPage";
 import { FlowDiagram } from "./FlowDiagram";
 import { JointChangeDialog } from "./JointChangeDialog";
-import { SpecView } from "./SpecView";
+import { ContractLine, SpecView, fromRequest } from "./SpecView";
 
 type Tab = "understood" | "found" | "activity" | "commands" | "changes" | "prompt" | "details" | "output";
 
@@ -59,6 +59,16 @@ function PrStatus({ state, at }: { state: PrState; at: string | null }) {
   const { t } = useTranslation();
   const dated = at !== null && (state === "merged" || state === "closed");
   return <span className={PR_TONES[state]}>{dated ? t(`run.pr.${state}At`, { when: formatDateTime(at) }) : t(`run.pr.${state}`)}</span>;
+}
+
+/** What the pull request's CI says, beside it, while it can still be merged. */
+function CiStatus({ run }: { run: Run }) {
+  const { t } = useTranslation();
+  if (run.prState !== "open" && run.prState !== "draft") return null;
+  if (run.prCi === "failed") return <span className="font-medium text-danger">{run.prCiFailed.length > 0 ? t("run.ci.failed", { checks: run.prCiFailed.join(", ") }) : t("run.ci.failedUnnamed")}</span>;
+  if (run.prCi === "pending") return <span>{t("run.ci.pending")}</span>;
+  if (run.prCi === "passed") return <span className="text-success">{t("run.ci.passed")}</span>;
+  return null;
 }
 
 function SummaryBlock({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
@@ -185,19 +195,15 @@ function ApprovalRow({ label, note, action, rowRef, children }: { label: string;
   );
 }
 
-const VERIFY_TONES: Record<CheckedCriterion["result"], string> = {
-  met: "text-success",
-  unmet: "font-medium text-warning",
-  unverified: "text-muted",
-};
-
 /** Each thing that had to be true, in its own words, with what became of it and why. */
 function VerificationItems({ verification }: { verification: VerificationOutput }) {
   const { t } = useTranslation();
   return (
     <ul className="space-y-1.5">
       {verification.criteria.map((item) => {
-        const why = item.corrected ? `run.verifyWhy.${item.corrected}` : item.result === "unverified" && !item.evidence ? "run.verifyWhy.noProof" : null;
+        // Without saying why, what it pointed at speaks for itself.
+        const said = whyNotProven(item);
+        const why = said && said !== "seeEvidence" ? `run.verifyWhy.${said}` : null;
         return (
           <li key={item.id} className="min-w-0">
             <p className="selectable break-words">
@@ -306,10 +312,13 @@ function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { atte
 function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number }) {
   const { t } = useTranslation();
   const { reviewers, approver } = reviewsOfRound(attempts, round);
+  const breakable = breakableOf(attempts);
   const latest = latestOfEachStep(reviewers);
   const ran = latest.filter((review) => review.state !== "skipped");
   // Those it skipped for being small are on a line of their own, with what can be done about it.
-  const skipped = latest.filter((review) => review.state === "skipped" && !skippedAsSmall(review));
+  const leftOut = latest.filter((review) => review.state === "skipped" && !skippedAsSmall(review));
+  const skipped = leftOut.filter((review) => !skippedForRisks(review));
+  const forRisks = leftOut.filter(skippedForRisks);
   return (
     <div className="space-y-0.5">
       {ran.length > 0 && (
@@ -317,7 +326,7 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
           {ran.map((review) => (
             <li key={review.id} className="flex items-baseline gap-1.5">
               <span className="font-mono text-[12px] font-medium">{review.stepId}</span>
-              <ReviewVerdict review={review} />
+              <ReviewVerdict review={review} findings={findingsOf(review.output, breakable)} />
             </li>
           ))}
         </ul>
@@ -330,8 +339,9 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
           </p>
         ))}
       {skipped.length > 0 && <p className="text-subtle">{t("run.approvalSkipped", { names: skipped.map((review) => review.stepId).join(", ") })}</p>}
+      {forRisks.length > 0 && <p className="text-subtle">{t("run.approvalSkippedRisks", { names: forRisks.map((review) => review.stepId).join(", ") })}</p>}
       {approver?.output && (
-        <div className={cx(ran.length + skipped.length > 0 && "pt-1")}>
+        <div className={cx(ran.length + leftOut.length > 0 && "pt-1")}>
           <ApproverVerdict output={approver.output} riskClass={approver.output.risk === "high" ? "font-medium text-warning" : "text-fg"} />
           {approver.output.reasons && <p className="selectable text-muted">{gist(approver.output.reasons, 160).text}</p>}
         </div>
@@ -478,22 +488,42 @@ function questionedLines(q: Questioned, decided: SpecDecided[]): number[] {
   return typeof number === "number" && Number.isInteger(number) && number >= 1 && number <= decided.length ? [number - 1] : [];
 }
 
+/** What a review questions, with the lines of `decided` it's about, by their place among all of them. */
+type QuestionedLines = Questioned & { lines: number[] };
+
 /**
- * What it settled by itself. Each line can go back to whoever does the work, without starting over.
- * What a review questions of it is the person's to settle, so it shows on its line.
+ * The round in which the change added something nothing asks for, which the approver gives with no
+ * number. One with a number is a line of what was decided, and an older answer has no round.
  */
-function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; questioned: Questioned[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
+function addedIn(q: Questioned): number | null {
+  const { number, round } = q;
+  return typeof number !== "number" && typeof round === "number" && Number.isInteger(round) && round >= 1 ? round : null;
+}
+
+/**
+ * What it settled by itself, or what the request already had: the lines of `decided` that `only` picks,
+ * by their place among all of them. Each line can go back to whoever does the work, without starting
+ * over. What a review questions of it is the person's to settle, so it shows on its line, and
+ * `elsewhere` is what matches no line, quoted as it came. What the change added that nothing asks for,
+ * in `added`, comes after, as lines of their own, with the round each appeared in.
+ */
+function DecidedList({ attemptId, decided, only, questioned, elsewhere, added, canChange, armed, busy, onSend }: { attemptId: string; decided: SpecDecided[]; only: (item: SpecDecided) => boolean; questioned: QuestionedLines[]; elsewhere: Questioned[]; added: Questioned[]; canChange: boolean; armed: boolean; busy: boolean; onSend: (decided: string, instruction: string, onDone: () => void) => void }) {
   const { t } = useTranslation();
   const [changing, setChanging] = useState<number | null>(null);
   const draftKey = `${attemptId}:change:${changing}`;
   const instruction = useApp((s) => s.approvalDrafts[draftKey] ?? "");
   const setDraft = useApp((s) => s.setApprovalDraft);
-  const lines = questioned.map((q) => questionedLines(q, decided));
-  // One that matches no line still reaches the person, quoted as it came.
-  const elsewhere = questioned.filter((_, at) => lines[at].length === 0);
+  const shown: { item: SpecDecided & { added?: { round: number; why: string } }; index: number }[] = [
+    ...decided.flatMap((item, index) => (only(item) ? [{ item, index }] : [])),
+    // After every line of `decided`, so none takes the place of one.
+    ...added.flatMap((q, at) => {
+      const round = addedIn(q);
+      return round === null ? [] : [{ item: { text: q.decided, added: { round, why: q.why } }, index: decided.length + at }];
+    }),
+  ];
   return (
     <ul className="space-y-1.5">
-      {decided.map((item, index) => (
+      {shown.map(({ item, index }) => (
         // Lines of a fixed text: their position is their identity.
         <li key={index}>
           <div className="flex items-start gap-2">
@@ -505,9 +535,12 @@ function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, o
             )}
           </div>
           {item.taken === "person" && <p className="text-[11.5px] text-subtle">{t("run.decidedYouChose")}</p>}
+          {item.taken === "request" && item.assistant && <p className="text-[11.5px] text-subtle">{t("run.decidedWrittenBy", { client: item.assistant })}</p>}
+          {item.taken === "request" && !item.assistant && item.githubAccount && <p className="text-[11.5px] text-subtle">{t("run.decidedWrittenWithAccount")}</p>}
           {item.taken === "roundsLimit" && <p className="text-[11.5px] text-warning">{t("run.decidedKeelTook")}</p>}
+          {item.added && <p className="selectable text-[11.5px] break-words text-warning">{t("run.decidedAdded", { round: item.added.round, why: item.added.why })}</p>}
           {questioned
-            .filter((_, at) => lines[at].includes(index))
+            .filter((q) => q.lines.includes(index))
             .map((q, at) => (
               <p key={at} className="selectable text-[11.5px] break-words text-warning">
                 {t("run.decidedQuestioned", { why: q.why })}
@@ -546,6 +579,7 @@ function DecidedList({ attemptId, decided, questioned, canChange, armed, busy, o
  */
 export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck, sizeDecision = null, joint = null, onShowChanges, onError }: { attempt: Attempt; run: Run; attempts: Attempt[]; files: string[]; commands: CommandRun[]; rawCheck: RawCheck; sizeDecision?: SizeDecision | null; joint?: RunJoint | null; onShowChanges: () => void; onError: (message: string) => void }) {
   const { t } = useTranslation();
+  const earlierContract = joint?.part ? contractChangedText(t, joint.part) : null;
   const project = useApp((s) => s.overview.projects.find((p) => p.id === run.projectId));
   const draft = useApp((s) => s.approvalDrafts[attempt.id] ?? "");
   const setDraft = useApp((s) => s.setApprovalDraft);
@@ -631,21 +665,30 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const parts = spec?.parts ?? [];
   const agreeing = parts.length > 0;
   const together = agreeing ? (spec?.together ?? []) : [];
+  const contract = agreeing ? (spec?.contract ?? []) : [];
   // Right after working out what's asked, nobody has done anything yet. Saying it finished without
   // an explanation would read as something gone wrong.
   const nothingToExplain = asked !== null && !attempts.some((a) => a.kind === "agent" && a.role === "worker");
   const { reviewers, approver } = reviewsOfRound(attempts, run.round);
   const reviewed = reviewers.some((review) => review.state !== "skipped") || approver != null;
-  // What a review questions of what was decided alone, which the approver left to the person.
+  // What a review questions of what was decided alone, which the approver left to the person, and
+  // the lines it's about. What the change added that nothing asks for is about none of them.
   const raised = approver?.output?.questioned;
-  const questioned = Array.isArray(raised) ? raised.filter((q) => typeof q?.decided === "string" && typeof q.why === "string") : [];
+  const questioned: QuestionedLines[] = (Array.isArray(raised) ? raised.filter((q) => typeof q?.decided === "string" && typeof q.why === "string") : []).map((q) => ({
+    ...q,
+    lines: spec && addedIn(q) === null ? questionedLines(q, spec.decided) : [],
+  }));
+  // That comes after what was decided alone, with the round it appeared in.
+  const added = questioned.filter((q) => addedIn(q) !== null);
+  // One that matches no line still reaches the person, quoted as it came, with what it decided alone.
+  const elsewhere = questioned.filter((q) => q.lines.length === 0 && addedIn(q) === null);
   const skippedForSize = skippedSteps(attempts);
   const hiddenFiles = files.length - SHOWN_FILES;
   const sentBack = sentBackByAssistant(attempts, run.round);
   // What nobody could prove, the same as in "What proves it". In a short window that row can be far
-  // down the list, so how much of it there is shows by the note, which never scrolls away.
-  const verification = verificationInRound(attempts, run.round);
-  const notProven = uncheckedInRound(attempts, run.round).length + (verification ? verificationCounts(verification).unverified : 0);
+  // down the list, so how much of it there is, and why, shows by the note, which never scrolls away.
+  const notProvenWhy = notProvenInRound(attempts, run.round);
+  const notProven = notProvenWhy.reduce((sum, group) => sum + group.count, 0);
   const showWhatProves = () => provesRow.current?.scrollIntoView({ block: "nearest" });
 
   return (
@@ -677,6 +720,17 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             </ul>
           </ApprovalRow>
         )}
+        {contract.length > 0 && (
+          <ApprovalRow label={t("run.specContract")} note={t("run.generated")}>
+            <ul className="selectable list-disc space-y-0.5 pl-4 break-words">
+              {contract.map((point) => (
+                <li key={point.id}>
+                  <ContractLine point={point} />
+                </li>
+              ))}
+            </ul>
+          </ApprovalRow>
+        )}
         {askedGist && (
           <ApprovalRow
             label={t("run.whatWasAsked")}
@@ -692,9 +746,14 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             <p className="selectable break-words">{askedGist.text}</p>
           </ApprovalRow>
         )}
-        {spec && (spec.decided.length > 0 || questioned.length > 0) && (
+        {spec && spec.decided.some(fromRequest) && (
+          <ApprovalRow label={t("run.decidedInRequest")}>
+            <DecidedList attemptId={attempt.id} decided={spec.decided} only={fromRequest} questioned={questioned} elsewhere={[]} added={[]} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
+          </ApprovalRow>
+        )}
+        {((spec?.decided.some((item) => !fromRequest(item)) ?? false) || elsewhere.length > 0 || added.length > 0) && (
           <ApprovalRow label={t("run.decidedTitle")} note={t("run.generated")}>
-            <DecidedList attemptId={attempt.id} decided={spec.decided} questioned={questioned} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
+            <DecidedList attemptId={attempt.id} decided={spec?.decided ?? []} only={(item) => !fromRequest(item)} questioned={questioned} elsewhere={elsewhere} added={added} canChange={!empty && canSendBack(run.workflow, attempt.stepId)} armed={armed} busy={busy} onSend={sendBack} />
           </ApprovalRow>
         )}
         {sentBack && (
@@ -782,6 +841,12 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
           {partWarningText(t, warning)}
         </p>
       ))}
+      {earlierContract && (
+        <p data-contract-changed className="mt-2 flex gap-1.5 rounded-md border border-warning/40 bg-inset p-2 text-[12.5px] font-medium text-warning">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          {earlierContract}
+        </p>
+      )}
       {touchesWorkflows(files) && (
         <p className="mt-2 flex gap-1.5 rounded-md border border-warning/40 bg-inset p-2 text-[12.5px] font-medium text-warning">
           <AlertTriangle size={14} className="mt-0.5 shrink-0" />
@@ -796,9 +861,16 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
       )}
       {/* Right above the note and the buttons: the focus starts there, so this is in view with them. */}
       {notProven > 0 && (
-        <div className="mt-2 flex items-center gap-2 rounded-md border border-border-strong bg-inset py-1 pr-1 pl-2 text-[12.5px]">
-          <CircleQuestionMark size={14} className="shrink-0 text-muted" />
-          <p className="min-w-0 flex-1 font-medium">{t("run.notProvenCount", { count: notProven })}</p>
+        <div className="mt-2 flex items-start gap-2 rounded-md border border-border-strong bg-inset py-1 pr-1 pl-2 text-[12.5px]">
+          <CircleQuestionMark size={14} className="mt-[7px] shrink-0 text-muted" />
+          <div className="min-w-0 flex-1 py-1">
+            <p className="font-medium">{t("run.notProvenCount", { count: notProven })}</p>
+            <ul className="text-muted">
+              {notProvenWhy.map((group) => (
+                <li key={group.why}>{t(`run.notProvenWhy.${group.why}`, { count: group.count, where: t("run.whatProves") })}</li>
+              ))}
+            </ul>
+          </div>
           <Button variant="ghost" onClick={showWhatProves}>
             {t("run.notProvenSee", { count: notProven })}
           </Button>
@@ -999,9 +1071,75 @@ export function QuestionsCard({ attempt, attempts, onError }: { attempt: Attempt
   );
 }
 
-function Actions({ attempt, projectId, onError }: { attempt: Attempt; projectId: string; onError: (message: string) => void }) {
+/**
+ * A setup or check that can start over, and the run's commands the project changed since it
+ * started. It asks again whenever the project's commands change, so "now" is what they are.
+ */
+function useCommandChanges(attempt: Attempt, projectId: string): CommandChange[] {
+  const commands = useApp((s) => {
+    const project = s.overview.projects.find((p) => p.id === projectId);
+    return JSON.stringify([project?.setupCommand ?? null, project?.checkCommand ?? null]);
+  });
+  const [found, setFound] = useState<{ key: string; changes: CommandChange[] } | null>(null);
+  const asks = (attempt.kind === "setup" || attempt.kind === "check") && ["failed", "interrupted", "blocked", "stopped"].includes(attempt.state);
+  const key = `${attempt.id}\n${commands}`;
+  useEffect(() => {
+    if (!asks) return;
+    let current = true;
+    api
+      .runCommandChanges(attempt.runId)
+      .then((changes) => current && setFound({ key, changes: changes ?? [] }))
+      .catch(() => {});
+    return () => {
+      current = false;
+    };
+  }, [asks, key, attempt.runId]);
+  return asks && found?.key === key ? found.changes : [];
+}
+
+/**
+ * Whether starting over with the project's commands runs anything else: the step's own command,
+ * or for a check, the setup that installs what it needs, which then runs again first.
+ */
+function startsOverDifferently(attempt: Attempt, changes: CommandChange[]): boolean {
+  return changes.some((change) => change.stepId === attempt.stepId || (attempt.kind === "check" && change.kind === "setup"));
+}
+
+/** Each command as the run started with it and as the project has it now. */
+function CommandChanges({ changes, setupFirst, limited }: { changes: CommandChange[]; setupFirst: boolean; limited: boolean }) {
+  const { t } = useTranslation();
+  return (
+    <div className="mt-2.5 rounded-md border border-border p-3">
+      <p className="text-[12.5px] font-medium">{t("run.commandsChanged")}</p>
+      <dl className="mt-2 space-y-2">
+        {changes.map((change) => (
+          <div key={change.stepId}>
+            <dt className="text-[11.5px] font-semibold text-muted">{change.stepId}</dt>
+            <dd className="mt-0.5 grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-0.5 text-[12px]">
+              <span className="text-subtle">{t("run.commandBefore")}</span>
+              <code className="selectable font-mono break-all text-muted">{change.before}</code>
+              <span className="text-subtle">{t("run.commandNow")}</span>
+              <code className="selectable font-mono break-all">{change.now}</code>
+            </dd>
+          </div>
+        ))}
+      </dl>
+      {setupFirst && <p className="mt-2 text-[11.5px] text-muted">{t("run.commandsSetupFirst")}</p>}
+      {setupFirst && limited && <p className="mt-2 text-[11.5px] text-warning">{t("run.setupLimited")}</p>}
+      <p className="mt-2 text-[11.5px] text-subtle">{t("run.commandsChangedHint")}</p>
+    </div>
+  );
+}
+
+/**
+ * What can be done with a step that stopped. `agentsWrote` says whether an agent that can change files
+ * has had the run's copy: a setup started then gets no more than the agents do, and the person is told
+ * before choosing.
+ */
+export function Actions({ attempt, projectId, agentsWrote, onError }: { attempt: Attempt; projectId: string; agentsWrote: boolean; onError: (message: string) => void }) {
   const { t } = useTranslation();
   const navigate = useApp((s) => s.navigate);
+  const changes = useCommandChanges(attempt, projectId);
   const act = (run: () => Promise<unknown>) => run().catch((e) => onError(errorText(t, e)));
   if (attempt.reason?.code === "reworkLimit") {
     return (
@@ -1050,13 +1188,25 @@ function Actions({ attempt, projectId, onError }: { attempt: Attempt; projectId:
   }
   if (attempt.state === "succeeded" || attempt.state === "abandoned" || attempt.state === "rejected" || attempt.state === "skipped" || attempt.state === "returned" || attempt.state === "postponed") return null;
   const canResume = attempt.kind === "agent" && ["interrupted", "blocked", "stopped", "failed"].includes(attempt.state);
+  // Only when what it would start over runs something else now.
+  const commandChanged = startsOverDifferently(attempt, changes);
+  const setupFirst = attempt.kind !== "setup" && changes.some((change) => change.kind === "setup");
+  // Starting a setup over, with new commands or not, runs what agents may have changed.
+  const setupLimited = attempt.kind === "setup" && agentsWrote;
   return (
     <Card className="p-4">
       {attempt.reason && <p className="selectable text-[12.5px] text-warning">{reasonText(t, attempt.reason)}</p>}
-      <div className={cx("flex flex-wrap gap-2", attempt.reason && "mt-2.5")}>
+      {commandChanged && <CommandChanges changes={changes} setupFirst={setupFirst} limited={agentsWrote} />}
+      {setupLimited && <p className={cx("text-[12px] text-warning", (attempt.reason || commandChanged) && "mt-2.5")}>{t("run.setupLimited")}</p>}
+      <div className={cx("flex flex-wrap gap-2", (attempt.reason || commandChanged || setupLimited) && "mt-2.5")}>
         {needsSignIn(attempt.reason) && <Button onClick={() => void act(() => api.openClaudeLogin())}>{t("run.signIn")}</Button>}
         {needsProjectSettings(attempt.reason) && <Button onClick={() => navigate({ name: "projects", projectId })}>{t("newRun.openProject")}</Button>}
         {canResume && <Button variant="primary" onClick={() => void act(() => api.attemptRetry(attempt.id, true))}>{t("run.resume")}</Button>}
+        {commandChanged && (
+          <Button variant="primary" onClick={() => void act(() => api.attemptRetry(attempt.id, false, true))}>
+            {t("run.retryWithNewCommands")}
+          </Button>
+        )}
         <Button onClick={() => void act(() => api.attemptRetry(attempt.id, false))}>{t("run.retry")}</Button>
         <Button variant="ghost" onClick={() => void act(() => api.attemptAbandon(attempt.id))}>
           {t("run.abandon")}
@@ -1129,8 +1279,10 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       return line(data.command ? t("activity.startedCheck", { command: data.command }) : t("activity.started"), "text-subtle");
     case "waiting":
       return line(t("activity.waiting"), "text-warning");
-    case "skipped":
-      return line(data.reason?.code === "treatedAsSmall" ? t("activity.skippedSmall") : t("activity.skipped"), "text-subtle");
+    case "skipped": {
+      const skipped = { state: "skipped", reason: data.reason };
+      return line(skippedAsSmall(skipped) ? t("activity.skippedSmall") : skippedForRisks(skipped) ? t("activity.skippedRisks") : t("activity.skipped"), "text-subtle");
+    }
     case "postponed":
       return line(t("activity.postponed", { names: (data.steps ?? []).join(", ") }), "font-medium");
     case "sizeDecided":
@@ -1181,6 +1333,13 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       );
     case "reviewIncomplete":
       return line(t("activity.reviewIncomplete", { files: (data.unread ?? []).join(", ") }), "text-warning");
+    case "contractReplaced":
+      return line(t("activity.contractReplaced", { ids: (data.replaced ?? []).join(", ") }));
+    case "contractGiven":
+      // A part no point names was given none, which says nothing.
+      return (data.points ?? []).length > 0 ? line(t("activity.contractGiven", { ids: data.points.map((point: { id: string }) => point.id).join(", ") })) : null;
+    case "reviewBreaks":
+      return line(t("activity.reviewBreaks", { ids: (data.breaks ?? []).join(", ") }), "text-warning");
     case "verificationCorrected":
       return (
         <div>
@@ -1239,7 +1398,7 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
     case "stallCleared":
       return line(t("activity.stallCleared"));
     case "stopRequested":
-      return line(t("activity.stopRequested"));
+      return line(data.by ? t("activity.stopRequestedBy", { client: data.by }) : t("activity.stopRequested"));
     case "waitLonger":
       return line(t("activity.waitLonger"));
     case "commandKilled":
@@ -1249,6 +1408,21 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
     // Only an assistant's retry leaves one, so the person sees it wasn't them.
     case "retryRequested":
       return data.by ? line(t("activity.retryRequested", { client: data.by })) : null;
+    case "commandsUpdated":
+      return (
+        <div>
+          {line(t("activity.commandsUpdated"), "font-medium")}
+          <ul className="selectable mt-0.5 space-y-0.5 font-mono text-[11.5px] break-all text-muted">
+            {(data.changes ?? []).map((change: CommandChange) => (
+              <li key={change.stepId}>
+                {change.stepId}: {change.before} → {change.now}
+              </li>
+            ))}
+          </ul>
+        </div>
+      );
+    case "setupLimited":
+      return line(t("activity.setupLimited"), "text-warning");
     case "recovered":
       return line(t("activity.recovered"), "text-subtle");
     case "snapshotFailed":
@@ -1389,10 +1563,19 @@ function ProposalsCard({ runId, revision }: { runId: string; revision: number })
   );
 }
 
-function ReviewVerdict({ review }: { review: Attempt }) {
+/** What a finding can say the change breaks in this run: what its specification has. */
+function breakableOf(attempts: Attempt[]): string[] {
+  const asked = specifyingAttempt(attempts);
+  return breakableIds(asked ? specOf(asked) : null);
+}
+
+/** What became of a review. When Keel doesn't count it as an approval, it says why: its summary can still say all is fine. */
+function ReviewVerdict({ review, findings }: { review: Attempt; findings: FindingShown[] }) {
   const { t } = useTranslation();
   if (!review.output) return <StateBadge state={review.state} label={t(`states.${review.state}`)} />;
   if ((review.output.unread ?? []).length > 0) return <span className="text-warning">{t("run.verdictUnread")}</span>;
+  const broken = [...new Set(findings.flatMap((finding) => (finding.breaks ? [finding.breaks] : [])))];
+  if (broken.length > 0) return <span className="text-warning">{t("run.verdictBreaks", { ids: broken.join(", ") })}</span>;
   return <span className={review.output.verdict === "approved" ? "text-success" : "text-warning"}>{review.output.verdict === "approved" ? t("run.verdictApproved") : t("run.verdictChanges")}</span>;
 }
 
@@ -1412,29 +1595,38 @@ function ApproverVerdict({ output, riskClass = "text-subtle" }: { output: NonNul
 function ReviewsList({ attempts, round }: { attempts: Attempt[]; round: number }) {
   const { t } = useTranslation();
   const { reviewers, approver } = reviewsOfRound(attempts, round);
+  const breakable = breakableOf(attempts);
   // A person can ask for a review that was skipped, and then that's what became of it.
   return (
     <>
       <ul className="space-y-2">
-        {latestOfEachStep(reviewers).map((review) => (
-          <li key={review.id} className="text-[12.5px]">
-            <div className="flex flex-wrap items-baseline gap-2">
-              <span className="font-mono text-[12px] font-medium">{review.stepId}</span>
-              <ReviewVerdict review={review} />
-            </div>
-            {review.state === "skipped" && review.reason && <p className="selectable mt-0.5 text-muted">{reasonText(t, review.reason)}</p>}
-            {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
-            {(review.output?.unread ?? []).length > 0 && <p className="selectable mt-0.5 text-warning">{t("run.unreadFiles", { files: review.output?.unread?.join(", ") })}</p>}
-            {uncheckedOf(review.output).length > 0 && <p className="selectable mt-0.5 text-muted">{t("run.reviewUnchecked", { items: uncheckedOf(review.output).join("; ") })}</p>}
-            {(review.output?.findings ?? []).length > 0 && (
-              <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 text-muted">
-                {review.output?.findings.map((finding, index) => (
-                  <li key={index}>{finding}</li>
-                ))}
-              </ul>
-            )}
-          </li>
-        ))}
+        {latestOfEachStep(reviewers).map((review) => {
+          const findings = findingsOf(review.output, breakable);
+          return (
+            <li key={review.id} className="text-[12.5px]">
+              <div className="flex flex-wrap items-baseline gap-2">
+                <span className="font-mono text-[12px] font-medium">{review.stepId}</span>
+                <ReviewVerdict review={review} findings={findings} />
+              </div>
+              {review.state === "skipped" && review.reason && <p className="selectable mt-0.5 text-muted">{reasonText(t, review.reason)}</p>}
+              {review.output?.summary && <p className="selectable mt-0.5 text-muted">{review.output.summary}</p>}
+              {(review.output?.unread ?? []).length > 0 && <p className="selectable mt-0.5 text-warning">{t("run.unreadFiles", { files: review.output?.unread?.join(", ") })}</p>}
+              {uncheckedOf(review.output).length > 0 && <p className="selectable mt-0.5 text-muted">{t("run.reviewUnchecked", { items: uncheckedOf(review.output).join("; ") })}</p>}
+              {findings.length > 0 && (
+                <ul className="selectable mt-1 list-disc space-y-0.5 pl-4 text-muted">
+                  {findings.map((finding, index) => (
+                    // A review's list, in its order: two findings can say the same.
+                    <li key={index}>
+                      {finding.breaks && <span className="font-medium text-warning">{t("run.findingBreaks", { id: finding.breaks })} </span>}
+                      {finding.where && <span className="font-mono text-[12px]">{finding.where} </span>}
+                      {finding.text}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </li>
+          );
+        })}
       </ul>
       {approver?.output && (
         <div className="mt-3 border-t border-border pt-2.5 text-[12.5px]">
@@ -1682,6 +1874,7 @@ export function RunDetail({ runId }: { runId: string }) {
             <h1 className="selectable text-[17px] leading-snug font-semibold">{run?.title}</h1>
             <p className="mt-0.5 flex flex-wrap gap-x-3 text-[12px] text-subtle">
               {run?.prUrl && run.prState && <PrStatus state={run.prState} at={run.prStateAt} />}
+              {run?.prUrl && <CiStatus run={run} />}
               {isReadOnlyTask(run) && <span className="rounded border border-border px-1 text-[11px] text-muted">{t("run.readOnly")}</span>}
               {joint && (
                 <button type="button" className="inline-flex items-center gap-1 text-accent hover:underline" onClick={() => setJointOpen(true)}>
@@ -1717,7 +1910,7 @@ export function RunDetail({ runId }: { runId: string }) {
           <QuestionsCard key={latest.id} attempt={latest} attempts={attempts} onError={setError} />
         ) : (
           <>
-            <Actions attempt={latest} projectId={run.projectId} onError={setError} />
+            <Actions attempt={latest} projectId={run.projectId} agentsWrote={agentCouldHaveWritten(attempts)} onError={setError} />
             {!going && outcome}
           </>
         )}

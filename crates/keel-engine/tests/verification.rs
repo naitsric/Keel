@@ -148,6 +148,8 @@ fn agent(id: &str, tools: ToolProfile, role: StepRole, prompt: &str) -> Workflow
         max_budget_usd: None,
         paths: vec![],
         when: None,
+        risks: vec![],
+        model_when_risky: None,
         role,
     })
 }

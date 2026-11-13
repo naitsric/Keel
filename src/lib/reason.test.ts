@@ -26,6 +26,20 @@ describe("reasonText", () => {
   });
 });
 
+describe("a step skipped for the risks of what was asked", () => {
+  it("names the risks it looks at in plain words, in both languages", () => {
+    const reason = { code: "noMatchingRisks", risks: ["concurrency", "sharedContracts", "whatever"] };
+    expect(reasonText(t("en"), reason)).toBe("What was asked names none of the risks it looks at (things happening at the same time, something other code depends on, something it couldn't name).");
+    expect(reasonText(t("es"), reason)).toBe("Lo pedido no nombra ninguno de los riesgos que revisa (cosas que pasan al mismo tiempo, algo de lo que depende otro código, algo que no supo nombrar).");
+  });
+
+  it("says which step needs one that works out the change before it", () => {
+    const reason = { code: "invalidWorkflow", problem: "risksNeedSpecifier", step: "state" };
+    expect(reasonText(t("en"), reason)).toBe("“state” goes by the risks of what was asked, so a step that works out the change has to come before it.");
+    expect(reasonText(t("es"), reason)).toBe("«state» se guía por los riesgos de lo pedido, así que antes tiene que haber un paso que defina el cambio.");
+  });
+});
+
 describe("a step waiting for its project's turn", () => {
   it("names the step and the run that have the turn, and that it's about running commands", () => {
     const reason = { code: "waitingForProject", step: "builder", runId: "r44", title: "The runs' folders" };
@@ -65,7 +79,8 @@ describe("what's said about a verifier", () => {
         say("run.verifyUnverified", { count: 1 }),
         say("run.verifyNone", { count: 4 }),
         ...["met", "unmet", "unverified"].map((result) => say(`run.verifyResult.${result}`)),
-        ...["noEvidence", "noCheckPassed", "leftOut", "noProof"].map((why) => say(`run.verifyWhy.${why}`)),
+        ...["noEvidence", "noCheckPassed", "leftOut", "noTest", "notRun"].map((why) => say(`run.verifyWhy.${why}`)),
+        ...["byReviews", "notRun", "noTest", "noCheckPassed", "noEvidence", "leftOut", "seeEvidence"].flatMap((why) => [1, 2].map((count) => say(`run.notProvenWhy.${why}`, { count, where: say("run.whatProves") }))),
         say("activity.verifyAnswer"),
         say("activity.verificationCorrected", { count: 2 }),
         say("activity.verificationDropped", { count: 2 }),
@@ -87,6 +102,8 @@ describe("what's said about a verifier", () => {
         say("workflows.roleVerifier"),
       ];
       for (const text of texts) expect(text).not.toMatch(JARGON);
+      // A key with no text would pass for plain words.
+      for (const text of texts) expect(text).not.toMatch(/^[a-z]\w*(\.\w+)+$/i);
     }
   });
 });
@@ -105,10 +122,19 @@ describe("what a specifier got wrong", () => {
     expect(spanish).not.toMatch(JARGON);
   });
 
+  it("says when Keel couldn't check the answer at all, and that it doesn't count", () => {
+    const reason = { code: "specNotChecked", detail: "no such table: joint_change" };
+    const english = reasonText(i18next.getFixedT("en"), reason);
+    expect(english).toBe("Keel couldn't read what it needed to check this answer, so it doesn't count: no such table: joint_change. Try it again.");
+    const spanish = reasonText(i18next.getFixedT("es"), reason);
+    expect(spanish).toBe("Keel no pudo leer lo que necesitaba para revisar esta respuesta, así que no cuenta: no such table: joint_change. Inténtalo de nuevo.");
+    for (const text of [english, spanish]) expect(text).not.toMatch(JARGON);
+  });
+
   it("has a sentence for everything that can go wrong, with no jargon in it", () => {
     for (const language of ["en", "es"]) {
       const problems = i18next.getResource(language, "translation", "specProblems") as Record<string, string>;
-      expect(Object.keys(problems)).toEqual(["criterionNeedsText", "questionNeedsText", "tooManyChanges", "tooManyLimits", "unreadable", "noSummary", "summaryTooLong", "noCriteria", "tooManyCriteria", "criterionTooLong", "criterionNeedsId", "repeatedCriterion", "tooManyDecided", "decidedTooLong", "tooManyQuestions", "questionTooLong", "questionNeedsId", "repeatedQuestion", "wrongNumberOfOptions", "optionTooLong", "repeatedOption", "tooManyRecommended", "leftUnresolved", "noParts", "tooManyParts", "unknownProject", "repeatedPart", "tooManyTogether"]);
+      expect(Object.keys(problems)).toEqual(["criterionNeedsText", "questionNeedsText", "tooManyChanges", "tooManyLimits", "unreadable", "noSummary", "summaryTooLong", "noCriteria", "tooManyCriteria", "criterionTooLong", "criterionNeedsId", "repeatedCriterion", "tooManyDecided", "decidedTooLong", "tooManyQuestions", "questionTooLong", "questionNeedsId", "repeatedQuestion", "wrongNumberOfOptions", "optionTooLong", "repeatedOption", "tooManyRecommended", "leftUnresolved", "noParts", "tooManyParts", "unknownProject", "repeatedPart", "tooManyTogether", "tooManyContract", "contractNeedsText", "contractTooLong", "contractUnknownProject", "contractWithoutPart"]);
       for (const text of Object.values(problems)) expect(text).not.toMatch(JARGON);
     }
   });

@@ -23,6 +23,8 @@ const card = (id: string, column: BoardColumn, extra: Partial<BoardCard> = {}): 
   prUrl: null,
   prState: null,
   prStateAt: null,
+  prCi: null,
+  prCiFailed: [],
   rejection: null,
   startBlocked: null,
   createdAt: "2026-11-05T00:00:00Z",
@@ -64,6 +66,25 @@ describe("what a done card says about its pull request", () => {
   it("speaks Spanish too", () => {
     expect(cardLabel(t("es"), card("d", "done", { prState: "merged", prStateAt: null }))?.label).toBe("Mergeado");
     expect(cardLabel(t("es"), card("d", "done", { prState: "closed", prStateAt: null }))?.label).toBe("Cerrado sin mergear");
+  });
+
+  it("turns red when its CI fails, and says which checks", () => {
+    for (const prState of ["open", "draft"] as const) {
+      const red = done({ prState, prCi: "failed", prCiFailed: ["lint", "pyright"] });
+      expect(red?.state).toBe("failed");
+      expect(red?.label).toBe(en(`board.pr.${prState}`));
+      expect(red?.detail).toBe("CI failed: lint, pyright");
+    }
+    expect(cardLabel(t("es"), card("d", "done", { prState: "open", prCi: "failed", prCiFailed: ["lint"] }))?.detail).toBe("CI en rojo: lint");
+    // GitHub can say it failed without Keel knowing which check: no colon and nothing after it.
+    expect(done({ prState: "open", prCi: "failed", prCiFailed: [] })?.detail).toBe("CI failed");
+    expect(cardLabel(t("es"), card("d", "done", { prState: "open", prCi: "failed", prCiFailed: [] }))?.detail).toBe("CI en rojo");
+    // Anything else about the CI stays off the card, and so does a failure once it's merged or closed.
+    for (const extra of [{ prState: "open", prCi: "pending" }, { prState: "open", prCi: "passed" }, { prState: "open", prCi: "noCi" }, { prState: "merged", prCi: "failed", prCiFailed: ["lint"] }] as Partial<BoardCard>[]) {
+      const label = done(extra);
+      expect(label?.state).not.toBe("failed");
+      expect(label?.detail ?? "").not.toContain("CI");
+    }
   });
 
   it("only shows on a card that's done: its column still comes from the run", () => {
@@ -452,7 +473,7 @@ describe("notices", () => {
 
 describe("what a card says about a change across several projects", () => {
   const names = (id: string) => ({ p2: "valora", p3: "dupplaBack" })[id] ?? id;
-  const part = (extra: Partial<NonNullable<BoardCard["part"]>> = {}) => ({ changeId: "plan", position: 2, total: 2, waitsFor: null, warnings: [], ...extra });
+  const part = (extra: Partial<NonNullable<BoardCard["part"]>> = {}) => ({ changeId: "plan", position: 2, total: 2, waitsFor: null, warnings: [], contractChanged: [], ...extra });
 
   it("says nothing on an ordinary card", () => {
     expect(jointLabel(en, card("a", "todo"), names)).toBeNull();
@@ -482,6 +503,12 @@ describe("what a card says about a change across several projects", () => {
       }),
     });
     expect(jointLabel(en, warned, names)?.warnings).toEqual(["Part 1, in valora, has commits this part didn't read.", "Part 1, in valora: its pull request was closed."]);
+  });
+
+  it("warns when it was specified with points of the contract as they no longer are", () => {
+    const earlier = card("b", "humanReview", { jointChangeId: "plan", part: part({ warnings: [{ kind: "changed", position: 1, project: "valora" }], contractChanged: ["K1", "K4"] }) });
+    expect(jointLabel(en, earlier, names)?.warnings).toEqual(["Part 1, in valora, has commits this part didn't read.", "Specified with an earlier version of what the parts agree on (K1, K4). Only a new run of this part takes the current one."]);
+    expect(jointLabel(t("es"), earlier, names)?.warnings[1]).toBe("Se especificó con una versión anterior de lo que las partes acuerdan (K1, K4). Solo una nueva ejecución de esta parte toma la actual.");
   });
 });
 

@@ -12,7 +12,7 @@ import ReactDOM from "react-dom/client";
 import App from "../src/App";
 import i18next from "../src/i18n";
 import { useSearchEverywhere, type SearchScope } from "../src/commands/SearchEverywhere";
-import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, Issue, JointChange, JointCheck, PartOf, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunJoint, RunRow, SpecOutput, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
+import type { BrainNote, Attempt, AttemptState, AuditEvent, BoardCard, BoardColumn, CiLeftOut, CiState, ContractPoint, Finding, Issue, JointCard, JointChange, JointCheck, PartOf, Preflight, PrState, Project, ProjectAdded, ProjectProposal, Reason, Run, RunJoint, RunRow, SpecOutput, WorkflowResults, WorkflowStep, WorkflowDraft } from "../src/lib/api";
 import { useApp, type View } from "../src/lib/store";
 
 const params = new URLSearchParams(location.search);
@@ -81,7 +81,8 @@ const agentStep = (id: string, model: string, tools: "readOnly" | "build") => ({
 const reviewerStep = (id: string, paths: string[]) => ({ id, model: "sonnet", tools: "readOnly" as const, effort: null, prompt: "Review {{diff}}", maxTurns: null, maxBudgetUsd: null, paths, role: { kind: "reviewer" as const } });
 // What the verifier found: verify=all|some|none|unmet with flow=approval|delivered, flow=verifying and
 // flow=verifyUnreadable for the step itself, and verify=old to see one from an earlier round, which
-// says nothing. node=verify opens what it found. long=1 has text at its limits.
+// says nothing. verify=notRun has a test that exists but didn't run here, one from before the verifier
+// said why apart, and one with no test, and the approval says why for each. node=verify opens what it found. long=1 has text at its limits.
 const verifyMode = params.get("verify");
 const verifyShown = verifyMode !== null || params.get("flow") === "verifying" || params.get("flow") === "verifyUnreadable";
 const verifyStep: WorkflowStep = { ...agentStep("verify", "sonnet", "readOnly"), role: { kind: "verifier" } };
@@ -121,7 +122,8 @@ const waiting = params.get("flow") === "approval" || params.get("flow") === "lim
 // (text that would push the buttons away, what was asked included), gate=build (asks before building,
 // where what was asked is already what the card shows), gate=end (never delivers). asked=none has no
 // step that says what was asked. With flow=delivered, pr=draft|open|merged|closed is what became of the
-// pull request, and pr=unknown is one Keel hasn't looked at yet. specifier=1 has what was asked come
+// pull request, and pr=unknown is one Keel hasn't looked at yet. ci=failed|pending|passed|noCi is what
+// its CI says, and view=board has a card whose CI failed. specifier=1 has what was asked come
 // from a specifier's structured answer, with what it decided alone and a "Change" on each line, and
 // with gate=build there's nothing yet to say about what it did. flow=questions is the card that asks,
 // in the language of lang=, with long=1 for text at its limits, many=1 for three questions, none=1 for
@@ -189,22 +191,50 @@ const previewSpec = {
   decided: [
     { text: say("Keeps the rounding as it is today, because nothing asked to change it.", "Deja el redondeo como está hoy, porque nada pidió cambiarlo.") },
     { text: say("If `whole` is 0, what should happen? Show an error, as today", "Si `whole` es 0, ¿qué debe pasar? Mostrar error, como hoy"), taken: "person" },
-    ...(params.get("taken") === "1" ? [{ text: say("Should the total round up? Leave it as it is", "¿El total debe redondear hacia arriba? Dejarlo como está"), taken: "roundsLimit" }] : []),
+    // taken=1 adds one Keel took when the rounds of questions ran out, and three the request already
+    // decided: one the person wrote, one an assistant wrote for them, and one from an issue written
+    // with the project's GitHub account.
+    ...(params.get("taken") === "1"
+      ? [
+          { text: say("Should the total round up? Leave it as it is", "¿El total debe redondear hacia arriba? Dejarlo como está"), taken: "roundsLimit" },
+          { text: say("If the author resolves their own critical thread, it counts for now.", "Si el autor resuelve su propio hilo critical, por ahora cuenta."), taken: "request" },
+          { text: say("Invoices already sent keep the total they had.", "Las facturas ya enviadas conservan el total que tenían."), taken: "request", assistant: "Claude Code" },
+          { text: say("Drafts don't count toward the total.", "Los borradores no cuentan en el total."), taken: "request", githubAccount: "alice" },
+        ]
+      : []),
     ...(questionedShown ? [{ text: say("Sorts the invoices by date, as the list does today.", "Ordena las facturas por fecha, como la lista de hoy.") }] : []),
   ],
   questions: [],
+  // agreement=1, with specifier=1: where a change across projects is agreed, with each part, what's
+  // tried together and what the parts agree on exactly.
+  ...(params.get("agreement") === "1"
+    ? {
+        parts: [
+          { project: "payments", text: say("Add an endpoint that settles one invoice", "Agrega un endpoint que liquida una factura") },
+          { project: "demo", text: say("Call it when an invoice is paid", "Lo llama cuando se paga una factura") },
+        ],
+        together: [say("Pay an invoice in demo and see it settled in payments", "Paga una factura en demo y mírala liquidada en payments")],
+        contract: [
+          { id: "K1", when: say("payments gets POST /invoices/{id}/settle", "payments recibe POST /invoices/{id}/settle"), then: say("it answers 200 with settledAt", "responde 200 con settledAt"), projects: ["payments"] },
+          { id: "K2", when: say("an invoice is paid in demo", "se paga una factura en demo"), then: say("demo sends POST /invoices/{id}/settle", "demo envía POST /invoices/{id}/settle"), projects: ["demo"] },
+        ],
+      }
+    : {}),
 };
 // What questioned=1 has the approver question. The first names its line by its number and quotes it in
 // other words. The second quotes its line as it is, with no number, like an answer from before there
 // were numbers. The third quotes no line, and its number is past the end, so it goes after the list.
+// The fourth is something the change added that nothing asks for, with no number and the round it
+// appeared in: round=2 has it come with the rework.
 const previewQuestioned = [
   { decided: say("Rounding stays the same", "El redondeo sigue igual"), number: 1, why: say("Totals on invoices with a discount now drift by a cent.", "Los totales de las facturas con descuento ahora se corren un centavo.") },
   { decided: say("“sorts the invoices by date, as the list does today”", "“ordena las facturas por fecha, como la lista de hoy”"), why: say("The export sorts them by number, so the two no longer agree.", "La exportación las ordena por número, así que ya no coinciden.") },
   { decided: say("Sends the receipt by email", "Manda el recibo por correo"), number: previewSpec.decided.length + 1, why: say("Nothing in the request asks for an email.", "Nada en el pedido pide un correo.") },
+  { decided: say("The export fails when an invoice has no date", "La exportación falla si una factura no tiene fecha"), number: null, round: round + 1, why: say("Old invoices have no date, so the export would stop working for them.", "Las facturas viejas no tienen fecha, así que la exportación dejaría de funcionar para ellas.") },
 ];
 // unchecked=1: what the code review couldn't check by reading the code.
 const previewUnchecked = uncheckedShown ? [say("How the invoices page shows the new totals", "Cómo se ven los totales nuevos en la página de facturas"), say("That the export still opens in the accounting app", "Que la exportación siga abriendo en el programa de contabilidad")] : [];
-const useSpecifier = params.get("specifier") === "1" || questionedShown;
+const useSpecifier = params.get("specifier") === "1" || questionedShown || params.get("findings") === "breaks";
 const specAttempt: Attempt = { ...attempt, id: "a0", stepId: "spec", role: useSpecifier ? "specifier" : "worker", tools: "readOnly", state: "succeeded", reason: null, modelActual: "claude-opus-5-5", filesChanged: null, output: useSpecifier ? (previewSpec as unknown as Attempt["output"]) : null, resultText: useSpecifier ? "" : long ? askedLong : "1. add returns the sum.\n2. The tests pass.", finishedAt: at(2) };
 const previewQuestions = [
   {
@@ -256,12 +286,12 @@ const checkAttempt: Attempt = { ...attempt, id: "a2", stepId: "check", kind: "ch
 const approvalAttempt: Attempt = { ...attempt, id: "a3", stepId: "approval", kind: "approval", tools: "none", round, state: delivered ? "succeeded" : "waitingApproval", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: null, rawSha256: null, finishedAt: delivered ? at(0) : null };
 const prAttempt: Attempt = { ...attempt, id: "a4", stepId: "pull-request", kind: "deliver", tools: "none", state: "succeeded", reason: null, modelRequested: "", modelActual: null, filesChanged: null, resultText: "https://github.com/acme/app/pull/12", rawSha256: null, finishedAt: at(0) };
 const reworkAttempt: Attempt = { ...builtAttempt, id: "a1b", number: 2, round: 1, resultText: "I added the role check the security review asked for, in app/api.py.\n\nTests: `make test` passes." };
-const reviewer = (id: string, verdict: "approved" | "changes", summary: string, findings: string[], unchecked: string[] = []): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "succeeded", reason: null, tools: "readOnly", filesChanged: null, resultText: null, finishedAt: at(1), output: { verdict, findings, summary, unchecked } as Attempt["output"] });
+const reviewer = (id: string, verdict: "approved" | "changes", summary: string, findings: Finding[], unchecked: string[] = []): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "succeeded", reason: null, tools: "readOnly", filesChanged: null, resultText: null, finishedAt: at(1), output: { verdict, findings, summary, unchecked } as Attempt["output"] });
 const skippedReviewer = (id: string): Attempt => ({ ...attempt, id: `r-${id}`, stepId: id, role: "reviewer", round, state: "skipped", reason: { code: "noMatchingPaths", paths: ["**/*.tsx"] }, tools: "readOnly", filesChanged: null, resultText: null, modelActual: null, finishedAt: at(1), output: null });
 const approverAttempt = (decision: "approve" | "rework"): Attempt => ({ ...attempt, id: "r-approver", stepId: "approver", role: "approver", round, state: params.get("flow") === "limit" ? "blocked" : "succeeded", reason: params.get("flow") === "limit" ? { code: "reworkLimit", rounds: 2 } : null, tools: "readOnly", modelActual: "claude-opus-5-5", filesChanged: null, resultText: null, finishedAt: at(1), output: { decision, risk: params.get("risk") ?? "medium", reasons: long ? "The security finding is real: the new endpoint skips the role check, and the same pattern repeats in every handler. ".repeat(6) : "The security finding is real: the new endpoint skips the role check.", instructions: "Add the role check.", overriddenByPerson: params.get("override") === "1", ...(questionedShown ? { questioned: previewQuestioned } : {}) } as Attempt["output"] });
 const verifiedItems = () => {
   const longWords = (text: string, limit: number) => atLimit(text, limit);
-  const item = (id: string, when: string, then: string, result: "met" | "unmet" | "unverified", evidence: string, corrected?: string) => ({ id, when: longWords(when, 100), then: longWords(then, 100), result, evidence: long ? `${evidence} ${"x".repeat(140)}`.slice(0, 140) : evidence, ...(corrected ? { corrected } : {}) });
+  const item = (id: string, when: string, then: string, result: "met" | "unmet" | "unverified", evidence: string, corrected?: string, why?: string) => ({ id, when: longWords(when, 100), then: longWords(then, 100), result, evidence: long ? `${evidence} ${"x".repeat(140)}`.slice(0, 140) : evidence, ...(corrected ? { corrected } : {}), ...(why ? { why } : {}) });
   const C1 = [say("add(1, 2) is called", "se llama add(1, 2)"), say("it returns 3", "devuelve 3")] as const;
   const C2 = [say("one argument is negative", "un argumento es negativo"), say("it still returns the sum", "igual devuelve la suma")] as const;
   const C3 = [say("an argument is a decimal", "un argumento es decimal"), say("the rounding stays as it is today", "el redondeo sigue como hoy")] as const;
@@ -273,6 +303,14 @@ const verifiedItems = () => {
       return [item("C1", ...C1, "unverified", ""), item("C2", ...C2, "unverified", "test_calc.py:14", "noCheckPassed"), item("C3", ...C3, "unverified", "", "noEvidence"), item("C4", ...C4, "unverified", "", "leftOut")];
     case "unmet":
       return [item("C1", ...C1, "met", "test_calc.py::test_add"), item("C2", ...C2, "unmet", "calc.py:3"), item("C3", ...C3, "unverified", ""), item("C4", ...C4, "unverified", "", "leftOut")];
+    case "notRun":
+      return [
+        item("C1", ...C1, "met", "test_calc.py::test_add"),
+        item("C2", ...C2, "unverified", say("test_invoices.py:14 needs Postgres, which isn't here", "test_invoices.py:14 necesita Postgres, que no está aquí"), undefined, "notRun"),
+        // As from before the verifier said why apart: only what it pointed at says it.
+        item("C3", ...C3, "unverified", say("test_invoices.py:30 needs Postgres; skipped", "test_invoices.py:30 requiere Postgres; se salta")),
+        item("C4", ...C4, "unverified", "", undefined, "noTest"),
+      ];
     default:
       return [item("C1", ...C1, "met", "test_calc.py::test_add"), item("C2", ...C2, "met", "test_calc.py:14"), item("C3", ...C3, "met", "test_calc.py:21"), item("C4", ...C4, "unverified", "")];
   }
@@ -280,12 +318,25 @@ const verifiedItems = () => {
 const verifierOutput = () => ({ criteria: verifiedItems(), summary: atLimit(say("Tests prove the sum works, and nothing covers the invoices page.", "Las pruebas demuestran que la suma funciona, y nada cubre la página de facturas."), 200) }) as unknown as Attempt["output"];
 const verifierAttempt = (s: AttemptState, fields: Partial<Attempt> = {}): Attempt => ({ ...attempt, id: "v1", stepId: "verify", role: "verifier", round: verifyMode === "old" ? 0 : round, tools: "readOnly", state: s, reason: null, filesChanged: null, resultText: null, finishedAt: at(1), output: s === "succeeded" ? verifierOutput() : null, ...fields });
 const verifiedAttempts = verifyMode !== null ? [verifierAttempt("succeeded")] : [];
+// findings=1 has the security review find a problem, as text, the way reviews wrote them before Keel
+// asked where each is and what it breaks. findings=breaks adds the code review calling three things
+// minor: one breaks C2, so Keel keeps it as asking for changes and node=code says why in its
+// Activity, and one names C9, which the specification doesn't have, so it breaks nothing.
+const breaksShown = params.get("findings") === "breaks";
+const securityFinds = params.get("findings") === "1" || breaksShown;
+const codeFindings: Finding[] = breaksShown
+  ? [
+      { file: "calc.py", line: 3, text: say("Still subtracts when one argument is negative", "Sigue restando cuando un argumento es negativo"), breaks: "C2" },
+      { file: "test_calc.py", line: null, text: say("The test's name could say which case it covers", "El nombre de la prueba podría decir qué caso cubre"), breaks: null },
+      { file: "calc.py", line: 9, text: say("The docstring doesn't mention decimals", "El docstring no menciona los decimales"), breaks: "C9" },
+    ]
+  : [];
 const reviews: Attempt[] = [
-  reviewer("security", params.get("findings") === "1" ? "changes" : "approved", params.get("findings") === "1" ? "The new endpoint skips the role check." : "No problems in authorization, logs or input handling.", params.get("findings") === "1" ? ["app/api.py:42 doesn't call require_role"] : []),
+  reviewer("security", securityFinds ? "changes" : "approved", securityFinds ? "The new endpoint skips the role check." : "No problems in authorization, logs or input handling.", securityFinds ? ["app/api.py:42 doesn't call require_role"] : []),
   skippedReviewer("ux"),
   skippedReviewer("ui"),
-  reviewer("code", "approved", "It meets each criterion, and the tests prove it.", [], previewUnchecked),
-  approverAttempt(params.get("findings") === "1" ? "rework" : "approve"),
+  reviewer("code", breaksShown ? "changes" : "approved", breaksShown ? say("Minor things, nothing that blocks.", "Cosas menores, nada que bloquee.") : "It meets each criterion, and the tests prove it.", codeFindings, previewUnchecked),
+  approverAttempt(securityFinds ? "rework" : "approve"),
 ];
 const built = [builtAttempt, ...(round > 0 ? [reworkAttempt] : [])];
 const gated = gate === "build" ? [specAttempt, approvalAttempt] : gate === "end" ? [specAttempt, builtAttempt, approvalAttempt] : null;
@@ -327,6 +378,12 @@ const draftsWaiting: WorkflowDraft[] = [
 const learnerStep: WorkflowStep = { ...agentStep("learnings", "sonnet", "readOnly"), role: { kind: "learner" } };
 const setupStep: WorkflowStep = { type: "setup", id: "setup", run: "uv sync --frozen" };
 const fullWorkflow: WorkflowStep[] = [setupStep, ...workflow, learnerStep];
+// The reviews as Keel ships them: state only for the risks it looks at, and code with a stronger model
+// for a risky change. view=workflows&node=state and node=code show their fields. flow=risks is a run
+// where state was left out and code ran on Opus: node=state says why.
+const shippedReviews: WorkflowStep = { type: "parallel", id: "reviews", steps: [reviewerStep("security", []), reviewerStep("ux", ["**/*.tsx"]), reviewerStep("ui", ["**/*.tsx"]), { ...reviewerStep("code", []), modelWhenRisky: "opus" }, { ...reviewerStep("state", []), risks: ["concurrency", "sharedContracts", "irreversibleData"] }] };
+const withShippedReviews = (steps: WorkflowStep[]) => steps.map((step) => (step.id === "reviews" ? shippedReviews : step));
+const skippedForRisks: Reason = { code: "noMatchingRisks", risks: ["concurrency", "sharedContracts", "irreversibleData"] };
 const ran = (stepId: string, s: AttemptState, fields: Partial<Attempt> = {}): Attempt => ({ ...attempt, id: `${stepId}-${fields.round ?? 0}-${fields.number ?? 1}`, stepId, state: s, reason: null, tools: "readOnly", filesChanged: null, resultText: null, modelActual: s === "skipped" ? null : "claude-sonnet-5-5", ...fields });
 const setupRan = ran("setup", "succeeded", { kind: "setup", tools: "setup", modelRequested: "", modelActual: null });
 const specRan = ran("spec", "succeeded", { modelRequested: "opus", modelActual: "claude-opus-5-5", resultText: "1. add returns the sum.\n2. The tests pass." });
@@ -376,12 +433,28 @@ const WHY_MOVED_UP: Reason[] =
       ]
     : [{ code: "sensitiveFiles", files: [".github/workflows/ci.yml"], total: 1 }, { code: "tooManyLines", lines: 512, limit: 400 }];
 // What an assistant over MCP did, in place of the person: by=1 has Claude Code send back flow=returned
-// (node=approval shows it), or close the run with state=abandoned. flow=sentBack is the approval it
+// (node=approval shows it), close the run with state=abandoned, or ask it to stop with state=stopped,
+// which without by=1 the person did. flow=sentBack is the approval it
 // comes back to, which says why. task=1 is a read-only task it started, with no saved workflow.
 const assistantBy = params.get("by") === "1" || params.get("flow") === "sentBack" ? "Claude Code" : null;
 const sentBackWith = say("Return 0 instead of raising when the list is empty.", "Devuelve 0 en vez de lanzar un error cuando la lista está vacía.");
 const returnedApproval = ran("approval", "returned", { kind: "approval", tools: "none", modelRequested: "", modelActual: null, output: { instructions: sentBackWith, ...(assistantBy ? { by: assistantBy } : {}) } as unknown as Attempt["output"] });
 const nextRound = (a: Attempt): Attempt => ({ ...a, id: `${a.stepId}-1-2`, round: 1, number: 2 });
+// flow=commands is a check that failed, and the person changed the project's commands after the run
+// started: it can start over with the new ones. flow=newCommands is after that, with the new setup
+// running before the check comes round again, where node=check, then clickStart=Attempt 1 and
+// then=Activity, says which ones it took. The check that failed keeps how it ended, and attempt 2
+// stands for it being put off. node=setup then=Activity says the new setup gets no more than the
+// agents.
+const newCommands = [
+  { stepId: "setup", kind: "setup", before: "uv sync --frozen", now: "uv sync --frozen --group test" },
+  { stepId: "check", kind: "check", before: "make test", now: "uv run --group test pytest" },
+];
+const withNewCommands = (steps: WorkflowStep[]): WorkflowStep[] =>
+  steps.map((step) => {
+    const change = newCommands.find((c) => c.stepId === step.id);
+    return change && (step.type === "setup" || step.type === "check") ? { ...step, run: change.now } : step;
+  });
 const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Attempt[]; round: number }> = {
   small: { steps: fittingSteps, round: 0, attempts: [specRan, builderRan(), checkRan(), verifierAttempt("succeeded"), skippedAsSmallRan("security"), skippedAsSmallRan("ux"), skippedAsSmallRan("ui"), skippedAsSmallRan("code"), skippedAsSmallRan("approver", "approver"), humanWaits] },
   asked: { steps: fittingSteps, round: 0, attempts: [specRan, builderRan(), checkRan(), verifierAttempt("succeeded"), skippedAsSmallRan("security"), skippedAsSmallRan("ux"), skippedAsSmallRan("ui"), skippedAsSmallRan("code"), skippedAsSmallRan("approver", "approver"), ran("approval", "postponed", { kind: "approval", tools: "none", modelRequested: "", modelActual: null }), reviewRan("security", "running", { number: 2, modelActual: "claude-sonnet-5-5", finishedAt: null }), reviewRan("ux", "skipped", { number: 2 }), reviewRan("ui", "skipped", { number: 2 }), reviewRan("code", "running", { number: 2, modelActual: "claude-sonnet-5-5", finishedAt: null })] },
@@ -391,6 +464,8 @@ const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Atte
   rework: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "succeeded", verdict("changes")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", verdict("approved")), decided("rework"), builderRan({ round: 1, number: 2, state: "running", finishedAt: null })] },
   skipped: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), humanWaits] },
   failed: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("failed"), checkRan("failed", { number: 2 })] },
+  commands: { steps: fullWorkflow, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("failed")] },
+  newCommands: { steps: withNewCommands(fullWorkflow), round: 0, attempts: [setupRan, specRan, builderRan(), checkRan("failed"), checkRan("postponed", { number: 2, exitCode: null }), ran("setup", "running", { kind: "setup", tools: "setup", number: 2, modelRequested: "", modelActual: null, prompt: newCommands[0].now, finishedAt: null })] },
   many: { steps: manySteps, round: 0, attempts: [setupRan, ...Array.from({ length: 6 }, (_, i) => ran(`step-${i + 1}`, "succeeded", { modelRequested: i % 2 ? "sonnet" : "opus", modelActual: i % 2 ? "claude-sonnet-5-5" : "claude-opus-5-5" })), ran("a-step-whose-name-is-much-too-long-to-fit-in-any-node-at-all", "succeeded", { modelRequested: "claude-a-model-with-a-very-long-name-indeed", modelActual: "claude-a-model-with-a-very-long-name-indeed" }), checkRan(), reviewRan("security", "succeeded", verdict("approved")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", verdict("approved")), reviewRan("a-reviewer-with-a-very-long-name-as-well", "succeeded", verdict("approved")), decided("approve"), ran("after-the-reviews", "succeeded", { filesChanged: ["calc.py"], runFiles: ["calc.py"] }), checkRan("succeeded", { id: "check-again-0-1", stepId: "check-again" }), humanWaits] },
   unreadable: { steps: null, round: 0, attempts: [setupRan, specRan, builderRan(), reviewRan("security", "succeeded", verdict("approved")), checkRan("failed")] },
   try: { steps: [setupStep, { type: "check", id: "try-check", run: "pnpm test" }], round: 0, attempts: [setupRan, checkRan("failed", { id: "try-check-0-1", stepId: "try-check", prompt: "pnpm test" })] },
@@ -401,6 +476,7 @@ const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Atte
   corrected: { steps: fullWorkflow, round: 0, attempts: [setupRan, ...correctedAttempts, ...(fixedAtOnce ? [builderRan({ state: "running", finishedAt: null })] : [])] },
   // A person sent it back: the approval they answered says so, and the run is on its next round.
   returned: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), returnedApproval, builderRan({ round: 1, number: 2, state: "running", finishedAt: null })] },
+  risks: { steps: withShippedReviews(fullWorkflow), round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "succeeded", verdict("approved")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", { ...verdict("approved"), modelRequested: "opus", modelActual: "claude-opus-5-5" }), reviewRan("state", "skipped", { reason: skippedForRisks }), decided("approve"), humanWaits] },
   sentBack: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), returnedApproval, ...[builderRan({ resultText: "I made add return 0 for an empty list." }), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), humanWaits].map(nextRound)] },
 };
 const flowScene = FLOW_SCENES[params.get("flow") ?? ""];
@@ -413,6 +489,7 @@ const mapNotes = [
 const proposals: BrainNote[] = [{ ...note(7, "Migrations must be added in order: the app refuses to start if one is missing.", ["db/migrations"]), kind: "learning", state: "proposed", evidence: "The check failed with 'migration 12 missing' until the builder renamed the file." }];
 const prShown = params.get("pr") ?? "draft";
 const prState: PrState | null = delivered && prShown !== "unknown" ? (prShown as PrState) : null;
+const prCi = prState ? ((params.get("ci") as CiState | null) ?? null) : null;
 const run: Run = {
   id: "r1",
   startedBy: params.get("mcp") === "on" || params.get("task") === "1" ? "Claude Code" : null,
@@ -431,6 +508,8 @@ const run: Run = {
   prState,
   prStateAt: prState ? at(30) : null,
   prCheckedAt: prState ? at(2) : null,
+  prCi,
+  prCiFailed: prCi === "failed" ? ["lint", "pyright"] : [],
   round: flowScene?.round ?? (params.get("round") === "2" ? 1 : 0),
   createdAt: at(4),
   finishedAt: delivered ? at(0) : null,
@@ -450,6 +529,7 @@ const events: AuditEvent[] = [
   event(10, "toolCall", { id: "t4", name: "Bash", input: { command: state === "stalled" ? "uv run pytest -q" : "python3 test_calc.py" } }),
   ...(state === "stalled" || state === "running" ? [] : [event(11, "toolResult", { id: "t4", isError: false, text: "ok" })]),
   ...(state === "stalled" ? [event(12, "stalled", {})] : []),
+  ...(state === "stopped" ? [event(12, "stopRequested", assistantBy ? { by: assistantBy } : {})] : []),
   ...(finished ? [event(13, "result", {}), event(14, "finished", { state })] : []),
   ...(state === "abandoned" ? [event(15, "abandoned", assistantBy ? { by: assistantBy } : {})] : []),
 ];
@@ -546,7 +626,8 @@ const otherProject: Project = { ...demoProject, id: "p2", name: "payments", path
 const projects = view === "board" || palette || params.get("drafts") === "1" ? [demoProject, otherProject] : [demoProject];
 
 // Adding a project. dialog=setup opens its dialog right away, and click=Add project… gets there the
-// long way. setup=pnpm|npm|yarn|uv|cargo|go|make|unknown is what the folder gives away.
+// long way. setup=pnpm|npm|yarn|uv|uvci|cargo|go|make|ci|unknown is what the folder gives away, and
+// uvci is uv with the linters its CI runs. view=projects&cigap=1 has a check that misses what CI runs.
 // accounts=one|several|readonly|none, gh=missing and repo=none are what GitHub has to say.
 // added=new|existing|restored says how it got here (with session=out or map=failed for a map that
 // didn't start), and leaving it out is reopening it from "Finish setup".
@@ -559,11 +640,12 @@ const freshProject: Project = { ...otherProject, id: "p3", name: "shop", path: "
 const manyProjects = params.get("projects") === "many";
 const moreProjects: Project[] = manyProjects ? ["mobile", "billing-api", "docs", "infra", "website", "analytics"].map((name, i) => ({ ...otherProject, id: `p${i + 4}`, name, path: `/Users/you/www/${name}`, githubRepo: `acme/${name}` })) : [];
 let listedProjects: Project[] = params.get("empty") === "1" ? [] : [...projects, ...(params.get("projects") === "mixed" || manyProjects || params.get("dialog") === "setup" ? [freshProject] : []), ...moreProjects];
-const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[]; setupOptions: string[]; checkOptions: string[]; fromCi?: boolean }> = {
+const GUESSES: Record<string, { check: string | null; setup: string | null; from: string[]; setupOptions: string[]; checkOptions: string[]; fromCi?: boolean; ciChecks?: string[]; ciLeftOut?: CiLeftOut[] }> = {
   pnpm: { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run check:i18n", "pnpm run lint", "pnpm test", "pnpm run typecheck"] },
   npm: { check: "npm test", setup: "npm ci", from: ["package.json", "package-lock.json"], setupOptions: [], checkOptions: [] },
   yarn: { check: "yarn test", setup: "yarn install --frozen-lockfile", from: ["package.json", "yarn.lock"], setupOptions: [], checkOptions: [] },
   uv: { check: "uv run --frozen pytest", setup: "uv sync --frozen --group test", from: ["uv.lock", "pyproject.toml"], setupOptions: ["--group notebook", "--group stubs", "--group test", "--group test-uv"], checkOptions: [] },
+  uvci: { check: "uv run --frozen pytest && uv run --frozen ruff check . && uv run --frozen pyright", setup: "uv sync --frozen", from: ["uv.lock", ".github/workflows/ci.yml"], setupOptions: [], checkOptions: [], ciChecks: ["uv run --frozen ruff check .", "uv run --frozen pyright"], ciLeftOut: [{ command: "semgrep ci", why: "offline" }, { command: "uv run mypy .", why: "mayFail" }] },
   cargo: { check: "cargo test", setup: "cargo fetch", from: ["Cargo.toml"], setupOptions: [], checkOptions: [] },
   go: { check: "go test ./...", setup: "go mod download", from: ["go.mod"], setupOptions: [], checkOptions: [] },
   make: { check: "make test", setup: null, from: ["Makefile"], setupOptions: [], checkOptions: [] },
@@ -609,7 +691,7 @@ const setupAccounts = (account: string | null | undefined) => {
 
 const PR = "https://github.com/acme/app/pull/12";
 const issueOf = (number: number, title: string) => ({ number, title, author: "someone", url: `https://github.com/acme/app/issues/${number}` });
-const boardCard = (id: string, title: string, column: BoardColumn, extra: Partial<BoardCard> = {}): BoardCard => ({ id, projectId: "p1", title, body: "", issue: null, column, position: 0, runId: null, runState: null, reason: null, prUrl: null, prState: null, prStateAt: null, rejection: null, startBlocked: null, createdAt: at(100), jointChangeId: null, alsoTouches: [], part: null, ...extra });
+const boardCard = (id: string, title: string, column: BoardColumn, extra: Partial<BoardCard> = {}): BoardCard => ({ id, projectId: "p1", title, body: "", issue: null, column, position: 0, runId: null, runState: null, reason: null, prUrl: null, prState: null, prStateAt: null, prCi: null, prCiFailed: [], rejection: null, startBlocked: null, createdAt: at(100), jointChangeId: null, alsoTouches: [], part: null, ...extra });
 const inRun = (runState: AttemptState, reason: Reason | null = null) => ({ runId: "r1", runState, reason });
 let boardCards: BoardCard[] =
   params.get("cards") === "none"
@@ -639,6 +721,7 @@ let boardCards: BoardCard[] =
         boardCard("c23", "Add a filter to the orders list", "done", { ...inRun("succeeded"), prUrl: PR, prState: "closed", prStateAt: at(2000) }),
         boardCard("c24", "Show the plan name in the header", "done", { ...inRun("succeeded"), prUrl: PR, prState: "open", prStateAt: at(90) }),
         boardCard("c25", "Trim the weekly email", "done", { ...inRun("succeeded"), prUrl: PR, prState: "draft", prStateAt: at(20) }),
+        boardCard("c28", "Type the settings form", "done", { ...inRun("succeeded"), prUrl: PR, prState: "draft", prStateAt: at(15), prCi: "failed", prCiFailed: ["lint", "pyright"] }),
         boardCard("c26", "A pull request Keel hasn't looked at yet", "done", { ...inRun("succeeded"), prUrl: PR }),
         boardCard("c21", "Write the map of the project", "done", inRun("succeeded")),
         boardCard("c22", "Rotate the payments key", "done", { ...inRun("succeeded"), projectId: "p2", prUrl: PR }),
@@ -663,9 +746,39 @@ const jointAgreed: SpecOutput = {
     { project: "demo", text: "Call it when an invoice is paid" },
   ],
   together: jointChecks.map((check) => check.text),
+  // One side to each point: what payments answers, and what demo sends and shows.
+  contract: [
+    { id: "K1", when: "payments gets POST /invoices/{id}/settle", then: "it answers 200 with `settledAt`", projects: ["payments"] },
+    { id: "K2", when: "an invoice is paid in demo", then: "demo sends POST /invoices/{id}/settle", projects: ["demo"] },
+    { id: "K3", when: "the invoice is already settled", then: "payments answers 409", projects: ["payments"] },
+    { id: "K4", when: "demo gets a 409", then: "it shows the invoice as paid", projects: ["demo"] },
+  ],
+};
+// What each part found of each point: met, not met, not verified, and not checked yet.
+// ?jointContract=none is an agreement without any.
+// ?jointVerify=none has demo's part run a workflow with no verifier.
+// ?jointContract=corrected has a person correct K1 after payments' part was specified.
+const jointCorrected = params.get("jointContract") === "corrected";
+const jointContract = (parts: JointCard[]): ContractPoint[] => {
+  if (params.get("jointContract") === "none") return [];
+  const noVerifier = params.get("jointVerify") === "none";
+  const found: Record<string, ContractPoint["parts"][number]["result"]> = { K1: "met", K2: null, K3: "unmet", K4: "unverified" };
+  return (jointAgreed.contract ?? []).map((point) => ({
+    id: point.id,
+    when: point.when,
+    then: jointCorrected && point.id === "K1" ? "it answers 200 with `settledAt` and `reference`" : point.then,
+    projects: point.projects,
+    parts: parts
+      .filter((card) => point.projects.includes(card.project))
+      .map((card) => {
+        const unverifiable = noVerifier && card.project === "demo";
+        const earlier = jointCorrected && point.id === "K1";
+        return { cardId: card.cardId, position: card.part?.position ?? 0, project: card.project, result: unverifiable || earlier ? null : (found[point.id] ?? null), verifies: !unverifiable, earlier };
+      }),
+  }));
 };
 function partOf(changeId: string, position: number, extra: Partial<PartOf> = {}): PartOf {
-  return { changeId, position, total: 2, waitsFor: null, warnings: [], ...extra };
+  return { changeId, position, total: 2, waitsFor: null, warnings: [], contractChanged: params.get("jointContract") === "corrected" && position === 1 ? ["K1"] : [], ...extra };
 }
 function jointChange(changeId: string): JointChange {
   const name = (projectId: string) => listedProjects.find((p) => p.id === projectId)?.name ?? projectId;
@@ -677,10 +790,12 @@ function jointChange(changeId: string): JointChange {
     id: changeId,
     agreedIn: agreeing ? view(agreeing) : null,
     projects: [agreeing?.projectId ?? "p1", ...(agreeing?.alsoTouches ?? ["p2"])].map((id) => ({ id, name: name(id) })),
-    agreed: agreed ? jointAgreed : null,
+    agreed: agreed ? { ...jointAgreed, contract: params.get("jointContract") === "none" ? [] : jointAgreed.contract } : null,
     parts: parts.map(view),
     readOnly: [],
     checks: agreed ? jointChecks : [],
+    contract: agreed ? jointContract(parts.map(view)) : [],
+    contractNext: agreed ? 5 : null,
   };
 }
 // ?joint=agree or ?joint=part shows a run in a change across projects.
@@ -750,7 +865,9 @@ mockIPC((command, args) => {
       if (!listedProjects.some((p) => p.id === freshProject.id)) listedProjects = [...listedProjects, freshProject];
       return addedAnswer();
     case "project_setup":
-      return { project: listedProjects.find((p) => p.id === (args as { projectId: string }).projectId) ?? freshProject, guess: { fromCi: false, ...(GUESSES[params.get("setup") ?? "pnpm"] ?? GUESSES.unknown) } };
+      return { project: listedProjects.find((p) => p.id === (args as { projectId: string }).projectId) ?? freshProject, guess: { fromCi: false, ciChecks: [], ciLeftOut: [], ...(GUESSES[params.get("setup") ?? "pnpm"] ?? GUESSES.unknown) } };
+    case "project_ci_gap":
+      return params.get("cigap") === "1" && (args as { projectId: string }).projectId === "p1" ? { commands: ["uv run --frozen ruff check .", "uv run --frozen pyright"], leftOut: [{ command: "semgrep ci", why: "offline" }, { command: "uv run mypy .", why: "mayFail" }, { command: "RUSTFLAGS=-Dwarnings cargo clippy", why: "env" }], from: [".github/workflows/ci.yml"] } : { commands: [], leftOut: [], from: [] };
     // folders=none: the commands need nothing from the home folder.
     case "project_tool_folders":
       return params.get("folders") === "none"
@@ -803,7 +920,7 @@ mockIPC((command, args) => {
     case "workflows_list":
       return [
         ...(params.get("flow") === "many" ? [{ id: "many", name: i18next.language === "es" ? "Muchos pasos" : "Many steps", builtin: false, steps: manySteps }] : []),
-        { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: [...workflow, learnerStep] },
+        { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: withShippedReviews([...workflow, learnerStep]) },
         { id: "builtin:organic", name: i18next.language === "es" ? "Se adapta al cambio" : "Fits the change", builtin: true, steps: [...fittingSteps, learnerStep] },
         { id: "mine", name: i18next.language === "es" ? "Solo revisiones" : "Reviews only", builtin: false, steps: workflow.slice(3) },
       ];
@@ -821,6 +938,8 @@ mockIPC((command, args) => {
     }
     case "run_attempts":
       return (args as { runId?: string } | undefined)?.runId === "try1" ? tryAttempts() : flowScene ? flowScene.attempts : attemptsList;
+    case "run_command_changes":
+      return params.get("flow") === "commands" ? newCommands : [];
     case "github_status": {
       const projectId = (args as { projectId?: string } | undefined)?.projectId;
       if (projectId === freshProject.id) return setupAccounts((args as { account?: string | null }).account);
@@ -928,7 +1047,30 @@ mockIPC((command, args) => {
         if (params.get("flow") === "small" || params.get("flow") === "asked") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "skipped", data: { reason: asSmall.reason } }, { seq: 101, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: true, lines: 12, files: 2, round: 0 } }];
         if (params.get("flow") === "movedUp") return [{ seq: 100, attemptId: "security-0-1", at: at(1), kind: "sizeDecided", data: { small: false, because: WHY_MOVED_UP, round: 0 } }];
       }
+      if ((args as { attemptId?: string } | undefined)?.attemptId === "state-0-1" && params.get("flow") === "risks") return [{ seq: 100, attemptId: "state-0-1", at: at(1), kind: "skipped", data: { paths: [], reason: skippedForRisks } }];
       if ((args as { attemptId?: string } | undefined)?.attemptId === "c1" && params.get("flow") === "corrected") return correctedEvents;
+      // contractReplaced=1, with specifier=1: a part's specifier wrote points of the contract again,
+      // and Keel kept them as agreed. flow=approval&node=spec&then=Activity shows it.
+      if ((args as { attemptId?: string } | undefined)?.attemptId === specAttempt.id && params.get("contractReplaced") === "1") {
+        return [
+          { seq: 100, attemptId: specAttempt.id, at: at(2), kind: "result", data: {} },
+          { seq: 101, attemptId: specAttempt.id, at: at(2), kind: "contractReplaced", data: { replaced: ["K1", "K3"] } },
+          { seq: 102, attemptId: specAttempt.id, at: at(2), kind: "finished", data: { state: "succeeded" } },
+        ];
+      }
+      if ((args as { attemptId?: string } | undefined)?.attemptId === "check-0-1" && params.get("flow") === "newCommands") {
+        return [
+          { seq: 100, attemptId: "check-0-1", at: at(3), kind: "checkResult", data: { kind: "check", exitCode: 1, stdout: "", stderr: "make: *** No rule to make target 'test'.  Stop.\n", truncated: false, leftWorkspaceDirty: false } },
+          { seq: 101, attemptId: "check-0-1", at: at(1), kind: "commandsUpdated", data: { changes: newCommands } },
+        ];
+      }
+      if ((args as { attemptId?: string } | undefined)?.attemptId === "setup-0-2" && params.get("flow") === "newCommands") {
+        return [
+          { seq: 102, attemptId: "setup-0-2", at: at(1), kind: "setupLimited", data: {} },
+          { seq: 103, attemptId: "setup-0-2", at: at(1), kind: "started", data: { command: newCommands[0].now } },
+        ];
+      }
+      if ((args as { attemptId?: string } | undefined)?.attemptId === "r-code" && breaksShown) return [{ seq: 100, attemptId: "r-code", at: at(1), kind: "reviewBreaks", data: { breaks: ["C2"] } }];
       if ((args as { attemptId?: string } | undefined)?.attemptId === returnedApproval.id && (params.get("flow") === "returned" || params.get("flow") === "sentBack")) {
         return [{ seq: 100, attemptId: returnedApproval.id, at: at(5), kind: "returned", data: { instructions: sentBackWith, round: 1, ...(assistantBy ? { by: assistantBy } : {}) } }];
       }

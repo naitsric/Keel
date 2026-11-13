@@ -1,6 +1,7 @@
 import type { TFunction } from "i18next";
 import type { CommandError, Reason } from "./api";
 import { formatDateTime } from "./format";
+import { riskText } from "./size";
 
 /** The sentence for a reason. Rust sends a code and data; only the UI has words. */
 export function reasonText(t: TFunction, reason: Reason): string {
@@ -26,10 +27,14 @@ export function reasonText(t: TFunction, reason: Reason): string {
       return t(`invalidWorkflow.${data.problem}`, { step: data.step, defaultValue: data.problem });
     case "specNotUsable":
       return t("reasons.specNotUsable", { problems: (data.problems ?? []).map((problem: Reason) => specProblemText(t, problem)).join("; ") });
+    case "contractNotValid":
+      return t("reasons.contractNotValid", { problems: (data.problems ?? []).map((problem: Reason) => specProblemText(t, problem)).join("; ") });
     case "invalidAnswer":
       return t(`invalidAnswers.${data.problem}`, { question: data.question, defaultValue: t("reasons.invalidAnswer") });
     case "noMatchingPaths":
       return t("reasons.noMatchingPaths", { paths: (data.paths ?? []).join(", ") });
+    case "noMatchingRisks":
+      return t("reasons.noMatchingRisks", { risks: (data.risks ?? []).map((risk: string) => riskText(t, risk)).join(", ") });
     case "setupFailed":
       return t("reasons.setupFailed", { exitCode: data.exitCode ?? "?" });
     case "checkFailed":
