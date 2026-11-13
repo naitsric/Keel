@@ -914,15 +914,29 @@ fn elixir(root: &Path) -> Option<Stack> {
     })
 }
 
-/// Commands chained so that each has to pass. A command with a `#` or a new line in it is left
+/// Commands chained so that each has to pass. A command with a comment or a new line in it is left
 /// out: under `sh -c` it could turn every command after it into a comment, or run without having
 /// to pass.
 fn chained(parts: Vec<String>) -> Option<String> {
     let parts: Vec<String> = parts
         .into_iter()
-        .filter(|part| !part.trim().is_empty() && !part.contains(['#', '\n']))
+        .filter(|part| !part.trim().is_empty() && !part.contains('\n') && !has_comment(part))
         .collect();
     (!parts.is_empty()).then(|| parts.join(" && "))
+}
+
+/// Whether `sh` reads the rest of `command` as a comment: a `#` that starts a word, at the start or
+/// after a blank or an operator. One inside a word is the word's, as in Maven's
+/// `-Dtest='#method'`. A `#` in quotes after a blank counts too, which only leaves out more.
+fn has_comment(command: &str) -> bool {
+    let mut before: Option<char> = None;
+    for c in command.chars() {
+        if c == '#' && before.is_none_or(|b| b.is_whitespace() || ";&|()<>".contains(b)) {
+            return true;
+        }
+        before = Some(c);
+    }
+    false
 }
 
 /// A Makefile's `test` target is what the project itself calls testing, so it wins. Every stack found
@@ -1032,6 +1046,26 @@ mod tests {
         assert_eq!(
             chained(parts(&["make test", "cargo test"])),
             Some("make test && cargo test".to_owned())
+        );
+        // A `#` that starts a word, after a blank or an operator, starts a comment.
+        for hides in [
+            "make test;# x",
+            "make test&&#x",
+            "make test |#x",
+            "(#x)",
+            "a\t#b",
+        ] {
+            assert_eq!(
+                chained(parts(&[hides, "cargo test"])),
+                Some("cargo test".to_owned()),
+                "{hides}"
+            );
+        }
+        // One inside a word is the word's, as Maven's filter on a test method is.
+        let maven = "mvn test -Dtest='#keel-setup-runs-no-tests'";
+        assert_eq!(
+            chained(parts(&[maven, "echo a#b"])),
+            Some(format!("{maven} && echo a#b"))
         );
     }
 
