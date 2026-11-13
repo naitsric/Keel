@@ -13,8 +13,8 @@ use keel_core::{
     StepSpec, ToolProfile, WorkflowStep,
 };
 use keel_engine::{
-    Answer, AnswerChoice, Config, Engine, Error, Neighbour, PartOf, PartWarning, StartRun,
-    Workflow, full_workflow,
+    Answer, AnswerChoice, Config, ContractEdit, Engine, Error, Neighbour, PartOf, PartWarning,
+    StartRun, Workflow, full_workflow,
 };
 use keel_harness::Tools;
 use keel_harness::github::Issue;
@@ -445,11 +445,29 @@ impl World {
                     .parts
                     .iter()
                     .map(|part| {
+                        if part.earlier {
+                            return format!("{}=earlier", part.project);
+                        }
                         let unverifiable = if part.verifies { "" } else { ", unverifiable" };
                         format!("{}={:?}{unverifiable}", part.project, part.result)
                     })
                     .collect();
                 format!("{} {}", point.id, parts.join(" "))
+            })
+            .collect()
+    }
+
+    /// Each part, by project, with the points of the contract it was specified with as they no
+    /// longer are.
+    fn contract_changed(&self, card: &str) -> Vec<String> {
+        self.engine
+            .joint_change(card)
+            .unwrap()
+            .parts
+            .into_iter()
+            .map(|part| {
+                let changed = part.part.map(|part| part.contract_changed);
+                format!("{} {:?}", part.project, changed.unwrap_or_default())
             })
             .collect()
     }
@@ -1384,6 +1402,414 @@ fn each_part_verifies_the_contract_points_that_name_it_and_the_change_shows_each
     );
 }
 
+/// A point of the contract as a person writes it in the dialog: one already there by its id.
+fn point(id: Option<&str>, when: &str, then: &str, projects: &[&str]) -> ContractEdit {
+    ContractEdit {
+        id: id.map(str::to_owned),
+        when: when.into(),
+        then: then.into(),
+        projects: projects.iter().map(|&project| project.to_owned()).collect(),
+    }
+}
+
+#[test]
+fn a_person_corrects_the_contract_and_a_part_started_again_is_specified_and_verified_against_it() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.verifying_workflows();
+    let verified = |evidence: &str| {
+        json!({ "criteria": [
+            { "id": "C1", "result": "met", "evidence": evidence },
+            { "id": "K1", "result": "met", "evidence": evidence },
+        ], "summary": "Both hold." })
+    };
+    w.answers(&[
+        with_contract(),
+        plain("Valora sends the token"),
+        json!({}),
+        verified("send.test.ts:3"),
+        json!({}),
+        verified("send.test.ts:5"),
+        plain("Valora sends the token and when it expires"),
+        json!({}),
+        verified("send.test.ts:12"),
+    ]);
+    let (card, run) = w.agreeing();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    let approval = w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+    assert_eq!(
+        w.contract(&card),
+        ["K1 valora=Some(Met)", "K2 app=None", "K3 app=None"]
+    );
+    assert_eq!(w.contract_changed(&card), ["valora []", "app []"]);
+
+    // Valora has to send when the token expires too. K3 goes, and app answers 409 as well.
+    let expires = "valora sends POST /session with `token` and `expires`";
+    w.engine
+        .joint_contract_set(
+            &card,
+            &[
+                point(
+                    Some("K1"),
+                    "someone logs in on valora",
+                    expires,
+                    &["valora"],
+                ),
+                point(
+                    Some("K2"),
+                    "app gets POST /session with `token`",
+                    "it answers 201",
+                    &["app"],
+                ),
+                point(
+                    None,
+                    "the session already exists",
+                    "app answers 409",
+                    &["app"],
+                ),
+            ],
+        )
+        .unwrap();
+    // What was approved stays as it was.
+    let agreed = w.store.joint_change(&card).unwrap().agreed.unwrap();
+    assert_eq!(
+        agreed["contract"][0]["then"],
+        "valora sends POST /session with `token`"
+    );
+    // Valora's part was specified with K1 as it was, so what its verifier found is about that. It
+    // also relied on app's side, where K4 is new and K3 is gone. App's part hasn't started: it
+    // takes the contract as it is when it does.
+    assert_eq!(
+        w.contract(&card),
+        ["K1 valora=earlier", "K2 app=None", "K4 app=None"]
+    );
+    assert_eq!(
+        w.contract_changed(&card),
+        [r#"valora ["K1", "K4", "K3"]"#, "app []"]
+    );
+    let joint = w.engine.run_joint(&first).unwrap().unwrap();
+    assert_eq!(
+        joint.part.unwrap().contract_changed,
+        ["K1", "K4", "K3"],
+        "its run says so too"
+    );
+
+    // Sent back from its approval, it's built and verified again, without being specified again.
+    // Its agents keep reading the contract it was specified with, which its criteria say.
+    w.engine.send_back(&approval.id, "Tidy it up").unwrap();
+    let approval = w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+    for index in [4, 5] {
+        let call = w.call(index);
+        assert!(
+            call.contains("valora sends POST /session with `token`"),
+            "{index}: {call}"
+        );
+        assert!(!call.contains(expires), "{index}: {call}");
+        assert!(!call.contains("A person corrected"), "{index}: {call}");
+        assert!(!call.contains("K4"), "{index}: {call}");
+    }
+    assert_eq!(
+        w.contract(&card),
+        ["K1 valora=earlier", "K2 app=None", "K4 app=None"]
+    );
+
+    // The person rejects it and starts it again.
+    w.engine
+        .answer_approval(&approval.id, false, "Send when it expires too")
+        .unwrap();
+    w.engine
+        .card_move(&parts[0].id, CardLane::Todo, 0, "en")
+        .unwrap();
+    w.engine.board_tick().unwrap();
+    let again = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    assert_ne!(again, first);
+    w.wait_for(&again, "approval", AttemptState::WaitingApproval);
+    let spec = w.attempts(&again, "spec")[0].output.clone().unwrap();
+    assert_eq!(
+        spec["criteria"][1],
+        json!({ "id": "K1", "when": "someone logs in on valora", "then": expires })
+    );
+    // Every agent of it reads the contract as it is now, and that a person corrected it.
+    for index in [6, 7, 8] {
+        let told = w.call(index);
+        for now in [
+            format!("K1 (valora): someone logs in on valora → {expires}"),
+            "K4 (app): the session already exists → app answers 409".to_owned(),
+            "A person corrected what the parts agree on exactly after approving it.".to_owned(),
+        ] {
+            assert!(told.contains(&now), "{index}, {now}: {told}");
+        }
+        assert!(!told.contains("the token is wrong"), "K3 is gone: {told}");
+    }
+    // And its verifier checks K1 as it says now.
+    let verifier = w.asked(8);
+    assert!(verifier.contains(expires), "{verifier}");
+    assert_eq!(
+        w.contract(&card),
+        ["K1 valora=Some(Met)", "K2 app=None", "K4 app=None"]
+    );
+    assert_eq!(w.contract_changed(&card), ["valora []", "app []"]);
+}
+
+#[test]
+fn a_correction_keeps_its_points_ids_never_gives_one_again_and_is_checked_like_the_agreement() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.answers(&[with_contract()]);
+    let (card, run) = w.agreeing();
+    let k1 = point(
+        Some("K1"),
+        "someone logs in on valora",
+        "valora sends POST /session with `token`",
+        &["valora"],
+    );
+    // Before it's approved there's nothing to correct: the person sends the agreement back.
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    assert!(matches!(
+        w.engine
+            .joint_contract_set(&card, std::slice::from_ref(&k1)),
+        Err(Error::InvalidState)
+    ));
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+
+    // Saving it as it was agreed changes nothing.
+    let agreed: Vec<ContractEdit> = w
+        .engine
+        .joint_change(&card)
+        .unwrap()
+        .contract
+        .into_iter()
+        .map(|point| ContractEdit {
+            id: Some(point.id),
+            when: point.when,
+            then: point.then,
+            projects: point.projects,
+        })
+        .collect();
+    w.engine.joint_contract_set(&card, &agreed).unwrap();
+    assert_eq!(w.store.joint_change(&card).unwrap().contract, None);
+
+    let ids = || -> Vec<String> {
+        let contract = w.engine.joint_change(&card).unwrap().contract;
+        contract.into_iter().map(|point| point.id).collect()
+    };
+    // K3 goes, and the new point takes K4, never K3 again. A point keeps its id wherever it moves.
+    w.engine
+        .joint_contract_set(&card, &[k1.clone(), point(None, "a", "b", &["app"])])
+        .unwrap();
+    assert_eq!(ids(), ["K1", "K4"]);
+    w.engine
+        .joint_contract_set(
+            &card,
+            &[
+                point(None, " c\n  waits ", "d", &["app", "app"]),
+                k1.clone(),
+                point(Some("K4"), "a", "b", &["app"]),
+            ],
+        )
+        .unwrap();
+    assert_eq!(ids(), ["K5", "K1", "K4"]);
+    let contract = w.engine.joint_change(&card).unwrap().contract;
+    assert_eq!(
+        (contract[0].when.as_str(), contract[0].parts.len()),
+        ("c waits", 1),
+        "tidied as an agent's is"
+    );
+
+    // A point that's gone, one that never was, and one twice are not points to keep.
+    for edit in [
+        vec![point(Some("K3"), "a", "b", &["app"])],
+        vec![point(Some("K9"), "a", "b", &["app"])],
+        vec![k1.clone(), k1.clone()],
+    ] {
+        assert!(
+            matches!(
+                w.engine.joint_contract_set(&card, &edit),
+                Err(Error::InvalidState)
+            ),
+            "{edit:?}"
+        );
+    }
+    assert_eq!(ids(), ["K5", "K1", "K4"]);
+
+    // Checked as the agreement's was, and nothing changes while it's wrong. A new point goes by
+    // the id it would take.
+    let problems = |edit: &[ContractEdit]| match w.engine.joint_contract_set(&card, edit) {
+        Err(Error::Blocked(Reason::ContractNotValid { problems })) => problems,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        problems(&[point(None, " ", "b", &["app"])]),
+        [SpecProblem::ContractNeedsText {
+            id: "K6".into(),
+            position: 1
+        }]
+    );
+    assert_eq!(
+        problems(&[point(Some("K1"), "a", "b", &["nope"])]),
+        [SpecProblem::ContractUnknownProject {
+            id: "K1".into(),
+            position: 1,
+            project: "nope".into(),
+        }]
+    );
+    assert_eq!(
+        problems(&[point(Some("K1"), "a", "b", &[])]),
+        [SpecProblem::ContractWithoutPart {
+            id: "K1".into(),
+            position: 1
+        }]
+    );
+    let long = "x".repeat(200);
+    assert!(matches!(
+        problems(&[point(Some("K1"), &long, "b", &["valora"])])[..],
+        [SpecProblem::ContractTooLong { .. }]
+    ));
+    let many: Vec<ContractEdit> = (0..8).map(|_| point(None, "a", "b", &["app"])).collect();
+    assert_eq!(
+        problems(&many),
+        [SpecProblem::TooManyContract { count: 8, limit: 7 }]
+    );
+    assert_eq!(ids(), ["K5", "K1", "K4"]);
+
+    // What was refused gave no id away. With every point gone, no part has any to keep.
+    w.engine
+        .joint_contract_set(&card, &[point(None, "e", "f", &["valora"])])
+        .unwrap();
+    assert_eq!(ids(), ["K6"]);
+    w.engine.joint_contract_set(&card, &[]).unwrap();
+    assert!(ids().is_empty());
+}
+
+#[test]
+fn a_part_is_told_when_a_point_it_relies_on_says_something_else() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.short_workflows();
+    w.answers(&[
+        with_contract(),
+        plain("Valora sends the token"),
+        json!({}),
+        json!({}),
+    ]);
+    let (card, run) = w.agreeing();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+    let k1 = point(
+        Some("K1"),
+        "someone logs in on valora",
+        "valora sends POST /session with `token`",
+        &["valora"],
+    );
+    let k3 = point(
+        Some("K3"),
+        "the token is wrong",
+        "app answers 401",
+        &["app"],
+    );
+    let k2 = |then: &str| {
+        point(
+            Some("K2"),
+            "app gets POST /session with `token`",
+            then,
+            &["app"],
+        )
+    };
+
+    // App's side changes. Valora keeps none of it, but its part relied on it.
+    w.engine
+        .joint_contract_set(
+            &card,
+            &[k1.clone(), k2("it answers 201 with `id`"), k3.clone()],
+        )
+        .unwrap();
+    assert_eq!(w.contract_changed(&card), [r#"valora ["K2"]"#, "app []"]);
+    // What it found of its own point is still about K1 as it is.
+    assert_eq!(
+        w.contract(&card),
+        ["K1 valora=None, unverifiable", "K2 app=None", "K3 app=None"]
+    );
+
+    // As it was agreed again, nothing it read is different.
+    w.engine
+        .joint_contract_set(&card, &[k1.clone(), k2("it answers 201"), k3.clone()])
+        .unwrap();
+    assert_eq!(w.contract_changed(&card), ["valora []", "app []"]);
+
+    // K1 names app too now, and saving it with its projects the other way round is no change.
+    let both = |projects: &[&str]| {
+        let mut k1 = k1.clone();
+        k1.projects = projects.iter().map(|&p| p.to_owned()).collect();
+        [k1, k2("it answers 201"), k3.clone()]
+    };
+    w.engine
+        .joint_contract_set(&card, &both(&["valora", "app"]))
+        .unwrap();
+    let saved = w.store.joint_change(&card).unwrap().contract;
+    w.engine
+        .joint_contract_set(&card, &both(&["app", "valora"]))
+        .unwrap();
+    assert_eq!(w.store.joint_change(&card).unwrap().contract, saved);
+}
+
+#[test]
+fn a_part_whose_spec_step_is_not_a_specifier_is_never_told_its_contract_changed() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // An older workflow: its `spec` step is a worker, which Keel gives no points of the contract.
+    for project in [&w.app, &w.valora] {
+        let workflow = w
+            .engine
+            .save_workflow(
+                project,
+                &Workflow {
+                    id: String::new(),
+                    name: "Older".into(),
+                    steps: vec![
+                        agent("spec", StepRole::Worker, None, "{{request}}"),
+                        WorkflowStep::Approval {
+                            id: "approval".into(),
+                        },
+                    ],
+                    builtin: false,
+                },
+            )
+            .unwrap();
+        w.engine
+            .update_project(
+                project,
+                &keel_store::ProjectSettings {
+                    default_workflow: Some(workflow.id),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+    }
+    w.answers(&[with_contract(), plain("Valora sends the token")]);
+    let (card, run) = w.agreeing();
+    let approval = w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+
+    w.engine
+        .joint_contract_set(&card, &[point(Some("K1"), "a", "b", &["valora"])])
+        .unwrap();
+    // It never had K1 to have it as it was, and starting it again wouldn't give it K1 either.
+    assert_eq!(w.contract_changed(&card), ["valora []", "app []"]);
+    assert_eq!(w.contract(&card), ["K1 valora=None, unverifiable"]);
+}
+
 #[test]
 fn a_part_whose_workflow_has_no_verifier_says_so_rather_than_not_yet() {
     keel_harness::needs!(sandbox);
@@ -1579,6 +2005,7 @@ fn each_part_opens_its_own_pull_request_saying_which_part_it_is() {
                 project: "valora".into(),
             }),
             warnings: vec![],
+            contract_changed: vec![],
         }
     );
 

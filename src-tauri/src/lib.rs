@@ -12,7 +12,7 @@ use keel_core::{
     serialize_masked,
 };
 use keel_engine::{
-    AddedProject, Answer, Board, BrainView, CiGap, CommandChange, Config, Engine,
+    AddedProject, Answer, Board, BrainView, CiGap, CommandChange, Config, ContractEdit, Engine,
     Error as EngineError, GithubStatus, JointChangeView, Preflight, ProjectProposalReview,
     ProjectSetup, RawCheck, RetryOptions, RunJoint, StartRun, Workflow, WorkflowDraft,
     request_from_issue, title_from_issue,
@@ -535,6 +535,16 @@ fn joint_check_set(
     Ok(state.engine.joint_check_set(&change_id, seq, works)?)
 }
 
+/// Only from here too: no agent and no assistant can correct what the parts agree on.
+#[tauri::command(async)]
+fn joint_contract_set(
+    state: State<'_, AppState>,
+    change_id: String,
+    points: Vec<ContractEdit>,
+) -> CommandResult<()> {
+    Ok(state.engine.joint_contract_set(&change_id, &points)?)
+}
+
 #[tauri::command(async)]
 fn run_joint(state: State<'_, AppState>, run_id: String) -> CommandResult<Option<RunJoint>> {
     Ok(state.engine.run_joint(&run_id)?)
@@ -1052,6 +1062,7 @@ pub fn run() {
             card_stop_waiting,
             joint_change_get,
             joint_check_set,
+            joint_contract_set,
             run_joint,
             max_agents_get,
             max_agents_set,

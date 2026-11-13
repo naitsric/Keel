@@ -1423,18 +1423,34 @@ impl Inner {
             ));
         }
         // A part of a change across projects also keeps the points of the contract that name it,
-        // as they were agreed. Once what it wrote is kept, the record says which of them it wrote
-        // again in other words.
-        let contract = self.contract_of(&m.run_id)?;
+        // as they are now: as agreed, or as a person corrected them since. Once what it wrote is
+        // kept, the record says which points it was given, so Keel can tell when they're corrected
+        // again, and which of them it wrote again in other words.
+        let part = self.part_contract(&m.run_id)?;
+        let contract = part
+            .as_ref()
+            .map(|(own, _)| own.clone())
+            .unwrap_or_default();
         let verdict =
             specs::judge_part(output, &written, fixing_a_limit, rounds_answered, &contract);
         let replaced = specs::replaced_by_contract(output, &contract);
-        if verdict.output().is_some() && !replaced.is_empty() {
-            let _ = self.store.append_event(
-                &m.attempt_id,
-                "contractReplaced",
-                &json!({ "replaced": replaced }),
-            );
+        if verdict.output().is_some() {
+            // Without this record Keel would take it for what was agreed, so it's not kept
+            // without it.
+            if let Some((own, every)) = &part {
+                self.store.append_event(
+                    &m.attempt_id,
+                    joint::CONTRACT_GIVEN,
+                    &json!({ "points": own, "contract": every }),
+                )?;
+            }
+            if !replaced.is_empty() {
+                let _ = self.store.append_event(
+                    &m.attempt_id,
+                    "contractReplaced",
+                    &json!({ "replaced": replaced }),
+                );
+            }
         }
         Ok(verdict)
     }

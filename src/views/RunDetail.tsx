@@ -5,7 +5,7 @@ import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CommandChange, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
 import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, breakableIds, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, type FindingShown, focusAttempt, gist, latestOfEachStep, notProvenInRound, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf, whyNotProven } from "../lib/audit";
-import { partText, partWarningText } from "../lib/board";
+import { contractChangedText, partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText, specProblemText } from "../lib/reason";
@@ -579,6 +579,7 @@ function DecidedList({ attemptId, decided, only, questioned, elsewhere, added, c
  */
 export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck, sizeDecision = null, joint = null, onShowChanges, onError }: { attempt: Attempt; run: Run; attempts: Attempt[]; files: string[]; commands: CommandRun[]; rawCheck: RawCheck; sizeDecision?: SizeDecision | null; joint?: RunJoint | null; onShowChanges: () => void; onError: (message: string) => void }) {
   const { t } = useTranslation();
+  const earlierContract = joint?.part ? contractChangedText(t, joint.part) : null;
   const project = useApp((s) => s.overview.projects.find((p) => p.id === run.projectId));
   const draft = useApp((s) => s.approvalDrafts[attempt.id] ?? "");
   const setDraft = useApp((s) => s.setApprovalDraft);
@@ -840,6 +841,12 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
           {partWarningText(t, warning)}
         </p>
       ))}
+      {earlierContract && (
+        <p data-contract-changed className="mt-2 flex gap-1.5 rounded-md border border-warning/40 bg-inset p-2 text-[12.5px] font-medium text-warning">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          {earlierContract}
+        </p>
+      )}
       {touchesWorkflows(files) && (
         <p className="mt-2 flex gap-1.5 rounded-md border border-warning/40 bg-inset p-2 text-[12.5px] font-medium text-warning">
           <AlertTriangle size={14} className="mt-0.5 shrink-0" />
@@ -1328,6 +1335,9 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       return line(t("activity.reviewIncomplete", { files: (data.unread ?? []).join(", ") }), "text-warning");
     case "contractReplaced":
       return line(t("activity.contractReplaced", { ids: (data.replaced ?? []).join(", ") }));
+    case "contractGiven":
+      // A part no point names was given none, which says nothing.
+      return (data.points ?? []).length > 0 ? line(t("activity.contractGiven", { ids: data.points.map((point: { id: string }) => point.id).join(", ") })) : null;
     case "reviewBreaks":
       return line(t("activity.reviewBreaks", { ids: (data.breaks ?? []).join(", ") }), "text-warning");
     case "verificationCorrected":

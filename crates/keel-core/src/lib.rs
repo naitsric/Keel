@@ -452,6 +452,11 @@ pub enum Reason {
     SpecNotChecked {
         detail: String,
     },
+    /// A person's correction of what the parts of a change agree on exactly breaks the rules the
+    /// agreement's contract kept, so the contract stays as it was.
+    ContractNotValid {
+        problems: Vec<SpecProblem>,
+    },
     /// An answer to a step's questions doesn't belong to them. `problem` is a code the UI
     /// translates: `unknownQuestion`, `repeatedQuestion`, `unanswered`, `optionNotOffered` or
     /// `emptyText`. `question` is the one it's about.
@@ -747,6 +752,7 @@ impl Reason {
             | Self::UnsafeBranch { .. }
             | Self::SpecNotUsable { .. }
             | Self::SpecNotChecked { .. }
+            | Self::ContractNotValid { .. }
             | Self::InvalidAnswer { .. }
             | Self::SendBackNeedsInstructions
             | Self::NothingToSendBackTo
@@ -1116,6 +1122,7 @@ mod tests {
             (Reason::NewCommandsNeedSetupOrCheck, false),
             (Reason::AssistantMayNotRun { client: text() }, false),
             (Reason::RerunWorkflowMissing { workflow: text() }, false),
+            (Reason::ContractNotValid { problems: vec![] }, false),
         ]
     }
 
@@ -1174,6 +1181,7 @@ mod tests {
             Reason::AssistantMayNotRun { .. } => 49,
             Reason::RerunWorkflowMissing { .. } => 50,
             Reason::NoMatchingRisks { .. } => 51,
+            Reason::ContractNotValid { .. } => 52,
         }
     }
 
@@ -1187,7 +1195,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=51).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=52).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]

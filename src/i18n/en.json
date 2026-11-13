@@ -178,7 +178,8 @@
     "specNotChecked": "Keel couldn't read what it needed to check this answer, so it doesn't count: {{detail}}. Try it again.",
     "newCommandsNeedSetupOrCheck": "Only a setup or a check can start over with the project's new commands.",
     "assistantMayNotRun": "{{client}} put this card back in Todo and can no longer start runs. Move it to Todo yourself to start it.",
-    "rerunWorkflowMissing": "This card was put back in Todo to run again with the workflow “{{workflow}}”, which no longer exists. Move it to Todo yourself to start it with the project's default workflow."
+    "rerunWorkflowMissing": "This card was put back in Todo to run again with the workflow “{{workflow}}”, which no longer exists. Move it to Todo yourself to start it with the project's default workflow.",
+    "contractNotValid": "The correction wasn't saved: {{problems}}."
   },
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",
@@ -548,6 +549,7 @@
     "specCorrected": "What it wrote didn't fit what Keel can show you, so Keel asked it to fix this:",
     "reviewIncomplete": "It couldn't read part of the change, so Keel doesn't count it as an approval: {{files}}",
     "contractReplaced": "It wrote {{ids}} in its own words. Keel kept them as they were agreed.",
+    "contractGiven": "Keel added {{ids}} of what the parts agree on to its criteria, as they read then.",
     "reviewBreaks": "It says the change breaks {{ids}}, so Keel doesn't count it as an approval.",
     "specAnswer": "It wrote down what it understood",
     "verifyAnswer": "It wrote down what it found",
@@ -1004,6 +1006,7 @@
       "waitsFor": "Waits for part {{position}}, in {{project}}, to have a pull request",
       "waitsForCard": "Waits for the part before it, in {{project}}, to have a pull request",
       "open": "See the change",
+      "contractChanged": "Specified with an earlier version of what the parts agree on ({{points}}). Only a new run of this part takes the current one.",
       "warnings": {
         "closed": "Part {{position}}, in {{project}}: its pull request was closed.",
         "changed": "Part {{position}}, in {{project}}, has commits this part didn't read."
@@ -1288,6 +1291,17 @@
     "contractPart": "Part {{position}}, {{project}}",
     "notChecked": "Not checked yet",
     "noVerifier": "This workflow doesn't verify",
+    "contractEarlier": "Specified with an earlier version",
+    "contractCorrect": "Correct",
+    "contractCorrectHint": "A part specified already keeps what it was given until it starts again.",
+    "contractAddFirst": "Add a point the parts agree on",
+    "contractAdd": "Add a point",
+    "contractRemove": "Remove",
+    "contractNew": "new",
+    "contractWhen": "When",
+    "contractThen": "Then",
+    "contractSave": "Save",
+    "contractCancel": "Cancel",
     "stopWaiting": "Don't wait",
     "stopWaitingHint": "Lets this part start without the pull request of the one before it.",
     "openRun": "Open run",

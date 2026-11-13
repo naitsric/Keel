@@ -676,6 +676,8 @@ export interface PartOf {
   /** The part it starts after, while it still waits for that one's pull request. */
   waitsFor: { cardId: string; position: number | null; project: string } | null;
   warnings: PartWarning[];
+  /** The points of the contract it was specified with as they no longer are: corrected, added or removed since. Empty until it's specified. */
+  contractChanged: string[];
 }
 
 export interface JointCard {
@@ -711,8 +713,10 @@ export interface JointChange {
   /** What it touches that no part changes. */
   readOnly: { id: string; name: string }[];
   checks: JointCheck[];
-  /** What the parts agree on exactly, point by point. Empty until it's agreed, and for an agreement without any. */
+  /** What the parts agree on exactly, point by point, as a person corrected it since, if they did. Empty until it's agreed, and for an agreement without any. */
   contract: ContractPoint[];
+  /** The number the next new point takes: K{contractNext}. Null until it's agreed. */
+  contractNext: number | null;
 }
 
 /** A point the parts agree on exactly, and what each part that keeps it found. */
@@ -720,6 +724,8 @@ export interface ContractPoint {
   id: string;
   when: string;
   then: string;
+  /** The projects it names, by the names they go by in what was agreed. */
+  projects: string[];
   /** First to last. */
   parts: {
     cardId: string;
@@ -729,7 +735,17 @@ export interface ContractPoint {
     result: CheckedCriterion["result"] | null;
     /** False once its run shows a workflow with no verifier, which never will. */
     verifies: boolean;
+    /** Its part was specified with this point as it was before a person corrected it, or before it was added. Then `result` is null. */
+    earlier: boolean;
   }[];
+}
+
+/** A point of the contract as a person corrects it: one already there by its id, a new one without. */
+export interface ContractEdit {
+  id: string | null;
+  when: string;
+  then: string;
+  projects: string[];
 }
 
 /** What a run's page says about the change across projects it's in. */
@@ -863,6 +879,7 @@ export const api = {
   jointChangeGet: (changeId: string) => invoke<JointChange>("joint_change_get", { changeId }),
   /** Only a person, from here, says what only works with every part in place works. */
   jointCheckSet: (changeId: string, seq: number, works: boolean) => invoke<void>("joint_check_set", { changeId, seq, works }),
+  jointContractSet: (changeId: string, points: ContractEdit[]) => invoke<void>("joint_contract_set", { changeId, points }),
   runJoint: (runId: string) => invoke<RunJoint | null>("run_joint", { runId }),
   maxAgentsGet: () => invoke<number>("max_agents_get"),
   maxAgentsSet: (value: number) => invoke<void>("max_agents_set", { value }),

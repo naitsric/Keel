@@ -591,6 +591,42 @@ impl Spec {
         problems
     }
 
+    /// The contract as a person corrected it once it was agreed: `points` replace it, in their
+    /// order and with their ids already given, tidied as an agent's are and checked by the same
+    /// rules. A point may name only the `known` projects, which were among those the agent was
+    /// given, and one of them with a part.
+    pub fn corrected_contract(
+        &self,
+        points: Vec<ContractPoint>,
+        known: &[String],
+    ) -> Result<Vec<ContractPoint>, Vec<SpecProblem>> {
+        let mut spec = self.clone();
+        spec.contract = points
+            .into_iter()
+            .map(|point| {
+                let mut projects: Vec<String> = Vec::new();
+                for project in &point.projects {
+                    let project = one_line(project);
+                    if !projects.contains(&project) {
+                        projects.push(project);
+                    }
+                }
+                ContractPoint {
+                    id: point.id,
+                    when: one_line(&point.when),
+                    then: one_line(&point.then),
+                    projects,
+                }
+            })
+            .collect();
+        let problems = spec.contract_problems(known);
+        if problems.is_empty() {
+            Ok(spec.contract)
+        } else {
+            Err(problems)
+        }
+    }
+
     /// The points of the contract a project's part has to keep, as its criteria.
     pub fn contract_of(&self, project: &str) -> Vec<Criterion> {
         self.contract
@@ -3538,6 +3574,43 @@ mod tests {
 
     fn point(when: &str, projects: &[&str]) -> Value {
         json!({ "when": when, "then": "it answers 201 with `id`", "projects": projects })
+    }
+
+    #[test]
+    fn a_corrected_contract_is_tidied_and_checked_as_the_agreements_was() {
+        // Valora has a part, and admin was only read, though a point named it too.
+        let spec: Spec =
+            serde_json::from_value(agreed(json!([part("valora", "x")]), json!([]))).unwrap();
+        let known = ["valora".to_owned(), "admin".to_owned()];
+        let corrected = |projects: &[&str]| {
+            spec.corrected_contract(
+                vec![ContractPoint {
+                    id: "K2".into(),
+                    when: " someone\n  logs in ".into(),
+                    then: "it answers".into(),
+                    projects: projects.iter().map(|&p| p.to_owned()).collect(),
+                }],
+                &known,
+            )
+        };
+        let kept = corrected(&["admin", " valora", "valora"]).unwrap();
+        assert_eq!(kept[0].when, "someone logs in");
+        assert_eq!(kept[0].projects, ["admin", "valora"], "once each");
+        assert_eq!(
+            corrected(&["valora", "elsewhere"]),
+            Err(vec![SpecProblem::ContractUnknownProject {
+                id: "K2".into(),
+                position: 1,
+                project: "elsewhere".into(),
+            }])
+        );
+        assert_eq!(
+            corrected(&["admin"]),
+            Err(vec![SpecProblem::ContractWithoutPart {
+                id: "K2".into(),
+                position: 1,
+            }])
+        );
     }
 
     #[test]

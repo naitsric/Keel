@@ -1212,9 +1212,10 @@ describe("the approval card", () => {
   });
 
   it("warns, before approving a part, about what became of the parts before it", () => {
-    const joint = { changeId: "plan", agrees: false, part: { changeId: "plan", position: 2, total: 2, waitsFor: null, warnings: [{ kind: "closed" as const, position: 1, project: "valora" }] } };
+    const joint = { changeId: "plan", agrees: false, part: { changeId: "plan", position: 2, total: 2, waitsFor: null, warnings: [{ kind: "closed" as const, position: 1, project: "valora" }], contractChanged: ["K2"] } };
     act(() => root.render(<ApprovalCard attempt={human} run={runWith(deliverNext)} attempts={[builder(["calc.py"]), human]} files={["calc.py"]} commands={[]} rawCheck="intact" joint={joint} onShowChanges={() => {}} onError={() => {}} />));
     expect(page()).toContain("Part 1, in valora: its pull request was closed.");
+    expect(document.querySelector("[data-contract-changed]")?.textContent).toBe("Specified with an earlier version of what the parts agree on (K2). Only a new run of this part takes the current one.");
     act(() => vi.advanceTimersByTime(800));
     expect(button("Approve and open a draft")?.disabled).toBe(false);
   });
@@ -1848,6 +1849,17 @@ describe("an answer Keel asked to fix", () => {
     await i18next.changeLanguage("es");
     act(() => root.render(<ActivityTab events={[...replaced]} role="specifier" corrected={false} />));
     expect(page()).toContain("Escribió K1, K3 con sus propias palabras. Keel los dejó como se acordaron.");
+  });
+
+  it("says which points of the contract a part's specifier was given, and nothing when it was given none", async () => {
+    const given = (points: { id: string }[]) => [event(1, "contractGiven", { points }), event(2, "finished", { state: "succeeded" })];
+    act(() => root.render(<ActivityTab events={given([{ id: "K1" }, { id: "K4" }])} role="specifier" corrected={false} />));
+    expect(page()).toContain("Keel added K1, K4 of what the parts agree on to its criteria, as they read then.");
+    act(() => root.render(<ActivityTab events={given([])} role="specifier" corrected={false} />));
+    expect(page()).not.toContain("what the parts agree on");
+    await i18next.changeLanguage("es");
+    act(() => root.render(<ActivityTab events={given([{ id: "K1" }])} role="specifier" corrected={false} />));
+    expect(page()).toContain("Keel agregó K1 de lo que las partes acuerdan a sus criterios, como decían entonces.");
   });
 });
 
