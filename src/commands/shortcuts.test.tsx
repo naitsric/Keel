@@ -4,7 +4,7 @@ import i18next from "../i18n";
 import { useApp } from "../lib/store";
 import { nextWaitingRun, openRun } from "./runs";
 import { useSearchEverywhere } from "./SearchEverywhere";
-import { button, callsTo, hideApp, note, paletteOpen, paletteRow, paletteRows, pressEnter, pressKey, pressMod, PROJECTS, row, settle, showApp, tapShift, type, view } from "./testApp";
+import { button, callsTo, hideApp, note, paletteOpen, paletteRow, paletteRows, pressEnter, pressKey, pressMod, row, settle, showApp, tapShift, type, view } from "./testApp";
 
 const RUNS = [row("r1", "running"), row("r2", "waitingApproval"), row("r3", "succeeded"), row("r4", "blocked"), row("r5", "queued")];
 
@@ -283,7 +283,9 @@ describe("the keys", () => {
     it("opens a project's board while the board is showing another, and Back from a run stays on it", async () => {
       await showApp(RUNS, { name: "board" });
       await settle();
-      expect(document.querySelector("select")?.value).toBe(PROJECTS[0].id);
+      // With several projects, the board starts on every project's cards.
+      expect(document.querySelector("select")?.value).toBe("");
+      expect(callsTo("board_get").at(-1)?.args).toEqual({ projectId: null });
       tapShift();
       tapShift();
       type("payments");

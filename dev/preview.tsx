@@ -712,7 +712,9 @@ let boardCards: BoardCard[] =
         boardCard("c5", "Move the cron jobs to the queue", "backlog", { ...inRun("rejected"), rejection: "Use the existing retry helper, not a new one." }),
         boardCard("c6", "Update the onboarding copy", "backlog", { ...inRun("rejected"), rejection: "" }),
         boardCard("c7", "Try a new charts library", "backlog", inRun("abandoned")),
+        boardCard("c45", "Refund a payment in parts", "backlog", { projectId: "p2" }),
         boardCard("c8", "Log failed sign-ins", "todo"),
+        boardCard("c46", "Retry a failed payout", "todo", { projectId: "p2" }),
         boardCard("c9", "Fix the time zone in the weekly email", "todo", { issue: issueOf(21, "Fix the time zone in the weekly email") }),
         boardCard("c10", "Paginate the orders list", "todo"),
         boardCard("c11", "Add a retry to the payment webhook", "inProgress", inRun("running")),
@@ -846,15 +848,16 @@ const workflowResults: WorkflowResults[] =
           { workflowId: "gone", workflowName: "A workflow since deleted", runs: 9, finished: 9, merged: 4, closed: 1, costPerMergedUsd: 0.86, averageRounds: 0.25, ...noAsking, ...noneChecked, ...noneFitted },
         ];
 
-// Same as the backend: the card lands at that index of the lane, and the rest close up around it.
+// Same as the backend: the card lands at that index of its project's cards in the lane, and the rest close up around it.
 function moveBoardCard(cardId: string, lane: "backlog" | "todo", index: number) {
   const card = boardCards.find((c) => c.id === cardId);
   if (!card) return;
   const rest = boardCards.filter((c) => c.id !== cardId);
-  const inLane = rest.filter((c) => c.column === lane);
+  const ours = (c: BoardCard) => c.column === lane && c.projectId === card.projectId;
+  const inLane = rest.filter(ours);
   const moved = { ...card, column: lane, runId: lane === "todo" ? null : card.runId, runState: lane === "todo" ? null : card.runState, reason: lane === "todo" ? null : card.reason, rejection: lane === "todo" ? null : card.rejection, startBlocked: lane === "todo" ? null : card.startBlocked };
   inLane.splice(index, 0, moved);
-  boardCards = [...rest.filter((c) => c.column !== lane), ...inLane];
+  boardCards = [...rest.filter((c) => !ours(c)), ...inLane];
 }
 
 mockWindows("main");
@@ -985,8 +988,9 @@ mockIPC((command, args) => {
       if (params.get("issues") === "repo") throw blockedBy("noGithubRemote");
       return params.get("issues") === "none" ? [] : issues;
     case "board_get": {
-      const { projectId } = args as { projectId: string };
-      return { cards: boardCards.filter((c) => c.projectId === projectId), working: Number(params.get("working") ?? 2), maxAgents, defaultWorkflow, paused: boardPaused() };
+      // No project is every project's cards.
+      const { projectId } = args as { projectId: string | null };
+      return { cards: boardCards.filter((c) => projectId === null || c.projectId === projectId), working: Number(params.get("working") ?? 2), maxAgents, defaultWorkflow, paused: boardPaused() };
     }
     case "card_create": {
       const { projectId, title, body } = args as { projectId: string; title: string; body: string };

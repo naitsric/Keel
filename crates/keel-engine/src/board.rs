@@ -235,8 +235,19 @@ impl Engine {
     pub fn board(&self, project_id: &str) -> Result<Board> {
         let store = &self.inner.store;
         let project = store.project(project_id)?;
+        self.board_of(store.cards(project_id)?, project.default_workflow)
+    }
+
+    /// Every project's cards on one board. A card still moves within its own project's Backlog
+    /// and Todo, so `card_move` counts its index among that project's cards.
+    pub fn board_all(&self) -> Result<Board> {
+        self.board_of(self.inner.store.all_cards()?, None)
+    }
+
+    fn board_of(&self, stored: Vec<Card>, default_workflow: Option<String>) -> Result<Board> {
+        let store = &self.inner.store;
         let mut cards = Vec::new();
-        for card in store.cards(project_id)? {
+        for card in stored {
             // What it says about a change across projects is extra. Not finding it out mustn't keep
             // the person from their board.
             let part = self.inner.part_of(&card).unwrap_or_default();
@@ -258,7 +269,7 @@ impl Engine {
             cards,
             working: store.working_runs()?,
             max_agents: self.max_agents(),
-            default_workflow: project.default_workflow,
+            default_workflow,
             // What the scheduler last saw. Looking now would take launching two processes.
             paused: locked(&self.inner.board_paused).clone(),
         })

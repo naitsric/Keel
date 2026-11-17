@@ -1664,6 +1664,39 @@ fn across_projects_the_top_card_that_has_waited_longest_goes_first() {
 }
 
 #[test]
+fn the_board_of_every_project_keeps_each_ones_order_and_leaves_out_a_removed_one() {
+    let w = world();
+    let repo = new_repo(w.dir.path(), "other");
+    let other = w.engine.add_project(&repo).unwrap();
+    let pause = || std::thread::sleep(Duration::from_millis(5));
+    let titles = || -> Vec<String> {
+        let board = w.engine.board_all().unwrap();
+        board.cards.into_iter().map(|c| c.title).collect()
+    };
+
+    w.new_card("app 1");
+    pause();
+    let second = w.new_card("app 2");
+    pause();
+    let elsewhere = w.engine.card_create(&other.id, "other 1", "").unwrap();
+    // A move counts among its own project's cards: this is the top of app's Backlog.
+    w.engine
+        .card_move(&second, CardLane::Backlog, 0, "en")
+        .unwrap();
+    assert_eq!(titles(), ["app 2", "other 1", "app 1"]);
+    let board = w.engine.board_all().unwrap();
+    assert_eq!(board.cards[1].project_id, other.id);
+    assert_eq!(board.default_workflow, None);
+
+    // Each project's own board still has only its cards.
+    assert_eq!(w.titles_in(BoardColumn::Backlog), ["app 2", "app 1"]);
+
+    w.engine.remove_project(&other.id).unwrap();
+    assert_eq!(titles(), ["app 2", "app 1"]);
+    assert!(w.store.card(&elsewhere).is_ok());
+}
+
+#[test]
 fn a_person_can_rearrange_todo_while_cards_wait_for_room() {
     keel_harness::needs!(sandbox);
     let w = world_with(|c| c.max_agents = 1);

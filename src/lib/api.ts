@@ -871,7 +871,8 @@ export const api = {
   revealRaw: (attemptId: string) => invoke<void>("reveal_raw", { attemptId }),
   appQuit: (stopRuns: boolean) => invoke<void>("app_quit", { stopRuns }),
   menuSet: (menus: MenuSpec[]) => invoke<void>("menu_set", { menus }),
-  boardGet: (projectId: string) => invoke<Board>("board_get", { projectId }),
+  /** Null for every project's cards on one board. */
+  boardGet: (projectId: string | null) => invoke<Board>("board_get", { projectId }),
   cardCreate: (projectId: string, title: string, body: string) => invoke<string>("card_create", { projectId, title, body }),
   cardImportIssue: (projectId: string, issue: Issue) => invoke<string>("card_import_issue", { projectId, issue }),
   cardUpdate: (cardId: string, title: string, body: string) => invoke<void>("card_update", { cardId, title, body }),

@@ -454,8 +454,12 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
 
 /// Not masked: the editor saves back what it gets, which would overwrite the real commands.
 #[tauri::command(async)]
-fn board_get(state: State<'_, AppState>, project_id: String) -> CommandResult<Board> {
-    Ok(state.engine.board(&project_id)?)
+fn board_get(state: State<'_, AppState>, project_id: Option<String>) -> CommandResult<Board> {
+    // Without a project, every project's cards.
+    Ok(match project_id {
+        Some(project_id) => state.engine.board(&project_id)?,
+        None => state.engine.board_all()?,
+    })
 }
 
 #[tauri::command(async)]

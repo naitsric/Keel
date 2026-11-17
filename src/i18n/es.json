@@ -910,8 +910,11 @@
   "board": {
     "title": "Tablero",
     "project": "Proyecto",
+    "allProjects": "Todos los proyectos",
+    "chooseProject": "Elige un proyecto",
     "noProjects": "Primero agrega un proyecto.",
     "empty": "El tablero de este proyecto está vacío. Crea una tarea o importa un issue de GitHub, y muévela a Por hacer para que empiece.",
+    "emptyAll": "Ningún proyecto tiene tareas todavía. Crea una tarea o importa un issue de GitHub, y muévela a Por hacer para que empiece.",
     "working": "Trabajando ahora, en todos los proyectos: {{working}} de {{maxAgents}}.",
     "waiting": "Se llegó al límite, así que las tarjetas en Por hacer esperan y empiezan en orden a medida que se libera un cupo.",
     "paused": "Por hacer está en pausa, así que nada empieza hasta que esto se resuelva.",

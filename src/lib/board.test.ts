@@ -191,6 +191,24 @@ describe("dropDestination", () => {
     expect(drop(layout, "b", "backlog")).toBeNull();
   });
 
+  describe("on the board of every project", () => {
+    // a and c are one project's, b and y another's.
+    const projectOf = (id: string) => (id === "a" || id === "c" || id === "x" ? "app" : "api");
+    const dropMixed = (hovered: Layout, active: string, over: string | null) => dropDestination(layout, hovered, active, over, projectOf);
+
+    it("counts the index among the card's own project's cards only", () => {
+      expect(dropMixed(layout, "c", "a")).toEqual({ lane: "backlog", index: 0, layout: { backlog: ["c", "a", "b"], todo: ["x", "y"] } });
+      // The bottom of Todo is under y, which isn't app's, so it's second among app's.
+      const hovered = dragOver(layout, "a", "todo", false);
+      expect(dropMixed(hovered, "a", "todo")).toEqual({ lane: "todo", index: 1, layout: { backlog: ["b", "c"], todo: ["x", "y", "a"] } });
+    });
+
+    it("is null when it only passes another project's cards", () => {
+      expect(dropMixed(layout, "a", "b")).toBeNull();
+      expect(drop(layout, "a", "b")?.index).toBe(1);
+    });
+  });
+
   it("is null when dropped nowhere, or on a column Keel moves", () => {
     expect(drop(layout, "a", null)).toBeNull();
     for (const column of ["inProgress", "humanReview", "done"]) expect(drop(layout, "a", column)).toBeNull();

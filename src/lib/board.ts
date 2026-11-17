@@ -64,13 +64,17 @@ export function dragOver(layout: Layout, activeId: string, overId: string, below
 
 export interface Destination {
   lane: Lane;
-  /** Where the card ends up within the lane, counting from the top. */
+  /** Where the card ends up within its project's cards in the lane, counting from the top. */
   index: number;
   layout: Layout;
 }
 
-/** Where a dropped card goes. Null if it changes nothing, or if it was dropped where it can't go. */
-export function dropDestination(saved: Layout, layout: Layout, activeId: string, overId: string | null): Destination | null {
+/**
+ * Where a dropped card goes. Null if it changes nothing, or if it was dropped where it can't go.
+ * `projectOf` gives a card's project: a card only moves among its own project's cards, so on the
+ * board of every project, the others in the lane don't count toward its index.
+ */
+export function dropDestination(saved: Layout, layout: Layout, activeId: string, overId: string | null, projectOf: (cardId: string) => string = () => ""): Destination | null {
   if (overId === null) return null;
   const column = overColumn(layout, overId);
   const lane = laneHolding(layout, activeId);
@@ -78,10 +82,14 @@ export function dropDestination(saved: Layout, layout: Layout, activeId: string,
   // Across lanes the card already moved while hovering. Within one, it takes the place of the card it's over.
   const rest = layout[lane].filter((id) => id !== activeId);
   const over = layout[lane].indexOf(overId);
-  const index = isColumn(overId) ? layout[lane].indexOf(activeId) : over;
-  if (index < 0) return null;
-  if (saved[lane].indexOf(activeId) === index) return null;
-  return { lane, index, layout: { ...layout, [lane]: [...rest.slice(0, index), activeId, ...rest.slice(index)] } };
+  const at = isColumn(overId) ? layout[lane].indexOf(activeId) : over;
+  if (at < 0) return null;
+  const placed = [...rest.slice(0, at), activeId, ...rest.slice(at)];
+  const project = projectOf(activeId);
+  const own = (ids: string[]) => ids.filter((id) => projectOf(id) === project);
+  const index = own(placed).indexOf(activeId);
+  if (own(saved[lane]).indexOf(activeId) === index) return null;
+  return { lane, index, layout: { ...layout, [lane]: placed } };
 }
 
 /** The other lane, for moving without dragging: the card goes to the bottom of it. */
@@ -91,7 +99,7 @@ export function otherLane(groups: Groups, card: BoardCard): { lane: Lane; index:
   return { lane, index: groups[lane].length };
 }
 
-/** Whether cards are waiting in this project's Todo because the app-wide limit is reached. When it's paused, that's not why. */
+/** Whether cards are waiting in the Todo shown because the app-wide limit is reached. When it's paused, that's not why. */
 export const waitingForRoom = (board: Board, groups: Groups) => !board.paused && board.working >= board.maxAgents && groups.todo.length > 0;
 
 /** Says Todo is paused and why. A usage limit isn't something to fix, so that one says what lifts it. */
@@ -204,6 +212,8 @@ export interface BoardNotice {
   text: string;
   /** Whether the way out is in Settings. */
   settings: boolean;
+  /** The project those settings are of, when the board shows every project's cards. */
+  projectId?: string;
 }
 
 const reasonOf = (error: unknown) => (typeof error === "object" ? ((error as Partial<CommandError> | null)?.reason ?? null) : null);
@@ -216,7 +226,7 @@ export function boardNotice(t: TFunction, error: unknown): BoardNotice {
 
 export function moveNotice(t: TFunction, card: BoardCard, error: unknown): BoardNotice {
   const notice = boardNotice(t, error);
-  return { ...notice, text: t("board.moveFailed", { title: card.title, reason: notice.text }) };
+  return { ...notice, text: t("board.moveFailed", { title: card.title, reason: notice.text }), projectId: card.projectId };
 }
 
 /** Why the open issues can't be listed. The usual reasons talk about pull requests, so these talk about issues. */

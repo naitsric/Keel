@@ -1,7 +1,7 @@
 import { type Announcements, type CollisionDetection, closestCenter, DndContext, type DragEndEvent, type DragOverEvent, DragOverlay, type DragStartEvent, KeyboardSensor, MeasuringStrategy, PointerSensor, pointerWithin, rectIntersection, useDroppable, useSensor, useSensors } from "@dnd-kit/core";
 import { SortableContext, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from "@dnd-kit/sortable";
 import { AlertTriangle, Check, Download, GitPullRequest, Layers, Lock, Pencil, Plus, Trash2, X } from "lucide-react";
-import { type ComponentProps, type CSSProperties, type FormEvent, type ReactNode, type Ref, useCallback, useEffect, useMemo, useState } from "react";
+import { type ComponentProps, createContext, type CSSProperties, type FormEvent, type ReactNode, type Ref, useCallback, useContext, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useKeymapHold } from "../commands/keymapHold";
 import { useBoardCommands } from "../commands/pageCommands";
@@ -9,7 +9,7 @@ import { api, type Board, type BoardCard, type BoardColumn, type Issue } from ".
 import { type BoardNotice, boardNotice, canDelete, canEdit, cardLabel, clickAction, COLUMNS, dragOver, dropDestination, groupCards, importedIssues, importNotice, isColumn, isLane, jointLabel, type Lane, type Layout, layoutOf, moveNotice, newestOnly, otherLane, overColumn, pausedText, waitingForRoom, withLayout } from "../lib/board";
 import { needsSetup } from "../lib/projects";
 import { needsProjectSettings } from "../lib/reason";
-import { useApp } from "../lib/store";
+import { useApp, type View } from "../lib/store";
 import { Button, cx, Field, inputClass, Modal, StateBadge } from "../ui/primitives";
 import { AddProject, useAddProject } from "./AddProject";
 import { BlockerNotice } from "./Home";
@@ -24,13 +24,19 @@ const KEYBOARD_CODES = { start: ["Space"], cancel: ["Escape"], end: ["Space", "E
 
 const focusClass = "focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-accent";
 
+/** Whether the board shows every project's cards, so each card says whose it is. */
+const EveryProject = createContext(false);
+
+/** Where the board is, to come back to it: one project's, or every project's. */
+const boardView = (projectId: string): View => (projectId ? { name: "board", projectId } : { name: "board" });
+
 function NoticeBar({ notice, projectId, onDismiss }: { notice: BoardNotice; projectId?: string; onDismiss?: () => void }) {
   const { t } = useTranslation();
   const navigate = useApp((s) => s.navigate);
   return (
     <div role="alert" className="flex flex-wrap items-center gap-2 rounded-md border border-border-strong bg-inset px-3 py-2 text-[12.5px] text-warning">
       <span className="selectable min-w-0 flex-1">{notice.text}</span>
-      {notice.settings && <Button onClick={() => navigate({ name: "projects", projectId })}>{t("newRun.openProject")}</Button>}
+      {notice.settings && <Button onClick={() => navigate({ name: "projects", projectId: notice.projectId ?? (projectId || undefined) })}>{t("newRun.openProject")}</Button>}
       {onDismiss && (
         <Button variant="ghost" aria-label={t("board.dismiss")} title={t("board.dismiss")} className="px-1.5" onClick={onDismiss}>
           <X size={13} />
@@ -44,10 +50,13 @@ function NoticeBar({ notice, projectId, onDismiss }: { notice: BoardNotice; proj
 function CardFace({ card }: { card: BoardCard }) {
   const { t } = useTranslation();
   const projects = useApp((s) => s.overview.projects);
+  const everyProject = useContext(EveryProject);
   const label = cardLabel(t, card);
-  const joint = jointLabel(t, card, (id) => projects.find((project) => project.id === id)?.name ?? id);
+  const nameOf = (id: string) => projects.find((project) => project.id === id)?.name ?? id;
+  const joint = jointLabel(t, card, nameOf);
   return (
     <>
+      {everyProject && <span className="mb-0.5 block truncate text-[11px] font-medium text-subtle">{nameOf(card.projectId)}</span>}
       <span className="line-clamp-3 text-[12.5px] leading-snug font-medium break-words">
         {card.issue && <span className="font-normal text-subtle">#{card.issue.number} </span>}
         {card.title}
@@ -87,7 +96,7 @@ interface CardActions {
   onEdit: (card: BoardCard) => void;
   onDelete: (card: BoardCard) => void;
   onOpenPr: (url: string) => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (card: BoardCard) => void;
   onOpenJoint: (changeId: string) => void;
 }
 
@@ -110,7 +119,7 @@ function CardShell({ card, actions, nodeRef, style, faded, handleRef, handleProp
         <CardFace card={card} />
       </button>
       {needsProjectSettings(card.startBlocked) && (
-        <button type="button" className="mx-2 mb-1 block text-[11.5px] text-accent hover:underline" onClick={actions.onOpenSettings}>
+        <button type="button" className="mx-2 mb-1 block text-[11.5px] text-accent hover:underline" onClick={() => actions.onOpenSettings(card)}>
           {t("newRun.openProject")}
         </button>
       )}
@@ -226,22 +235,56 @@ function AlsoTouches({ projectId, chosen, disabled, onChange }: { projectId: str
 
 const sameProjects = (a: string[], b: string[]) => a.length === b.length && a.every((id) => b.includes(id));
 
+/** The project a card goes to, from the board of every project. With only one, that one. */
+function useProjectChoice(fixed: string) {
+  const projects = useApp((s) => s.overview.projects);
+  const [chosen, setChosen] = useState(fixed || (projects.length === 1 ? projects[0].id : ""));
+  return { projects, chosen, setChosen, choosing: !fixed };
+}
+
+function ProjectChoice({ projects, chosen, disabled, onChange }: { projects: { id: string; name: string }[]; chosen: string; disabled?: boolean; onChange: (projectId: string) => void }) {
+  const { t } = useTranslation();
+  return (
+    <Field label={t("board.project")}>
+      <select required value={chosen} disabled={disabled} onChange={(e) => onChange(e.target.value)} className={inputClass}>
+        <option value="" disabled>
+          {t("board.chooseProject")}
+        </option>
+        {projects.map((project) => (
+          <option key={project.id} value={project.id}>
+            {project.name}
+          </option>
+        ))}
+      </select>
+    </Field>
+  );
+}
+
+/** `projectId` is empty on the board of every project: then a new card asks which project it's for. */
 export function TaskDialog({ projectId, card, onClose, onSaved }: { projectId: string; card: BoardCard | null; onClose: () => void; onSaved: () => void }) {
   const { t } = useTranslation();
+  const choice = useProjectChoice(card?.projectId ?? projectId);
+  const chosen = choice.chosen;
   const [title, setTitle] = useState(card?.title ?? "");
   const [body, setBody] = useState(card?.body ?? "");
   const [touches, setTouches] = useState<string[]>(card?.alsoTouches ?? []);
   const [notice, setNotice] = useState<BoardNotice | null>(null);
   const [busy, setBusy] = useState(false);
   // A part is already one project's share of a change.
-  const canTouchOthers = !card?.part;
+  const canTouchOthers = !card?.part && chosen !== "";
+
+  const choose = (id: string) => {
+    choice.setChosen(id);
+    setTouches((touched) => touched.filter((other) => other !== id));
+  };
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    if (!chosen) return;
     setBusy(true);
     setNotice(null);
     try {
-      const id = card ? card.id : await api.cardCreate(projectId, title.trim(), body);
+      const id = card ? card.id : await api.cardCreate(chosen, title.trim(), body);
       if (card) await api.cardUpdate(card.id, title.trim(), body);
       if (canTouchOthers && !sameProjects(touches, card?.alsoTouches ?? [])) await api.cardSetProjects(id, touches);
       onSaved();
@@ -254,6 +297,7 @@ export function TaskDialog({ projectId, card, onClose, onSaved }: { projectId: s
   return (
     <Modal open onOpenChange={(open) => !open && onClose()} title={t(card ? "board.task.editTitle" : "board.task.newTitle")}>
       <form className="space-y-3.5" onSubmit={(e) => void submit(e)}>
+        {choice.choosing && <ProjectChoice projects={choice.projects} chosen={chosen} disabled={busy} onChange={choose} />}
         <Field label={t("board.task.title")}>
           <input autoFocus required value={title} onChange={(e) => setTitle(e.target.value)} className={inputClass} />
         </Field>
@@ -261,11 +305,11 @@ export function TaskDialog({ projectId, card, onClose, onSaved }: { projectId: s
         <Field label={card?.issue ? t("newRun.issueExtra") : t("board.task.description")}>
           <textarea rows={5} value={body} onChange={(e) => setBody(e.target.value)} placeholder={card?.issue ? undefined : t("newRun.promptPlaceholder")} className={`${inputClass} resize-y leading-relaxed`} />
         </Field>
-        {canTouchOthers && <AlsoTouches projectId={projectId} chosen={touches} disabled={busy} onChange={setTouches} />}
-        {notice && <NoticeBar notice={notice} projectId={projectId} />}
+        {canTouchOthers && <AlsoTouches projectId={chosen} chosen={touches} disabled={busy} onChange={setTouches} />}
+        {notice && <NoticeBar notice={notice} projectId={chosen} />}
         <div className="flex justify-end gap-2">
           <Button onClick={onClose}>{t("newRun.cancel")}</Button>
-          <Button type="submit" variant="primary" disabled={busy || title.trim() === ""}>
+          <Button type="submit" variant="primary" disabled={busy || title.trim() === "" || chosen === ""}>
             {t(card ? "board.task.save" : "board.task.create")}
           </Button>
         </div>
@@ -310,15 +354,22 @@ function DeleteDialog({ card, onClose, onDeleted }: { card: BoardCard; onClose: 
   );
 }
 
-function ImportDialog({ projectId, cards, onClose, onImported }: { projectId: string; cards: BoardCard[]; onClose: () => void; onImported: () => Promise<void> }) {
+/** `projectId` is empty on the board of every project: then it asks whose issues to list. */
+function ImportDialog({ projectId: fixed, cards, onClose, onImported }: { projectId: string; cards: BoardCard[]; onClose: () => void; onImported: () => Promise<void> }) {
   const { t } = useTranslation();
+  const choice = useProjectChoice(fixed);
+  const projectId = choice.chosen;
   const [issues, setIssues] = useState<Issue[] | null>(null);
   const [notice, setNotice] = useState<BoardNotice | null>(null);
   const [importing, setImporting] = useState<number | null>(null);
-  const imported = useMemo(() => importedIssues(cards), [cards]);
+  // An issue's number only means something in its own repo.
+  const imported = useMemo(() => importedIssues(cards.filter((card) => card.projectId === projectId)), [cards, projectId]);
 
   // Issues load only when asked for. Keel never polls them.
   useEffect(() => {
+    setIssues(null);
+    setNotice(null);
+    if (!projectId) return;
     let current = true;
     api
       .issuesList(projectId)
@@ -349,7 +400,8 @@ function ImportDialog({ projectId, cards, onClose, onImported }: { projectId: st
   return (
     <Modal open onOpenChange={(open) => !open && onClose()} title={t("board.import.title")} description={t("board.import.hint")} className="w-[560px]">
       <div className="space-y-3">
-        {issues === null && <p className="text-[12px] text-subtle">{t("newRun.issuesLoading")}</p>}
+        {choice.choosing && <ProjectChoice projects={choice.projects} chosen={projectId} disabled={importing !== null} onChange={choice.setChosen} />}
+        {issues === null && projectId && <p className="text-[12px] text-subtle">{t("newRun.issuesLoading")}</p>}
         {issues?.length === 0 && !notice && <p className="text-[12.5px] text-muted">{t("newRun.issuesEmpty")}</p>}
         {notice && <NoticeBar notice={notice} projectId={projectId} />}
         {issues && issues.length > 0 && (
@@ -397,6 +449,7 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
   const navigate = useApp((s) => s.navigate);
   const openSetup = useApp((s) => s.openProjectSetup);
 
+  // Empty for every project's cards on one board.
   const [projectId, setProjectId] = useState(initialProjectId ?? "");
   const [board, setBoard] = useState<Board | null>(null);
   const [layout, setLayout] = useState<Layout | null>(null);
@@ -415,19 +468,24 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
   useKeymapHold(activeId !== null);
   // The palette can open a project while the board is showing another.
   useEffect(() => {
-    if (initialProjectId && initialProjectId !== projectId) selectProject(initialProjectId);
+    const wanted = initialProjectId ?? "";
+    if (wanted !== projectId) selectProject(wanted);
   }, [initialProjectId]);
 
-  // Coming back to a project that has since been removed lands on one that's there.
+  // Every project's cards are worth a board of their own only with more than one. Coming back to a
+  // project that has since been removed lands on every project's, or on the one that's left.
+  const several = projects.length > 1;
   useEffect(() => {
-    if (projects.length > 0 && !projects.some((p) => p.id === projectId)) setProjectId(projects[0].id);
-  }, [projects, projectId]);
+    if (projects.length === 0) return;
+    if (projectId && !projects.some((p) => p.id === projectId)) setProjectId(several ? "" : projects[0].id);
+    else if (!projectId && !several) setProjectId(projects[0].id);
+  }, [projects, projectId, several]);
 
   // Only the newest answer counts, and awaiting this means it's on screen. Otherwise a card that
   // just moved could jump back to where it was.
   const load = useCallback(async () => {
-    if (projectId) await applyNewest(() => api.boardGet(projectId));
-  }, [projectId, applyNewest]);
+    if (projectId || several) await applyNewest(() => api.boardGet(projectId || null));
+  }, [projectId, several, applyNewest]);
 
   // "Check again" refreshes the session, which is what can lift a pause, so look again after it too.
   useEffect(() => {
@@ -440,6 +498,7 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
   const cardsById = useMemo(() => new Map((board?.cards ?? []).map((card) => [card.id, card])), [board]);
   const activeCard = activeId ? (cardsById.get(activeId) ?? null) : null;
   const hoveredColumn = activeId && overId ? overColumn(shown, overId) : null;
+  const projectOf = (id: string) => cardsById.get(id)?.projectId ?? "";
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates, keyboardCodes: KEYBOARD_CODES }));
 
@@ -503,7 +562,7 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
     endDrag();
     const id = String(active.id);
     const card = cardsById.get(id);
-    const destination = card ? dropDestination(layoutOf(saved), shown, id, over ? String(over.id) : null) : null;
+    const destination = card ? dropDestination(layoutOf(saved), shown, id, over ? String(over.id) : null, projectOf) : null;
     if (!card || !destination) {
       setLayout(null);
       return;
@@ -525,7 +584,7 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
   const actions: CardActions = {
     onOpen: (card) => {
       const action = clickAction(card);
-      if (action === "run" && card.runId) navigate({ name: "run", runId: card.runId, backTo: { name: "board", projectId } });
+      if (action === "run" && card.runId) navigate({ name: "run", runId: card.runId, backTo: boardView(projectId) });
       if (action === "edit") setDialog({ kind: "task", card });
     },
     onMove: (card) => {
@@ -541,7 +600,7 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
     onOpenPr: (url) => {
       api.openGithubUrl(url).catch((error) => setNotice(boardNotice(t, error)));
     },
-    onOpenSettings: () => navigate({ name: "projects", projectId }),
+    onOpenSettings: (card) => navigate({ name: "projects", projectId: card.projectId }),
     onOpenJoint: (changeId) => setDialog({ kind: "joint", changeId }),
   };
 
@@ -562,20 +621,21 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
     setLayout(null);
     setNotice(null);
     // The view says which project too, so Back from a run lands on this one.
-    navigate({ name: "board", projectId: id });
+    navigate(boardView(id));
   };
 
   const adding = useAddProject({ onAdded: (added) => selectProject(added.id) });
   const project = projects.find((p) => p.id === projectId);
 
   return (
-    <>
+    <EveryProject.Provider value={projectId === ""}>
       <main className="flex min-h-0 flex-1 flex-col gap-3 p-4">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
           {/* The top bar already says which page this is. */}
           <h1 className="sr-only">{t("board.title")}</h1>
           {projects.length > 0 && (
             <select aria-label={t("board.project")} value={projectId} onChange={(e) => selectProject(e.target.value)} className={cx(inputClass, "w-48")}>
+              {several && <option value="">{t("board.allProjects")}</option>}
               {projects.map((p) => (
                 <option key={p.id} value={p.id}>
                   {p.name}
@@ -613,7 +673,7 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
         )}
         {paused && <BlockerNotice blocker={paused} text={pausedText(t, paused)} />}
         {notice && <NoticeBar notice={notice} projectId={projectId} onDismiss={() => setNotice(null)} />}
-        {board && board.cards.length === 0 && <p className="text-[12.5px] text-muted">{t("board.empty")}</p>}
+        {board && board.cards.length === 0 && <p className="text-[12.5px] text-muted">{t(projectId ? "board.empty" : "board.emptyAll")}</p>}
         {projects.length > 0 && board && (
           <DndContext sensors={sensors} collisionDetection={collisionDetection} measuring={MEASURING} accessibility={{ announcements, screenReaderInstructions: { draggable: t("board.drag.help") } }} onDragStart={onDragStart} onDragOver={onDragOver} onDragEnd={onDragEnd} onDragCancel={onDragCancel}>
             <div className="flex min-h-0 flex-1 gap-2 overflow-x-auto">
@@ -649,7 +709,7 @@ export function BoardView({ initialProjectId }: { initialProjectId?: string }) {
       {dialog?.kind === "task" && <TaskDialog projectId={projectId} card={dialog.card} onClose={() => setDialog(null)} onSaved={changed} />}
       {dialog?.kind === "delete" && <DeleteDialog card={dialog.card} onClose={() => setDialog(null)} onDeleted={changed} />}
       {dialog?.kind === "import" && <ImportDialog projectId={projectId} cards={board?.cards ?? []} onClose={() => setDialog(null)} onImported={load} />}
-      {dialog?.kind === "joint" && <JointChangeDialog changeId={dialog.changeId} backTo={{ name: "board", projectId }} onClose={() => setDialog(null)} />}
-    </>
+      {dialog?.kind === "joint" && <JointChangeDialog changeId={dialog.changeId} backTo={boardView(projectId)} onClose={() => setDialog(null)} />}
+    </EveryProject.Provider>
   );
 }
