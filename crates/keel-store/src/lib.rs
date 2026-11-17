@@ -2702,6 +2702,19 @@ impl Store {
         Ok(cards)
     }
 
+    /// The cards of every project that's there, in the order the board shows them. In Backlog and
+    /// Todo each project keeps its own order, and the projects take turns: every project's first
+    /// card, then every project's second.
+    pub fn all_cards(&self) -> Result<Vec<Card>> {
+        let mut cards = read_cards(
+            &self.lock(),
+            "c.project_id in (select id from project where removed_at is null)",
+            [],
+        )?;
+        cards.sort_by(board_order);
+        Ok(cards)
+    }
+
     /// Changes what a card says, if a person can still change it. `false` if not. Once they change
     /// its body, it's theirs.
     pub fn update_card(&self, id: &str, title: &str, body: &str) -> Result<bool> {

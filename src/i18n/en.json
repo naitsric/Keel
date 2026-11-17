@@ -910,8 +910,11 @@
   "board": {
     "title": "Board",
     "project": "Project",
+    "allProjects": "All projects",
+    "chooseProject": "Choose a project",
     "noProjects": "Add a project first.",
     "empty": "This project's board is empty. Create a task or import a GitHub issue, then move it to Todo to start it.",
+    "emptyAll": "No project has tasks yet. Create a task or import a GitHub issue, then move it to Todo to start it.",
     "working": "Working now, across all projects: {{working}} of {{maxAgents}}.",
     "waiting": "The limit is reached, so cards in Todo wait and start in order as room frees up.",
     "paused": "Todo is paused, so nothing starts until this is fixed.",
