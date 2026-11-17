@@ -7,6 +7,7 @@ mod deliver;
 mod detect;
 mod diffs;
 mod git;
+mod issues;
 mod joint;
 mod localhost;
 mod notes;
@@ -35,6 +36,7 @@ pub use board::{Board, BoardCard, BoardIssue};
 pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
 pub use detect::{CiGap, CiLeftOut, CiWhy, Guess};
 pub use git::{ChangeSize, Git, GitError, Snapshot};
+pub use issues::{CommentFailed, IssueWatch, IssueWatchProblem, MOST_LABEL_CHARS};
 pub use joint::{
     ContractEdit, ContractPart, ContractView, JointCard, JointChangeView, Named, Neighbour, PartOf,
     PartWarning, RunJoint,
@@ -46,7 +48,7 @@ use keel_harness::process::{self, SIGINT, SIGTERM};
 use keel_harness::{Tools, settings, toolchains};
 use keel_store::rusqlite_value::Value;
 use keel_store::{
-    Decision, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
+    Decision, IssueTold, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
 };
 pub use notes::split_assistant_notes;
 pub use project_commands::{CommandChange, CommandKind, retry_runs_something_new};
@@ -126,6 +128,8 @@ pub struct Config {
     pub github_git_base: String,
     /// How long what Keel knows about a pull request is good for, in the background.
     pub pr_look_again: Duration,
+    /// How often Keel looks at the issues of the projects that watch them.
+    pub issue_look_again: Duration,
     /// What Claude Code runs around each Bash command of a step that can edit, to tell the agent
     /// which project files changed (see `keel_harness::hook`). The app installs it. Without it, or
     /// without git, no hook.
@@ -147,6 +151,7 @@ impl Config {
             session_check_limit: auth::CHECK_LIMIT,
             github_git_base: "https://github.com".to_owned(),
             pr_look_again: pull_requests::LOOK_AGAIN,
+            issue_look_again: issues::LOOK_AGAIN,
             bash_hook: None,
         }
     }
@@ -393,6 +398,12 @@ struct Inner {
     read_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// One lock for each project starting its map. See `Engine::generate_map`.
     starting_map: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// One lock for each project whose issues Keel looks at. See `issues`.
+    issue_looks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// What came of the last look at each project's issues since the app opened.
+    issue_watch: Mutex<HashMap<String, IssueWatch>>,
+    /// The last comment on each project's issues that didn't work, until one does.
+    issue_comment_failed: Mutex<HashMap<String, CommentFailed>>,
 }
 
 #[derive(Clone)]
@@ -461,6 +472,9 @@ impl Engine {
                 creating_workspace: Mutex::new(()),
                 read_locks: Mutex::default(),
                 starting_map: Mutex::default(),
+                issue_looks: Mutex::default(),
+                issue_watch: Mutex::default(),
+                issue_comment_failed: Mutex::default(),
             }),
         }
     }
@@ -601,6 +615,7 @@ impl Engine {
             default_workflow: None,
             sensitive_paths: Vec::new(),
             allow_localhost: false,
+            issue_label: None,
         };
         self.inner.store.add_project(&project)?;
         Ok((project, AddOutcome::New))
@@ -1006,6 +1021,7 @@ impl Engine {
             }
             return Err(error);
         }
+        self.inner.tell_issue_soon(&run_id, IssueTold::Started);
         Ok(run_id)
     }
 

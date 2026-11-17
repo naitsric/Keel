@@ -13,8 +13,9 @@ use keel_core::{
 };
 use keel_engine::{Config, Engine, StartRun, Workflow};
 use keel_harness::Tools;
+use keel_harness::github::Issue;
 use keel_store::rusqlite_value::Value;
-use keel_store::{ProjectSettings, Store};
+use keel_store::{IssueTold, ProjectSettings, Store};
 
 type Changes = Arc<Mutex<Vec<String>>>;
 
@@ -103,6 +104,9 @@ case "$1 $2" in
   echo "tok-SECRET"; exit 0;;
 "repo view") echo '{{"defaultBranchRef":{{"name":"main"}},"viewerPermission":"WRITE","isPrivate":true}}'; exit 0;;
 "api repos/acme/app/branches/main") echo false; exit 0;;
+"api repos/"*"/comments")
+  if [ -f "{flags}/no-comments" ]; then echo "HTTP 403: Resource not accessible by personal access token" >&2; exit 1; fi
+  echo '{{}}'; exit 0;;
 "pr create")
   if [ -f "{flags}/pr-exists" ]; then echo "a pull request for branch already exists:" >&2; echo "https://github.com/acme/app/pull/99" >&2; exit 1; fi
   prev=""
@@ -257,6 +261,10 @@ impl World {
     }
 
     fn start(&self, workflow: &Workflow) -> String {
+        self.start_from(workflow, None, "en")
+    }
+
+    fn start_from(&self, workflow: &Workflow, issue: Option<Issue>, language: &str) -> String {
         self.engine
             .start_run(StartRun {
                 project_id: self.project_id.clone(),
@@ -264,8 +272,8 @@ impl World {
                 request: "Fix the bug".into(),
                 workflow: workflow.steps.clone(),
                 saved_workflow: Some(workflow.reference()),
-                language: "en".into(),
-                source_issue: None,
+                language: language.into(),
+                source_issue: issue,
                 started_by: None,
             })
             .unwrap()
@@ -298,8 +306,12 @@ impl World {
 
     /// A whole run, up to its pull request and past the last change it reports.
     fn delivered(&self) -> String {
+        self.delivered_from(None, "en")
+    }
+
+    fn delivered_from(&self, issue: Option<Issue>, language: &str) -> String {
         let workflow = self.saved(delivering_steps());
-        let run = self.start(&workflow);
+        let run = self.start_from(&workflow, issue, language);
         let human = self.wait_step(&run, "human", AttemptState::WaitingApproval);
         self.engine.answer_approval(&human.id, true, "").unwrap();
         self.until("the run finishing", || {
@@ -1359,4 +1371,82 @@ fn a_run_still_delivers_after_another_run_of_its_project_starts_from_newer_code(
     assert!(w.store.run(&run).unwrap().pr_url.is_some());
     // Its title still comes from its own first commit.
     assert!(w.gh_log().contains("--title fix "), "{}", w.gh_log());
+}
+
+fn an_issue(number: i64, repo: &str) -> Issue {
+    Issue {
+        number,
+        title: format!("Issue {number}"),
+        author: "bob".into(),
+        url: format!("https://github.com/{repo}/issues/{number}"),
+        body: "It breaks.".into(),
+    }
+}
+
+impl World {
+    fn comments(&self) -> Vec<String> {
+        self.gh_log()
+            .lines()
+            .filter(|line| line.contains("/comments"))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+#[test]
+fn a_run_from_an_issue_of_a_watched_project_says_on_it_when_it_starts_and_when_its_pull_request_opens()
+ {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.engine
+        .set_issue_label(&w.project_id, Some("keel"))
+        .unwrap();
+    let run = w.delivered_from(Some(an_issue(7, "acme/app")), "es");
+    w.until("both comments", || w.comments().len() >= 2);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(
+        w.comments(),
+        [
+            "gh api repos/acme/app/issues/7/comments --method POST -f body=Keel empezó a trabajar en este issue.",
+            "gh api repos/acme/app/issues/7/comments --method POST -f body=Keel abrió un pull request para este issue: https://github.com/acme/app/pull/12",
+        ]
+    );
+    // Each is said once: both are marked already, so nothing would say them again.
+    for what in [IssueTold::Started, IssueTold::PullRequest] {
+        assert!(!w.store.mark_issue_told(&run, what).unwrap(), "{what:?}");
+    }
+}
+
+#[test]
+fn keel_says_nothing_on_an_issue_of_a_project_that_watches_none_or_of_another_repo() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.delivered_from(Some(an_issue(7, "acme/app")), "en");
+    w.engine
+        .set_issue_label(&w.project_id, Some("keel"))
+        .unwrap();
+    w.delivered_from(Some(an_issue(8, "acme/other")), "en");
+    w.delivered_from(None, "en");
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(w.comments().is_empty(), "{:?}", w.comments());
+}
+
+#[test]
+fn a_comment_github_refuses_is_said_on_the_projects_watch_and_nothing_stops() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.engine
+        .set_issue_label(&w.project_id, Some("keel"))
+        .unwrap();
+    // A look first: that's where the project's page reads what went wrong.
+    w.engine.look_at_issues(&w.project_id).unwrap();
+    std::fs::write(w.flags.join("no-comments"), "").unwrap();
+    let run = w.delivered_from(Some(an_issue(7, "acme/app")), "en");
+    assert!(w.store.run(&run).unwrap().pr_url.is_some());
+    w.until("the failure showing", || {
+        w.engine
+            .issue_watch(&w.project_id)
+            .and_then(|watch| watch.comment_failed)
+            .is_some_and(|failed| failed.number == 7 && failed.detail.contains("403"))
+    });
 }

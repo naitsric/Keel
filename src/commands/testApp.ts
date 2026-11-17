@@ -6,7 +6,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { vi } from "vitest";
 import App from "../App";
 import i18next from "../i18n";
-import type { Attempt, AttemptState, BoardCard, CiGap, Project, Run, RunRow, ToolFolder } from "../lib/api";
+import type { Attempt, AttemptState, BoardCard, CiGap, IssueWatch, Project, Run, RunRow, ToolFolder } from "../lib/api";
 import { useApp, type View } from "../lib/store";
 import { useCommands } from "./registry";
 import { useSearchEverywhere } from "./SearchEverywhere";
@@ -15,7 +15,7 @@ import { useSearchEverywhere } from "./SearchEverywhere";
 
 export const row = (id: string, state: AttemptState, extra: Partial<RunRow> = {}) => ({ id, title: `Run ${id}`, projectId: "p1", projectName: "demo", state, attemptId: `${id}-step`, stepId: "builder", attemptNumber: 1, reason: null, model: "sonnet", turns: null, startedAt: "2026-11-05T10:00:00Z", finishedAt: null, lastActivityAt: null, startedBy: null, prUrl: null, ...extra }) as RunRow;
 
-const project = (id: string, name: string) => ({ id, name, path: `/Users/you/${name}`, githubAccount: "you-work", githubRepo: `acme/${name}`, setupCommand: null, checkCommand: null, allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, sensitivePaths: [], allowLocalhost: false }) as Project;
+const project = (id: string, name: string) => ({ id, name, path: `/Users/you/${name}`, githubAccount: "you-work", githubRepo: `acme/${name}`, setupCommand: null, checkCommand: null, allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, sensitivePaths: [], allowLocalhost: false, issueLabel: null }) as Project;
 export const PROJECTS = [project("p1", "demo"), project("p2", "payments")];
 
 const attempt = (fields: Partial<Attempt>) => ({ kind: "agent", role: "worker", tools: "build", state: "succeeded", round: 0, number: 1, output: null, resultText: null, filesChanged: null, runFiles: null, startedAt: "2026-11-05T10:00:00Z", ...fields }) as Attempt;
@@ -39,6 +39,15 @@ export let calls: { command: string; args: unknown }[] = [];
 let root: Root | null = null;
 let shownRuns: RunRow[] = [];
 let ciGaps: Record<string, CiGap> = {};
+
+let issueWatch: IssueWatch | null = null;
+let lastLook: IssueWatch | null = null;
+
+/** What a look at a project's issues finds, until `hideApp`. Also what the last look found, unless `stored` is false. */
+export const setIssueWatch = (watch: IssueWatch | null, { stored = true } = {}) => {
+  issueWatch = watch;
+  lastLook = stored ? watch : null;
+};
 
 /** What a project's CI checks and its check doesn't, until `hideApp`. */
 export const setCiGap = (projectId: string, gap: CiGap) => {
@@ -89,6 +98,24 @@ function backend(command: string, args: unknown) {
       return { repo: "acme/demo", accounts: [], info: null, excessScopes: [], error: null };
     case "project_tool_folders":
       return toolFolders;
+    case "issues_watch":
+      return lastLook;
+    case "issues_look":
+      lastLook = issueWatch;
+      return issueWatch;
+    case "project_update": {
+      // Saved as Keel saves it: a new label forgets what the old one found.
+      const { settings } = args as { settings: Project };
+      const overview = useApp.getState().overview;
+      const before = overview?.projects.find((p) => p.id === projectId);
+      if (overview && before) {
+        if (before.issueLabel !== settings.issueLabel) lastLook = null;
+        const saved = { ...before, ...settings, id: before.id, name: before.name, path: before.path, githubRepo: before.githubRepo };
+        useApp.setState({ overview: { ...overview, projects: overview.projects.map((p) => (p.id === before.id ? saved : p)) } });
+        return saved;
+      }
+      return null;
+    }
     case "project_ci_gap":
       return ciGaps[projectId ?? ""] ?? { commands: [], leftOut: [], from: [] };
     case "overview":
@@ -124,6 +151,8 @@ export async function hideApp() {
   root = null;
   toolFolders = [];
   ciGaps = {};
+  issueWatch = null;
+  lastLook = null;
   await settle();
   document.body.replaceChildren();
   // Radix leaves this for a dialog that closes with the page; the next test starts clean.

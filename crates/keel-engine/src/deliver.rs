@@ -106,6 +106,7 @@ impl Inner {
                 let _ = self
                     .store
                     .patch_attempt(&attempt.id, &[("result_text", Value::Text(url))]);
+                self.tell_issue_soon(&attempt.run_id, keel_store::IssueTold::PullRequest);
                 self.end_early(&attempt.id, &attempt.run_id, AttemptState::Succeeded, None);
                 let _ = self.advance(&attempt.run_id);
             }

@@ -79,6 +79,20 @@ pub struct Issue {
     pub body: String,
 }
 
+/// What a look at a repo's issues found.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct IssueLook {
+    /// Open with the label, newest first, at most `MOST_ISSUES`.
+    pub open: Vec<Issue>,
+    /// Whether the repo has a label by that name at all.
+    pub label_exists: bool,
+    /// Of the issues asked about, the ones GitHub says are closed. One it couldn't say about isn't.
+    pub closed: Vec<i64>,
+}
+
+/// How many open issues with the label a look brings, and how many others it asks about.
+pub const MOST_ISSUES: usize = 100;
+
 /// Where a pull request stands. `at` is when it was merged or closed, or when it last changed if
 /// neither has happened.
 #[derive(Debug, Clone, PartialEq)]
@@ -356,9 +370,133 @@ impl Gh {
             .unwrap_or_default())
     }
 
+    /// The open issues with `label`, whether the repo has that label, and which of `numbers` were
+    /// closed, in one GraphQL question that only reads. A number GitHub can't find, such as one
+    /// deleted, spoils only its own part of the answer.
+    pub fn look_at_issues(
+        &self,
+        token: &Token,
+        repo: &str,
+        label: &str,
+        numbers: &[i64],
+    ) -> Result<IssueLook, GhError> {
+        let unexpected = |detail: String| GhError {
+            kind: "other",
+            detail,
+        };
+        let (owner, name) = owner_and_name(repo)?;
+        let asked: Vec<i64> = numbers
+            .iter()
+            .copied()
+            .filter(|n| *n > 0)
+            .take(MOST_ISSUES)
+            .collect();
+        let states: String = asked
+            .iter()
+            .map(|n| format!(" i{n}:issue(number:{n}){{state}}"))
+            .collect();
+        let query = format!(
+            "query=query($owner:String!,$name:String!,$label:String!){{repository(owner:$owner,name:$name){{label(name:$label){{name}} open:issues(labels:[$label],states:OPEN,first:{MOST_ISSUES},orderBy:{{field:CREATED_AT,direction:DESC}}){{nodes{{number title url body author{{login}}}}}}{states}}}}}"
+        );
+        let (_, out, err) = self.run_within_answer(
+            token,
+            &[
+                "api",
+                "graphql",
+                "-f",
+                &query,
+                "-f",
+                &format!("owner={owner}"),
+                "-f",
+                &format!("name={name}"),
+                "-f",
+                &format!("label={label}"),
+            ],
+            LOOK_LIMIT,
+        )?;
+        // GitHub answers what it could next to what it couldn't, and `gh` then fails.
+        let repository = serde_json::from_str::<serde_json::Value>(&out)
+            .ok()
+            .and_then(|value| value.pointer("/data/repository").cloned())
+            .filter(|repository| repository.is_object());
+        let Some(repository) = repository else {
+            let detail = token.redact(&err);
+            return Err(if detail.is_empty() {
+                unexpected(format!("unexpected answer about the issues of {repo}"))
+            } else {
+                GhError {
+                    kind: classify_error(&detail),
+                    detail,
+                }
+            });
+        };
+        let open = repository
+            .pointer("/open/nodes")
+            .and_then(|nodes| nodes.as_array())
+            .map(|nodes| nodes.iter().filter_map(parse_issue).collect())
+            .unwrap_or_default();
+        let closed = asked
+            .into_iter()
+            .filter(|n| {
+                repository
+                    .pointer(&format!("/i{n}/state"))
+                    .and_then(|state| state.as_str())
+                    == Some("CLOSED")
+            })
+            .collect();
+        Ok(IssueLook {
+            open,
+            label_exists: repository.get("label").is_some_and(|l| l.is_object()),
+            closed,
+        })
+    }
+
+    /// Writes a comment on an issue. Keel's only words on GitHub besides its pull requests.
+    pub fn comment_on_issue(
+        &self,
+        token: &Token,
+        repo: &str,
+        number: i64,
+        body: &str,
+    ) -> Result<(), GhError> {
+        let (owner, name) = owner_and_name(repo)?;
+        self.run_within(
+            token,
+            &[
+                "api",
+                &format!("repos/{owner}/{name}/issues/{number}/comments"),
+                "--method",
+                "POST",
+                "-f",
+                &format!("body={body}"),
+            ],
+            LOOK_LIMIT,
+        )?;
+        Ok(())
+    }
+
     /// `run`, giving up at the limit along with anything it started. For what runs on its own in the
     /// background, where nobody would notice it hanging and everything after it would wait.
     fn run_within(&self, token: &Token, args: &[&str], limit: Duration) -> Result<String, GhError> {
+        let (succeeded, out, err) = self.run_within_answer(token, args, limit)?;
+        if succeeded {
+            return Ok(out);
+        }
+        let detail = token.redact(&err);
+        Err(GhError {
+            kind: classify_error(&detail),
+            detail,
+        })
+    }
+
+    /// Like `run_within`, but a `gh` that ran to the end gives what it printed either way: whether
+    /// it succeeded, its output, and what it said on stderr, without the token.
+    fn run_within_answer(
+        &self,
+        token: &Token,
+        args: &[&str],
+        limit: Duration,
+    ) -> Result<(bool, String, String), GhError> {
         let mut command = self.command();
         command
             .args(args)
@@ -407,14 +545,7 @@ impl Gh {
                 .to_owned()
         };
         let (out, err) = (text(stdout), text(stderr));
-        if status.success() {
-            return Ok(out);
-        }
-        let detail = token.redact(&err);
-        Err(GhError {
-            kind: classify_error(&detail),
-            detail,
-        })
+        Ok((status.success(), out, token.redact(&err)))
     }
 
     /// What became of a pull request, and what its CI says, in one question. Only reads: after
@@ -454,10 +585,7 @@ impl Gh {
             kind: "other",
             detail,
         };
-        let (owner, name) = repo
-            .split_once('/')
-            .filter(|(owner, name)| !owner.is_empty() && !name.is_empty() && !name.contains('/'))
-            .ok_or_else(|| unexpected(format!("not a repo on GitHub: {repo}")))?;
+        let (owner, name) = owner_and_name(repo)?;
         let fields = if with_checks {
             format!("{PR_FIELDS} {CI_FIELDS}")
         } else {
@@ -527,6 +655,16 @@ impl Gh {
                 .to_owned()
         })
     }
+}
+
+/// `owner` and `name` of `owner/name`, or an error for anything else.
+fn owner_and_name(repo: &str) -> Result<(&str, &str), GhError> {
+    repo.split_once('/')
+        .filter(|(owner, name)| !owner.is_empty() && !name.is_empty() && !name.contains('/'))
+        .ok_or_else(|| GhError {
+            kind: "other",
+            detail: format!("not a repo on GitHub: {repo}"),
+        })
 }
 
 fn parse_issue(value: &serde_json::Value) -> Option<Issue> {
@@ -1141,6 +1279,92 @@ mod tests {
             calls[0].ends_with(" -f owner=acme -f name=app -F number=12 [token:gho_secret]"),
             "{}",
             calls[0]
+        );
+    }
+
+    #[test]
+    fn a_look_at_issues_reads_those_open_with_the_label_and_which_of_the_others_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(
+            dir.path(),
+            r#"echo '{"data":{"repository":{"label":{"name":"keel"},"open":{"nodes":[{"number":9,"title":"Nine","url":"https://github.com/acme/app/issues/9","body":"b9","author":{"login":"bob"}},{"number":8,"title":"Eight","url":"https://github.com/acme/app/issues/8","body":"","author":null}]},"i3":{"state":"CLOSED"},"i4":{"state":"OPEN"}}}}'"#,
+        );
+        let token = Token("gho_secret".into());
+        let look = gh
+            .look_at_issues(&token, "acme/app", "keel, ready", &[3, 4])
+            .unwrap();
+        assert!(look.label_exists);
+        assert_eq!(
+            look.open.iter().map(|i| i.number).collect::<Vec<_>>(),
+            [9, 8]
+        );
+        assert_eq!(look.open[0].author, "bob");
+        assert_eq!(look.open[0].body, "b9");
+        assert_eq!(look.open[1].author, "");
+        assert_eq!(look.closed, [3]);
+        let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+        assert_eq!(calls.lines().count(), 1, "{calls}");
+        assert!(calls.starts_with("api graphql -f query=query("), "{calls}");
+        assert!(!calls.contains("mutation"), "{calls}");
+        assert!(calls.contains("i3:issue(number:3){state}"), "{calls}");
+        // The label goes as a variable, whatever it says, and the token never as an argument.
+        assert!(
+            calls
+                .trim_end()
+                .ends_with(" -f owner=acme -f name=app -f label=keel, ready [token:gho_secret]"),
+            "{calls}"
+        );
+    }
+
+    #[test]
+    fn an_issue_github_cannot_find_spoils_only_its_own_part_of_the_look() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(
+            dir.path(),
+            r#"echo '{"data":{"repository":{"label":null,"open":{"nodes":[]},"i3":null,"i5":{"state":"CLOSED"}}},"errors":[{"type":"NOT_FOUND","message":"Could not resolve to an Issue with the number of 3."}]}'
+echo 'gh: Could not resolve to an Issue with the number of 3.' >&2; exit 1"#,
+        );
+        let look = gh
+            .look_at_issues(&Token("t".into()), "acme/app", "keel", &[3, 5])
+            .unwrap();
+        assert!(!look.label_exists);
+        assert!(look.open.is_empty());
+        assert_eq!(look.closed, [5]);
+    }
+
+    #[test]
+    fn a_look_at_issues_that_gets_no_answer_says_why() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(
+            dir.path(),
+            "echo 'HTTP 401: Bad credentials (https://api.github.com/graphql) gho_secret' >&2; exit 1",
+        );
+        let error = gh
+            .look_at_issues(&Token("gho_secret".into()), "acme/app", "keel", &[])
+            .unwrap_err();
+        assert!(error.detail.contains("Bad credentials"), "{error:?}");
+        assert!(!error.detail.contains("gho_secret"), "{error:?}");
+        assert!(
+            gh.look_at_issues(&Token("t".into()), "not-a-repo", "keel", &[])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_comment_on_an_issue_is_one_post_with_the_text_as_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(dir.path(), "echo '{}'");
+        gh.comment_on_issue(
+            &Token("gho_secret".into()),
+            "acme/app",
+            7,
+            "@team Keel started.\nSecond line",
+        )
+        .unwrap();
+        let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+        assert_eq!(
+            calls.trim_end(),
+            "api repos/acme/app/issues/7/comments --method POST -f body=@team Keel started.\nSecond line [token:gho_secret]"
         );
     }
 

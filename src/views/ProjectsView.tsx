@@ -1,7 +1,8 @@
 import { AlertTriangle, Check, Search } from "lucide-react";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type CiGap, type EnvVar, type GithubStatus, type Project, type Service, type Workflow } from "../lib/api";
+import { api, type CiGap, type EnvVar, type GithubStatus, type IssueWatch, type Project, type Service, type Workflow } from "../lib/api";
+import { formatRelative } from "../lib/format";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
 import { ciCommandsLeft, ciLeftOutLeft, foldersToOffer, needsNode, needsSetup, withCheckOption, withFolders } from "../lib/projects";
 import { errorText, reasonText } from "../lib/reason";
@@ -72,6 +73,36 @@ function ServiceRow({ service, onChange, onRemove }: { service: Service; onChang
  */
 export const projectCardKey = (project: Project) => [project.id, project.githubAccount, project.githubRepo, project.setupCommand, project.checkCommand, ...project.allowedRead].join("\0");
 
+/** What the last look at the project's issues found, or why it couldn't look. */
+function IssueWatchLine({ watch, looking }: { watch: IssueWatch | null; looking: boolean }) {
+  const { t } = useTranslation();
+  if (looking) return <p className="mt-1 text-[12px] text-subtle">{t("projects.issueWatch.looking")}</p>;
+  if (!watch) return null;
+  const problem = watch.problem;
+  const failed = watch.commentFailed;
+  return (
+    <div className="mt-1 space-y-0.5 text-[12px]">
+      {problem?.kind === "labelMissing" && (
+        <p className="flex gap-1.5 text-warning">
+          <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+          {t("projects.issueWatch.labelMissing", { label: watch.label })}
+        </p>
+      )}
+      {problem?.kind === "github" && <p className="text-danger">{t("projects.issueWatch.github", { detail: problem.detail })}</p>}
+      {problem?.kind === "ghMissing" && <p className="text-danger">{t("reasons.ghMissing")}</p>}
+      {(problem?.kind === "noAccount" || problem?.kind === "noRepo") && <p className="text-warning">{t(`projects.issueWatch.${problem.kind}`)}</p>}
+      {(!problem || problem.kind === "labelMissing") && (
+        <p className="text-muted">
+          {t("projects.issueWatch.done", { when: formatRelative(watch.at), open: watch.open })}
+          {watch.brought > 0 && ` ${t("projects.issueWatch.brought", { count: watch.brought })}`}
+          {watch.removed > 0 && ` ${t("projects.issueWatch.removed", { count: watch.removed })}`}
+        </p>
+      )}
+      {failed && <p className="text-warning">{t("projects.issueWatch.commentFailed", { number: failed.number, detail: failed.detail })}</p>}
+    </div>
+  );
+}
+
 function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boolean; onSaved: () => void }) {
   const { t, i18n } = useTranslation();
   const refreshOverview = useApp((s) => s.refreshOverview);
@@ -85,6 +116,9 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
   const [workflow, setWorkflow] = useState(project.defaultWorkflow ?? FULL_WORKFLOW);
   const [sensitive, setSensitive] = useState(project.sensitivePaths.join("\n"));
   const [localhost, setLocalhost] = useState(project.allowLocalhost);
+  const [label, setLabel] = useState(project.issueLabel ?? "");
+  const [watch, setWatch] = useState<IssueWatch | null>(null);
+  const [looking, setLooking] = useState(false);
   const [workflows, setWorkflows] = useState<Workflow[] | null>(null);
   const [ciGap, setCiGap] = useState<CiGap | null>(null);
   const [status, setStatus] = useState<GithubStatus | null>(null);
@@ -144,6 +178,30 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
     };
   }, [project.id]);
 
+  // What the last look at the issues found, or, when none has for this label, what a look now
+  // finds. Keyed by the saved label, so saving one looks even if this form starts over meanwhile.
+  useEffect(() => {
+    let current = true;
+    api
+      .issuesWatch(project.id)
+      .then((found) => {
+        if (!current) return;
+        setWatch(found);
+        if (found || !project.issueLabel) return;
+        setLooking(true);
+        api
+          .issuesLook(project.id)
+          .then((looked) => current && setWatch(looked))
+          .catch((e) => current && setError(errorText(t, e)))
+          .finally(() => current && setLooking(false));
+      })
+      .catch(() => current && setWatch(null));
+    return () => {
+      current = false;
+      setLooking(false);
+    };
+  }, [project.id, project.issueLabel, t]);
+
   const openOnGithub = (url: string) => {
     setError(null);
     api.openGithubUrl(url).catch((e) => setError(errorText(t, e)));
@@ -173,6 +231,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
         defaultWorkflow: workflow === FULL_WORKFLOW ? null : workflow,
         sensitivePaths: lines(sensitive),
         allowLocalhost: localhost,
+        issueLabel: label.trim() || null,
       });
       await refreshOverview();
       onSaved();
@@ -306,6 +365,14 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
                 </Button>
               </div>
               <p className="mt-2 text-[11.5px] leading-snug text-subtle">{t("settings.githubAccessHint", { account: selected })}</p>
+            </div>
+          )}
+          {project.githubRepo && (
+            <div className="max-w-sm">
+              <Field label={t("projects.issueLabel")} hint={t("projects.issueLabelHint")}>
+                <input value={label} onChange={(e) => setLabel(e.target.value)} maxLength={50} placeholder={t("projects.issueLabelPlaceholder")} className={inputClass} />
+              </Field>
+              <IssueWatchLine watch={watch?.label === label.trim() ? watch : null} looking={looking} />
             </div>
           )}
           {status && status.error?.code !== "ghMissing" && (

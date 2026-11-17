@@ -89,6 +89,26 @@ export interface Project {
   sensitivePaths: string[];
   /** Its tests start servers on localhost, so its check and its builder's commands may reach anything there. */
   allowLocalhost: boolean;
+  /** Keel brings the repo's open issues with this label to the Backlog, and says on each when its run starts and when its pull request opens. Null: it watches none. */
+  issueLabel: string | null;
+}
+
+/** Why Keel couldn't look at a project's issues, or something the person should know. */
+export type IssueWatchProblem = { kind: "noRepo" } | { kind: "noAccount" } | { kind: "ghMissing" } | { kind: "labelMissing" } | { kind: "github"; detail: string };
+
+/** What came of the last look at a project's issues since the app opened. */
+export interface IssueWatch {
+  label: string;
+  at: string;
+  /** Open issues with the label. */
+  open: number;
+  /** Of those, how many that look put in the Backlog. */
+  brought: number;
+  /** Cards it took off because their issue closed before they started. */
+  removed: number;
+  problem: IssueWatchProblem | null;
+  /** The last comment on an issue that didn't work, until one does. */
+  commentFailed: { number: number; detail: string } | null;
 }
 
 export interface ProjectSettings {
@@ -102,6 +122,7 @@ export interface ProjectSettings {
   defaultWorkflow: string | null;
   sensitivePaths: string[];
   allowLocalhost: boolean;
+  issueLabel: string | null;
 }
 
 /** A folder in the home folder where programs a project's commands use are installed. */
@@ -847,6 +868,9 @@ export const api = {
   mcpClientRevoke: (id: string) => invoke<void>("mcp_client_revoke", { id }),
   mcpConnectClaude: (canRun: boolean) => invoke<McpOverview>("mcp_connect_claude", { canRun }),
   issuesList: (projectId: string) => invoke<Issue[]>("issues_list", { projectId }),
+  issuesWatch: (projectId: string) => invoke<IssueWatch | null>("issues_watch", { projectId }),
+  /** Looks at the project's issues now, as the background does every 2 minutes. */
+  issuesLook: (projectId: string) => invoke<IssueWatch | null>("issues_look", { projectId }),
   decisionsList: (projectId: string) => invoke<Decision[]>("decisions_list", { projectId }),
   decisionRetire: (seq: number) => invoke<void>("decision_retire", { seq }),
   approvalAnswer: (attemptId: string, approve: boolean, text: string) => invoke<void>("approval_answer", { attemptId, approve, text }),
