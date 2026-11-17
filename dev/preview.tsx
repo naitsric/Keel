@@ -626,7 +626,7 @@ const mcpOverview = () => {
 };
 
 let defaultWorkflow: string | null = params.get("defaultWorkflow");
-const demoProject: Project = { sensitivePaths: params.get("sensitive") === "1" ? ["billing/", "*.proto"] : [],  id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: noCheck ? null : "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.nvm"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }], defaultWorkflow, allowLocalhost: localhostOpen };
+const demoProject: Project = { sensitivePaths: params.get("sensitive") === "1" ? ["billing/", "*.proto"] : [],  id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: noCheck ? null : "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.nvm"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }], defaultWorkflow, allowLocalhost: localhostOpen, issueLabel: params.get("watch") };
 // A second project on the board, with one card, to try the selector and coming back from a run.
 const otherProject: Project = { ...demoProject, id: "p2", name: "payments", path: "/Users/you/payments", services: [], env: [], defaultWorkflow: null };
 const projects = view === "board" || palette || params.get("drafts") === "1" ? [demoProject, otherProject] : [demoProject];
@@ -987,6 +987,22 @@ mockIPC((command, args) => {
       if (params.get("issues") === "account") throw blockedBy("githubAccountMissing");
       if (params.get("issues") === "repo") throw blockedBy("noGithubRemote");
       return params.get("issues") === "none" ? [] : issues;
+    case "issues_watch":
+    case "issues_look": {
+      // ?watch=keel watches that label. ?watchProblem=labelMissing, github, noAccount… and ?commentFailed=1 for what can go wrong.
+      const label = params.get("watch");
+      if (!label) return null;
+      const problem = params.get("watchProblem");
+      return {
+        label,
+        at: at(command === "issues_look" ? 0 : 1),
+        open: problem ? 0 : 3,
+        brought: command === "issues_look" && !problem ? 1 : 0,
+        removed: params.get("removed") === "1" ? 1 : 0,
+        problem: problem === "github" ? { kind: "github", detail: "HTTP 401: Bad credentials (https://api.github.com/graphql)" } : problem ? { kind: problem } : null,
+        commentFailed: params.get("commentFailed") === "1" ? { number: 7, detail: "HTTP 403: Resource not accessible by personal access token" } : null,
+      };
+    }
     case "board_get": {
       // No project is every project's cards.
       const { projectId } = args as { projectId: string | null };

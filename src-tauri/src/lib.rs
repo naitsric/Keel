@@ -13,9 +13,9 @@ use keel_core::{
 };
 use keel_engine::{
     AddedProject, Answer, Board, BrainView, CiGap, CommandChange, Config, ContractEdit, Engine,
-    Error as EngineError, GithubStatus, JointChangeView, Preflight, ProjectProposalReview,
-    ProjectSetup, RawCheck, RetryOptions, RunJoint, StartRun, Workflow, WorkflowDraft,
-    request_from_issue, title_from_issue,
+    Error as EngineError, GithubStatus, IssueWatch, JointChangeView, Preflight,
+    ProjectProposalReview, ProjectSetup, RawCheck, RetryOptions, RunJoint, StartRun, Workflow,
+    WorkflowDraft, request_from_issue, title_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
@@ -301,6 +301,9 @@ struct ProjectSettingsInput {
     default_workflow: Option<String>,
     sensitive_paths: Vec<String>,
     allow_localhost: bool,
+    /// The label whose issues Keel brings to the Backlog. Empty or missing: it watches none.
+    #[serde(default)]
+    issue_label: Option<String>,
 }
 
 #[tauri::command(async)]
@@ -311,7 +314,7 @@ fn project_update(
 ) -> CommandResult<Project> {
     let clean =
         |value: Option<String>| value.map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
-    Ok(state.engine.update_project(
+    state.engine.update_project(
         &project_id,
         &ProjectSettings {
             github_account: clean(settings.github_account),
@@ -325,7 +328,30 @@ fn project_update(
             sensitive_paths: settings.sensitive_paths,
             allow_localhost: settings.allow_localhost,
         },
-    )?)
+    )?;
+    Ok(state
+        .engine
+        .set_issue_label(&project_id, settings.issue_label.as_deref())?)
+}
+
+/// What came of the last look at a project's issues since the app opened. None if it watches none,
+/// or hasn't looked yet.
+#[tauri::command(async)]
+fn issues_watch(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CommandResult<Masked<Option<IssueWatch>>> {
+    Ok(Masked(state.engine.issue_watch(&project_id)))
+}
+
+/// Looks at a project's issues now, as the background does, and says what came of it.
+#[tauri::command(async)]
+fn issues_look(
+    state: State<'_, AppState>,
+    project_id: String,
+) -> CommandResult<Masked<Option<IssueWatch>>> {
+    state.ready.wait();
+    Ok(Masked(state.engine.look_at_issues(&project_id)?))
 }
 
 #[tauri::command(async)]
@@ -1014,6 +1040,7 @@ pub fn run() {
                     // After that, so a run that's still going counts before anything new starts.
                     engine.start_board();
                     engine.start_pr_watch();
+                    engine.start_issue_watch();
                     ready.set();
                     let _ = handle.emit(CHANGED_EVENT, "");
                     // After the tools are known, so no client ever finds Keel half ready.
@@ -1089,6 +1116,8 @@ pub fn run() {
             project_update,
             github_status,
             issues_list,
+            issues_watch,
+            issues_look,
             decisions_list,
             decision_retire,
             approval_answer,
@@ -1188,6 +1217,7 @@ mod tests {
             default_workflow: Some("mine".into()),
             sensitive_paths: vec!["billing/".into()],
             allow_localhost: true,
+            issue_label: None,
         })
         .unwrap();
         sent["checkCommand"] = json!("pnpm test");
@@ -1308,6 +1338,7 @@ mod tests {
                 default_workflow: None,
                 sensitive_paths: vec![],
                 allow_localhost: false,
+                issue_label: None,
             }],
             pending_proposals: 0,
             workflow_drafts: 0,

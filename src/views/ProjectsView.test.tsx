@@ -1,12 +1,12 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { callsTo, hideApp, paletteRow, pressKey, pressMod, row, setCiGap, setToolFolders, settle, showApp, view } from "../commands/testApp";
+import { callsTo, hideApp, paletteRow, pressKey, pressMod, row, setCiGap, setIssueWatch, setToolFolders, settle, showApp, view } from "../commands/testApp";
 import i18next from "../i18n";
-import type { Project } from "../lib/api";
+import type { IssueWatch, Project } from "../lib/api";
 import { useApp } from "../lib/store";
 
 const RUNS = [row("r1", "running")];
-const project = (id: string, fields: Partial<Project> = {}): Project => ({ id, name: id, path: `/Users/you/${id}`, githubAccount: "you", githubRepo: `acme/${id}`, setupCommand: null, checkCommand: "make test", allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, sensitivePaths: [], allowLocalhost: false, ...fields });
+const project = (id: string, fields: Partial<Project> = {}): Project => ({ id, name: id, path: `/Users/you/${id}`, githubAccount: "you", githubRepo: `acme/${id}`, setupCommand: null, checkCommand: "make test", allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, sensitivePaths: [], allowLocalhost: false, issueLabel: null, ...fields });
 const THREE = [project("alpha"), project("beta", { checkCommand: null }), project("gamma", { githubRepo: "other/thing" })];
 
 const header = () => document.querySelector("header") as HTMLElement;
@@ -182,6 +182,67 @@ describe("the Projects page", () => {
       expect(row?.textContent).toContain(i18next.t(`projects.ciWhy.${reason}`));
     }
     expect(button(i18next.t("projects.ciMissingAdd"))).toBeUndefined();
+  });
+
+  describe("watching a project's issues", () => {
+    const field = () => [...main().querySelectorAll("label")].find((l) => l.textContent?.startsWith(i18next.t("projects.issueLabel")))?.querySelector("input") as HTMLInputElement | undefined;
+    const saved = () => (callsTo("project_update").at(-1)?.args as { settings: Project }).settings;
+    const WATCH: IssueWatch = { label: "keel", at: new Date().toISOString(), open: 3, brought: 2, removed: 0, problem: null, commentFailed: null };
+
+    it("saves the label, looks right away and says what it brought", async () => {
+      await showApp(RUNS, { name: "projects" }, [project("alpha")]);
+      expect(field()?.value).toBe("");
+      expect(main().textContent).toContain(i18next.t("projects.issueLabelHint"));
+      setIssueWatch(WATCH, { stored: false });
+      await typeInto(field() as HTMLInputElement, "  keel ");
+      await click(button(i18next.t("settings.save")));
+      expect(saved().issueLabel).toBe("keel");
+      expect(callsTo("issues_look")).toHaveLength(1);
+      expect(main().textContent).toContain(i18next.t("projects.issueWatch.brought", { count: 2 }));
+    });
+
+    it("still looks and shows it when the same save makes the form start over", async () => {
+      await showApp(RUNS, { name: "projects" }, [project("alpha")]);
+      setIssueWatch(WATCH, { stored: false });
+      const check = [...main().querySelectorAll("label")].find((l) => l.textContent?.startsWith(i18next.t("settings.checkCommand")))?.querySelector("input") as HTMLInputElement;
+      await typeInto(check, "make test-all");
+      await typeInto(field() as HTMLInputElement, "keel");
+      await click(button(i18next.t("settings.save")));
+      expect(saved().checkCommand).toBe("make test-all");
+      expect(field()?.value).toBe("keel");
+      expect(callsTo("issues_look")).toHaveLength(1);
+      expect(main().textContent).toContain(i18next.t("projects.issueWatch.brought", { count: 2 }));
+    });
+
+    it("looks on opening a watching project the background hasn't looked at yet", async () => {
+      setIssueWatch(WATCH, { stored: false });
+      await showApp(RUNS, { name: "projects" }, [project("alpha", { issueLabel: "keel" })]);
+      expect(callsTo("issues_look")).toHaveLength(1);
+      expect(main().textContent).toContain(i18next.t("projects.issueWatch.brought", { count: 2 }));
+    });
+
+    it("stops watching when the label is emptied, and doesn't look", async () => {
+      setIssueWatch(WATCH);
+      await showApp(RUNS, { name: "projects" }, [project("alpha", { issueLabel: "keel" })]);
+      expect(field()?.value).toBe("keel");
+      await typeInto(field() as HTMLInputElement, "");
+      await click(button(i18next.t("settings.save")));
+      expect(saved().issueLabel).toBeNull();
+      expect(callsTo("issues_look")).toEqual([]);
+      expect(main().textContent).not.toContain(i18next.t("projects.issueWatch.brought", { count: 2 }));
+    });
+
+    it("says when the repo has no such label, or a comment on an issue failed", async () => {
+      setIssueWatch({ ...WATCH, brought: 0, problem: { kind: "labelMissing" }, commentFailed: { number: 7, detail: "HTTP 403" } });
+      await showApp(RUNS, { name: "projects" }, [project("alpha", { issueLabel: "keel" })]);
+      expect(main().textContent).toContain(i18next.t("projects.issueWatch.labelMissing", { label: "keel" }));
+      expect(main().textContent).toContain(i18next.t("projects.issueWatch.commentFailed", { number: 7, detail: "HTTP 403" }));
+    });
+
+    it("isn't offered for a project that isn't on GitHub", async () => {
+      await showApp(RUNS, { name: "projects" }, [project("alpha", { githubRepo: null })]);
+      expect(field()).toBeUndefined();
+    });
   });
 
   describe("localhost for a project's tests", () => {

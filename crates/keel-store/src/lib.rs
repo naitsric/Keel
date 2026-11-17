@@ -415,6 +415,24 @@ const MIGRATIONS: &[&str] = &[
     r#"
     alter table run add column extra_localhost integer not null default 0;
 "#,
+    // 23: Watching a project's issues. The label a person chose, none for a project from before. The
+    // issues already on the board count as seen, so one a person removed doesn't come back on its
+    // own; any card with an issue makes it seen from now on. And when a run said on its issue that
+    // it started, and that its pull request opened, so it says each once.
+    r#"
+    alter table project add column issue_label text;
+    create table issue_seen (
+        project_id text not null references project (id),
+        number integer not null,
+        primary key (project_id, number)
+    );
+    insert or ignore into issue_seen (project_id, number)
+        select project_id, issue_number from card where issue_number is not null;
+    create trigger card_issue_seen after insert on card when new.issue_number is not null
+    begin insert or ignore into issue_seen (project_id, number) values (new.project_id, new.issue_number); end;
+    alter table run add column issue_told_started text;
+    alter table run add column issue_told_pr text;
+"#,
 ];
 
 /// Whether the card a query calls `card` can start as far as other cards go: it waits for none,
@@ -444,6 +462,16 @@ const ATTEMPT_THAT_MATTERS: &str = "select b.rowid from attempt b where b.run_id
                   when b.state in ('queued', 'preparing', 'running') then 2 else 3 end,
              b.rowid desc
     limit 1";
+
+/// Whether the card a query calls `card` never started, so Keel may take it off the board when its
+/// issue closes: an issue's card in the Backlog or Todo, not taken, on no change across projects,
+/// and no run of its project ever came from that issue. Moving a card to Todo again forgets its
+/// run, which is why the runs are asked.
+const NEVER_STARTED: &str = "card.issue_number is not null and card.lane in ('backlog', 'todo')
+    and card.run_id is null and card.joint_change_id is null
+    and not exists (select 1 from run where run.project_id = card.project_id
+                    and json_valid(run.source_issue)
+                    and json_extract(run.source_issue, '$.number') = card.issue_number)";
 
 /// How many runs an MCP client may keep open until the person says otherwise.
 pub const DEFAULT_MAX_OPEN_RUNS: i64 = 3;
@@ -719,6 +747,25 @@ pub struct Project {
     /// Its tests start servers on localhost, so its check and its builder's commands may reach
     /// anything there. Setup never may.
     pub allow_localhost: bool,
+    /// Keel brings the repo's open issues with this label to the board's Backlog, and says on each
+    /// when its run starts and when its pull request opens. None: it watches nothing.
+    pub issue_label: Option<String>,
+}
+
+/// What a run says on the issue it came from, each once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueTold {
+    Started,
+    PullRequest,
+}
+
+impl IssueTold {
+    fn column(self) -> &'static str {
+        match self {
+            Self::Started => "issue_told_started",
+            Self::PullRequest => "issue_told_pr",
+        }
+    }
 }
 
 /// What a person can change about a project.
@@ -736,7 +783,7 @@ pub struct ProjectSettings {
     pub allow_localhost: bool,
 }
 
-const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths, allow_localhost";
+const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths, allow_localhost, issue_label";
 
 fn project_from(r: &Row) -> rusqlite::Result<Project> {
     let list = |text: String| serde_json::from_str(&text).unwrap_or_default();
@@ -756,6 +803,7 @@ fn project_from(r: &Row) -> rusqlite::Result<Project> {
         default_workflow: r.get(12)?,
         sensitive_paths: list(r.get(13)?),
         allow_localhost: r.get(14)?,
+        issue_label: r.get(15)?,
     })
 }
 
@@ -1801,8 +1849,8 @@ impl Store {
 
     pub fn add_project(&self, project: &Project) -> Result<()> {
         self.lock().execute(
-            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths, allow_localhost)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths, allow_localhost, issue_label)
+             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 project.id,
                 project.name,
@@ -1819,9 +1867,82 @@ impl Store {
                 project.default_workflow,
                 serde_json::to_string(&project.sensitive_paths).unwrap_or_default(),
                 project.allow_localhost,
+                project.issue_label,
             ],
         )?;
         Ok(())
+    }
+
+    /// The label whose issues Keel brings to the board, or none to stop watching.
+    pub fn set_issue_label(&self, id: &str, label: Option<&str>) -> Result<()> {
+        let changed = self.lock().execute(
+            "update project set issue_label = ?2 where id = ?1",
+            params![id, label],
+        )?;
+        if changed == 0 {
+            return Err(Error::NotFound(format!("project {id}")));
+        }
+        Ok(())
+    }
+
+    /// Of these issues, the ones never on this project's board, and that no run of the project came
+    /// from, as one started from the New Run dialog does without a card. In the order given.
+    pub fn unseen_issues(&self, project_id: &str, numbers: &[i64]) -> Result<Vec<i64>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select 1 where exists (select 1 from issue_seen where project_id = ?1 and number = ?2)
+             or exists (select 1 from run where run.project_id = ?1 and json_valid(run.source_issue)
+                        and json_extract(run.source_issue, '$.number') = ?2)",
+        )?;
+        let mut unseen = Vec::new();
+        for &number in numbers {
+            if !stmt.exists(params![project_id, number])? {
+                unseen.push(number);
+            }
+        }
+        Ok(unseen)
+    }
+
+    /// The issues of this project's cards that never started. By issue number.
+    pub fn issue_cards_not_started(&self, project_id: &str) -> Result<Vec<i64>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "select issue_number from card where project_id = ?1 and {NEVER_STARTED} order by issue_number"
+        ))?;
+        let rows = stmt.query_map([project_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Removes the card of an issue that was closed, if it still never started, and forgets the
+    /// issue was seen, so it comes back if it's opened again. False if there's no such card.
+    pub fn remove_closed_issue_card(&self, project_id: &str, number: i64) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let removed = tx.execute(
+            &format!(
+                "delete from card where project_id = ?1 and issue_number = ?2 and {NEVER_STARTED}"
+            ),
+            params![project_id, number],
+        )?;
+        if removed > 0 {
+            tx.execute(
+                "delete from issue_seen where project_id = ?1 and number = ?2",
+                params![project_id, number],
+            )?;
+        }
+        tx.commit()?;
+        Ok(removed > 0)
+    }
+
+    /// Marks that a run said `what` on its issue, now. False if it already had: then nobody says it
+    /// again.
+    pub fn mark_issue_told(&self, run_id: &str, what: IssueTold) -> Result<bool> {
+        let column = what.column();
+        let changed = self.lock().execute(
+            &format!("update run set {column} = ?2 where id = ?1 and {column} is null"),
+            params![run_id, now()],
+        )?;
+        Ok(changed > 0)
     }
 
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<()> {
@@ -3308,6 +3429,7 @@ mod tests {
                 default_workflow: None,
                 sensitive_paths: vec![],
                 allow_localhost: false,
+                issue_label: None,
             })
             .unwrap();
         store
@@ -3469,6 +3591,11 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 alter table run drop column issue_told_pr;
+                 alter table run drop column issue_told_started;
+                 drop trigger card_issue_seen;
+                 drop table issue_seen;
+                 alter table project drop column issue_label;
                  alter table run drop column extra_localhost;
                  alter table project drop column allow_localhost;
                  alter table card drop column body_by;
@@ -3778,6 +3905,7 @@ mod tests {
                 default_workflow: None,
                 sensitive_paths: vec![],
                 allow_localhost: false,
+                issue_label: None,
             })
             .unwrap();
     }
@@ -3801,6 +3929,11 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 15;
+                 alter table run drop column issue_told_pr;
+                 alter table run drop column issue_told_started;
+                 drop trigger card_issue_seen;
+                 drop table issue_seen;
+                 alter table project drop column issue_label;
                  alter table run drop column extra_localhost;
                  alter table project drop column allow_localhost;
                  drop trigger joint_contract_only_forward;
@@ -3845,6 +3978,126 @@ mod tests {
         assert!(store.project("new").unwrap().allowed_read.is_empty());
     }
 
+    fn issue_card(store: &Store, id: &str, number: i64) {
+        store
+            .add_card(&NewCard {
+                id: id.into(),
+                project_id: "p".into(),
+                title: format!("Issue {number}"),
+                body: String::new(),
+                issue: Some(format!(r#"{{"number":{number}}}"#)),
+                issue_number: Some(number),
+                body_by: None,
+            })
+            .unwrap();
+    }
+
+    /// Watching issues: the ones already on a board from before count as seen, so a card a person
+    /// removed earlier doesn't come back once they choose a label.
+    #[test]
+    fn issues_on_the_board_from_before_count_as_seen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        {
+            let store = Store::open(&path).unwrap();
+            seeded(&store);
+            issue_card(&store, "five", 5);
+        }
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "pragma user_version = 22;
+                 alter table run drop column issue_told_pr;
+                 alter table run drop column issue_told_started;
+                 drop trigger card_issue_seen;
+                 drop table issue_seen;
+                 alter table project drop column issue_label;",
+            )
+            .unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        assert_eq!(store.project("p").unwrap().issue_label, None);
+        assert_eq!(store.unseen_issues("p", &[5, 6]).unwrap(), [6]);
+        assert!(store.delete_card("five").unwrap());
+        assert_eq!(store.unseen_issues("p", &[5, 6]).unwrap(), [6]);
+        store.set_issue_label("p", Some("keel")).unwrap();
+        assert_eq!(
+            store.project("p").unwrap().issue_label.as_deref(),
+            Some("keel")
+        );
+        assert!(store.set_issue_label("missing", Some("keel")).is_err());
+    }
+
+    /// Only a card that never started leaves when its issue closes: once a run came from the issue,
+    /// even one whose card went back to Todo, it stays for the person.
+    #[test]
+    fn a_card_leaves_with_its_closed_issue_only_if_it_never_started() {
+        let (_dir, store) = store();
+        seeded(&store);
+        issue_card(&store, "five", 5);
+        issue_card(&store, "six", 6);
+        assert_eq!(store.issue_cards_not_started("p").unwrap(), [5, 6]);
+
+        store
+            .add_run(&NewRun {
+                id: "from-six".into(),
+                project_id: "p".into(),
+                title: "Issue 6".into(),
+                request: "fix it".into(),
+                workflow: "[]".into(),
+                language: "en".into(),
+                source_issue: Some(
+                    r#"{"number":6,"url":"https://github.com/a/b/issues/6"}"#.into(),
+                ),
+                request_written: None,
+                workflow_id: None,
+                workflow_name: None,
+                started_by: None,
+            })
+            .unwrap();
+        assert_eq!(store.issue_cards_not_started("p").unwrap(), [5]);
+        assert!(!store.remove_closed_issue_card("p", 6).unwrap());
+        // One started from the New Run dialog has a run and no card, and counts as seen too.
+        store
+            .add_run(&NewRun {
+                id: "from-eight".into(),
+                project_id: "p".into(),
+                title: "Issue 8".into(),
+                request: "fix it".into(),
+                workflow: "[]".into(),
+                language: "en".into(),
+                source_issue: Some(r#"{"number":8}"#.into()),
+                request_written: None,
+                workflow_id: None,
+                workflow_name: None,
+                started_by: None,
+            })
+            .unwrap();
+        assert_eq!(store.unseen_issues("p", &[7, 8]).unwrap(), [7]);
+        assert!(store.card("six").is_ok());
+
+        assert!(store.remove_closed_issue_card("p", 5).unwrap());
+        assert!(store.card("five").is_err());
+        // Forgotten as seen, so it comes back if it's opened again.
+        assert_eq!(store.unseen_issues("p", &[5, 6]).unwrap(), [5]);
+        assert!(!store.remove_closed_issue_card("p", 5).unwrap());
+    }
+
+    #[test]
+    fn a_run_says_each_thing_on_its_issue_once() {
+        let (_dir, store) = store();
+        seeded(&store);
+        assert!(store.mark_issue_told("r", IssueTold::Started).unwrap());
+        assert!(!store.mark_issue_told("r", IssueTold::Started).unwrap());
+        assert!(store.mark_issue_told("r", IssueTold::PullRequest).unwrap());
+        assert!(!store.mark_issue_told("r", IssueTold::PullRequest).unwrap());
+        assert!(
+            !store
+                .mark_issue_told("missing", IssueTold::Started)
+                .unwrap()
+        );
+    }
+
     /// #123: localhost is closed to every project until a person opens it, a project from before
     /// included, and a person can close it again.
     #[test]
@@ -3859,6 +4112,11 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 20;
+                 alter table run drop column issue_told_pr;
+                 alter table run drop column issue_told_started;
+                 drop trigger card_issue_seen;
+                 drop table issue_seen;
+                 alter table project drop column issue_label;
                  alter table run drop column extra_localhost;
                  alter table project drop column allow_localhost;",
             )
@@ -3935,6 +4193,11 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 21;
+                 alter table run drop column issue_told_pr;
+                 alter table run drop column issue_told_started;
+                 drop trigger card_issue_seen;
+                 drop table issue_seen;
+                 alter table project drop column issue_label;
                  alter table run drop column extra_localhost;",
             )
             .unwrap();
@@ -4812,6 +5075,7 @@ mod tests {
                 default_workflow: None,
                 sensitive_paths: vec![],
                 allow_localhost: false,
+                issue_label: None,
             })
             .unwrap();
         assert_eq!(
@@ -5551,6 +5815,7 @@ mod tests {
                 default_workflow: None,
                 sensitive_paths: vec![],
                 allow_localhost: false,
+                issue_label: None,
             })
             .unwrap();
         let pause = || std::thread::sleep(std::time::Duration::from_millis(5));
@@ -5709,6 +5974,11 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table run drop column issue_told_pr;
+                 alter table run drop column issue_told_started;
+                 drop trigger card_issue_seen;
+                 drop table issue_seen;
+                 alter table project drop column issue_label;
                  alter table run drop column extra_localhost;
                  alter table project drop column allow_localhost;
                  alter table card drop column body_by;
@@ -6548,6 +6818,11 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "pragma user_version = 16;
+             alter table run drop column issue_told_pr;
+             alter table run drop column issue_told_started;
+             drop trigger card_issue_seen;
+             drop table issue_seen;
+             alter table project drop column issue_label;
              alter table run drop column extra_localhost;
              alter table project drop column allow_localhost;
              drop trigger joint_contract_only_forward;

@@ -24,6 +24,7 @@ const PROJECT: Project = {
   defaultWorkflow: "mine",
   sensitivePaths: ["billing/"],
   allowLocalhost: true,
+  issueLabel: null,
 };
 const NO_GUESS: Guess = { check: null, setup: null, from: [], setupOptions: [], checkOptions: [], fromCi: false, localhost: false, ciChecks: [], ciLeftOut: [] };
 const PNPM: Guess = { check: "pnpm test", setup: "pnpm install --frozen-lockfile", from: ["package.json", "pnpm-lock.yaml"], setupOptions: [], checkOptions: ["pnpm run lint", "pnpm test"], fromCi: false, localhost: false, ciChecks: [], ciLeftOut: [] };
