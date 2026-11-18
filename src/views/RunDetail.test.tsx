@@ -1803,6 +1803,21 @@ describe("the commands a step ran", () => {
     expect(page()).not.toContain("The output says");
   });
 
+  it("says which proposals were left out for repeating another note, and nothing more when none was", async () => {
+    inActivity([event(1, "brainProposals", { count: 2 })]);
+    expect(page()).toContain("Proposed for the Brain: 2");
+    expect(page()).not.toContain("left out");
+
+    inActivity([event(1, "brainProposals", { count: 1, repeated: [{ text: "cargo test hangs with no network", like: 7 }] })]);
+    expect(page()).toContain("Proposed for the Brain: 1");
+    expect(page()).toContain("One was left out for saying what another note in the Brain says:");
+    expect(page()).toContain("cargo test hangs with no network");
+
+    await i18next.changeLanguage("es");
+    inActivity([event(1, "brainProposals", { count: 0, repeated: [{ text: "a", like: 1 }, { text: "b", like: 2 }] })]);
+    expect(page()).toContain("2 se dejaron fuera por decir lo mismo que otra nota del Brain:");
+  });
+
   it("is all in Spanish too", async () => {
     await i18next.changeLanguage("es");
     listed(failedBehindPipe);

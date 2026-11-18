@@ -175,6 +175,35 @@ impl World {
         self.answer("Write", &format!(r#"{{"lines":[{lines}]}}"#));
     }
 
+    /// A learner's run in a project nothing was ever proposed in.
+    fn learn_in_a_new_world(&self) -> String {
+        let repo = self.dir.path().join("other");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.name", "T"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        std::fs::write(repo.join("a.py"), "one\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let project_id = self.engine.add_project(&repo).unwrap().id;
+        self.answer("LEARN", r#"{"learnings":[]}"#);
+        let run = self
+            .engine
+            .start_run(StartRun {
+                project_id,
+                title: None,
+                request: "x".into(),
+                workflow: vec![agent("learnings", StepRole::Learner, "LEARN")],
+                language: "en".into(),
+                source_issue: None,
+                saved_workflow: None,
+                started_by: None,
+            })
+            .unwrap();
+        self.wait_finished(&run);
+        run
+    }
+
     fn learn(&self, learnings: &str) -> String {
         self.answer("LEARN", &format!(r#"{{"learnings":[{learnings}]}}"#));
         self.run(vec![agent("learnings", StepRole::Learner, "LEARN")])
@@ -646,6 +675,130 @@ fn the_learner_prompt_carries_what_the_builder_said() {
         learner
             .prompt
             .contains("What the builder said at the end of each round:\nRound 1:\nDone."),
+        "{}",
+        learner.prompt
+    );
+}
+
+#[test]
+fn the_same_thing_in_other_words_is_not_proposed_twice_and_that_goes_on_record() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let first = r#"{"text":"Inside the sandbox cargo test hangs retrying with no network, so run only cargo fmt there","evidence":"e","paths":[]}"#;
+    let run = w.learn(first);
+    let waiting = w.engine.proposals_of_run(&run).unwrap().remove(0);
+
+    let again = r#"{"text":"cargo test hangs retrying inside the sandbox with no network: run only cargo fmt","evidence":"e","paths":[]},{"text":"The date format lives in one helper and every screen goes through it","evidence":"e","paths":[]}"#;
+    let run = w.learn(again);
+    let kept = w.engine.proposals_of_run(&run).unwrap();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(kept[0].text.starts_with("The date format"));
+    let attempt = w.store.attempts_of_run(&run).unwrap().remove(0);
+    let event = w
+        .store
+        .events(&attempt.id, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "brainProposals")
+        .unwrap();
+    assert_eq!(event.data["count"], 1);
+    assert_eq!(event.data["repeated"][0]["like"], waiting.seq);
+    assert!(
+        event.data["repeated"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("cargo test hangs")
+    );
+
+    // What a person turned down stays turned down, and what they retired can come back.
+    w.engine.dismiss_note(waiting.seq).unwrap();
+    w.engine.accept_note(kept[0].seq).unwrap();
+    w.engine.retire_note(kept[0].seq).unwrap();
+    let run = w.learn(again);
+    let kept = w.engine.proposals_of_run(&run).unwrap();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(kept[0].text.starts_with("The date format"));
+}
+
+#[test]
+fn the_learner_is_told_what_was_already_proposed_whatever_its_prompt_says() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.learn(THREE);
+    let proposals = w.engine.proposals_of_run(&run).unwrap();
+    w.engine.accept_note(proposals[0].seq).unwrap();
+    w.engine.dismiss_note(proposals[1].seq).unwrap();
+
+    let run = w.learn("");
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    let prompt = &attempts[0].prompt;
+    assert!(
+        prompt.ends_with(
+            "This was already proposed and waits for a person to decide. Don't propose it again:\n- Three\n\nA person turned this down. Don't propose it again:\n- Two"
+        ),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("- One"),
+        "what's in is in the system prompt"
+    );
+
+    let first = w.store.attempts_of_run(&w.learn_in_a_new_world()).unwrap();
+    assert_eq!(first[0].prompt, "LEARN", "nothing to tell, nothing added");
+}
+
+#[test]
+fn the_learner_prompt_carries_what_a_person_sent_back() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let mut build = agent("builder", StepRole::Worker, "BUILD");
+    if let WorkflowStep::Agent(spec) = &mut build {
+        spec.tools = ToolProfile::Build;
+    }
+    let run = w
+        .engine
+        .start_run(StartRun {
+            project_id: w.project_id.clone(),
+            title: None,
+            request: "x".into(),
+            workflow: vec![
+                build,
+                WorkflowStep::Approval { id: "human".into() },
+                agent("learnings", StepRole::Learner, "LEARN\n{{trail}}"),
+            ],
+            language: "en".into(),
+            source_issue: None,
+            saved_workflow: None,
+            started_by: None,
+        })
+        .unwrap();
+    let waiting = |round: i64| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let found = w
+                .store
+                .attempts_of_run(&run)
+                .unwrap()
+                .into_iter()
+                .find(|a| a.round == round && a.state == AttemptState::WaitingApproval.as_str());
+            if let Some(attempt) = found {
+                return attempt.id;
+            }
+            assert!(Instant::now() < deadline, "never reached the approval");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    w.engine
+        .send_back(&waiting(0), "Dates go through the house helper.")
+        .unwrap();
+    w.engine.answer_approval(&waiting(1), true, "").unwrap();
+    w.wait_finished(&run);
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    let learner = attempts.iter().find(|a| a.step_id == "learnings").unwrap();
+    assert!(
+        learner.prompt.contains(
+            "Work that was sent back, and what was asked for:\nRound 1, a person:\nDates go through the house helper."
+        ),
         "{}",
         learner.prompt
     );

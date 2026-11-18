@@ -2405,6 +2405,16 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// What a person turned down in a project, oldest first. Kept so it isn't proposed again.
+    pub fn dismissed_notes(&self, project_id: &str) -> Result<Vec<BrainNote>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select * from brain_note where project_id = ?1 and state = 'dismissed' order by seq",
+        )?;
+        let rows = stmt.query_map([project_id], brain_note_from)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn brain_note(&self, seq: i64) -> Result<BrainNote> {
         self.lock()
             .query_row(

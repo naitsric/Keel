@@ -539,6 +539,8 @@
     "reworkLimitAnswerApproval": "Lo pasaste a tu aprobación",
     "brainMap": "Mapa escrito: {{kept}} líneas guardadas, {{dropped}} descartadas por no citar archivos reales",
     "brainProposals": "Propuesto para el Brain: {{count}}",
+    "brainRepeated_one": "Una se dejó fuera por decir lo mismo que otra nota del Brain:",
+    "brainRepeated_other": "{{count}} se dejaron fuera por decir lo mismo que otra nota del Brain:",
     "brainNote_active": "Aceptaste: {{text}}",
     "brainNote_dismissed": "Descartaste: {{text}}",
     "brainNote_retired": "Retiraste: {{text}}",

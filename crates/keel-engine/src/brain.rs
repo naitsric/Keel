@@ -14,7 +14,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::git::Git;
-use crate::{Engine, Error, Inner, Result, StartRun, locked};
+use crate::{Engine, Error, Inner, Result, StartRun, locked, workflows};
 
 /// How much of what people decided and accepted reaches each step. Decisions go first, then what
 /// was learned.
@@ -32,6 +32,13 @@ const MAX_EVIDENCE: usize = 500;
 pub const TRAIL_LIMIT: usize = 8 * 1024;
 /// How much of the end of a failed check's output goes in.
 const CHECK_TAIL: usize = 2 * 1024;
+/// How much of what was already proposed the learner is shown, so it doesn't propose it again.
+const PROPOSED_LIMIT: usize = 2 * 1024;
+/// From here up, two notes say the same thing in other words. Among the notes of real projects,
+/// the pairs that repeated each other shared 0.58 of their words or more, and no other pair over 0.38.
+const SAME_NOTE: f64 = 0.5;
+/// A note with fewer words than this is only the same as another if the text is.
+const MIN_WORDS: usize = 5;
 
 pub const MAP_SCHEMA: &str = r#"{"type":"object","properties":{"lines":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"paths":{"type":"array","items":{"type":"string"}}},"required":["text","paths"],"additionalProperties":false}}},"required":["lines"],"additionalProperties":false}"#;
 pub const LEARNINGS_SCHEMA: &str = r#"{"type":"object","properties":{"learnings":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"evidence":{"type":"string"},"paths":{"type":"array","items":{"type":"string"}}},"required":["text","evidence","paths"],"additionalProperties":false}}},"required":["learnings"],"additionalProperties":false}"#;
@@ -71,11 +78,11 @@ pub fn learner_step(id: &str, language: &str, model: &str, reviewers: &[&str]) -
         .collect();
     let prompt = if language.starts_with("es") {
         format!(
-            "Esta ejecución terminó, y no editas nada. Propón como máximo {MAX_PROPOSALS} cosas que alguien que trabaje en este repo debería saber, que no sean obvias leyendo el código y que esta ejecución haya demostrado. Cada una con su evidencia (qué pasó, en qué archivo o con qué comando) y las rutas que cubre, sin comodines. No repitas lo que ya está en lo que Keel sabe del proyecto. Nada de opiniones ni de detalles de este cambio en particular. Busca sobre todo lo que el builder tuvo que esquivar del entorno o del repo (algo que falló, que tardó o que no funcionó como se esperaba) en lo que dijo y en los checks que fallaron: eso no se ve en el código. Si no hay nada que valga la pena, devuelve la lista vacía: es la respuesta normal. Cada una en menos de 200 caracteres, en español.\n\nPedido:\n{{{{request}}}}\n\nRevisiones:\n{reviews}\n{{{{trail}}}}\n\nCambio:\n{{{{diff}}}}"
+            "Esta ejecución terminó, y no editas nada. Propón como máximo {MAX_PROPOSALS} cosas que alguien que trabaje en este repo debería saber, que no sean obvias leyendo el código y que esta ejecución haya demostrado. Cada una con su evidencia (qué pasó, en qué archivo o con qué comando) y las rutas que cubre, sin comodines. No repitas lo que ya está en lo que Keel sabe del proyecto. Nada de opiniones ni de detalles de este cambio en particular. Busca sobre todo lo que el builder tuvo que esquivar del entorno o del repo (algo que falló, que tardó o que no funcionó como se esperaba) en lo que dijo, en los checks que fallaron y en lo que se devolvió: eso no se ve en el código. Si no hay nada que valga la pena, devuelve la lista vacía: es la respuesta normal. Cada una en menos de 200 caracteres, en español.\n\nPedido:\n{{{{request}}}}\n\nRevisiones:\n{reviews}\n{{{{trail}}}}\n\nCambio:\n{{{{diff}}}}"
         )
     } else {
         format!(
-            "This run has ended, and you edit nothing. Propose at most {MAX_PROPOSALS} things someone working on this repo should know, that aren't obvious from reading the code and that this run proved. Each with its evidence (what happened, in which file or with which command) and the paths it covers, with no wildcards. Don't repeat what's already in what Keel knows about the project. No opinions, and no details of this particular change. Look above all for what the builder had to work around in the environment or the repo (something that failed, was slow, or didn't work as expected), in what it said and in the checks that failed: the code doesn't show that. If nothing is worth it, return an empty list: that's the normal answer. Each under 200 characters.\n\nRequest:\n{{{{request}}}}\n\nReviews:\n{reviews}\n{{{{trail}}}}\n\nChange:\n{{{{diff}}}}"
+            "This run has ended, and you edit nothing. Propose at most {MAX_PROPOSALS} things someone working on this repo should know, that aren't obvious from reading the code and that this run proved. Each with its evidence (what happened, in which file or with which command) and the paths it covers, with no wildcards. Don't repeat what's already in what Keel knows about the project. No opinions, and no details of this particular change. Look above all for what the builder had to work around in the environment or the repo (something that failed, was slow, or didn't work as expected), in what it said, in the checks that failed and in what was sent back: the code doesn't show that. If nothing is worth it, return an empty list: that's the normal answer. Each under 200 characters.\n\nRequest:\n{{{{request}}}}\n\nReviews:\n{reviews}\n{{{{trail}}}}\n\nChange:\n{{{{diff}}}}"
         )
     };
     StepSpec {
@@ -97,12 +104,24 @@ pub fn learner_step(id: &str, language: &str, model: &str, reviewers: &[&str]) -
 /// One thing that happened on the way, for the learner.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrailEntry {
-    /// What the builder said at the end of a round, or a check that failed.
-    pub check: Option<String>,
-    /// How a failed check ended.
-    pub exit_code: Option<i64>,
+    pub what: Happened,
     pub round: i64,
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Happened {
+    /// A step that can edit said this when it finished.
+    Said,
+    /// A check failed: its command and how it ended.
+    CheckFailed {
+        command: String,
+        exit_code: Option<i64>,
+    },
+    /// The approver sent the work back, with these instructions.
+    ApproverSentBack,
+    /// A person sent the work back, or the assistant they allowed to, named here.
+    SentBack { by: Option<String> },
 }
 
 /// The tail of `text`, at most `limit` bytes, on a character boundary.
@@ -117,19 +136,27 @@ fn tail_of(text: &str, limit: usize) -> String {
     format!("…{}", text[start..].trim_start())
 }
 
-/// What the builder said and which checks failed, oldest first. A builder is any agent step that can
-/// edit code, whatever its name. A check that failed counts even if a later one passed. Secrets are
-/// hidden, and a check keeps only the end of its output.
+/// What the builder said, which checks failed and what was sent back, oldest first. A builder is
+/// any agent step that can edit code, whatever its name. A check that failed counts even if a later
+/// one passed. Secrets are hidden, and a check keeps only the end of its output.
 pub fn trail_entries(attempts: &[Attempt], check_results: &[Event]) -> Vec<TrailEntry> {
     let mut entries = Vec::new();
     for attempt in attempts {
         let skipped = attempt.state == AttemptState::Skipped.as_str();
+        let sent_back = |what: Happened| {
+            workflows::instructions_of(attempt)
+                .filter(|text| !text.trim().is_empty())
+                .map(|text| TrailEntry {
+                    what,
+                    round: attempt.round,
+                    text: mask_secrets(text.trim()),
+                })
+        };
         if attempt.kind == "agent" && attempt.tools == ToolProfile::Build.as_str() && !skipped {
             let said = attempt.result_text.as_deref().unwrap_or_default().trim();
             if !said.is_empty() {
                 entries.push(TrailEntry {
-                    check: None,
-                    exit_code: None,
+                    what: Happened::Said,
                     round: attempt.round,
                     text: mask_secrets(said),
                 });
@@ -152,11 +179,19 @@ pub fn trail_entries(attempts: &[Attempt], check_results: &[Event]) -> Vec<Trail
                 .collect::<Vec<_>>()
                 .join("\n");
             entries.push(TrailEntry {
-                check: Some(mask_secrets(&crate::specs::one_line(&attempt.prompt))),
-                exit_code: attempt.exit_code,
+                what: Happened::CheckFailed {
+                    command: mask_secrets(&crate::specs::one_line(&attempt.prompt)),
+                    exit_code: attempt.exit_code,
+                },
                 round: attempt.round,
                 text: tail_of(&mask_secrets(&output), CHECK_TAIL),
             });
+        } else if attempt.role == "approver" && workflows::wants_rework(attempt) {
+            entries.extend(sent_back(Happened::ApproverSentBack));
+        } else if attempt.state == AttemptState::Returned.as_str() {
+            entries.extend(sent_back(Happened::SentBack {
+                by: workflows::sent_back_by(attempt).map(str::to_owned),
+            }));
         }
     }
     entries
@@ -164,23 +199,33 @@ pub fn trail_entries(attempts: &[Attempt], check_results: &[Event]) -> Vec<Trail
 
 fn entry_text(entry: &TrailEntry, language: &str) -> String {
     let es = language.starts_with("es");
-    let exit = match (entry.exit_code, es) {
-        (Some(code), true) => format!(" (código de salida {code})"),
-        (Some(code), false) => format!(" (exit code {code})"),
-        (None, _) => String::new(),
-    };
     let round = entry.round + 1;
-    match (&entry.check, es) {
-        (None, true) => format!("Ronda {round}:\n{}\n", entry.text),
-        (None, false) => format!("Round {round}:\n{}\n", entry.text),
-        (Some(command), true) => format!(
-            "Ronda {round}: falló `{command}`{exit}. Final de su salida:\n{}\n",
-            entry.text
-        ),
-        (Some(command), false) => format!(
-            "Round {round}: `{command}` failed{exit}. End of its output:\n{}\n",
-            entry.text
-        ),
+    let text = &entry.text;
+    match (&entry.what, es) {
+        (Happened::Said, true) => format!("Ronda {round}:\n{text}\n"),
+        (Happened::Said, false) => format!("Round {round}:\n{text}\n"),
+        (Happened::CheckFailed { command, exit_code }, _) => {
+            let exit = match (exit_code, es) {
+                (Some(code), true) => format!(" (código de salida {code})"),
+                (Some(code), false) => format!(" (exit code {code})"),
+                (None, _) => String::new(),
+            };
+            if es {
+                format!("Ronda {round}: falló `{command}`{exit}. Final de su salida:\n{text}\n")
+            } else {
+                format!("Round {round}: `{command}` failed{exit}. End of its output:\n{text}\n")
+            }
+        }
+        (Happened::ApproverSentBack, true) => format!("Ronda {round}, el aprobador:\n{text}\n"),
+        (Happened::ApproverSentBack, false) => format!("Round {round}, the approver:\n{text}\n"),
+        (Happened::SentBack { by: None }, true) => format!("Ronda {round}, una persona:\n{text}\n"),
+        (Happened::SentBack { by: None }, false) => format!("Round {round}, a person:\n{text}\n"),
+        (Happened::SentBack { by: Some(by) }, true) => {
+            format!("Ronda {round}, {by}, un asistente que la persona autorizó:\n{text}\n")
+        }
+        (Happened::SentBack { by: Some(by) }, false) => {
+            format!("Round {round}, {by}, an assistant the person allowed:\n{text}\n")
+        }
     }
 }
 
@@ -190,10 +235,11 @@ pub fn trail_text(entries: &[TrailEntry], language: &str, limit: usize) -> Strin
     let es = language.starts_with("es");
     if entries.is_empty() {
         return if es {
-            "Nada que reportar: ninguna verificación falló y el builder no dejó respuesta.\n"
+            "Nada que reportar: ninguna verificación falló, nada se devolvió y el builder no dejó respuesta.\n"
                 .to_owned()
         } else {
-            "Nothing to report: no check failed and the builder left no answer.\n".to_owned()
+            "Nothing to report: no check failed, nothing was sent back and the builder left no answer.\n"
+                .to_owned()
         };
     }
     let mut room = limit;
@@ -217,31 +263,32 @@ pub fn trail_text(entries: &[TrailEntry], language: &str, limit: usize) -> Strin
     }
     kept.reverse();
     let mut text = String::new();
-    let sections = [
+    type Section = (fn(&Happened) -> bool, &'static str, &'static str);
+    let sections: [Section; 3] = [
         (
-            false,
-            if es {
-                "Lo que dijo el builder al terminar cada ronda:\n"
-            } else {
-                "What the builder said at the end of each round:\n"
-            },
+            |what| matches!(what, Happened::Said),
+            "What the builder said at the end of each round:\n",
+            "Lo que dijo el builder al terminar cada ronda:\n",
         ),
         (
-            true,
-            if es {
-                "Checks que fallaron en el camino:\n"
-            } else {
-                "Checks that failed along the way:\n"
-            },
+            |what| matches!(what, Happened::CheckFailed { .. }),
+            "Checks that failed along the way:\n",
+            "Checks que fallaron en el camino:\n",
+        ),
+        (
+            |what| matches!(what, Happened::ApproverSentBack | Happened::SentBack { .. }),
+            "Work that was sent back, and what was asked for:\n",
+            "Trabajo que se devolvió, y lo que se pidió:\n",
         ),
     ];
-    for (is_check, title) in sections {
-        let mut part = String::new();
-        for entry in kept.iter().filter(|e| e.check.is_some() == is_check) {
-            part.push_str(&entry_text(entry, language));
-        }
+    for (belongs, en, spanish) in sections {
+        let part: String = kept
+            .iter()
+            .filter(|entry| belongs(&entry.what))
+            .map(|entry| entry_text(entry, language))
+            .collect();
         if !part.is_empty() {
-            text.push_str(title);
+            text.push_str(if es { spanish } else { en });
             text.push_str(&part);
             text.push('\n');
         }
@@ -254,6 +301,76 @@ pub fn trail_text(entries: &[TrailEntry], language: &str, limit: usize) -> Strin
         });
     }
     text
+}
+
+/// The words that tell one note from another: lowercase, and none under three letters.
+fn words(text: &str) -> HashSet<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|word| word.chars().count() >= 3)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether two notes say the same thing, going by how many of their words they share. Two short
+/// ones share most of theirs by chance, so those have to match to the letter.
+fn says_the_same(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    let (a, b) = (words(a), words(b));
+    if a.len() < MIN_WORDS || b.len() < MIN_WORDS {
+        return false;
+    }
+    let shared = a.intersection(&b).count();
+    shared as f64 / (a.len() + b.len() - shared) as f64 >= SAME_NOTE
+}
+
+/// What the learner is told was proposed before: what still waits for a person, and what a person
+/// turned down. Newest first within the limit, and what waits goes before what was turned down.
+pub fn already_proposed_text(notes: &[BrainNote], language: &str) -> String {
+    let es = language.starts_with("es");
+    let mut room = PROPOSED_LIMIT;
+    let mut section = |state: &str, title: &str| {
+        let mut lines: Vec<String> = Vec::new();
+        for note in notes
+            .iter()
+            .rev()
+            .filter(|n| n.kind == "learning" && n.state == state)
+        {
+            let line = format!("- {}\n", note.text);
+            if line.len() > room {
+                break;
+            }
+            room -= line.len();
+            lines.push(line);
+        }
+        lines.reverse();
+        (!lines.is_empty()).then(|| format!("{title}\n{}", lines.concat()))
+    };
+    let waiting = section(
+        "proposed",
+        if es {
+            "Esto ya se propuso y espera a que una persona decida. No lo propongas otra vez:"
+        } else {
+            "This was already proposed and waits for a person to decide. Don't propose it again:"
+        },
+    );
+    let turned_down = section(
+        "dismissed",
+        if es {
+            "Una persona descartó esto. No lo propongas otra vez:"
+        } else {
+            "A person turned this down. Don't propose it again:"
+        },
+    );
+    [waiting, turned_down]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_owned()
 }
 
 /// What the agents get, and exactly what went in and what didn't fit.
@@ -581,11 +698,14 @@ impl Inner {
         project_id: &str,
         workspace: &Path,
     ) -> Result<()> {
-        let mut known: HashSet<String> = self
+        // What's in the Brain, what waits for a person and what a person turned down. Not what they
+        // retired, so a learning that stopped being true can come back corrected.
+        let mut known: Vec<(i64, String)> = self
             .store
             .brain_notes(project_id)?
             .into_iter()
-            .map(|n| n.text)
+            .chain(self.store.dismissed_notes(project_id)?)
+            .map(|n| (n.seq, n.text))
             .collect();
         let run = self.store.run(&attempt.run_id)?;
         let attempts = self.store.attempts_of_run(&attempt.run_id)?;
@@ -596,14 +716,19 @@ impl Inner {
             attempts.iter().find_map(|a| a.sha_before.clone())
         };
         let mut count = 0;
+        let mut repeated = Vec::new();
         let learnings = output["learnings"].as_array().cloned().unwrap_or_default();
         for item in learnings.iter().take(MAX_PROPOSALS) {
             let text = clean(item["text"].as_str().unwrap_or_default(), MAX_TEXT);
-            if text.is_empty() || !known.insert(text.clone()) {
+            if text.is_empty() {
+                continue;
+            }
+            if let Some((like, _)) = known.iter().find(|(_, old)| says_the_same(&text, old)) {
+                repeated.push(json!({ "text": text, "like": like }));
                 continue;
             }
             let evidence = clean(item["evidence"].as_str().unwrap_or_default(), MAX_EVIDENCE);
-            self.store.add_brain_note(&NewBrainNote {
+            let seq = self.store.add_brain_note(&NewBrainNote {
                 project_id,
                 kind: "learning",
                 state: "proposed",
@@ -614,11 +739,25 @@ impl Inner {
                 run_id: &attempt.run_id,
                 attempt_id: &attempt.id,
             })?;
+            known.push((seq, text));
             count += 1;
         }
-        self.store
-            .append_event(&attempt.id, "brainProposals", &json!({ "count": count }))?;
+        // What was left out for saying what another note says goes on record, with the note it
+        // repeats, so nothing an agent proposed is lost without a trace.
+        self.store.append_event(
+            &attempt.id,
+            "brainProposals",
+            &json!({ "count": count, "repeated": repeated }),
+        )?;
         Ok(())
+    }
+
+    /// What was proposed before in this project, for the learner's prompt.
+    pub(crate) fn already_proposed(&self, project_id: &str, language: &str) -> Result<String> {
+        let mut notes = self.store.brain_notes(project_id)?;
+        notes.extend(self.store.dismissed_notes(project_id)?);
+        notes.sort_by_key(|n| n.seq);
+        Ok(already_proposed_text(&notes, language))
     }
 
     fn open_map_run(&self, project_id: &str) -> Result<Option<String>> {
@@ -788,7 +927,6 @@ pub(crate) fn optional_step_is_over(step: &WorkflowStep, attempt: &Attempt) -> b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::workflows;
 
     fn note(seq: i64, kind: &str, state: &str, text: &str) -> BrainNote {
         BrainNote {
@@ -958,8 +1096,7 @@ mod tests {
 
     fn said(round: i64, text: &str) -> TrailEntry {
         TrailEntry {
-            check: None,
-            exit_code: None,
+            what: Happened::Said,
             round,
             text: text.into(),
         }
@@ -967,8 +1104,10 @@ mod tests {
 
     fn failed(round: i64, command: &str, output: &str) -> TrailEntry {
         TrailEntry {
-            check: Some(command.into()),
-            exit_code: Some(2),
+            what: Happened::CheckFailed {
+                command: command.into(),
+                exit_code: Some(2),
+            },
             round,
             text: output.into(),
         }
@@ -1093,7 +1232,9 @@ mod tests {
 
         assert_eq!(entries.len(), 3, "{entries:?}");
         assert!(entries[0].text.starts_with("said builder"));
-        assert_eq!(entries[1].check.as_deref(), Some("make test"));
+        assert!(
+            matches!(&entries[1].what, Happened::CheckFailed { command, .. } if command == "make test")
+        );
         assert_eq!(entries[1].text, "boom\nbad thing");
         assert!(entries[2].text.starts_with("said fixer") && entries[2].round == 1);
         assert!(entries.iter().all(|e| !e.text.contains("sk-abcdef")));
@@ -1113,6 +1254,91 @@ mod tests {
                 .prompt
                 .contains("work around")
         );
+    }
+
+    #[test]
+    fn the_learner_gets_what_was_sent_back_and_who_asked() {
+        let entry = |what: Happened, round: i64, text: &str| TrailEntry {
+            what,
+            round,
+            text: text.into(),
+        };
+        let entries = [
+            entry(Happened::ApproverSentBack, 0, "Cover the empty list."),
+            entry(
+                Happened::SentBack { by: None },
+                1,
+                "Use the house date format.",
+            ),
+            entry(
+                Happened::SentBack {
+                    by: Some("Claude Code".into()),
+                },
+                2,
+                "Rename it.",
+            ),
+        ];
+        let en = trail_text(&entries, "en", TRAIL_LIMIT);
+        assert!(en.contains("Work that was sent back, and what was asked for:"));
+        assert!(en.contains("Round 1, the approver:\nCover the empty list."));
+        assert!(en.contains("Round 2, a person:\nUse the house date format."));
+        assert!(en.contains("Round 3, Claude Code, an assistant the person allowed:\nRename it."));
+        assert!(!en.contains("What the builder said"));
+        let es = trail_text(&entries, "es", TRAIL_LIMIT);
+        assert!(es.contains("Trabajo que se devolvió, y lo que se pidió:"));
+        assert!(es.contains("Ronda 1, el aprobador:"));
+        assert!(es.contains("Ronda 2, una persona:"));
+        assert!(es.contains("Ronda 3, Claude Code, un asistente que la persona autorizó:"));
+    }
+
+    #[test]
+    fn two_notes_are_the_same_when_they_share_most_of_their_words() {
+        // Two real proposals of two runs, which both waited for a person side by side.
+        let first = "Dentro de Keel, cargo test y clippy se cuelgan reintentando sin red; las pruebas de Rust solo se validan fuera de Keel. Dentro, solo cargo fmt --check y pnpm test.";
+        let again = "Dentro de Keel cargo no baja dependencias (#55): cargo test/clippy se cuelgan reintentando. Verifica con cargo fmt --all --check y pnpm test; las pruebas de Rust corren fuera.";
+        assert!(says_the_same(first, again));
+        // Two real lines about the same file that say different things.
+        let other = "CI, en este orden: typecheck, test, check:i18n, pnpm build, cargo fmt --check, clippy con -D warnings y cargo test. Cargo.toml usa edition 2024.";
+        assert!(!says_the_same(first, other));
+        assert!(says_the_same("Same", "Same"));
+        assert!(
+            !says_the_same("Item 1", "Item 2"),
+            "short ones only match to the letter"
+        );
+        assert!(!says_the_same(
+            "",
+            "anything at all, really, whatever it says"
+        ));
+    }
+
+    #[test]
+    fn the_learner_is_told_what_waits_and_what_a_person_turned_down() {
+        let notes = [
+            note(1, "learning", "proposed", "Waits one"),
+            note(2, "learning", "dismissed", "Turned down"),
+            note(3, "learning", "active", "Already in"),
+            note(4, "map", "active", "A map line"),
+            note(5, "learning", "proposed", "Waits two"),
+        ];
+        assert_eq!(
+            already_proposed_text(&notes, "en"),
+            "This was already proposed and waits for a person to decide. Don't propose it again:\n- Waits one\n- Waits two\n\nA person turned this down. Don't propose it again:\n- Turned down"
+        );
+        let es = already_proposed_text(&notes, "es");
+        assert!(es.starts_with("Esto ya se propuso y espera a que una persona decida."));
+        assert!(es.contains("Una persona descartó esto."));
+        assert_eq!(already_proposed_text(&notes[2..4], "en"), "");
+    }
+
+    #[test]
+    fn what_was_proposed_before_has_a_limit_and_keeps_the_newest() {
+        let long = "x".repeat(200);
+        let notes: Vec<BrainNote> = (1..=30)
+            .map(|seq| note(seq, "learning", "proposed", &format!("{seq} {long}")))
+            .collect();
+        let text = already_proposed_text(&notes, "en");
+        assert!(text.len() <= PROPOSED_LIMIT + 200, "{}", text.len());
+        assert!(text.contains("- 30 x") && !text.contains("- 1 x"));
     }
 
     #[test]
