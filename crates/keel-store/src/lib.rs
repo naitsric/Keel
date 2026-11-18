@@ -2445,6 +2445,18 @@ impl Store {
     }
 
     /// Whether anything has ever tried to map this project.
+    /// How many proposals wait for a person in each project that has any, so a screen can say
+    /// where they are. Not those of a removed project, as in `pending_proposals`.
+    pub fn pending_proposals_by_project(&self) -> Result<BTreeMap<String, i64>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select n.project_id, count(*) from brain_note n join project p on p.id = n.project_id
+             where n.state = 'proposed' and p.removed_at is null group by n.project_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn has_map_attempt(&self, project_id: &str) -> Result<bool> {
         Ok(self.lock().query_row(
             "select exists (select 1 from attempt a join run r on r.id = a.run_id
@@ -5928,6 +5940,10 @@ mod tests {
             .append_event("a", "note", &serde_json::json!({}))
             .unwrap();
         assert_eq!(store.pending_proposals().unwrap(), 1);
+        assert_eq!(
+            store.pending_proposals_by_project().unwrap(),
+            BTreeMap::from([("p".to_owned(), 1)])
+        );
 
         assert!(store.remove_project("p").unwrap());
         assert!(!store.remove_project("p").unwrap(), "it already is");
@@ -5938,6 +5954,7 @@ mod tests {
             0,
             "nothing could clear it"
         );
+        assert!(store.pending_proposals_by_project().unwrap().is_empty());
 
         assert_eq!(store.project("p").unwrap().name, "demo");
         assert_eq!(store.project_by_path("/demo").unwrap().unwrap().id, "p");

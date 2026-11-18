@@ -109,9 +109,13 @@ export function BrainPage() {
   const [error, setError] = useState<string | null>(null);
   const [generating, setGenerating] = useState(false);
 
+  const waiting = useApp((s) => s.overview.proposalsByProject);
+  const waitingIn = (id: string) => waiting[id] ?? 0;
+  // The top bar counts proposals across every project, so with none picked the page opens where some wait.
   useEffect(() => {
-    if (projects.length > 0 && !projects.some((p) => p.id === projectId)) setProjectId(projects[0].id);
-  }, [projects, projectId]);
+    if (projects.length > 0 && !projects.some((p) => p.id === projectId)) setProjectId((projects.find((p) => waitingIn(p.id) > 0) ?? projects[0]).id);
+  }, [projects, projectId, waiting]);
+  const elsewhere = projects.filter((p) => p.id !== projectId && waitingIn(p.id) > 0);
 
   const load = useCallback(async () => {
     if (!projectId) return;
@@ -160,7 +164,7 @@ export function BrainPage() {
                     <select value={projectId} onChange={(e) => setProjectId(e.target.value)} className={inputClass}>
                       {projects.map((p) => (
                         <option key={p.id} value={p.id}>
-                          {p.name}
+                          {waitingIn(p.id) > 0 ? t("brain.projectWaiting", { name: p.name, count: waitingIn(p.id) }) : p.name}
                         </option>
                       ))}
                     </select>
@@ -179,6 +183,17 @@ export function BrainPage() {
                 <p role="alert" className="text-[12.5px] text-danger">
                   {error}
                 </p>
+              )}
+              {/* The count in the top bar may all be in a project that isn't the one on screen. */}
+              {elsewhere.length > 0 && (
+                <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[12.5px] text-muted">
+                  <span>{t("brain.proposalsElsewhere")}</span>
+                  {elsewhere.map((p) => (
+                    <button key={p.id} type="button" className="text-accent hover:underline" onClick={() => setProjectId(p.id)}>
+                      {t("brain.projectWaiting", { name: p.name, count: waitingIn(p.id) })}
+                    </button>
+                  ))}
+                </div>
               )}
               {brain && brain.proposals.length > 0 && (
                 <Section title={t("brain.proposals")} hint={t("brain.proposalsHint")}>
