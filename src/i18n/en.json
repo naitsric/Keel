@@ -540,6 +540,8 @@
     "brainMap": "Map written: {{kept}} lines kept, {{dropped}} dropped for not citing real files",
     "brainMapRefresh": "Keel asked for a new map of the project: {{stale}} of its {{lines}} lines cite files that changed",
     "brainProposals": "Proposed for the Brain: {{count}}",
+    "brainRepeated_one": "One was left out for saying what another note in the Brain says:",
+    "brainRepeated_other": "{{count}} were left out for saying what another note in the Brain says:",
     "brainNote_active": "You accepted: {{text}}",
     "brainNote_dismissed": "You dismissed: {{text}}",
     "brainNote_retired": "You retired: {{text}}",
