@@ -69,7 +69,7 @@ pub fn system_prompt(
     (text, json!(sources))
 }
 
-/// Fills in `{{request}}`, `{{diff}}`, `{{rework}}`, `{{answers}}`, `{{check}}` and
+/// Fills in `{{request}}`, `{{diff}}`, `{{rework}}`, `{{answers}}`, `{{check}}`, `{{trail}}` and
 /// `{{steps.<id>.output}}`. One pass only: text that comes from an agent, an issue or a person is
 /// never expanded again, so it can't reach other values.
 pub fn render(template: &str, lookup: impl Fn(&str) -> Option<String>) -> String {

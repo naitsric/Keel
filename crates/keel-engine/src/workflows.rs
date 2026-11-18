@@ -609,7 +609,7 @@ pub fn wants_rework(attempt: &Attempt) -> bool {
         == Some("rework")
 }
 
-fn instructions_of(attempt: &Attempt) -> Option<String> {
+pub(crate) fn instructions_of(attempt: &Attempt) -> Option<String> {
     attempt
         .output
         .as_ref()?
@@ -620,7 +620,7 @@ fn instructions_of(attempt: &Attempt) -> Option<String> {
 
 /// The assistant that sent work back over MCP, which the engine writes next to its instructions.
 /// None when the person did.
-fn sent_back_by(attempt: &Attempt) -> Option<&str> {
+pub(crate) fn sent_back_by(attempt: &Attempt) -> Option<&str> {
     attempt.output.as_ref()?.get("by")?.as_str()
 }
 

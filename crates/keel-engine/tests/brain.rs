@@ -175,6 +175,35 @@ impl World {
         self.answer("Write", &format!(r#"{{"lines":[{lines}]}}"#));
     }
 
+    /// A learner's run in a project nothing was ever proposed in.
+    fn learn_in_a_new_world(&self) -> String {
+        let repo = self.dir.path().join("other");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.name", "T"]);
+        git(&repo, &["config", "user.email", "t@example.com"]);
+        std::fs::write(repo.join("a.py"), "one\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(&repo, &["commit", "-qm", "init"]);
+        let project_id = self.engine.add_project(&repo).unwrap().id;
+        self.answer("LEARN", r#"{"learnings":[]}"#);
+        let run = self
+            .engine
+            .start_run(StartRun {
+                project_id,
+                title: None,
+                request: "x".into(),
+                workflow: vec![agent("learnings", StepRole::Learner, "LEARN")],
+                language: "en".into(),
+                source_issue: None,
+                saved_workflow: None,
+                started_by: None,
+            })
+            .unwrap();
+        self.wait_finished(&run);
+        run
+    }
+
     fn learn(&self, learnings: &str) -> String {
         self.answer("LEARN", &format!(r#"{{"learnings":[{learnings}]}}"#));
         self.run(vec![agent("learnings", StepRole::Learner, "LEARN")])
@@ -626,4 +655,305 @@ fn a_read_only_map_does_not_run_the_projects_setup() {
     let run = w.map();
     assert_eq!(w.store.attempts_of_run(&run).unwrap().len(), 1);
     assert_eq!(w.engine.brain(&w.project_id).unwrap().map.len(), 2);
+}
+
+#[test]
+fn the_learner_prompt_carries_what_the_builder_said() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let mut build = agent("builder", StepRole::Worker, "BUILD");
+    if let WorkflowStep::Agent(spec) = &mut build {
+        spec.tools = ToolProfile::Build;
+    }
+    let run = w.run(vec![
+        build,
+        agent("learnings", StepRole::Learner, "LEARN\n{{trail}}"),
+    ]);
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    let learner = attempts.iter().find(|a| a.step_id == "learnings").unwrap();
+    assert!(
+        learner
+            .prompt
+            .contains("What the builder said at the end of each round:\nRound 1:\nDone."),
+        "{}",
+        learner.prompt
+    );
+}
+
+#[test]
+fn the_same_thing_in_other_words_is_not_proposed_twice_and_that_goes_on_record() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let first = r#"{"text":"Inside the sandbox cargo test hangs retrying with no network, so run only cargo fmt there","evidence":"e","paths":[]}"#;
+    let run = w.learn(first);
+    let waiting = w.engine.proposals_of_run(&run).unwrap().remove(0);
+
+    let again = r#"{"text":"cargo test hangs retrying inside the sandbox with no network: run only cargo fmt","evidence":"e","paths":[]},{"text":"The date format lives in one helper and every screen goes through it","evidence":"e","paths":[]}"#;
+    let run = w.learn(again);
+    let kept = w.engine.proposals_of_run(&run).unwrap();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(kept[0].text.starts_with("The date format"));
+    let attempt = w.store.attempts_of_run(&run).unwrap().remove(0);
+    let event = w
+        .store
+        .events(&attempt.id, 0)
+        .unwrap()
+        .into_iter()
+        .find(|e| e.kind == "brainProposals")
+        .unwrap();
+    assert_eq!(event.data["count"], 1);
+    assert_eq!(event.data["repeated"][0]["like"], waiting.seq);
+    assert!(
+        event.data["repeated"][0]["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("cargo test hangs")
+    );
+
+    // What a person turned down stays turned down, and what they retired can come back.
+    w.engine.dismiss_note(waiting.seq).unwrap();
+    w.engine.accept_note(kept[0].seq).unwrap();
+    w.engine.retire_note(kept[0].seq).unwrap();
+    let run = w.learn(again);
+    let kept = w.engine.proposals_of_run(&run).unwrap();
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert!(kept[0].text.starts_with("The date format"));
+}
+
+#[test]
+fn the_learner_is_told_what_was_already_proposed_whatever_its_prompt_says() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.learn(THREE);
+    let proposals = w.engine.proposals_of_run(&run).unwrap();
+    w.engine.accept_note(proposals[0].seq).unwrap();
+    w.engine.dismiss_note(proposals[1].seq).unwrap();
+
+    let run = w.learn("");
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    let prompt = &attempts[0].prompt;
+    assert!(
+        prompt.ends_with(
+            "This was already proposed and waits for a person to decide. Don't propose it again:\n- Three\n\nA person turned this down. Don't propose it again:\n- Two"
+        ),
+        "{prompt}"
+    );
+    assert!(
+        !prompt.contains("- One"),
+        "what's in is in the system prompt"
+    );
+
+    let first = w.store.attempts_of_run(&w.learn_in_a_new_world()).unwrap();
+    assert_eq!(first[0].prompt, "LEARN", "nothing to tell, nothing added");
+}
+
+#[test]
+fn the_learner_prompt_carries_what_a_person_sent_back() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let mut build = agent("builder", StepRole::Worker, "BUILD");
+    if let WorkflowStep::Agent(spec) = &mut build {
+        spec.tools = ToolProfile::Build;
+    }
+    let run = w
+        .engine
+        .start_run(StartRun {
+            project_id: w.project_id.clone(),
+            title: None,
+            request: "x".into(),
+            workflow: vec![
+                build,
+                WorkflowStep::Approval { id: "human".into() },
+                agent("learnings", StepRole::Learner, "LEARN\n{{trail}}"),
+            ],
+            language: "en".into(),
+            source_issue: None,
+            saved_workflow: None,
+            started_by: None,
+        })
+        .unwrap();
+    let waiting = |round: i64| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let found = w
+                .store
+                .attempts_of_run(&run)
+                .unwrap()
+                .into_iter()
+                .find(|a| a.round == round && a.state == AttemptState::WaitingApproval.as_str());
+            if let Some(attempt) = found {
+                return attempt.id;
+            }
+            assert!(Instant::now() < deadline, "never reached the approval");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    w.engine
+        .send_back(&waiting(0), "Dates go through the house helper.")
+        .unwrap();
+    w.engine.answer_approval(&waiting(1), true, "").unwrap();
+    w.wait_finished(&run);
+    let attempts = w.store.attempts_of_run(&run).unwrap();
+    let learner = attempts.iter().find(|a| a.step_id == "learnings").unwrap();
+    assert!(
+        learner.prompt.contains(
+            "Work that was sent back, and what was asked for:\nRound 1, a person:\nDates go through the house helper."
+        ),
+        "{}",
+        learner.prompt
+    );
+}
+
+#[test]
+fn a_line_that_cites_a_folder_goes_stale_only_when_the_folder_is_gone() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    std::fs::create_dir(w.repo.join("docs")).unwrap();
+    std::fs::write(w.repo.join("docs/años.md"), "one\n").unwrap();
+    git(&w.repo, &["add", "-A"]);
+    git(&w.repo, &["commit", "-qm", "docs"]);
+    w.map_answer(
+        r#"{"text":"The code lives in src","paths":["src"]},{"text":"The docs live in docs","paths":["docs"]},{"text":"The years are in one file","paths":["docs/años.md"]},{"text":"B is the entry point","paths":["src/b.py"]}"#,
+    );
+    w.map();
+
+    std::fs::write(w.repo.join("src/a.py"), "two\n").unwrap();
+    std::fs::write(w.repo.join("docs/años.md"), "two\n").unwrap();
+    git(&w.repo, &["add", "-A"]);
+    git(&w.repo, &["commit", "-qm", "change inside both"]);
+    w.run(vec![agent("first", StepRole::Worker, "ANYTHING")]);
+    let stale = |w: &World| -> Vec<bool> {
+        let brain = w.engine.brain(&w.project_id).unwrap();
+        brain.map.iter().map(|n| n.stale).collect()
+    };
+    assert_eq!(
+        stale(&w),
+        [false, false, true, false],
+        "only the line that cites the file that changed, whatever its name"
+    );
+
+    git(&w.repo, &["rm", "-rq", "docs"]);
+    git(&w.repo, &["commit", "-qm", "no docs"]);
+    w.run(vec![agent("second", StepRole::Worker, "ANYTHING")]);
+    assert_eq!(stale(&w), [false, true, true, false], "the folder is gone");
+}
+
+#[test]
+fn a_map_half_out_of_date_is_written_again_on_its_own_and_once_for_the_same_code() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.map_answer(TWO_LINES);
+    w.map();
+    let last_map = |w: &World| w.store.last_map_attempt(&w.project_id).unwrap().unwrap().id;
+    let first = last_map(&w);
+    // The map is asked for apart from the step that found it out of date.
+    let next_map = |w: &World, after: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let last = w.store.last_map_attempt(&w.project_id).unwrap().unwrap();
+            if last.id != after && w.engine.brain(&w.project_id).unwrap().map_run.is_none() {
+                return last.id;
+            }
+            assert!(Instant::now() < deadline, "no new map");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let no_new_map = |w: &World, last: &str| {
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(last_map(w), last);
+    };
+
+    // Nothing changed, so nothing to write again.
+    w.run(vec![agent("same", StepRole::Worker, "ANYTHING")]);
+    no_new_map(&w, &first);
+
+    // One line of two is out of date, and the agent that maps comes back with nothing usable.
+    std::fs::write(w.repo.join("src/a.py"), "two\n").unwrap();
+    git(&w.repo, &["add", "-A"]);
+    git(&w.repo, &["commit", "-qm", "change a"]);
+    w.map_answer(r#"{"text":"Cites nothing real","paths":["src/nope.py"]}"#);
+    let run = w.run(vec![agent("first", StepRole::Worker, "ANYTHING")]);
+    let second = next_map(&w, &first);
+    let attempt = w.store.attempts_of_run(&run).unwrap().remove(0);
+    let asked: Vec<_> = w
+        .store
+        .events(&attempt.id, 0)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "brainMapRefresh")
+        .collect();
+    assert_eq!(asked.len(), 1, "the step that found it says so");
+    assert_eq!(asked[0].data["stale"], 1);
+    assert_eq!(asked[0].data["lines"], 2);
+    let brain = w.engine.brain(&w.project_id).unwrap();
+    assert_eq!(
+        brain.map[0].note.text, "Tests live in src",
+        "the old map stays"
+    );
+    assert!(brain.map[0].stale);
+
+    // The same code would get the same useless map, so it isn't asked for again.
+    w.run(vec![agent("again", StepRole::Worker, "ANYTHING")]);
+    no_new_map(&w, &second);
+
+    // New code is a reason to try again, and a map that's kept leaves nothing out of date.
+    std::fs::write(w.repo.join("src/a.py"), "three\n").unwrap();
+    git(&w.repo, &["add", "-A"]);
+    git(&w.repo, &["commit", "-qm", "change a again"]);
+    w.map_answer(r#"{"text":"A new map","paths":["src/a.py"]}"#);
+    w.run(vec![agent("third", StepRole::Worker, "ANYTHING")]);
+    let third = next_map(&w, &second);
+    let brain = w.engine.brain(&w.project_id).unwrap();
+    assert_eq!(brain.map.len(), 1);
+    assert_eq!(brain.map[0].note.text, "A new map");
+    assert!(!brain.map[0].stale);
+    w.run(vec![agent("fourth", StepRole::Worker, "ANYTHING")]);
+    no_new_map(&w, &third);
+}
+
+#[test]
+fn a_map_that_failed_is_not_asked_for_again_until_a_person_does() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.map_answer(TWO_LINES);
+    w.map();
+    // A person asked for a map and the agent failed.
+    let failed = w
+        .engine
+        .start_run(StartRun {
+            project_id: w.project_id.clone(),
+            title: None,
+            request: "x".into(),
+            workflow: vec![agent("brain-map", StepRole::Mapper, "FAIL")],
+            language: "en".into(),
+            source_issue: None,
+            saved_workflow: None,
+            started_by: None,
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while w.store.attempts_of_run(&failed).unwrap()[0].state != AttemptState::Failed.as_str() {
+        assert!(Instant::now() < deadline, "the map never failed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let last = w.store.last_map_attempt(&w.project_id).unwrap().unwrap().id;
+
+    std::fs::write(w.repo.join("src/a.py"), "two\n").unwrap();
+    std::fs::write(w.repo.join("src/b.py"), "two\n").unwrap();
+    git(&w.repo, &["add", "-A"]);
+    git(&w.repo, &["commit", "-qm", "change both"]);
+    w.run(vec![agent("first", StepRole::Worker, "ANYTHING")]);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        w.store.last_map_attempt(&w.project_id).unwrap().unwrap().id,
+        last
+    );
+    assert!(
+        w.engine
+            .brain(&w.project_id)
+            .unwrap()
+            .map
+            .iter()
+            .all(|n| n.stale)
+    );
 }

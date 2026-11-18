@@ -2405,6 +2405,16 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// What a person turned down in a project, oldest first. Kept so it isn't proposed again.
+    pub fn dismissed_notes(&self, project_id: &str) -> Result<Vec<BrainNote>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select * from brain_note where project_id = ?1 and state = 'dismissed' order by seq",
+        )?;
+        let rows = stmt.query_map([project_id], brain_note_from)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn brain_note(&self, seq: i64) -> Result<BrainNote> {
         self.lock()
             .query_row(
@@ -2445,6 +2455,18 @@ impl Store {
     }
 
     /// Whether anything has ever tried to map this project.
+    /// How many proposals wait for a person in each project that has any, so a screen can say
+    /// where they are. Not those of a removed project, as in `pending_proposals`.
+    pub fn pending_proposals_by_project(&self) -> Result<BTreeMap<String, i64>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select n.project_id, count(*) from brain_note n join project p on p.id = n.project_id
+             where n.state = 'proposed' and p.removed_at is null group by n.project_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn has_map_attempt(&self, project_id: &str) -> Result<bool> {
         Ok(self.lock().query_row(
             "select exists (select 1 from attempt a join run r on r.id = a.run_id
@@ -2452,6 +2474,19 @@ impl Store {
             [project_id],
             |r| r.get(0),
         )?)
+    }
+
+    /// The last time an agent set out to write a project's map, however it ended.
+    pub fn last_map_attempt(&self, project_id: &str) -> Result<Option<Attempt>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "select a.* from attempt a join run r on r.id = a.run_id
+                 where r.project_id = ?1 and a.role = 'mapper' order by a.rowid desc limit 1",
+                [project_id],
+                attempt_from,
+            )
+            .optional()?)
     }
 
     pub fn retire_decision(&self, seq: i64) -> Result<()> {
@@ -5928,6 +5963,10 @@ mod tests {
             .append_event("a", "note", &serde_json::json!({}))
             .unwrap();
         assert_eq!(store.pending_proposals().unwrap(), 1);
+        assert_eq!(
+            store.pending_proposals_by_project().unwrap(),
+            BTreeMap::from([("p".to_owned(), 1)])
+        );
 
         assert!(store.remove_project("p").unwrap());
         assert!(!store.remove_project("p").unwrap(), "it already is");
@@ -5938,6 +5977,7 @@ mod tests {
             0,
             "nothing could clear it"
         );
+        assert!(store.pending_proposals_by_project().unwrap().is_empty());
 
         assert_eq!(store.project("p").unwrap().name, "demo");
         assert_eq!(store.project_by_path("/demo").unwrap().unwrap().id, "p");

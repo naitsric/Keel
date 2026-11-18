@@ -629,7 +629,9 @@ let defaultWorkflow: string | null = params.get("defaultWorkflow");
 const demoProject: Project = { sensitivePaths: params.get("sensitive") === "1" ? ["billing/", "*.proto"] : [],  id: "p1", name: "demo", path: "/Users/you/demo", githubAccount: params.get("account") === "none" ? null : "you-work", githubRepo: "acme/app", setupCommand: "uv sync --frozen", checkCommand: noCheck ? null : "make test", allowedDomains: ["pypi.org"], allowedRead: ["~/.nvm"], services: [{ type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }, { type: "command", name: "cache", start: "redis-server --unixsocket $KEEL_SOCKET --port 0", socket: null }], env: [{ name: "DATABASE_URL", value: "postgresql://postgres@/test?host={{socketDir:db}}" }], defaultWorkflow, allowLocalhost: localhostOpen, issueLabel: params.get("watch") };
 // A second project on the board, with one card, to try the selector and coming back from a run.
 const otherProject: Project = { ...demoProject, id: "p2", name: "payments", path: "/Users/you/payments", services: [], env: [], defaultWorkflow: null };
-const projects = view === "board" || palette || params.get("drafts") === "1" ? [demoProject, otherProject] : [demoProject];
+// `elsewhere=1`: proposals wait in a project that isn't the one the Brain page is on.
+const proposalsElsewhere = params.get("elsewhere") === "1";
+const projects = view === "board" || palette || params.get("drafts") === "1" || proposalsElsewhere ? [demoProject, otherProject] : [demoProject];
 
 // Adding a project. dialog=setup opens its dialog right away, and click=Add project… gets there the
 // long way. setup=pnpm|npm|yarn|uv|uvci|cargo|go|make|ci|unknown is what the folder gives away, and
@@ -868,7 +870,7 @@ mockIPC((command, args) => {
       // A new object each time, as the real answer is.
       return { ...preflight };
     case "overview":
-      return params.get("empty") === "1" ? { pendingProposals: 0, workflowDrafts: 0, projectProposals: projectsProposed.length, runs: params.get("history") === "1" ? runs : [], projects: listedProjects, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: params.get("proposals") === "1" ? 1 : 0, workflowDrafts: params.get("drafts") === "1" ? draftsWaiting.length : 0, projectProposals: projectsProposed.length, runs, projects: listedProjects.map((p) => (p.id === "p1" ? { ...p, defaultWorkflow } : p)), totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
+      return params.get("empty") === "1" ? { pendingProposals: 0, proposalsByProject: {}, workflowDrafts: 0, projectProposals: projectsProposed.length, runs: params.get("history") === "1" ? runs : [], projects: listedProjects, totals: { running: 0, retrying: 0, blocked: 0, tokens: 0, durationMs: 0, costUsd: 0 } } : { pendingProposals: proposalsElsewhere ? proposals.length : params.get("proposals") === "1" ? 1 : 0, proposalsByProject: proposalsElsewhere ? { p2: proposals.length } : params.get("proposals") === "1" ? { p1: 1 } : {}, workflowDrafts: params.get("drafts") === "1" ? draftsWaiting.length : 0, projectProposals: projectsProposed.length, runs, projects: listedProjects.map((p) => (p.id === "p1" ? { ...p, defaultWorkflow } : p)), totals: { running: 1, retrying: 1, blocked: 2, tokens: 128400, durationMs: 1260000, costUsd: 1.87 } };
     case "plugin:dialog|open":
       return params.get("picker") === "cancel" ? null : freshProject.path;
     case "project_add":
@@ -915,7 +917,7 @@ mockIPC((command, args) => {
       return {
         map: mapNotes,
         learnings: [{ ...note(9, "The tests share one database, so they can't run at the same time.", ["tests/conftest.py"]), kind: "learning", stale: false, included: true }],
-        proposals,
+        proposals: proposalsElsewhere && (args as { projectId: string }).projectId !== otherProject.id ? [] : proposals,
         decisions: [
           { seq: 2, at: at(1000), answer: "answered", question: i18next.language === "es" ? "Si `whole` es 0, ¿qué debe pasar?" : "If `whole` is 0, what should happen?", text: i18next.language === "es" ? "Mostrar error, como hoy" : "Show an error, as today", included: true },
           { seq: 1, at: at(2000), answer: "reject", question: null, text: "Use the existing retry helper, not a new one.", included: true },
@@ -1138,6 +1140,8 @@ const PAGES: { [Name in View["name"]]: Extract<View, { name: Name }> } = {
   projects: { name: "projects", projectId: params.get("project") ?? undefined },
 };
 if (Object.hasOwn(PAGES, view)) useApp.setState({ view: PAGES[view as View["name"]] });
+// As after the person looked at demo, which has none waiting.
+if (proposalsElsewhere) useApp.setState({ brainProjectId: demoProject.id });
 if (params.get("dialog") === "newRun") useApp.setState({ newRunOpen: true });
 if (params.get("dialog") === "quit") useApp.setState({ quitOpen: true });
 if (params.get("dialog") === "setup") useApp.setState({ projectSetup: { projectId: freshProject.id, added: params.get("added") ? (addedAnswer() as ProjectAdded) : null, returnToNewRun: false } });

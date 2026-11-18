@@ -2514,6 +2514,14 @@ impl Inner {
                 text.push_str(&format!("\n\n{broken}"));
             }
         }
+        // A learner can't tell what it proposed in other runs, and a workflow saved before this
+        // doesn't ask. Without it the same thing was proposed again while the first still waited.
+        if spec.role == StepRole::Learner {
+            let proposed = self.already_proposed(&run.project_id, &run.language)?;
+            if !proposed.is_empty() {
+                text.push_str(&format!("\n\n{proposed}"));
+            }
+        }
         if let Some(rule) = request_rule {
             text.push_str(&format!("\n\n{rule}"));
         }
@@ -2562,6 +2570,17 @@ impl Inner {
                 &verification::checks_in_round(&steps, attempts, run.round),
                 &run.language,
             )),
+            "trail" => {
+                let results = self
+                    .store
+                    .run_events(&run.id, "checkResult")
+                    .unwrap_or_default();
+                Some(brain::trail_text(
+                    &brain::trail_entries(attempts, &results),
+                    &run.language,
+                    brain::TRAIL_LIMIT,
+                ))
+            }
             _ => {
                 let id = name.strip_prefix("steps.")?.strip_suffix(".output")?;
                 Some(workflows::output_of(attempts, id))

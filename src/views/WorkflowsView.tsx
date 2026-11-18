@@ -16,7 +16,7 @@ import { WorkflowResultsCard } from "./WorkflowResultsCard";
 
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
 const DEFAULT_EFFORT = "__default__";
-const PROMPT_TOKENS = "{{request}}, {{diff}}, {{rework}}, {{answers}}, {{check}}, {{steps.spec.output}}";
+const PROMPT_TOKENS = "{{request}}, {{diff}}, {{rework}}, {{answers}}, {{check}}, {{trail}}, {{steps.spec.output}}";
 
 /** A step's name that isn't taken yet. */
 export function freshId(base: string, taken: string[]): string {

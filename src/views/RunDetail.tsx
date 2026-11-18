@@ -1431,8 +1431,23 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       return line(t("activity.snapshotFailed", { error: data.error }), "text-danger");
     case "brainMap":
       return line(t("activity.brainMap", { kept: data.kept, dropped: data.dropped }), data.dropped > 0 ? "text-warning" : undefined);
-    case "brainProposals":
-      return line(t("activity.brainProposals", { count: data.count }));
+    case "brainMapRefresh":
+      return line(t("activity.brainMapRefresh", { stale: data.stale, lines: data.lines }));
+    case "brainProposals": {
+      const repeated: { text: string; like: number }[] = data.repeated ?? [];
+      if (repeated.length === 0) return line(t("activity.brainProposals", { count: data.count }));
+      return (
+        <div>
+          {line(t("activity.brainProposals", { count: data.count }))}
+          {line(t("activity.brainRepeated", { count: repeated.length }))}
+          <ul className="selectable mt-0.5 list-disc space-y-0.5 pl-4 text-[11.5px] text-muted">
+            {repeated.map((note) => (
+              <li key={note.text}>{note.text}</li>
+            ))}
+          </ul>
+        </div>
+      );
+    }
     case "brainNote":
       return line(t(`activity.brainNote_${data.state}`, { text: data.text }));
     case "brainFailed":
