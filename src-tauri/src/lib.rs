@@ -141,6 +141,8 @@ struct Overview {
     /// Not masked: Settings saves back what it gets, which would overwrite the real values.
     projects: Vec<Project>,
     pending_proposals: i64,
+    /// Where they wait, for the Brain page: only the projects that have any.
+    proposals_by_project: std::collections::BTreeMap<String, i64>,
     workflow_drafts: usize,
     project_proposals: usize,
 }
@@ -152,6 +154,7 @@ fn overview(state: State<'_, AppState>) -> CommandResult<Overview> {
         totals: state.store.totals()?,
         projects: state.store.projects()?,
         pending_proposals: state.store.pending_proposals()?,
+        proposals_by_project: state.store.pending_proposals_by_project()?,
         // A folder that can't be read shouldn't take the home page down with it.
         workflow_drafts: state
             .engine
@@ -1341,6 +1344,7 @@ mod tests {
                 issue_label: None,
             }],
             pending_proposals: 0,
+            proposals_by_project: Default::default(),
             workflow_drafts: 0,
             project_proposals: 0,
         };

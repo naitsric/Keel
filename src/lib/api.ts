@@ -580,6 +580,8 @@ export interface Overview {
   totals: Totals;
   projects: Project[];
   pendingProposals: number;
+  /** How many of them wait in each project that has any. */
+  proposalsByProject: Record<string, number>;
   workflowDrafts: number;
   projectProposals: number;
 }

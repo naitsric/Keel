@@ -231,3 +231,73 @@ describe("the Brain page in a wide window", () => {
     expect(column()?.textContent).toContain(i18next.t(inside));
   });
 });
+
+describe("proposals waiting in other projects", () => {
+  let root: Root;
+  const proposal = { seq: 9, kind: "learning", state: "proposed", text: "The db needs a socket", evidence: "The check failed without it", paths: [], commitSha: null };
+  const brainOf = (projectId: string): BrainView => ({ ...brain, decisions: [], proposals: projectId === "p2" ? [proposal as never] : [] });
+  const page = () => document.body.textContent ?? "";
+  const shown = () => document.querySelector("select")?.value;
+  // The first list is the one of projects. The other picks the model that writes the map.
+  const listed = () => [...(document.querySelector("select")?.querySelectorAll("option") ?? [])].map((option) => option.textContent);
+  const open = () => act(async () => root.render(<BrainPage />));
+  const withWaiting = (proposalsByProject: Record<string, number>, brainProjectId: string | null) =>
+    useApp.setState({
+      overview: { ...useApp.getState().overview, projects: [{ id: "p1", name: "demo" }, { id: "p2", name: "other" }, { id: "p3", name: "third" }] as never, proposalsByProject },
+      brainProjectId,
+    });
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    mockIPC((_, args) => brainOf((args as { projectId: string }).projectId));
+    const container = document.createElement("div");
+    document.body.append(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.replaceChildren();
+    useApp.setState({ brainProjectId: null, overview: { ...useApp.getState().overview, proposalsByProject: {} } });
+  });
+
+  it("opens where some wait when no project was picked, and on the first one when none do", async () => {
+    withWaiting({ p2: 1 }, null);
+    await open();
+    expect(shown()).toBe("p2");
+    expect(page()).toContain("The db needs a socket");
+    expect(page()).not.toContain("Proposals are waiting in other projects");
+
+    act(() => root.unmount());
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+    withWaiting({}, null);
+    await open();
+    expect(shown()).toBe("p1");
+  });
+
+  it("says which other projects have some, in the list and beside it, and goes there", async () => {
+    withWaiting({ p2: 1, p3: 4 }, "p1");
+    await open();
+    expect(shown()).toBe("p1");
+    expect(listed()).toEqual(["demo", "other · 1 proposal", "third · 4 proposals"]);
+    expect(page()).toContain("Proposals are waiting in other projects:");
+    const link = [...document.querySelectorAll("button")].find((button) => button.textContent === "other · 1 proposal");
+    await act(async () => link?.click());
+    expect(shown()).toBe("p2");
+    expect(page()).toContain("The db needs a socket");
+    const links = [...document.querySelectorAll("button")].map((button) => button.textContent);
+    expect(links).toContain("third · 4 proposals");
+    expect(links).not.toContain("other · 1 proposal");
+  });
+
+  it("says nothing when the only ones waiting are on screen, in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    withWaiting({ p2: 2 }, "p2");
+    await open();
+    expect(page()).not.toContain("Hay propuestas esperando en otros proyectos");
+    expect(listed()).toContain("other · 2 propuestas");
+    withWaiting({ p2: 2 }, "p1");
+    await open();
+    expect(page()).toContain("Hay propuestas esperando en otros proyectos:");
+  });
+});
