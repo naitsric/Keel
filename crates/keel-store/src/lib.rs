@@ -2454,6 +2454,19 @@ impl Store {
         )?)
     }
 
+    /// The last time an agent set out to write a project's map, however it ended.
+    pub fn last_map_attempt(&self, project_id: &str) -> Result<Option<Attempt>> {
+        Ok(self
+            .lock()
+            .query_row(
+                "select a.* from attempt a join run r on r.id = a.run_id
+                 where r.project_id = ?1 and a.role = 'mapper' order by a.rowid desc limit 1",
+                [project_id],
+                attempt_from,
+            )
+            .optional()?)
+    }
+
     pub fn retire_decision(&self, seq: i64) -> Result<()> {
         self.lock()
             .execute("update decision set retired = 1 where seq = ?1", [seq])?;

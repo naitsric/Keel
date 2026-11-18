@@ -44,7 +44,8 @@ Each project has a small Brain, kept in the app on this Mac, and every agent get
 most about 4 KB, so when it's full, adding something means retiring something.
 
 - **Map:** an agent writes it from the code when you add the project. Each line cites files and a
-  commit, and it's marked out of date when those files change.
+  commit, and it's marked out of date when those files change. When half the lines are, Keel has
+  it written again as the next run starts.
 - **Decisions:** what you say when approving or rejecting a change. Agents follow these first.
 - **Learned:** at the end of a run, an agent can propose up to 3 things it learned, with evidence.
   They only go in if you accept them.

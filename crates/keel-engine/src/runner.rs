@@ -401,6 +401,8 @@ impl Inner {
             self.end_early(&attempt_id, &run_id, AttemptState::Stopped, None);
             return;
         }
+        // The first step of a run to get a workspace brings the mirror up to date.
+        let mirror_updates = !PathBuf::from(&attempt.workspace).join(".git").exists();
         let started = match &step {
             WorkflowStep::Agent(spec) => self.spawn_agent(&attempt, &project_id, spec, resume),
             WorkflowStep::Setup { run, .. } => self.spawn_command(&attempt, &project_id, run, true),
@@ -415,7 +417,16 @@ impl Inner {
             WorkflowStep::Approval { .. } | WorkflowStep::Parallel { .. } => Ok(None),
         };
         match started {
-            Ok(Some(monitor)) => self.monitor(monitor),
+            Ok(Some(monitor)) => {
+                // Now is when Keel can tell how much of the map the new code left behind. Apart,
+                // since starting a run reads the session, and this step is already being watched.
+                if mirror_updates {
+                    let inner = self.clone();
+                    let (attempt_id, project_id) = (attempt_id.clone(), project_id.clone());
+                    std::thread::spawn(move || inner.refresh_stale_map(&attempt_id, &project_id));
+                }
+                self.monitor(monitor)
+            }
             Ok(None) => {
                 self.release_slot(&attempt_id, &project_id, holds_project, counts_as_agent);
                 self.end_early(&attempt_id, &run_id, AttemptState::Stopped, None);

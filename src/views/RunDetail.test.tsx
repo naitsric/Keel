@@ -1803,6 +1803,14 @@ describe("the commands a step ran", () => {
     expect(page()).not.toContain("The output says");
   });
 
+  it("says when a step found the map out of date and Keel asked for a new one", async () => {
+    inActivity([event(1, "brainMapRefresh", { run: "r2", stale: 7, lines: 12 })]);
+    expect(page()).toContain("Keel asked for a new map of the project: 7 of its 12 lines cite files that changed");
+    await i18next.changeLanguage("es");
+    inActivity([event(1, "brainMapRefresh", { run: "r2", stale: 7, lines: 12 })]);
+    expect(page()).toContain("Keel pidió un mapa nuevo del proyecto: 7 de sus 12 líneas citan archivos que cambiaron");
+  });
+
   it("is all in Spanish too", async () => {
     await i18next.changeLanguage("es");
     listed(failedBehindPipe);

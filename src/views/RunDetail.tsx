@@ -1431,6 +1431,8 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       return line(t("activity.snapshotFailed", { error: data.error }), "text-danger");
     case "brainMap":
       return line(t("activity.brainMap", { kept: data.kept, dropped: data.dropped }), data.dropped > 0 ? "text-warning" : undefined);
+    case "brainMapRefresh":
+      return line(t("activity.brainMapRefresh", { stale: data.stale, lines: data.lines }));
     case "brainProposals":
       return line(t("activity.brainProposals", { count: data.count }));
     case "brainNote":

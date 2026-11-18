@@ -536,12 +536,31 @@ impl Git {
     /// so this doesn't need the sandbox.
     pub fn changed_in_mirror(&self, mirror: &Path, commit: &str) -> Result<Vec<String>, GitError> {
         let base = format!("refs/heads/{BASE_REF}");
+        // With `-z` a name with an accent comes as it is, not quoted and escaped.
         Ok(self
             .run(
                 mirror,
-                &["diff", "--no-ext-diff", "--name-only", commit, &base],
+                &["diff", "--no-ext-diff", "--name-only", "-z", commit, &base],
             )?
-            .lines()
+            .split('\0')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
+    /// Which of these paths the mirror still has, files or folders.
+    pub fn kept_in_mirror(
+        &self,
+        mirror: &Path,
+        paths: &[&str],
+    ) -> Result<std::collections::HashSet<String>, GitError> {
+        let base = format!("refs/heads/{BASE_REF}");
+        let mut args = vec!["ls-tree", "--name-only", "-z", &base, "--"];
+        args.extend(paths);
+        Ok(self
+            .run(mirror, &args)?
+            .split('\0')
+            .filter(|name| !name.is_empty())
             .map(str::to_owned)
             .collect())
     }

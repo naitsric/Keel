@@ -5,6 +5,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::Arc;
 
 use keel_core::{AttemptState, Reason, StepRole, StepSpec, ToolProfile, WorkflowStep};
 use keel_store::{Attempt, BrainNote, Decision, NewBrainNote};
@@ -261,6 +262,24 @@ fn cited_paths(workspace: &Path, item: &Value) -> Vec<String> {
     paths
 }
 
+/// Whether something changed inside `path`, which makes it a folder.
+fn changed_inside(path: &str, changed: &[String]) -> bool {
+    let inside = format!("{path}/");
+    changed.iter().any(|file| file.starts_with(&inside))
+}
+
+/// Whether what a note cites has changed: a file it cites did, or a folder it cites is `gone`.
+fn cites_a_change(paths: &[String], changed: &[String], gone: impl Fn(&str) -> bool) -> bool {
+    paths.iter().any(|path| {
+        changed.iter().any(|file| file == path) || (changed_inside(path, changed) && gone(path))
+    })
+}
+
+/// Half of the map or more out of date is when it's written again on its own.
+fn map_needs_writing_again(stale_lines: usize, lines: usize) -> bool {
+    lines > 0 && stale_lines * 2 >= lines
+}
+
 /// A note in the Brain as a screen shows it.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -301,7 +320,9 @@ pub struct BrainView {
 
 impl Inner {
     /// Which notes cite something that has changed since they were written, going by what the
-    /// mirror has. A commit the mirror doesn't know counts, since nothing vouches for it now.
+    /// mirror has. A commit the mirror doesn't know counts, since nothing vouches for it now. A
+    /// folder is cited for what lives there, so a change inside it doesn't count: only the folder
+    /// going away does.
     fn stale_notes(&self, project_id: &str, notes: &[BrainNote]) -> HashSet<i64> {
         let mut stale = HashSet::new();
         let mirror = self.mirror(project_id);
@@ -312,22 +333,39 @@ impl Inner {
             return stale;
         }
         let git = Git::new(bin);
+        let cited: Vec<(&BrainNote, &str)> = notes
+            .iter()
+            .filter(|n| n.state == "active" && !n.paths.is_empty())
+            .filter_map(|n| Some((n, n.commit_sha.as_deref()?)))
+            .collect();
         let mut changed_since: HashMap<&str, Option<Vec<String>>> = HashMap::new();
-        for note in notes.iter().filter(|n| n.state == "active") {
-            let Some(commit) = note.commit_sha.as_deref() else {
-                continue;
-            };
-            if note.paths.is_empty() {
-                continue;
-            }
-            let changed = changed_since
+        for (_, commit) in &cited {
+            changed_since
                 .entry(commit)
                 .or_insert_with(|| git.changed_in_mirror(&mirror, commit).ok());
-            let is_stale = changed.as_ref().is_none_or(|files| {
-                note.paths.iter().any(|path| {
-                    files
-                        .iter()
-                        .any(|f| f == path || f.starts_with(&format!("{path}/")))
+        }
+        // One question to git for every folder with a change inside, whatever the note.
+        let mut folders: Vec<&str> = cited
+            .iter()
+            .filter_map(|(note, commit)| Some((note, changed_since[commit].as_ref()?)))
+            .flat_map(|(note, files)| {
+                note.paths
+                    .iter()
+                    .filter(|path| changed_inside(path, files))
+                    .map(String::as_str)
+            })
+            .collect();
+        folders.sort_unstable();
+        folders.dedup();
+        let kept = if folders.is_empty() {
+            Some(HashSet::new())
+        } else {
+            git.kept_in_mirror(&mirror, &folders).ok()
+        };
+        for (note, commit) in cited {
+            let is_stale = changed_since[commit].as_ref().is_none_or(|files| {
+                cites_a_change(&note.paths, files, |folder| {
+                    kept.as_ref().is_none_or(|kept| !kept.contains(folder))
                 })
             });
             if is_stale {
@@ -335,6 +373,51 @@ impl Inner {
             }
         }
         stale
+    }
+
+    /// Has the map written again once half of it or more cites something that changed, so the
+    /// mark means something again. Called when a run has just brought the mirror up to date. Only
+    /// if the last map was written and read older code than this: after one that failed, or one
+    /// that read this same code and left the map as it was, asking again would only spend more,
+    /// and a person asks for it on the Brain screen when they've seen why.
+    pub(crate) fn refresh_stale_map(self: &Arc<Self>, attempt_id: &str, project_id: &str) {
+        let asked = || -> Result<Option<Value>> {
+            let attempt = self.store.attempt(attempt_id)?;
+            if attempt.role == "mapper" {
+                return Ok(None);
+            }
+            let notes = self.store.brain_notes(project_id)?;
+            let stale = self.stale_notes(project_id, &notes);
+            let map: Vec<&BrainNote> = notes
+                .iter()
+                .filter(|n| n.state == "active" && n.kind == "map")
+                .collect();
+            let stale_lines = map.iter().filter(|n| stale.contains(&n.seq)).count();
+            if !map_needs_writing_again(stale_lines, map.len()) {
+                return Ok(None);
+            }
+            let Some(last) = self.store.last_map_attempt(project_id)? else {
+                return Ok(None);
+            };
+            if last.state != AttemptState::Succeeded.as_str()
+                || last.sha_before == attempt.sha_before
+            {
+                return Ok(None);
+            }
+            let engine = Engine {
+                inner: self.clone(),
+            };
+            let run = engine.generate_map(project_id, &last.model_requested, &attempt.language)?;
+            Ok(Some(
+                json!({ "run": run, "stale": stale_lines, "lines": map.len() }),
+            ))
+        };
+        // A map that can't start now isn't this step's problem: the next run asks again.
+        if let Ok(Some(data)) = asked() {
+            let _ = self
+                .store
+                .append_event(attempt_id, "brainMapRefresh", &data);
+        }
     }
 
     /// What an agent starting now gets.
@@ -785,6 +868,34 @@ mod tests {
         ] {
             assert_eq!(real(bad), None, "{bad}");
         }
+    }
+
+    #[test]
+    fn a_cited_folder_only_counts_when_it_is_gone() {
+        let paths = |list: &[&str]| list.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+        let changed = paths(&["src/views/Board.tsx", "Cargo.toml", "srcs/x"]);
+        let here = |_: &str| false;
+        let gone = |_: &str| true;
+        assert!(cites_a_change(&paths(&["Cargo.toml"]), &changed, here));
+        assert!(
+            !cites_a_change(&paths(&["src", "src/views"]), &changed, here),
+            "a change inside a folder that's still there"
+        );
+        assert!(cites_a_change(&paths(&["src"]), &changed, gone));
+        assert!(
+            !cites_a_change(&paths(&["crates", "README.md"]), &changed, gone),
+            "nothing it cites changed, so nobody asks whether it's gone"
+        );
+        assert!(!changed_inside("src", &paths(&["srcs/x", "src"])));
+    }
+
+    #[test]
+    fn half_the_map_out_of_date_is_when_it_is_written_again() {
+        assert!(!map_needs_writing_again(0, 0));
+        assert!(!map_needs_writing_again(5, 12));
+        assert!(map_needs_writing_again(6, 12));
+        assert!(map_needs_writing_again(1, 2));
+        assert!(!map_needs_writing_again(1, 3));
     }
 
     #[test]

@@ -627,3 +627,157 @@ fn a_read_only_map_does_not_run_the_projects_setup() {
     assert_eq!(w.store.attempts_of_run(&run).unwrap().len(), 1);
     assert_eq!(w.engine.brain(&w.project_id).unwrap().map.len(), 2);
 }
+
+#[test]
+fn a_line_that_cites_a_folder_goes_stale_only_when_the_folder_is_gone() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    std::fs::create_dir(w.repo.join("docs")).unwrap();
+    std::fs::write(w.repo.join("docs/años.md"), "one\n").unwrap();
+    git(&w.repo, &["add", "-A"]);
+    git(&w.repo, &["commit", "-qm", "docs"]);
+    w.map_answer(
+        r#"{"text":"The code lives in src","paths":["src"]},{"text":"The docs live in docs","paths":["docs"]},{"text":"The years are in one file","paths":["docs/años.md"]},{"text":"B is the entry point","paths":["src/b.py"]}"#,
+    );
+    w.map();
+
+    std::fs::write(w.repo.join("src/a.py"), "two\n").unwrap();
+    std::fs::write(w.repo.join("docs/años.md"), "two\n").unwrap();
+    git(&w.repo, &["add", "-A"]);
+    git(&w.repo, &["commit", "-qm", "change inside both"]);
+    w.run(vec![agent("first", StepRole::Worker, "ANYTHING")]);
+    let stale = |w: &World| -> Vec<bool> {
+        let brain = w.engine.brain(&w.project_id).unwrap();
+        brain.map.iter().map(|n| n.stale).collect()
+    };
+    assert_eq!(
+        stale(&w),
+        [false, false, true, false],
+        "only the line that cites the file that changed, whatever its name"
+    );
+
+    git(&w.repo, &["rm", "-rq", "docs"]);
+    git(&w.repo, &["commit", "-qm", "no docs"]);
+    w.run(vec![agent("second", StepRole::Worker, "ANYTHING")]);
+    assert_eq!(stale(&w), [false, true, true, false], "the folder is gone");
+}
+
+#[test]
+fn a_map_half_out_of_date_is_written_again_on_its_own_and_once_for_the_same_code() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.map_answer(TWO_LINES);
+    w.map();
+    let last_map = |w: &World| w.store.last_map_attempt(&w.project_id).unwrap().unwrap().id;
+    let first = last_map(&w);
+    // The map is asked for apart from the step that found it out of date.
+    let next_map = |w: &World, after: &str| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let last = w.store.last_map_attempt(&w.project_id).unwrap().unwrap();
+            if last.id != after && w.engine.brain(&w.project_id).unwrap().map_run.is_none() {
+                return last.id;
+            }
+            assert!(Instant::now() < deadline, "no new map");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    let no_new_map = |w: &World, last: &str| {
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(last_map(w), last);
+    };
+
+    // Nothing changed, so nothing to write again.
+    w.run(vec![agent("same", StepRole::Worker, "ANYTHING")]);
+    no_new_map(&w, &first);
+
+    // One line of two is out of date, and the agent that maps comes back with nothing usable.
+    std::fs::write(w.repo.join("src/a.py"), "two\n").unwrap();
+    git(&w.repo, &["add", "-A"]);
+    git(&w.repo, &["commit", "-qm", "change a"]);
+    w.map_answer(r#"{"text":"Cites nothing real","paths":["src/nope.py"]}"#);
+    let run = w.run(vec![agent("first", StepRole::Worker, "ANYTHING")]);
+    let second = next_map(&w, &first);
+    let attempt = w.store.attempts_of_run(&run).unwrap().remove(0);
+    let asked: Vec<_> = w
+        .store
+        .events(&attempt.id, 0)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "brainMapRefresh")
+        .collect();
+    assert_eq!(asked.len(), 1, "the step that found it says so");
+    assert_eq!(asked[0].data["stale"], 1);
+    assert_eq!(asked[0].data["lines"], 2);
+    let brain = w.engine.brain(&w.project_id).unwrap();
+    assert_eq!(
+        brain.map[0].note.text, "Tests live in src",
+        "the old map stays"
+    );
+    assert!(brain.map[0].stale);
+
+    // The same code would get the same useless map, so it isn't asked for again.
+    w.run(vec![agent("again", StepRole::Worker, "ANYTHING")]);
+    no_new_map(&w, &second);
+
+    // New code is a reason to try again, and a map that's kept leaves nothing out of date.
+    std::fs::write(w.repo.join("src/a.py"), "three\n").unwrap();
+    git(&w.repo, &["add", "-A"]);
+    git(&w.repo, &["commit", "-qm", "change a again"]);
+    w.map_answer(r#"{"text":"A new map","paths":["src/a.py"]}"#);
+    w.run(vec![agent("third", StepRole::Worker, "ANYTHING")]);
+    let third = next_map(&w, &second);
+    let brain = w.engine.brain(&w.project_id).unwrap();
+    assert_eq!(brain.map.len(), 1);
+    assert_eq!(brain.map[0].note.text, "A new map");
+    assert!(!brain.map[0].stale);
+    w.run(vec![agent("fourth", StepRole::Worker, "ANYTHING")]);
+    no_new_map(&w, &third);
+}
+
+#[test]
+fn a_map_that_failed_is_not_asked_for_again_until_a_person_does() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.map_answer(TWO_LINES);
+    w.map();
+    // A person asked for a map and the agent failed.
+    let failed = w
+        .engine
+        .start_run(StartRun {
+            project_id: w.project_id.clone(),
+            title: None,
+            request: "x".into(),
+            workflow: vec![agent("brain-map", StepRole::Mapper, "FAIL")],
+            language: "en".into(),
+            source_issue: None,
+            saved_workflow: None,
+            started_by: None,
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while w.store.attempts_of_run(&failed).unwrap()[0].state != AttemptState::Failed.as_str() {
+        assert!(Instant::now() < deadline, "the map never failed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let last = w.store.last_map_attempt(&w.project_id).unwrap().unwrap().id;
+
+    std::fs::write(w.repo.join("src/a.py"), "two\n").unwrap();
+    std::fs::write(w.repo.join("src/b.py"), "two\n").unwrap();
+    git(&w.repo, &["add", "-A"]);
+    git(&w.repo, &["commit", "-qm", "change both"]);
+    w.run(vec![agent("first", StepRole::Worker, "ANYTHING")]);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        w.store.last_map_attempt(&w.project_id).unwrap().unwrap().id,
+        last
+    );
+    assert!(
+        w.engine
+            .brain(&w.project_id)
+            .unwrap()
+            .map
+            .iter()
+            .all(|n| n.stale)
+    );
+}
