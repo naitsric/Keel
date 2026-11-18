@@ -2562,6 +2562,17 @@ impl Inner {
                 &verification::checks_in_round(&steps, attempts, run.round),
                 &run.language,
             )),
+            "trail" => {
+                let results = self
+                    .store
+                    .run_events(&run.id, "checkResult")
+                    .unwrap_or_default();
+                Some(brain::trail_text(
+                    &brain::trail_entries(&attempts, &results),
+                    &run.language,
+                    brain::TRAIL_LIMIT,
+                ))
+            }
             _ => {
                 let id = name.strip_prefix("steps.")?.strip_suffix(".output")?;
                 Some(workflows::output_of(attempts, id))
