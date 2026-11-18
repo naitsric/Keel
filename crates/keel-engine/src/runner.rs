@@ -552,9 +552,19 @@ impl Inner {
             .claude
             .clone()
             .ok_or(Error::Blocked(Reason::ClaudeMissing))?;
-        let (_git, sha_before) = self.prepare_workspace(attempt, project_id)?;
+        let (git, sha_before) = self.prepare_workspace(attempt, project_id)?;
         let workspace = PathBuf::from(&attempt.workspace);
         let dir = self.run_dir(&attempt.run_id);
+        // The commit the run started from, which is where this step is if it's the first.
+        let base = store
+            .attempts_of_run(&attempt.run_id)?
+            .iter()
+            .find_map(|a| a.sha_before.clone())
+            .unwrap_or_else(|| sha_before.clone());
+        let instructions = prompts::Instructions::new(
+            git.file_at(&workspace, &base, "CLAUDE.md"),
+            &git.files_at(&workspace, &base).unwrap_or_default(),
+        );
         // The other projects of a change across several, which it reads and can't change. Only
         // what its settings already close to changes, since `--add-dir` opens a folder to writes.
         let (copies, joint) = if joint::reads_others(&spec.role) {
@@ -582,7 +592,7 @@ impl Inner {
             self.brain_block(project_id)?
         };
         let (system_prompt, sources) =
-            prompts::system_prompt(&workspace, &attempt.language, spec.tools, &brain, &joint);
+            prompts::system_prompt(&instructions, &attempt.language, spec.tools, &brain, &joint);
         let system_prompt_file = dir.join(format!("{stem}.system.md"));
         std::fs::write(&system_prompt_file, &system_prompt)?;
         let prompt_file = dir.join(format!("{stem}.prompt.txt"));
