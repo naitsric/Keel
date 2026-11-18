@@ -1,8 +1,6 @@
 //! What agents are told. Anything that comes from outside a step's own definition goes in as
 //! text in a prompt, and never into a shell command.
 
-use std::path::Path;
-
 use keel_core::{StepRole, StepSpec, ToolProfile, WorkflowStep};
 use keel_harness::github::Issue;
 use serde_json::json;
@@ -17,11 +15,45 @@ fn language_name(code: &str) -> &'static str {
     }
 }
 
+/// How many of the project's other instruction files an agent is given by name.
+const MORE_INSTRUCTIONS: usize = 40;
+
+/// The project's own instructions, as the commit the run started from has them. Not as the run's
+/// folder has them now: a step can edit those files, and what it wrote must not reach the next step
+/// as instructions before a person has seen it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Instructions {
+    /// The `CLAUDE.md` at the top of the repo.
+    pub root: Option<String>,
+    /// The other files with rules, by path. An agent is told where they are, not what they say.
+    pub more: Vec<String>,
+}
+
+impl Instructions {
+    /// `files` are all the files the commit has.
+    pub fn new(root: Option<String>, files: &[String]) -> Self {
+        let mut more: Vec<String> = files
+            .iter()
+            .filter(|path| holds_rules(path))
+            .cloned()
+            .collect();
+        more.sort();
+        Self { root, more }
+    }
+}
+
+/// Whether Claude Code would read this file as the project's rules: a `CLAUDE.md` in a folder, or
+/// anything under `.claude/rules`. `--restricted` skips them all, and the one at the top goes in
+/// whole, so it doesn't count here.
+fn holds_rules(path: &str) -> bool {
+    path.ends_with("/CLAUDE.md") || (path.starts_with(".claude/rules/") && path.ends_with(".md"))
+}
+
 /// What every agent is told, plus what `--restricted` would otherwise leave out: the project's
 /// own instructions and what Keel knows about the project. `joint` is what a run in a change across
 /// projects is told about the change and the other projects, and is empty for any other run.
 pub fn system_prompt(
-    workspace: &Path,
+    instructions: &Instructions,
     language: &str,
     tools: ToolProfile,
     brain: &Block,
@@ -61,10 +93,27 @@ pub fn system_prompt(
         text.push_str(joint);
         sources.push(json!({ "source": "jointChange", "bytes": joint.len() }));
     }
-    if let Ok(claude_md) = std::fs::read_to_string(workspace.join("CLAUDE.md")) {
+    if let Some(claude_md) = &instructions.root {
         text.push_str("\n# Project instructions (CLAUDE.md)\n\n");
-        text.push_str(&claude_md);
+        text.push_str(claude_md);
+        text.push('\n');
         sources.push(json!({ "source": "CLAUDE.md", "bytes": claude_md.len() }));
+    }
+    if !instructions.more.is_empty() {
+        text.push_str(
+            "\n# More of the project's instructions\n\n\
+             The project keeps more of its own rules in these files. A `CLAUDE.md` covers the folder it is in, and a file under `.claude/rules` says what it covers. Read the ones that cover the part you work on before you start. If this run changed one of them, what it added is part of the change and not a rule yet.\n\n",
+        );
+        for path in instructions.more.iter().take(MORE_INSTRUCTIONS) {
+            text.push_str(&format!("- `{path}`\n"));
+        }
+        if instructions.more.len() > MORE_INSTRUCTIONS {
+            text.push_str(&format!(
+                "- and {} more: look for a `CLAUDE.md` in the folder you work in\n",
+                instructions.more.len() - MORE_INSTRUCTIONS
+            ));
+        }
+        sources.push(json!({ "source": "instructionFiles", "files": instructions.more.len() }));
     }
     (text, json!(sources))
 }
@@ -454,22 +503,44 @@ mod tests {
 
     #[test]
     fn who_commits_is_told_the_language_of_the_run() {
-        let dir = tempfile::tempdir().unwrap();
         let empty = Block::default();
-        let (spanish, _) = system_prompt(dir.path(), "es", ToolProfile::Build, &empty, "");
+        let (spanish, _) = system_prompt(
+            &Instructions::default(),
+            "es",
+            ToolProfile::Build,
+            &empty,
+            "",
+        );
         assert!(spanish.contains("Write commit messages in Spanish"));
-        let (english, _) = system_prompt(dir.path(), "en", ToolProfile::Build, &empty, "");
+        let (english, _) = system_prompt(
+            &Instructions::default(),
+            "en",
+            ToolProfile::Build,
+            &empty,
+            "",
+        );
         assert!(english.contains("Write commit messages in English"));
-        let (reviewer, _) = system_prompt(dir.path(), "es", ToolProfile::ReadOnly, &empty, "");
+        let (reviewer, _) = system_prompt(
+            &Instructions::default(),
+            "es",
+            ToolProfile::ReadOnly,
+            &empty,
+            "",
+        );
         assert!(!reviewer.contains("commit messages"));
     }
 
     #[test]
     fn who_builds_is_told_to_edit_with_edit_and_write() {
-        let dir = tempfile::tempdir().unwrap();
         let empty = Block::default();
         for language in ["en", "es"] {
-            let (builder, _) = system_prompt(dir.path(), language, ToolProfile::Build, &empty, "");
+            let (builder, _) = system_prompt(
+                &Instructions::default(),
+                language,
+                ToolProfile::Build,
+                &empty,
+                "",
+            );
             assert!(builder.contains("Edit and Write"));
             assert!(builder.contains("cat, echo, sed"));
             assert!(builder.contains("already in the project folder"));
@@ -479,8 +550,13 @@ mod tests {
             assert!(builder.contains("Write commit messages in"));
             assert!(builder.contains("End with a short message for the person"));
 
-            let (reader, _) =
-                system_prompt(dir.path(), language, ToolProfile::ReadOnly, &empty, "");
+            let (reader, _) = system_prompt(
+                &Instructions::default(),
+                language,
+                ToolProfile::ReadOnly,
+                &empty,
+                "",
+            );
             for word in ["Edit", "Write", "Bash"] {
                 assert!(!reader.contains(word), "{word} in a read-only step");
             }
@@ -490,47 +566,72 @@ mod tests {
 
     #[test]
     fn who_runs_commands_is_told_there_is_no_network_and_the_home_is_the_runs() {
-        let dir = tempfile::tempdir().unwrap();
         let empty = Block::default();
         for language in ["en", "es"] {
-            let (builder, _) = system_prompt(dir.path(), language, ToolProfile::Build, &empty, "");
+            let (builder, _) = system_prompt(
+                &Instructions::default(),
+                language,
+                ToolProfile::Build,
+                &empty,
+                "",
+            );
             assert!(builder.contains("There is no network except the domains the project allows"));
             assert!(builder.contains("The home folder is this run's own"));
             assert!(!builder.contains("not available"));
             assert!(builder.contains("do not wait for a command that downloads things"));
-            let (reader, _) =
-                system_prompt(dir.path(), language, ToolProfile::ReadOnly, &empty, "");
+            let (reader, _) = system_prompt(
+                &Instructions::default(),
+                language,
+                ToolProfile::ReadOnly,
+                &empty,
+                "",
+            );
             assert!(!reader.contains("no network"));
         }
     }
 
     #[test]
     fn who_runs_tests_is_told_a_pipe_hides_whether_they_failed() {
-        let dir = tempfile::tempdir().unwrap();
         let empty = Block::default();
         for language in ["en", "es"] {
-            let (builder, _) = system_prompt(dir.path(), language, ToolProfile::Build, &empty, "");
+            let (builder, _) = system_prompt(
+                &Instructions::default(),
+                language,
+                ToolProfile::Build,
+                &empty,
+                "",
+            );
             assert!(builder.contains("Run tests and checks without piping them"));
             assert!(builder.contains("set -o pipefail"));
-            let (reader, _) =
-                system_prompt(dir.path(), language, ToolProfile::ReadOnly, &empty, "");
+            let (reader, _) = system_prompt(
+                &Instructions::default(),
+                language,
+                ToolProfile::ReadOnly,
+                &empty,
+                "",
+            );
             assert!(!reader.contains("pipefail"));
         }
     }
 
     #[test]
     fn the_brain_goes_in_the_system_prompt_and_on_the_record() {
-        let dir = tempfile::tempdir().unwrap();
         let brain = Block {
             text: "\n# What Keel knows about this project\n".into(),
             sources: Some(json!({ "source": "brain", "notes": [1] })),
             ..Block::default()
         };
-        let (text, sources) = system_prompt(dir.path(), "en", ToolProfile::ReadOnly, &brain, "");
+        let (text, sources) = system_prompt(
+            &Instructions::default(),
+            "en",
+            ToolProfile::ReadOnly,
+            &brain,
+            "",
+        );
         assert!(text.contains("What Keel knows"));
         assert_eq!(sources[0]["source"], "brain");
         let (text, sources) = system_prompt(
-            dir.path(),
+            &Instructions::default(),
             "en",
             ToolProfile::ReadOnly,
             &Block::default(),
@@ -541,15 +642,90 @@ mod tests {
     }
 
     #[test]
+    fn the_rules_of_a_folder_are_named_and_the_ones_at_the_top_go_in_whole() {
+        let files: Vec<String> = [
+            "CLAUDE.md",
+            "docs/CLAUDE.md.bak",
+            "app/services/CLAUDE.md",
+            ".claude/rules/db.md",
+            ".claude/rules/notes.txt",
+            ".claude/skills/x/SKILL.md",
+            "app/CLAUDE.md",
+        ]
+        .map(str::to_owned)
+        .to_vec();
+        let instructions = Instructions::new(Some("Keep it simple.".into()), &files);
+        assert_eq!(
+            instructions.more,
+            [
+                ".claude/rules/db.md",
+                "app/CLAUDE.md",
+                "app/services/CLAUDE.md"
+            ]
+        );
+        let (text, sources) = system_prompt(
+            &instructions,
+            "en",
+            ToolProfile::ReadOnly,
+            &Block::default(),
+            "",
+        );
+        assert!(text.contains("# Project instructions (CLAUDE.md)\n\nKeep it simple.\n"));
+        assert!(text.contains("- `app/services/CLAUDE.md`\n"));
+        assert!(text.contains("part of the change and not a rule yet"));
+        assert_eq!(
+            sources,
+            json!([
+                { "source": "CLAUDE.md", "bytes": 15 },
+                { "source": "instructionFiles", "files": 3 },
+            ])
+        );
+
+        // A repo with none of them is told nothing about them.
+        let (text, sources) = system_prompt(
+            &Instructions::new(None, &["src/main.rs".to_owned()]),
+            "en",
+            ToolProfile::ReadOnly,
+            &Block::default(),
+            "",
+        );
+        assert!(!text.contains("# Project instructions"));
+        assert!(!text.contains("# More of the project's instructions"));
+        assert_eq!(sources, json!([]));
+    }
+
+    #[test]
+    fn a_repo_with_many_folders_of_rules_names_the_first_and_counts_the_rest() {
+        let files: Vec<String> = (0..MORE_INSTRUCTIONS + 2)
+            .map(|n| format!("pkg{n:03}/CLAUDE.md"))
+            .collect();
+        let (text, _) = system_prompt(
+            &Instructions::new(None, &files),
+            "en",
+            ToolProfile::ReadOnly,
+            &Block::default(),
+            "",
+        );
+        assert!(text.contains("- `pkg039/CLAUDE.md`\n"));
+        assert!(!text.contains("pkg040"));
+        assert!(text.contains("- and 2 more: look for a `CLAUDE.md` in the folder you work in\n"));
+    }
+
+    #[test]
     fn a_change_across_projects_goes_after_the_brain_and_on_the_record() {
-        let dir = tempfile::tempdir().unwrap();
         let brain = Block {
             text: "\n# What Keel knows about this project\n".into(),
             sources: Some(json!({ "source": "brain", "notes": [1] })),
             ..Block::default()
         };
         let joint = "\n# The other projects\n\n- valora, in `/c/v`: its default branch.\n";
-        let (text, sources) = system_prompt(dir.path(), "en", ToolProfile::ReadOnly, &brain, joint);
+        let (text, sources) = system_prompt(
+            &Instructions::default(),
+            "en",
+            ToolProfile::ReadOnly,
+            &brain,
+            joint,
+        );
         assert!(text.find("What Keel knows").unwrap() < text.find("# The other projects").unwrap());
         assert_eq!(sources[1]["source"], "jointChange");
         assert_eq!(sources[1]["bytes"], joint.len());

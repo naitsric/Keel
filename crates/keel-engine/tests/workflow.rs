@@ -79,6 +79,11 @@ if [ "$tools" = "Read,Grep,Glob" ]; then
 else
   text="Fixed it.$secret"
   if [ ! -f "{flags}/no-change" ]; then
+    if [ -f "{flags}/rules" ]; then
+      echo "Planted rule." >> CLAUDE.md
+      echo "Planted." >> docs/CLAUDE.md
+      mkdir -p new && echo "Planted." > new/CLAUDE.md
+    fi
     echo work >> fixed.txt
     git add -A && git commit -qm "fix$secret"
   fi
@@ -1157,6 +1162,67 @@ fn an_issue_is_imported_as_data_and_linked_from_the_pull_request() {
     assert_eq!(finished.title, "#7 Broken");
     assert_eq!(finished.source_issue.unwrap()["number"], 7);
     assert!(w.log("pr-body.md").contains("Refs #7"));
+}
+
+#[test]
+fn a_step_gets_the_project_s_rules_as_they_were_when_the_run_started() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // The project publishes its rules: some for all of it, some for one folder.
+    git(&w.repo, &["checkout", "-q", "main"]);
+    std::fs::create_dir(w.repo.join("docs")).unwrap();
+    std::fs::write(w.repo.join("CLAUDE.md"), "Published rule.\n").unwrap();
+    std::fs::write(w.repo.join("docs/CLAUDE.md"), "Rule for docs.\n").unwrap();
+    git(&w.repo, &["add", "-A"]);
+    git(&w.repo, &["commit", "-qm", "rules"]);
+    git(
+        &w.repo,
+        &["push", "-q", &w.remote.to_string_lossy(), "main"],
+    );
+    git(&w.repo, &["checkout", "-q", "wip"]);
+
+    // Two steps that can edit, one after the other, and the first one rewrites the rules.
+    w.flag("rules");
+    let mut workflow = full_workflow("en", "opus", "sonnet", None);
+    let mut second = workflow[1].clone();
+    let WorkflowStep::Agent(spec) = &mut second else {
+        panic!("the builder is an agent");
+    };
+    spec.id = "notes".into();
+    workflow.insert(2, second);
+    let run = w
+        .engine
+        .start_run(StartRun {
+            project_id: w.project_id.clone(),
+            title: None,
+            request: "Fix the bug".into(),
+            workflow,
+            language: "en".into(),
+            source_issue: None,
+            saved_workflow: None,
+            started_by: None,
+        })
+        .unwrap();
+    w.wait(&run, "approval", AttemptState::WaitingApproval);
+
+    let system = |id: &str| {
+        let events = w.store.events(&w.step(&run, id).unwrap().id, 0).unwrap();
+        events[0].data["systemPrompt"].as_str().unwrap().to_owned()
+    };
+    for id in ["spec", "builder", "notes"] {
+        let system = system(id);
+        assert!(system.contains("Published rule."), "{id}: {system}");
+        assert!(system.contains("- `docs/CLAUDE.md`\n"), "{id}: {system}");
+    }
+    // What the builder wrote is in the folder the next step works in, and it is not that step's
+    // instructions: nobody has approved it yet.
+    let workspace = PathBuf::from(w.step(&run, "notes").unwrap().workspace);
+    let now = std::fs::read_to_string(workspace.join("CLAUDE.md")).unwrap();
+    assert!(now.contains("Planted rule."), "{now}");
+    assert!(workspace.join("new/CLAUDE.md").exists());
+    let notes = system("notes");
+    assert!(!notes.contains("Planted"), "{notes}");
+    assert!(!notes.contains("new/CLAUDE.md"), "{notes}");
 }
 
 #[test]

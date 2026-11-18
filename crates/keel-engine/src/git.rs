@@ -565,6 +565,26 @@ impl Git {
             .collect())
     }
 
+    /// A file as a commit has it, or `None` if the commit doesn't have it. Read from git and not
+    /// from the folder, so a link a step left in its place leads nowhere.
+    pub fn file_at(&self, workspace: &Path, commit: &str, path: &str) -> Option<String> {
+        self.run_in_workspace(
+            workspace,
+            &["cat-file", "blob", &format!("{commit}:{path}")],
+        )
+        .ok()
+    }
+
+    /// Every file a commit has, by path.
+    pub fn files_at(&self, workspace: &Path, commit: &str) -> Result<Vec<String>, GitError> {
+        Ok(self
+            .run_in_workspace(workspace, &["ls-tree", "-r", "--name-only", "-z", commit])?
+            .split('\0')
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect())
+    }
+
     /// The files the run has changed since `base`, as the pull request will list them.
     pub fn files_since(&self, workspace: &Path, base: &str) -> Result<Vec<String>, GitError> {
         let range = format!("{base}..HEAD");

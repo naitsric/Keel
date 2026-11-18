@@ -50,6 +50,11 @@ most about 4 KB, so when it's full, adding something means retiring something.
 - **Learned:** at the end of a run, an agent can propose up to 3 things it learned, with evidence.
   They only go in if you accept them.
 
+Agents also get the repo's own rules. The `CLAUDE.md` at the top goes to every agent whole, and a
+`CLAUDE.md` in a folder or a file under `.claude/rules` is named, for the agent to read when it works
+on that part. They are read as the project had them when the run started, so what a step writes in
+one of them is part of the change and reaches no agent as a rule until you merge it.
+
 ## How it isolates agents
 
 - Each run works in its own private clone. Your repo isn't touched.
