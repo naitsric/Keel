@@ -1035,6 +1035,140 @@ fn reopening_with_a_lost_step_leaves_the_turn_with_the_one_still_running() {
     h.wait_for(&alive, &[AttemptState::Succeeded]);
 }
 
+/// A run whose check is `command`, and then a person's approval.
+fn start_checked(engine: &Engine, project_id: &str, command: &str) -> String {
+    engine
+        .start_run(StartRun {
+            project_id: project_id.to_owned(),
+            title: None,
+            request: "x".into(),
+            workflow: vec![
+                keel_core::WorkflowStep::Check {
+                    id: "check".into(),
+                    run: command.into(),
+                },
+                keel_core::WorkflowStep::Approval { id: "human".into() },
+            ],
+            saved_workflow: None,
+            language: "en".into(),
+            source_issue: None,
+            started_by: None,
+        })
+        .unwrap()
+}
+
+/// A check a closed app left behind, as the store has it: still marked as running, with what it
+/// printed in `raw`.
+fn left_running(h: &Harness, run: &str, number: i64, like: &keel_store::Attempt, raw: &Path) {
+    h.store
+        .add_attempt(&keel_store::NewAttempt {
+            id: format!("left-{number}"),
+            run_id: run.to_owned(),
+            step_id: "check".into(),
+            kind: "check".into(),
+            role: "worker".into(),
+            round: 0,
+            number,
+            state: AttemptState::Running,
+            model_requested: String::new(),
+            effort: None,
+            tools: "check".into(),
+            max_turns: None,
+            max_budget_usd: None,
+            language: "en".into(),
+            prompt: "true".into(),
+            system_prompt_sources: "[]".into(),
+            settings: "{}".into(),
+            session_id: format!("left-{number}"),
+            resumed_from: None,
+            workspace: like.workspace.clone(),
+            raw_path: raw.to_string_lossy().into_owned(),
+            started_at: keel_store::now(),
+        })
+        .unwrap();
+}
+
+/// Only a parent is told how its child ended, and the app that reopens isn't the check's. It used
+/// to call a check that passed interrupted, and the run waited for a person to try it again.
+#[test]
+fn a_check_still_running_when_the_app_reopens_ends_with_its_real_result_and_the_run_goes_on() {
+    keel_harness::needs!(sandbox);
+    // The app that starts it never looks at it again, as one that was closed doesn't.
+    let h = harness_with("", LOGGED_IN, "2.1.318", |c| {
+        c.tick = Duration::from_secs(3600);
+    });
+    // Runs until the test lets it go, and never more than 20 seconds.
+    let run = start_checked(
+        &h.engine,
+        &h.project_id,
+        "i=0; while [ ! -f let-go ] && [ $i -lt 200 ]; do sleep 0.1; i=$((i+1)); done; echo checked; test -f let-go",
+    );
+    let running = h.wait_for(&run, &[AttemptState::Running]);
+
+    let reopened = restart(&h);
+    reopened.recover().unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(h.latest(&run).state, "running", "it hasn't ended yet");
+    std::fs::write(Path::new(&running.workspace).join("let-go"), "").unwrap();
+
+    // The run goes on to its next step, as if the app had never closed.
+    let waiting = h.wait_for(&run, &[AttemptState::WaitingApproval]);
+    assert_eq!(waiting.step_id, "human");
+    let check = h.store.attempt(&running.id).unwrap();
+    assert_eq!(check.state, "succeeded", "{:?}", check.reason);
+    assert_eq!(check.exit_code, Some(0));
+    let events = h.store.events(&check.id, 0).unwrap();
+    assert!(events.iter().any(|e| e.kind == "recovered"));
+    let result = events.iter().find(|e| e.kind == "checkResult").unwrap();
+    assert_eq!(result.data["exitCode"], 0);
+    assert_eq!(result.data["stdout"], "checked\n");
+}
+
+#[test]
+fn a_check_that_ended_while_the_app_was_closed_keeps_whether_it_passed_or_failed() {
+    keel_harness::needs!(sandbox);
+    let h = harness("");
+    let run = start_checked(&h.engine, &h.project_id, "true");
+    h.wait_for(&run, &[AttemptState::WaitingApproval]);
+    let first = h.store.attempts_of_run(&run).unwrap().remove(0);
+    // What it leaves as it ends, beside what it printed.
+    let dir = Path::new(&first.raw_path).parent().unwrap().to_owned();
+    assert_eq!(
+        std::fs::read_to_string(dir.join("check-1.exit")).unwrap(),
+        "0\n"
+    );
+
+    // One that failed with nobody watching, one that passed, and one from a Keel that left no
+    // exit code, which is all the app had to go by before.
+    for (number, exit) in [(7, Some("3\n")), (8, Some("0\n")), (9, None)] {
+        let raw = dir.join(format!("check-{number}.log"));
+        std::fs::write(&raw, "ran\n").unwrap();
+        if let Some(exit) = exit {
+            std::fs::write(raw.with_extension("exit"), exit).unwrap();
+        }
+        left_running(&h, &run, number, &first, &raw);
+    }
+    restart(&h).recover().unwrap();
+
+    let failed = h.store.attempt("left-7").unwrap();
+    assert_eq!(failed.state, "failed");
+    assert_eq!(
+        reason(&failed),
+        Reason::CheckFailed {
+            exit_code: Some(3),
+            localhost_refused: false
+        }
+    );
+    assert_eq!(failed.exit_code, Some(3));
+    let passed = h.store.attempt("left-8").unwrap();
+    assert_eq!(passed.state, "succeeded", "{:?}", passed.reason);
+    assert_eq!(passed.exit_code, Some(0));
+    let unknown = h.store.attempt("left-9").unwrap();
+    assert_eq!(unknown.state, "interrupted");
+    assert_eq!(reason(&unknown), Reason::AgentLost);
+    assert_eq!(unknown.exit_code, None);
+}
+
 #[test]
 fn retry_starts_fresh_in_the_same_workspace_and_resume_continues_the_session() {
     keel_harness::needs!(sandbox);

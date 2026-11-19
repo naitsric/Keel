@@ -93,6 +93,17 @@ impl Monitor {
     }
 }
 
+impl Monitor {
+    /// The exit code a setup or check left as it ended (see `process::keeping_exit_code`), which is
+    /// all Keel has when the step outlived the app that started it. `None` while it runs, for one
+    /// an older Keel started, and for an agent, which says how it ended in what it writes.
+    fn kept_exit_code(&self) -> Option<i32> {
+        matches!(self.kind.as_str(), "check" | "setup")
+            .then(|| process::kept_exit_code(&self.raw_path))
+            .flatten()
+    }
+}
+
 /// Whether one of the project's allowed domains is `host` or a subdomain of it.
 fn allows_host(domains: &[String], host: &str) -> bool {
     domains.iter().any(|domain| {
@@ -756,16 +767,19 @@ impl Inner {
             return Ok(None);
         }
         std::fs::write(&prompt_file, "")?;
-        let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
-        command
-            .args(["-p", &profile, "/bin/sh", "-c", command_text])
-            .current_dir(&workspace)
-            .env_clear()
-            .envs(
-                keel_harness::clean_env(&tools.path_env)
-                    .into_iter()
-                    .filter(|(name, _)| !name.starts_with("CLAUDE_") && !name.starts_with("BASH_")),
-            );
+        // Its exit code goes to a file as well, for the app that reopens while it runs: see
+        // `process::keeping_exit_code`. What waits for it is outside the sandbox, where the
+        // command can't write that file.
+        let mut command = process::keeping_exit_code(
+            std::path::Path::new("/usr/bin/sandbox-exec"),
+            &["-p", &profile, "/bin/sh", "-c", command_text],
+            &raw_path,
+        );
+        command.current_dir(&workspace).env_clear().envs(
+            keel_harness::clean_env(&tools.path_env)
+                .into_iter()
+                .filter(|(name, _)| !name.starts_with("CLAUDE_") && !name.starts_with("BASH_")),
+        );
         screenshots::empty(&workspace, &dir)?;
         let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
         // A setup before any agent that can write writes to the project's home. Anything else
@@ -890,7 +904,10 @@ impl Inner {
             let inner = self.clone();
             std::thread::spawn(move || inner.monitor(context));
         } else {
-            self.finish(context, None, true);
+            // A setup or check that ended while the app was closed left its exit code. One that
+            // didn't, or an agent, was lost.
+            let exit_code = context.kept_exit_code();
+            self.finish(context, exit_code, true);
         }
         Ok(())
     }
@@ -934,13 +951,15 @@ impl Inner {
                     }
                 }
                 // Not Keel's child: after a restart, its pid may already be someone else's, so
-                // its group is left alone.
-                None => {
+                // its group is left alone. Nobody tells Keel how it ended either, so a setup or
+                // check says it in a file, which is there as soon as it's over.
+                None => m.kept_exit_code().map(Some).or_else(|| {
                     let alive = m
                         .root_pid
                         .is_some_and(|pid| process::signal_process(pid, 0));
-                    if alive { None } else { Some(None) }
-                }
+                    // Looked at again, since it may have ended between the two looks.
+                    (!alive).then(|| m.kept_exit_code())
+                }),
             };
             if let Some(code) = exit {
                 self.finish(m, code, false);
