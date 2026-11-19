@@ -91,24 +91,29 @@ impl Inner {
         std::thread::spawn(move || {
             let _creating = locked(&inner.creating_workspace);
             let mirror = inner.mirror(&id);
-            let _ = inner.update_mirror_from_github(&Git::new(git), &mirror, &account, &repo);
+            let updated = inner.update_mirror_from_github(&Git::new(git), &mirror, &account, &repo);
+            inner.noted(
+                "bringing a project's copy up to date from GitHub",
+                &id,
+                updated,
+            );
         });
         Ok(())
     }
 
     pub(crate) fn deliver(self: &Arc<Self>, attempt: &Attempt) {
-        let _ = self
-            .store
-            .set_state(&attempt.id, AttemptState::Running, None);
+        self.keep_state(&attempt.id, AttemptState::Running, None);
         self.changed(&attempt.run_id);
         match self.try_deliver(attempt) {
             Ok(url) => {
-                let _ = self
-                    .store
-                    .patch_attempt(&attempt.id, &[("result_text", Value::Text(url))]);
+                self.keep_fields(&attempt.id, &[("result_text", Value::Text(url))]);
                 self.tell_issue_soon(&attempt.run_id, keel_store::IssueTold::PullRequest);
                 self.end_early(&attempt.id, &attempt.run_id, AttemptState::Succeeded, None);
-                let _ = self.advance(&attempt.run_id);
+                self.noted(
+                    "moving a run on to its next step",
+                    &attempt.run_id,
+                    self.advance(&attempt.run_id),
+                );
             }
             Err(Error::Blocked(reason)) => self.end_early(
                 &attempt.id,

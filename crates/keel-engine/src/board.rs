@@ -519,7 +519,9 @@ impl Engine {
             for attempt in active {
                 if asked.insert(attempt.id.clone()) {
                     // Keel asks, not the person, who chose to quit and not to stop this run.
-                    let _ = self.stop_by(&attempt.id, QUITTING);
+                    let stopping = self.stop_by(&attempt.id, QUITTING);
+                    self.inner
+                        .noted("stopping a step as Keel quits", &attempt.id, stopping);
                 }
             }
             std::thread::sleep(Duration::from_millis(100));
