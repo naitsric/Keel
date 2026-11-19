@@ -40,7 +40,8 @@ fn write_script(path: &Path, text: &str) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// A step that can write changes a file and commits it, or fails with `fails` there.
+/// A step that can write changes a file and commits it, and then fails with `fails` there. One that
+/// only reads changes nothing.
 fn fake_claude(flags: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -56,25 +57,37 @@ for a in "$@"; do
 done
 list=$(printf '%s' "$tools" | sed 's/,/","/g')
 echo "{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake\",\"tools\":[\"$list\"],\"apiKeySource\":\"none\"}}"
+if [ "$tools" != "Read,Grep,Glob" ]; then
+  echo work >> fixed.txt
+  git add -A && git commit -qm "fix"
+fi
 if [ -f "{flags}/fails" ]; then exit 1; fi
-echo work >> fixed.txt
-git add -A && git commit -qm "fix"
 echo "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"Fixed it.\",\"num_turns\":1,\"total_cost_usd\":0.5,\"usage\":{{\"input_tokens\":10,\"output_tokens\":2}},\"modelUsage\":{{\"claude-fake\":{{}}}}}}"
 "##,
         flags = flags.display(),
     )
 }
 
-/// Enough of `gh` to open a pull request. Nothing here reaches GitHub.
-const FAKE_GH: &str = r##"#!/bin/bash
+/// Enough of `gh` to open a pull request and to say what became of it: what's in `pr-view`, or
+/// that GitHub can't be reached without it. Nothing here reaches GitHub.
+fn fake_gh(flags: &Path) -> String {
+    format!(
+        r##"#!/bin/bash
 case "$1 $2" in
 "auth token") echo "tok-SECRET"; exit 0;;
-"repo view") echo '{"defaultBranchRef":{"name":"main"},"viewerPermission":"WRITE","isPrivate":true}'; exit 0;;
+"repo view") echo '{{"defaultBranchRef":{{"name":"main"}},"viewerPermission":"WRITE","isPrivate":true}}'; exit 0;;
 "api repos/acme/app/branches/main") echo false; exit 0;;
 "pr create") echo "https://github.com/acme/app/pull/12"; exit 0;;
+"api graphql")
+  echo asked >> "{flags}/asked"
+  if [ -f "{flags}/pr-view" ]; then cat "{flags}/pr-view"; exit 0; fi
+  echo "HTTP 502: Bad Gateway (https://api.github.com/graphql)" >&2; exit 1;;
 esac
 echo "unexpected: $*" >&2; exit 1
-"##;
+"##,
+        flags = flags.display(),
+    )
+}
 
 fn world() -> World {
     let dir = tempfile::tempdir().unwrap();
@@ -84,7 +97,7 @@ fn world() -> World {
         std::fs::create_dir(path).unwrap();
     }
     write_script(&bin.join("claude"), &fake_claude(&flags));
-    write_script(&bin.join("gh"), FAKE_GH);
+    write_script(&bin.join("gh"), &fake_gh(&flags));
 
     let remote = dir.path().join("remotes/acme/app.git");
     std::fs::create_dir_all(&remote).unwrap();
@@ -133,11 +146,15 @@ fn world() -> World {
 }
 
 fn builder() -> WorkflowStep {
-    WorkflowStep::Agent(StepSpec {
+    WorkflowStep::Agent(agent(ToolProfile::Build))
+}
+
+fn agent(tools: ToolProfile) -> StepSpec {
+    StepSpec {
         id: "builder".into(),
         model: "fake".into(),
         effort: None,
-        tools: ToolProfile::Build,
+        tools,
         prompt: "{{request}}".into(),
         max_turns: None,
         max_budget_usd: None,
@@ -146,7 +163,7 @@ fn builder() -> WorkflowStep {
         risks: vec![],
         model_when_risky: None,
         role: Default::default(),
-    })
+    }
 }
 
 fn until(what: &str, done: impl Fn() -> bool) {
@@ -210,14 +227,36 @@ impl World {
         run
     }
 
-    /// Answers the approval, and waits for the run to end and for what its build left to be freed,
-    /// which goes through the same trash.
+    /// A run of one agent and nothing else, as far as it gets by itself: it ends when the agent
+    /// succeeds, and waits for the person when it fails.
+    fn one_step(&self, tools: ToolProfile, ends: AttemptState) -> String {
+        let run = self
+            .engine
+            .start_run(StartRun::one_step(
+                self.project_id.clone(),
+                agent(tools),
+                "en".into(),
+            ))
+            .unwrap();
+        self.wait_step(&run, "builder", ends);
+        if ends == AttemptState::Succeeded {
+            self.wait_ended(&run);
+        }
+        run
+    }
+
+    /// Answers the approval, and waits for the run to end.
     fn answer(&self, run: &str, approve: bool) {
         let human = self.step(run, "human");
         let text = if approve { "" } else { "Not this way" };
         self.engine
             .answer_approval(&human.id, approve, text)
             .unwrap();
+        self.wait_ended(run);
+    }
+
+    /// Until the run has ended and what its build left is freed, which goes through the same trash.
+    fn wait_ended(&self, run: &str) {
         until("the run ending", || {
             self.store.run(run).unwrap().finished_at.is_some()
         });
@@ -268,11 +307,30 @@ impl World {
             .unwrap();
     }
 
-    /// As if Keel had looked at the pull request and found this.
+    /// As if Keel had looked at the pull request just now and found this.
     fn pull_request_is(&self, run: &str, state: PrState) {
-        self.store
-            .patch_run(run, &[("pr_state", Value::Text(state.as_str().to_owned()))])
-            .unwrap();
+        let fields = [
+            ("pr_state", Value::Text(state.as_str().to_owned())),
+            ("pr_checked_at", Value::Text(days_ago(0))),
+        ];
+        self.store.patch_run(run, &fields).unwrap();
+    }
+
+    /// What GitHub answers about the pull request from now on, as `gh api graphql` prints it.
+    fn github_says(&self, state: &str) {
+        let at = "2026-11-01T10:00:00Z";
+        let view = format!(
+            r#"{{"data":{{"repository":{{"pullRequest":{{"state":"{state}","isDraft":false,"mergedAt":"{at}","closedAt":"{at}","updatedAt":"{at}"}}}}}}}}"#
+        );
+        std::fs::write(self.flags.join("pr-view"), view).unwrap();
+    }
+
+    /// How many times GitHub was asked about a pull request.
+    fn asked(&self) -> usize {
+        std::fs::read_to_string(self.flags.join("asked"))
+            .unwrap_or_default()
+            .lines()
+            .count()
     }
 
     /// One pass, with nothing gone wrong.
@@ -389,9 +447,38 @@ fn a_run_whose_pull_request_is_open_or_a_draft_keeps_its_copy_however_old() {
     assert_eq!(w.freed(), Vec::<String>::new());
     assert!(w.workspace(&run).join("fixed.txt").exists());
 
-    w.pull_request_is(&run, PrState::Closed);
+    w.pull_request_is(&run, PrState::Merged);
     assert_eq!(w.freed(), vec![run.clone()]);
     assert!(!w.workspace(&run).exists());
+    assert_eq!(w.asked(), 0, "merged can't be undone, so nobody asks");
+}
+
+#[test]
+fn a_closed_pull_request_is_asked_about_again_before_its_copy_goes() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.delivered();
+    w.ended(&run, 8);
+    // Closed when Keel looked a moment ago. It could have been opened again since, and a look is
+    // written down also when GitHub didn't answer, which it doesn't here.
+    w.pull_request_is(&run, PrState::Closed);
+    assert_eq!(w.freed(), Vec::<String>::new());
+    assert_eq!(w.asked(), 1);
+    assert!(w.workspace(&run).join("fixed.txt").exists());
+
+    // Someone opened it again, and Keel hasn't seen that yet.
+    w.github_says("OPEN");
+    assert_eq!(w.freed(), Vec::<String>::new());
+    assert!(w.workspace(&run).join("fixed.txt").exists());
+    assert_eq!(w.store.run(&run).unwrap().pr_state, Some(PrState::Closed));
+
+    w.github_says("CLOSED");
+    assert_eq!(w.freed(), vec![run.clone()]);
+    assert!(!w.workspace(&run).exists());
+    // Once freed, the next passes have nothing to ask about.
+    let asked = w.asked();
+    assert_eq!(w.freed(), Vec::<String>::new());
+    assert_eq!(w.asked(), asked);
 }
 
 #[test]
@@ -417,18 +504,7 @@ fn a_run_that_has_not_ended_keeps_its_copy() {
     // One waits for the person, and one failed and waits for them to try again or close it.
     let waiting = w.waiting(true);
     std::fs::write(w.flags.join("fails"), "").unwrap();
-    let failed = w
-        .engine
-        .start_run(StartRun::one_step(
-            w.project_id.clone(),
-            match builder() {
-                WorkflowStep::Agent(spec) => spec,
-                _ => unreachable!(),
-            },
-            "en".into(),
-        ))
-        .unwrap();
-    w.wait_step(&failed, "builder", AttemptState::Failed);
+    let failed = w.one_step(ToolProfile::Build, AttemptState::Failed);
     // However long ago they started.
     for run in [&waiting, &failed] {
         w.store
@@ -444,6 +520,61 @@ fn a_run_that_has_not_ended_keeps_its_copy() {
     // And the one that waited still delivers from its copy.
     w.answer(&waiting, true);
     assert!(w.store.run(&waiting).unwrap().pr_url.is_some());
+}
+
+#[test]
+fn a_run_that_ended_on_its_own_with_commits_and_no_pull_request_keeps_its_copy() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // One build step and nothing after: its commit is in the clone and nowhere else.
+    let built = w.one_step(ToolProfile::Build, AttemptState::Succeeded);
+    // One that only read, and one the person rejected, commits and all.
+    let read = w.one_step(ToolProfile::ReadOnly, AttemptState::Succeeded);
+    let rejected = w.rejected();
+    for run in [&built, &read, &rejected] {
+        assert_eq!(w.store.run(run).unwrap().pr_url, None);
+        w.ended(run, 8);
+    }
+    assert!(w.workspace(&read).join(".git").exists());
+
+    assert_eq!(w.freed(), vec![read.clone(), rejected.clone()]);
+    for freed in [&read, &rejected] {
+        assert!(!w.workspace(freed).exists());
+    }
+    // However old.
+    w.ended(&built, 400);
+    assert_eq!(w.freed(), Vec::<String>::new());
+    assert!(w.workspace(&built).join("fixed.txt").exists());
+    assert!(!w.engine.copy_freed(&built).unwrap());
+    assert!(w.engine.run_diff(&built).unwrap().contains("fixed.txt"));
+}
+
+#[test]
+fn a_run_the_person_left_or_an_assistant_closed_frees_its_copy_commits_and_all() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // Each committed, and then failed and waited for someone.
+    std::fs::write(w.flags.join("fails"), "").unwrap();
+    let left = w.one_step(ToolProfile::Build, AttemptState::Failed);
+    let closed = w.one_step(ToolProfile::Build, AttemptState::Failed);
+    let waits = w.one_step(ToolProfile::Build, AttemptState::Failed);
+    for run in [&left, &closed, &waits] {
+        assert!(w.workspace(run).join("fixed.txt").exists());
+    }
+    w.engine.abandon(&w.step(&left, "builder").id).unwrap();
+    w.engine
+        .abandon_by(&w.step(&closed, "builder").id, "Claude Code")
+        .unwrap();
+    for run in [&left, &closed] {
+        w.wait_ended(run);
+        w.ended(run, 8);
+    }
+
+    assert_eq!(w.freed(), vec![left.clone(), closed.clone()]);
+    for freed in [&left, &closed] {
+        assert!(!w.workspace(freed).exists());
+    }
+    assert!(w.workspace(&waits).join("fixed.txt").exists());
 }
 
 #[test]
@@ -590,7 +721,7 @@ fn trying_a_step_again_in_a_freed_copy_says_it_was_freed_and_starts_nothing() {
     let w = world();
     let run = w.delivered();
     w.ended(&run, 8);
-    w.pull_request_is(&run, PrState::Closed);
+    w.pull_request_is(&run, PrState::Merged);
     assert_eq!(w.freed(), vec![run.clone()]);
     let ended_at = w.store.run(&run).unwrap().finished_at;
     let attempts = w.store.attempts_of_run(&run).unwrap().len();
