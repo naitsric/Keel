@@ -20,6 +20,27 @@ describe("a check whose tests were refused localhost", () => {
   });
 });
 
+describe("a failed check Keel didn't send back to the builder by itself", () => {
+  it("says how many times it failed and that Keel already sent it back, in both languages", () => {
+    const atTheLimit = { code: "checkFailed", exitCode: 2, failedTimes: 3 };
+    expect(reasonText(t("en"), atTheLimit)).toBe("The check failed 3 times, the last with code 2. Keel already sent the work back to the builder, and won't again on its own. It's your call now.");
+    expect(reasonText(t("es"), atTheLimit)).toBe("La verificación falló 3 veces, la última con código 2. Keel ya le devolvió el trabajo al builder, y no lo hará otra vez por su cuenta. Ahora decides tú.");
+  });
+
+  it("doesn't say it failed 1 times when the approver had used the rounds", () => {
+    const once = { code: "checkFailed", exitCode: 1, failedTimes: 1 };
+    expect(reasonText(t("en"), once)).toBe("The check failed with code 1. This work had already gone back as often as Keel sends it on its own, so it's your call now.");
+    expect(reasonText(t("es"), once)).toBe("La verificación falló con código 1. El trabajo ya se había devuelto las veces que Keel lo devuelve por su cuenta, así que ahora decides tú.");
+  });
+
+  it("says the builder changed nothing, so the check didn't run again", () => {
+    const unchanged = { code: "checkFailed", exitCode: 1, unchanged: true };
+    expect(reasonText(t("en"), unchanged)).toBe("The check failed with code 1 and the work went back, but the builder changed nothing. Keel didn't run the check again: on the same code it would say the same.");
+    expect(reasonText(t("es"), unchanged)).toBe("La verificación falló con código 1 y el trabajo se devolvió, pero el builder no cambió nada. Keel no volvió a correr la verificación: sobre el mismo código diría lo mismo.");
+    expect(needsProjectSettings(unchanged)).toBe(false);
+  });
+});
+
 describe("reasonText", () => {
   it("names the stuck command, in both languages", () => {
     const reason = { code: "stalled", command: "uv run pytest", minutes: 11, cpuPercent: 0.2 };

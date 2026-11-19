@@ -1407,6 +1407,8 @@ impl Inner {
         if state == AttemptState::Succeeded && m.role == "reviewer" {
             self.correct_review(&m);
         }
+        // A check that ran and failed sends the work back to the builder: see `failed_checks`.
+        let sent_back = self.failed_check_goes_back(&m.attempt_id, &mut state, &mut reason);
         let _ = store.set_state(&m.attempt_id, state, reason.as_ref());
         let _ = store.append_event(
             &m.attempt_id,
@@ -1447,7 +1449,7 @@ impl Inner {
             }
             return;
         }
-        if state == AttemptState::Succeeded || m.role == "learner" {
+        if state == AttemptState::Succeeded || m.role == "learner" || sent_back {
             let _ = self.advance(&m.run_id);
         }
     }
@@ -1786,6 +1788,8 @@ fn classify(
                 Reason::CheckFailed {
                     exit_code,
                     localhost_refused: false,
+                    failed_times: None,
+                    unchanged: false,
                 }
             }
         };

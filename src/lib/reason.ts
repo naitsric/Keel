@@ -38,7 +38,11 @@ export function reasonText(t: TFunction, reason: Reason): string {
     case "setupFailed":
       return t("reasons.setupFailed", { exitCode: data.exitCode ?? "?" });
     case "checkFailed":
-      return data.localhostRefused === true ? t("reasons.checkFailedLocalhost", { exitCode: data.exitCode ?? "?", setting: t("settings.localhost") }) : t("reasons.checkFailed", { exitCode: data.exitCode ?? "?" });
+      if (data.localhostRefused === true) return t("reasons.checkFailedLocalhost", { exitCode: data.exitCode ?? "?", setting: t("settings.localhost") });
+      // Keel sends the work back to the builder by itself, and says why when it didn't.
+      if (data.unchanged === true) return t("reasons.checkFailedUnchanged", { exitCode: data.exitCode ?? "?" });
+      if (typeof data.failedTimes === "number") return t("reasons.checkFailedLimit", { count: data.failedTimes, exitCode: data.exitCode ?? "?" });
+      return t("reasons.checkFailed", { exitCode: data.exitCode ?? "?" });
     case "exitedWithoutResult":
       return t("reasons.exitedWithoutResult", { exitCode: data.exitCode ?? "?" });
     case "waitingForProject":

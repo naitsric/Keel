@@ -6,6 +6,7 @@ mod brain;
 mod deliver;
 mod detect;
 mod diffs;
+mod failed_checks;
 mod git;
 mod issues;
 mod joint;
@@ -1195,7 +1196,10 @@ impl Engine {
     fn send_back_as(&self, attempt_id: &str, instructions: &str, by: Option<&str>) -> Result<()> {
         let store = &self.inner.store;
         let attempt = store.attempt(attempt_id)?;
-        if attempt.state != AttemptState::WaitingApproval.as_str() {
+        // From a check that failed too, where Keel left it to them: see `failed_checks`.
+        let failed_check =
+            attempt.kind == "check" && attempt.state == AttemptState::Failed.as_str();
+        if !failed_check && attempt.state != AttemptState::WaitingApproval.as_str() {
             return Err(Error::InvalidState);
         }
         let instructions = instructions.trim();
@@ -1204,10 +1208,12 @@ impl Engine {
         }
         let steps: Vec<WorkflowStep> =
             serde_json::from_value(store.run(&attempt.run_id)?.workflow).unwrap_or_default();
-        if !workflows::can_send_back(&steps, &attempt.step_id) {
+        if failed_check {
+            self.inner
+                .person_sends_check_back(&attempt, &steps, instructions, by)?;
+        } else if !workflows::can_send_back(&steps, &attempt.step_id) {
             return Err(Error::Blocked(Reason::NothingToSendBackTo));
-        }
-        if !store.return_attempt(attempt_id, &attempt.run_id, instructions, by)? {
+        } else if !store.return_attempt(attempt_id, &attempt.run_id, instructions, by)? {
             return Err(Error::InvalidState);
         }
         self.inner.advance(&attempt.run_id)?;
@@ -2496,6 +2502,10 @@ impl Inner {
                 text.push_str(&format!("\n\n{added}"));
             }
         }
+        // In a round that began with a failed check, what it printed, for whoever does the work.
+        if let Some(failed) = self.failed_check_text(spec, run, &attempts) {
+            text.push_str(&format!("\n\n{failed}"));
+        }
         // Every approver can say in which round something the change added appeared, so every one
         // is told which round this is, and what the builder said it added, whatever its prompt says.
         if matches!(spec.role, StepRole::Approver { .. }) {
@@ -2686,6 +2696,10 @@ impl Inner {
                         let id = self.record_skipped(run_id, spec, &attempts, reason)?;
                         self.say_size(spec, &id, &run, &attempts, &mut size)?;
                         continue 'round;
+                    }
+                    // Sent back for a failed check, and nothing changed: see `failed_checks`.
+                    if self.check_would_prove_nothing(&run, &attempts, step)? {
+                        return Ok(());
                     }
                     let number = workflows::next_number(&attempts, step.id());
                     let id = self.start_step(run_id, step, number, None, Some(&mut size))?;

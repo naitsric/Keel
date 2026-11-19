@@ -718,7 +718,7 @@ fn a_check_further_along_has_not_passed_yet_so_the_run_is_not_small() {
 }
 
 #[test]
-fn a_check_that_failed_stops_the_run_and_passing_it_later_is_what_counts() {
+fn a_check_that_keeps_failing_stops_the_run_and_passing_it_later_is_what_counts() {
     keel_harness::needs!(sandbox);
     let w = world();
     let mut steps = fitting();
@@ -727,7 +727,9 @@ fn a_check_that_failed_stops_the_run_and_passing_it_later_is_what_counts() {
         run: "test -f .git/passing-now".into(),
     };
     let run = w.start(steps);
+    // Once the work has gone back to the builder as often as Keel sends it by itself.
     let failed = w.wait_for(&run, "check", AttemptState::Failed);
+    assert_eq!(failed.round, 2);
     assert!(
         w.all(&run, "security").is_empty(),
         "the failure is what stops it"
@@ -737,6 +739,44 @@ fn a_check_that_failed_stops_the_run_and_passing_it_later_is_what_counts() {
     w.engine.retry(&failed.id, false).unwrap();
     w.wait_for(&run, "human", AttemptState::WaitingApproval);
     w.assert_went_small(&run);
+}
+
+/// A check that failed sends the work back to the builder. What decides the size is the round the
+/// run ends in: the check that passed there, and the change as it is by then.
+#[test]
+fn a_check_that_failed_and_was_fixed_is_judged_on_the_code_as_it_ended() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let mut steps = fitting();
+    steps[2] = WorkflowStep::Check {
+        id: "check".into(),
+        run: "test -f fixed.txt".into(),
+    };
+    w.builder_does(2, "echo fixed > fixed.txt");
+    let run = w.start(steps.clone());
+    w.wait_for(&run, "human", AttemptState::WaitingApproval);
+    let checks: Vec<(i64, String)> = w
+        .all(&run, "check")
+        .into_iter()
+        .map(|a| (a.round, a.state))
+        .collect();
+    assert_eq!(checks, [(0, "returned".into()), (1, "succeeded".into())]);
+    w.assert_went_small(&run);
+    // Decided once, in the round the check passed, on both rounds' lines.
+    assert_eq!(
+        w.decisions(&run),
+        [json!({ "small": true, "lines": 3, "files": 2, "round": 1 })]
+    );
+    assert!(
+        w.all(&run, "security").iter().all(|a| a.round == 1),
+        "nothing was decided on the code the check failed on"
+    );
+
+    // What the fix adds counts: one that makes the change too big moves the run up.
+    let w = world();
+    w.builder_does(2, "seq 1 400 > fixed.txt");
+    let run = w.start(steps);
+    w.moved_up(&run, "tooManyLines");
 }
 
 #[test]

@@ -245,6 +245,25 @@ impl World {
         }
     }
 
+    /// The step's next try after `earlier`, once it stands like this.
+    fn wait_after(
+        &self,
+        run: &str,
+        id: &str,
+        earlier: &keel_store::Attempt,
+        state: AttemptState,
+    ) -> keel_store::Attempt {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let attempt = self.wait(run, id, state);
+            if attempt.number > earlier.number {
+                return attempt;
+            }
+            assert!(Instant::now() < deadline, "{id} was never tried again");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     fn wait_run_finished(&self, run: &str) -> keel_store::Run {
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
@@ -448,8 +467,9 @@ fn the_token_is_never_stored_and_the_active_account_never_changes() {
     assert!(!w.log("claude.log").contains(TOKEN));
 }
 
+/// The work goes back to the builder twice by itself first: `failed_checks` has those tests.
 #[test]
-fn a_failed_check_stops_the_run_and_can_be_retried_alone() {
+fn a_check_that_keeps_failing_stops_the_run_and_can_be_retried_alone() {
     keel_harness::needs!(sandbox);
     let w = world();
     let run = w.start(Some("test -f approved-by-test || exit 3"));
@@ -458,7 +478,9 @@ fn a_failed_check_stops_the_run_and_can_be_retried_alone() {
         reason(&check),
         Reason::CheckFailed {
             exit_code: Some(3),
-            localhost_refused: false
+            localhost_refused: false,
+            failed_times: Some(3),
+            unchanged: false,
         }
     );
     assert_eq!(check.exit_code, Some(3));
@@ -484,7 +506,7 @@ fn a_failed_check_stops_the_run_and_can_be_retried_alone() {
         agents_before,
         "agents don't run again"
     );
-    assert_eq!(w.step(&run, "check").unwrap().number, 2);
+    assert_eq!(w.step(&run, "check").unwrap().number, 4);
 }
 
 impl World {
@@ -567,7 +589,7 @@ fn a_retry_with_the_fixed_setup_runs_it_first_and_then_the_step_that_failed() {
     let agents_before = w.log("claude.log").matches("=== CLAUDE").count();
     w.engine.retry_with(&failed.id, NEW_COMMANDS).unwrap();
     w.wait(&run, "approval", AttemptState::WaitingApproval);
-    use AttemptState::{Failed, Postponed, Succeeded};
+    use AttemptState::{Failed, Postponed, Returned, Succeeded};
     assert_eq!(
         w.ran(&run, "setup"),
         vec![
@@ -575,13 +597,16 @@ fn a_retry_with_the_fixed_setup_runs_it_first_and_then_the_step_that_failed() {
             ran(2, "touch installed.txt", Succeeded)
         ]
     );
-    // What ran keeps how it ended. The step put off for the setup says so, and comes round again.
+    // What ran keeps how it ended: Keel had sent the work back to the builder twice before it
+    // left the check to the person. The step put off for the setup says so, and comes round again.
     assert_eq!(
         w.ran(&run, "check"),
         vec![
-            ran(1, "test -f installed.txt", Failed),
-            ran(2, "test -f installed.txt", Postponed),
-            ran(3, "test -f installed.txt", Succeeded),
+            ran(1, "test -f installed.txt", Returned),
+            ran(2, "test -f installed.txt", Returned),
+            ran(3, "test -f installed.txt", Failed),
+            ran(4, "test -f installed.txt", Postponed),
+            ran(5, "test -f installed.txt", Succeeded),
         ]
     );
     let first = w.store.attempt(&failed.id).unwrap();
@@ -589,7 +614,9 @@ fn a_retry_with_the_fixed_setup_runs_it_first_and_then_the_step_that_failed() {
         serde_json::from_value::<Reason>(first.reason.unwrap()).unwrap(),
         Reason::CheckFailed {
             exit_code: Some(1),
-            localhost_refused: false
+            localhost_refused: false,
+            failed_times: Some(3),
+            unchanged: false,
         }
     );
     assert_eq!(
@@ -602,6 +629,41 @@ fn a_retry_with_the_fixed_setup_runs_it_first_and_then_the_step_that_failed() {
     assert_eq!(setup.settings["network"], "none");
     let events = w.store.events(&setup.id, 0).unwrap();
     assert!(events.iter().any(|e| e.kind == "setupLimited"));
+}
+
+/// Sent back for a failed check, a builder that changes nothing leaves the check to the person
+/// without running it. Starting it over is theirs, also when a new setup has to run first.
+#[test]
+fn a_check_left_because_nothing_changed_runs_when_the_person_starts_it_over_with_a_new_setup() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.flag("no-change");
+    w.set_commands("true", "test -f installed.txt");
+    let run = w.start_builtin();
+    w.wait(&run, "check", AttemptState::Failed);
+    w.set_commands("touch installed.txt", "test -f installed.txt");
+    let left = w.step(&run, "check").unwrap();
+    assert_eq!(
+        reason(&left),
+        Reason::CheckFailed {
+            exit_code: Some(1),
+            localhost_refused: false,
+            failed_times: None,
+            unchanged: true,
+        }
+    );
+    w.engine.retry_with(&left.id, NEW_COMMANDS).unwrap();
+    w.wait(&run, "approval", AttemptState::WaitingApproval);
+    use AttemptState::{Failed, Postponed, Returned, Succeeded};
+    assert_eq!(
+        w.ran(&run, "check"),
+        vec![
+            ran(1, "test -f installed.txt", Returned),
+            ran(2, "test -f installed.txt", Failed),
+            ran(3, "test -f installed.txt", Postponed),
+            ran(4, "test -f installed.txt", Succeeded),
+        ]
+    );
 }
 
 #[test]
@@ -625,19 +687,22 @@ fn a_retry_takes_the_project_s_fixed_check_only_when_asked_to() {
 
     // A plain retry runs what the run started with.
     w.engine.retry(&failed.id, false).unwrap();
-    let again = w.wait(&run, "check", AttemptState::Failed);
-    assert_eq!((again.number, again.prompt.as_str()), (2, "exit 3"));
+    let again = w.wait_after(&run, "check", &failed, AttemptState::Failed);
+    assert_eq!((again.number, again.prompt.as_str()), (4, "exit 3"));
 
     // Asked to, it runs the project's, and the run keeps it for what comes after.
     w.engine.retry_with(&again.id, NEW_COMMANDS).unwrap();
     w.wait(&run, "approval", AttemptState::WaitingApproval);
-    use AttemptState::{Failed, Succeeded};
+    use AttemptState::{Failed, Returned, Succeeded};
+    // The first two went back to the builder, which is as often as Keel sends it by itself.
     assert_eq!(
         w.ran(&run, "check"),
         vec![
-            ran(1, "exit 3", Failed),
-            ran(2, "exit 3", Failed),
-            ran(3, "echo fixed", Succeeded)
+            ran(1, "exit 3", Returned),
+            ran(2, "exit 3", Returned),
+            ran(3, "exit 3", Failed),
+            ran(4, "exit 3", Failed),
+            ran(5, "echo fixed", Succeeded)
         ]
     );
     assert_eq!(w.ran(&run, "setup").len(), 1, "the setup didn't change");
@@ -684,8 +749,8 @@ fn a_saved_workflow_s_own_check_keeps_its_command() {
     let failed = w.wait(&run, "check", AttemptState::Failed);
     assert_eq!(w.engine.command_changes(&run).unwrap(), vec![]);
     w.engine.retry_with(&failed.id, NEW_COMMANDS).unwrap();
-    let again = w.wait(&run, "check", AttemptState::Failed);
-    assert_eq!((again.number, again.prompt.as_str()), (2, "exit 3"));
+    let again = w.wait_after(&run, "check", &failed, AttemptState::Failed);
+    assert_eq!((again.number, again.prompt.as_str()), (4, "exit 3"));
 }
 
 #[test]

@@ -415,10 +415,12 @@ pub fn can_send_back(steps: &[WorkflowStep], approval_id: &str) -> bool {
 }
 
 /// Rounds that happened because a person asked for them. They don't count against the approver.
+/// A check that failed and Keel sent back by itself isn't one of them.
 pub fn rounds_asked_by_a_person(attempts: &[Attempt]) -> i64 {
     attempts
         .iter()
         .filter(|a| a.state == AttemptState::Returned.as_str())
+        .filter(|a| !crate::failed_checks::sent_back_by_keel(a))
         .count() as i64
 }
 
