@@ -2500,7 +2500,7 @@ impl Inner {
         // a saved workflow's prompt leaves out. An approver gets the builder's list instead, below.
         if matches!(spec.role, StepRole::Reviewer | StepRole::Verifier) {
             let account = workflows::builder_account(&attempts, &run.language);
-            if !account.is_empty() && !text.contains(&account) {
+            if !account.is_empty() && !prompts::uses(&spec.prompt, "builder") {
                 text.push_str(&format!("\n\n{account}"));
             }
         }
@@ -2558,7 +2558,14 @@ impl Inner {
             any_fenced.set(any_fenced.get() || !text.is_empty());
             text
         };
+        // A prompt that is only what Keel fills in, such as `{{request}}` alone, says nothing of
+        // its own: what goes in is all the step is told to do. So it goes in as it is, with no
+        // tag and no line saying it isn't an instruction.
+        let bare = !prompts::has_words_of_its_own(template);
         let fenced = |tag: &str, attributes: &str, text: &str| {
+            if bare {
+                return text.to_owned();
+            }
             with_tags(prompts::fenced(tag, attributes, text, &run.language))
         };
         let text = prompts::render(template, |name| match name {
@@ -2630,8 +2637,9 @@ impl Inner {
             }
         });
         // A prompt that doesn't say what the tags are, such as one a workflow saved before kept,
-        // is told after them.
-        if any_fenced.get() && !prompts::says_material_line(&text) {
+        // is told after them. Whether it says so is asked of the prompt as the workflow has it:
+        // a change or an issue can contain the same sentence, and that isn't Keel saying it.
+        if any_fenced.get() && !bare && !prompts::says_material_line(template) {
             return Ok(format!(
                 "{text}\n\n{}",
                 prompts::material_line(&run.language)
