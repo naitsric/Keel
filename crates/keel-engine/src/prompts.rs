@@ -49,6 +49,11 @@ fn holds_rules(path: &str) -> bool {
     path.ends_with("/CLAUDE.md") || (path.starts_with(".claude/rules/") && path.ends_with(".md"))
 }
 
+/// What an agent that can run commands is told about a command that would wait for someone. A
+/// builder ran `git checkout -p`, and its step sat there until a person stepped in.
+const NOBODY_ANSWERS_EN: &str = "Nobody can answer a command: do not start one that asks something, opens an editor or a pager, or reads from the keyboard.\n";
+const NOBODY_ANSWERS_ES: &str = "Nadie puede responderle a un comando: no inicies uno que pregunte algo, abra un editor o un paginador, o lea del teclado.\n";
+
 /// What every agent is told, plus what `--restricted` would otherwise leave out: the project's
 /// own instructions and what Keel knows about the project. `joint` is what a run in a change across
 /// projects is told about the change and the other projects, and is empty for any other run.
@@ -80,6 +85,11 @@ pub fn system_prompt(
         text.push_str(
             "Run tests and checks without piping them into grep, head or tail, which hides whether they failed, or start with `set -o pipefail`.\n",
         );
+        text.push_str(if language.starts_with("es") {
+            NOBODY_ANSWERS_ES
+        } else {
+            NOBODY_ANSWERS_EN
+        });
     }
     text.push_str(&format!(
         "\nEnd with a short message for the person, in {}: what you did, what changed, how you checked it, and anything they need to decide. It may become a pull request description, so write it for a reviewer, and don't mention this environment, pushing, or pull requests.\n",
@@ -587,6 +597,32 @@ mod tests {
                 "",
             );
             assert!(!reader.contains("no network"));
+        }
+    }
+
+    #[test]
+    fn who_runs_commands_is_told_nobody_can_answer_one() {
+        let empty = Block::default();
+        let told = |language: &str, tools| {
+            system_prompt(&Instructions::default(), language, tools, &empty, "").0
+        };
+        let english = told("en", ToolProfile::Build);
+        assert!(english.contains("Nobody can answer a command"), "{english}");
+        assert!(english.contains("opens an editor or a pager"));
+        assert!(english.contains("reads from the keyboard"));
+        let spanish = told("es", ToolProfile::Build);
+        assert!(
+            spanish.contains("Nadie puede responderle a un comando"),
+            "{spanish}"
+        );
+        assert!(spanish.contains("abra un editor o un paginador"));
+        assert!(spanish.contains("lea del teclado"));
+        assert!(!spanish.contains("Nobody can answer"));
+        // One that can't run a command has none to start.
+        for language in ["en", "es"] {
+            let reader = told(language, ToolProfile::ReadOnly);
+            assert!(!reader.contains("answer a command"));
+            assert!(!reader.contains("responderle a un comando"));
         }
     }
 

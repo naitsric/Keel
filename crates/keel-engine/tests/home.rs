@@ -24,7 +24,7 @@ struct World {
 
 /// Stands in for `claude`. It runs one Bash command, the one in `log/command`, the way Claude Code
 /// does: after what the file in `CLAUDE_ENV_FILE` says, in a sandbox that lets it write only in the
-/// project. It writes down its own `HOME`, which file it was given, and what the command printed,
+/// project, reading from a pipe that stays open and that nobody writes to. It writes down its own `HOME`, which file it was given, and what the command printed,
 /// in `log/bash-new.txt`, or `log/bash-resumed.txt` for a session it continues. With
 /// `log/fail-first`, a session it starts ends without a result.
 fn fake_claude(log: &Path) -> String {
@@ -45,8 +45,10 @@ out="{log}/bash-$session.txt"
 {{ echo "claude=$HOME"; echo "envfile=$CLAUDE_ENV_FILE"; }} > "$out"
 script="$([ -n "$CLAUDE_ENV_FILE" ] && cat "$CLAUDE_ENV_FILE")
 $(cat "{log}/command")"
+mkfifo "{log}/stdin-$$" && exec 3<>"{log}/stdin-$$"
 /usr/bin/sandbox-exec -p "(version 1)(allow default)(deny file-write* (subpath \"$HOME\"))(allow file-write* (subpath \"$PWD\"))" \
-  /bin/sh -c "$script" >> "$out" 2>&1
+  /bin/sh -c "$script" <&3 >> "$out" 2>&1
+exec 3>&-
 [ $session = new ] && [ -e "{log}/fail-first" ] && exit 3
 list=$(printf '%s' "$tools" | sed 's/,/","/g')
 echo "{{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"fake\",\"tools\":[\"$list\"],\"apiKeySource\":\"none\"}}"
@@ -469,6 +471,45 @@ fn what_the_builders_commands_leave_in_their_home_the_check_of_the_run_finds() {
         "{}",
         file.display()
     );
+}
+
+/// What a command says about who could answer it, and whether reading with nothing to read ended by
+/// itself. The read gives up after 5 seconds, so a test never leaves one waiting.
+const WHO_ANSWERS: &str = "perl -e 'alarm 5; exec @ARGV' head -1; echo \"read=$?\"; \
+                           echo \"TERM=$TERM\"; echo \"GIT_EDITOR=$GIT_EDITOR\"; echo \"EDITOR=$EDITOR\"; \
+                           echo \"PAGER=$PAGER\"; echo \"GIT_PAGER=$GIT_PAGER\"; \
+                           echo \"GIT_TERMINAL_PROMPT=$GIT_TERMINAL_PROMPT\"";
+
+/// A builder's `git checkout -p` and a `head` with no file each left a step waiting, for as long as
+/// 26 minutes, for someone to type. Nobody can, so a command that reads finds nothing to read, and
+/// git and the usual tools open no editor, no pager and no prompt.
+#[test]
+fn a_command_that_waits_for_someone_finds_nobody_and_goes_on() {
+    keel_harness::needs!(sandbox);
+    let w = world(&[]);
+    let id = w.add();
+    let run = w.run(
+        &id,
+        WHO_ANSWERS,
+        vec![agent("builder"), check("check", WHO_ANSWERS)],
+    );
+    let builder = w.wait_done(&run, "builder");
+    assert_eq!(builder.state, "succeeded");
+    let built = w.bash("new");
+    let checked = w.passed(&w.wait_done(&run, "check"));
+    for (who, output) in [("builder", &built), ("check", &checked)] {
+        assert_eq!(said(output, "read"), "0", "{who}: {output}");
+        for (name, value) in [
+            ("TERM", "dumb"),
+            ("GIT_EDITOR", "true"),
+            ("EDITOR", "true"),
+            ("PAGER", "cat"),
+            ("GIT_PAGER", "cat"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+        ] {
+            assert_eq!(said(output, name), value, "{who}: {name}");
+        }
+    }
 }
 
 /// A builder that goes on with its session, as when a person retries it that way, runs its commands

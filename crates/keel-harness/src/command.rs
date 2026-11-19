@@ -6,8 +6,22 @@ use std::process::Command;
 use keel_core::StepSpec;
 
 /// Variables an agent inherits. Everything else, including every token, is dropped.
-const ENV_ALLOW: [&str; 8] = [
-    "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "SHELL", "TERM",
+const ENV_ALLOW: [&str; 7] = [
+    "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TMPDIR", "SHELL",
+];
+
+/// Nobody is there to answer a step's commands, so nothing they run may wait for someone: an editor
+/// returns at once with the text as it was, a pager just prints, and git fails rather than ask for
+/// a password. `TERM` is the same however Keel was opened: from a terminal it was that terminal's,
+/// which no step has, and tools took it as someone to show an editor or a full-screen page to.
+const NOBODY_ANSWERS: [(&str, &str); 7] = [
+    ("TERM", "dumb"),
+    ("GIT_EDITOR", "true"),
+    ("EDITOR", "true"),
+    ("VISUAL", "true"),
+    ("GIT_PAGER", "cat"),
+    ("PAGER", "cat"),
+    ("GIT_TERMINAL_PROMPT", "0"),
 ];
 
 /// Variables that, if set in the user's environment, would change how Claude Code bills or
@@ -40,6 +54,11 @@ pub fn clean_env(path_env: &str) -> Vec<(String, String)> {
     // knows is there. This way it doesn't look. A run's identity is in its own clone's config.
     env.push(("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()));
     env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
+    env.extend(
+        NOBODY_ANSWERS
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned())),
+    );
     // Removes the ability to leave a test suite running behind the agent's back, which is what
     // jammed the Archon pilot. Long commands then need a generous foreground timeout.
     env.push(("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS".into(), "1".into()));
@@ -308,5 +327,66 @@ mod tests {
             "git must not look for a config the sandbox hides"
         );
         assert!(env.iter().any(|(k, v)| k == "PATH" && v == "/bin"));
+    }
+
+    /// A builder once ran `git checkout -p` and its step sat there for 26 minutes.
+    #[test]
+    fn nothing_a_step_runs_can_wait_for_an_editor_a_pager_or_a_password() {
+        let env = clean_env("/bin");
+        let var = |name: &str| {
+            let found: Vec<&str> = env
+                .iter()
+                .filter(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+                .collect();
+            assert!(found.len() <= 1, "{name} is set once: {found:?}");
+            found.first().copied()
+        };
+        // Never the terminal Keel was opened from: no step has one.
+        assert_eq!(var("TERM"), Some("dumb"));
+        for editor in ["GIT_EDITOR", "EDITOR", "VISUAL"] {
+            assert_eq!(var(editor), Some("true"), "{editor}");
+        }
+        for pager in ["GIT_PAGER", "PAGER"] {
+            assert_eq!(var(pager), Some("cat"), "{pager}");
+        }
+        assert_eq!(var("GIT_TERMINAL_PROMPT"), Some("0"));
+    }
+
+    /// With the real git: a commit with no message would open an editor and wait for it.
+    #[test]
+    fn git_gives_up_at_once_where_it_would_open_an_editor() {
+        let Some(git) = [
+            "/usr/bin/git",
+            "/opt/homebrew/bin/git",
+            "/usr/local/bin/git",
+        ]
+        .iter()
+        .find(|path| Path::new(path).exists()) else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let mut command = Command::new(git);
+            command
+                .args(args)
+                .current_dir(dir.path())
+                .env_clear()
+                .envs(clean_env("/usr/bin:/bin"));
+            crate::process::stdout_within(command, std::time::Duration::from_secs(30)).unwrap()
+        };
+        assert!(run(&["init", "-q"]).is_some());
+        let commit = [
+            "-c",
+            "user.name=T",
+            "-c",
+            "user.email=t@example.com",
+            "commit",
+            "--allow-empty",
+        ];
+        assert!(run(&commit).is_some(), "it waited for an editor");
+        // Nothing was committed, since nobody wrote a message.
+        let log = run(&["log", "--oneline"]).unwrap();
+        assert!(log.is_empty(), "{}", String::from_utf8_lossy(&log));
     }
 }
