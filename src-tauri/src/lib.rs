@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use keel_core::{
-    CardLane, EnvVar, Masked, Reason, Service, StepSpec, ToolProfile, WorkflowStep, mask_secrets,
-    serialize_masked,
+    CardLane, EnvVar, Log, Masked, Reason, Service, StepSpec, ToolProfile, WorkflowStep,
+    mask_secrets, serialize_masked,
 };
 use keel_engine::{
     AddedProject, Answer, Board, BrainView, CiGap, CommandChange, Config, ContractEdit, Engine,
@@ -958,6 +958,22 @@ fn reveal_raw(state: State<'_, AppState>, attempt_id: String) -> CommandResult<(
         })
 }
 
+/// Shows Keel's log in Finder: what it wrote down when something failed and nothing could show it.
+#[tauri::command(async)]
+fn reveal_log(state: State<'_, AppState>) -> CommandResult<()> {
+    let log = Log::in_dir(&state.data_dir);
+    std::process::Command::new("/usr/bin/open")
+        .arg("-R")
+        .arg(log.path())
+        .status()
+        .map(|_| ())
+        .map_err(|e| CommandError {
+            code: "internal",
+            reason: None,
+            detail: Some(e.to_string()),
+        })
+}
+
 #[tauri::command(async)]
 fn active_count(state: State<'_, AppState>) -> CommandResult<usize> {
     Ok(state.engine.active_count()?)
@@ -1015,6 +1031,8 @@ pub fn run() {
         })
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
+            let log = Log::in_dir(&data_dir);
+            keel_core::log_panics(log.clone());
             let database = data_dir.join("keel.db");
             let opened = std::fs::create_dir_all(&data_dir)
                 .map_err(|e| (launch::Why::Other, e.to_string()))
@@ -1024,12 +1042,23 @@ pub fn run() {
             let store = match opened {
                 Ok(store) => Arc::new(store),
                 Err((why, detail)) => {
+                    let folder = data_dir.display();
+                    log.write(&format!(
+                        "Keel couldn't open its data in {folder}: {detail}"
+                    ));
                     let language = launch::language(&database);
                     let notice = launch::cant_open(language, why, &detail, &data_dir);
                     launch::tell_and_quit(app, notice);
                     return Ok(());
                 }
             };
+            let branch = if launch::BRANCH_BUILD {
+                ", built from a branch"
+            } else {
+                ""
+            };
+            let version = &app.package_info().version;
+            log.write(&format!("Keel {version} started{branch}"));
             let handle = app.handle().clone();
             let mut config = Config::new(data_dir.clone());
             // No spaces, and macOS doesn't clear it on its own.
@@ -1038,7 +1067,8 @@ pub fn run() {
                     std::path::PathBuf::from(home).join(launch::home_folder(launch::BRANCH_BUILD));
                 config.runs_dir = keel.join("runs");
                 // Without it, builders just get no note.
-                config.bash_hook = keel_harness::hook::install(&keel.join("bin"), BASH_HOOK).ok();
+                let hook = keel_harness::hook::install(&keel.join("bin"), BASH_HOOK);
+                config.bash_hook = log.noted("installing the hook for builders' commands", hook);
                 if let Some(hook) = config.bash_hook.clone() {
                     std::thread::spawn(move || keel_harness::hook::warm_up(&hook));
                 }
@@ -1060,7 +1090,7 @@ pub fn run() {
                     *tools_shared.lock().unwrap_or_else(|e| e.into_inner()) = tools.clone();
                     engine.set_tools(tools);
                     // Reconnects to steps that outlived the last session.
-                    let _ = engine.recover();
+                    log.noted("picking up what was running", engine.recover());
                     // After that, so a run that's still going counts before anything new starts.
                     engine.start_board();
                     engine.start_pr_watch();
@@ -1068,7 +1098,7 @@ pub fn run() {
                     ready.set();
                     let _ = handle.emit(CHANGED_EVENT, "");
                     // After the tools are known, so no client ever finds Keel half ready.
-                    mcp::start_if_enabled(mcp_server, handle);
+                    mcp::start_if_enabled(mcp_server, handle, &log);
                 });
             }
             app.manage(AppState {
@@ -1165,6 +1195,7 @@ pub fn run() {
             open_help,
             github_accounts,
             reveal_raw,
+            reveal_log,
             active_count,
             app_quit,
             menu::menu_set,

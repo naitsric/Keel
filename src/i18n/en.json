@@ -49,6 +49,7 @@
     "back": "Back",
     "nextWaiting": "Next run waiting for you",
     "previousWaiting": "Previous run waiting for you",
+    "showLog": "Show Keel's error log in Finder",
     "newRun": "New run",
     "newTask": "New task",
     "showChanges": "Show the run's changes",

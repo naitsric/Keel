@@ -88,8 +88,9 @@ one of them is part of the change and reaches no agent as a rule until you merge
 
 ## Secrets in what it shows
 
-Keel hides known secrets when it shows a run, when an assistant reads one over MCP, and in a pull
-request's title and description. The audit record and what agents receive keep the original.
+Keel hides known secrets when it shows a run, when an assistant reads one over MCP, in a pull
+request's title and description, and in its own error log. The audit record and what agents receive
+keep the original.
 
 It goes by known token shapes and names like `API_KEY`, so some secrets will slip through. It also
 doesn't stop a secret an agent committed from being pushed with the branch, so review the draft
@@ -116,6 +117,11 @@ You need:
 The first screen checks these and says how to get what's missing.
 
 ## If something goes wrong
+
+Keel writes down what fails with nowhere to show it, such as a step whose result couldn't be saved,
+and what it was doing if it closes on its own. That goes in `keel.log`, in
+`~/Library/Application Support/io.github.naitsric.keel`, and **Navigate → Show Keel's error log in
+Finder** takes you to it. The file stays under 1 MB, with one older file next to it.
 
 If Keel can't open its data when it starts, it says why and closes. It won't open data that a newer
 Keel has used, because it would damage it, and it leaves that data as it was.

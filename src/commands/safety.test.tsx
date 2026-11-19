@@ -405,6 +405,7 @@ describe("safety", () => {
         "run.nextWaiting": null,
         "run.previousWaiting": null,
         "run.new": "CmdOrCtrl+N",
+        "app.showLog": null,
       });
     });
 

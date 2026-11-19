@@ -49,6 +49,7 @@
     "back": "Volver",
     "nextWaiting": "Siguiente ejecución que te espera",
     "previousWaiting": "Ejecución anterior que te espera",
+    "showLog": "Ver el registro de errores de Keel en Finder",
     "newRun": "Nueva ejecución",
     "newTask": "Nueva tarea",
     "showChanges": "Ver los cambios de la ejecución",
