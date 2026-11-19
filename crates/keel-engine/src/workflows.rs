@@ -648,6 +648,35 @@ pub fn rework_text(attempts: &[Attempt], round: i64, language: &str) -> String {
             };
             format!("{intro}\n{text}")
         });
+    // A check that failed sent the work back since, for one round or more. What the approver had
+    // asked for before that was done in a round nobody got to judge, and nothing else remembers
+    // it: without this the builder can undo it to get past the check, and a review call it out of
+    // scope.
+    let mut asked_in = round - 1;
+    while asked_in >= 0
+        && attempts
+            .iter()
+            .any(|a| a.round == asked_in && crate::failed_checks::went_back(a))
+    {
+        asked_in -= 1;
+    }
+    let approver_still_stands = (asked_in < round - 1)
+        .then(|| {
+            attempts
+                .iter()
+                .rev()
+                .filter(|a| a.round == asked_in && a.role == "approver" && wants_rework(a))
+                .find_map(instructions_of)
+        })
+        .flatten()
+        .map(|text| {
+            let intro = if es {
+                "Antes de que fallara la verificación, el aprobador devolvió este trabajo por esto. Sigue en pie, así que no lo deshagas, y cuenta como parte del alcance:"
+            } else {
+                "Before the check failed, the approver sent this work back for this. It still stands, so don't undo it, and it counts as part of the scope:"
+            };
+            format!("{intro}\n{text}")
+        });
     // Whoever does the work should know whether the person said it or an assistant did.
     let from_person = last_round()
         .filter(|a| a.state == AttemptState::Returned.as_str())
@@ -696,11 +725,16 @@ pub fn rework_text(attempts: &[Attempt], round: i64, language: &str) -> String {
         };
         format!("{intro}\n{}", earlier.join("\n"))
     });
-    [still_stands, from_person, from_approver]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    [
+        still_stands,
+        approver_still_stands,
+        from_person,
+        from_approver,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("\n\n")
 }
 
 /// What an approver is told about rounds: which one this is, counted from 1 as the person sees it,

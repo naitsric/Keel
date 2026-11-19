@@ -371,8 +371,8 @@ pub enum Reason {
     /// sandbox refused its tests a server on localhost, which the project's settings can open.
     /// Keel sends the work back to the builder by itself when a check runs and fails. `failed_times`
     /// is there when it didn't because the run had already gone back as often as it may: how many
-    /// times this check has failed in the run, this one counted. `unchanged` when the builder changed
-    /// nothing after it failed, so it didn't run again, and `exit_code` is the one it failed with.
+    /// times this check has failed in the run, this one counted. `unchanged` when it failed again
+    /// after going back and the builder's own work had changed no file, so it didn't go back again.
     CheckFailed {
         exit_code: Option<i32>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -535,6 +535,9 @@ pub enum WhyNotSmall {
     CheckNotPassed,
     /// It passed, but its test tools said they skipped this many tests, which proved nothing.
     CheckSkippedTests { count: u32 },
+    /// It failed earlier in the run and the work went back to the builder, so how it was made to
+    /// pass is something to look at.
+    CheckWentBack,
     /// The run came from an issue this person wrote, who isn't the project's GitHub account.
     IssueFromSomeoneElse { author: String },
     /// The run came from an issue, and it doesn't say who wrote it.

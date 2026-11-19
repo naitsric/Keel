@@ -1105,6 +1105,17 @@ pub struct Event {
     pub data: serde_json::Value,
 }
 
+/// How a failed check goes back to the builder. See `Store::return_failed_check`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SentBack<'a> {
+    /// What a person wants changed. None when Keel sends it back by itself.
+    pub instructions: Option<&'a str>,
+    /// The MCP client that did it for them, if one did.
+    pub by: Option<&'a str>,
+    /// What names the files as the check left them, if Keel could tell.
+    pub left: Option<&'a str>,
+}
+
 /// One row of the home table: a run and its latest attempt.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2657,16 +2668,21 @@ impl Store {
     /// A check that failed goes back to the builder: its attempt says so, keeping why it failed, and
     /// the run moves to its next round. With `failed` Keel does it by itself as the check ends, so
     /// nobody ever sees it waiting. With `instructions` a person does it from one that waits, or the
-    /// MCP client `by` names. All or nothing, like `return_attempt`. False if the attempt was no
-    /// longer where it had to be.
+    /// MCP client `by` names. `left` is what the files were as the check left them, which is how
+    /// Keel tells later whether the builder changed any. All or nothing, like `return_attempt`.
+    /// False if the attempt was no longer where it had to be.
     pub fn return_failed_check(
         &self,
         id: &str,
         run_id: &str,
         failed: Option<&Reason>,
-        instructions: Option<&str>,
-        by: Option<&str>,
+        sent: SentBack,
     ) -> Result<bool> {
+        let SentBack {
+            instructions,
+            by,
+            left,
+        } = sent;
         let mut conn = self.lock();
         let tx = conn.transaction()?;
         let at = now();
@@ -2701,7 +2717,7 @@ impl Store {
         let round: i64 = tx.query_row("select round from run where id = ?1", [run_id], |r| {
             r.get(0)
         })?;
-        let (kind, data) = match instructions {
+        let (kind, mut data) = match instructions {
             Some(instructions) => {
                 let mut data = serde_json::json!({ "instructions": instructions, "round": round });
                 if let Some(by) = by {
@@ -2711,6 +2727,9 @@ impl Store {
             }
             None => ("checkSentBack", serde_json::json!({ "round": round })),
         };
+        if let Some(left) = left {
+            data["left"] = left.into();
+        }
         tx.execute(
             "insert into event (attempt_id, at, kind, data) values (?1, ?2, ?3, ?4)",
             params![id, at, kind, data.to_string()],
@@ -5082,6 +5101,15 @@ mod tests {
         "c".to_owned()
     }
 
+    /// A person's send-back from a failed check, or an assistant's.
+    fn words<'a>(instructions: &'a str, by: Option<&'a str>) -> SentBack<'a> {
+        SentBack {
+            instructions: Some(instructions),
+            by,
+            left: None,
+        }
+    }
+
     #[test]
     fn a_failed_check_goes_back_with_its_round_as_it_ends_and_keeps_why_it_failed() {
         let (_dir, store) = store();
@@ -5096,14 +5124,18 @@ mod tests {
         // Only a check: the builder of the same run stays where it is.
         assert!(
             !store
-                .return_failed_check("a", "r", Some(&failed), None, None)
+                .return_failed_check("a", "r", Some(&failed), SentBack::default())
                 .unwrap()
         );
         assert_eq!(store.run("r").unwrap().round, 0);
 
+        let left = SentBack {
+            left: Some("tree-1"),
+            ..SentBack::default()
+        };
         assert!(
             store
-                .return_failed_check(&id, "r", Some(&failed), None, None)
+                .return_failed_check(&id, "r", Some(&failed), left)
                 .unwrap()
         );
         let attempt = store.attempt(&id).unwrap();
@@ -5116,17 +5148,20 @@ mod tests {
         assert_eq!(store.run("r").unwrap().round, 1);
         let events = store.events(&id, 0).unwrap();
         assert_eq!(events[0].kind, "checkSentBack");
-        assert_eq!(events[0].data, serde_json::json!({ "round": 1 }));
+        assert_eq!(
+            events[0].data,
+            serde_json::json!({ "round": 1, "left": "tree-1" })
+        );
 
         // Once, whoever asks.
         assert!(
             !store
-                .return_failed_check(&id, "r", Some(&failed), None, None)
+                .return_failed_check(&id, "r", Some(&failed), SentBack::default())
                 .unwrap()
         );
         assert!(
             !store
-                .return_failed_check(&id, "r", None, Some("Again"), None)
+                .return_failed_check(&id, "r", None, words("Again", None))
                 .unwrap()
         );
         assert_eq!(store.run("r").unwrap().round, 1);
@@ -5139,7 +5174,7 @@ mod tests {
         let id = running_check(&store);
         assert!(
             !store
-                .return_failed_check(&id, "r", None, Some("Use the other parser"), None)
+                .return_failed_check(&id, "r", None, words("Use the other parser", None))
                 .unwrap(),
             "it's still running"
         );
@@ -5158,8 +5193,7 @@ mod tests {
                     &id,
                     "r",
                     None,
-                    Some("Use the other parser"),
-                    Some("Claude Code")
+                    words("Use the other parser", Some("Claude Code")),
                 )
                 .unwrap()
         );

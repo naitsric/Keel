@@ -28,6 +28,8 @@ decides that itself from what it can see, and an agent or an issue saying so doe
 
 - What was asked was worked out as small, with no risks named, such as money or personal data.
 - The project's check passed, on this code. With no check, nothing is ever small.
+- The check never failed on the way. Once it has sent the work back, the reviews look at how it
+  was made to pass.
 - The run doesn't come from an issue by anyone other than the project's GitHub account, or from an
   assistant over MCP.
 - The change touches nothing sensitive: `.github/`, build and dependency files, test settings,

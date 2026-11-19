@@ -1328,9 +1328,7 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
     case "checkSentBack":
       return line(t("activity.checkSentBack", { round: data.round + 1 }), "text-warning");
     case "checkNotSentBack":
-      return line(t("activity.checkNotSentBack"), "text-warning");
-    case "checkNotRunAgain":
-      return line(t("activity.checkNotRunAgain"), "text-warning");
+      return line(t(data.unchanged ? "activity.checkUnchanged" : "activity.checkNotSentBack"), "text-warning");
     case "questionsAsked":
       return line(t("activity.questionsAsked", { count: (data.questions ?? []).length }), "text-warning");
     case "answers":

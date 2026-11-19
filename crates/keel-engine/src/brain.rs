@@ -165,7 +165,6 @@ pub fn trail_entries(attempts: &[Attempt], check_results: &[Event]) -> Vec<Trail
         } else if attempt.kind == "check"
             && (attempt.state == AttemptState::Failed.as_str()
                 || crate::failed_checks::went_back(attempt))
-            && !crate::failed_checks::not_run_again(attempt)
         {
             let data = check_results
                 .iter()
@@ -1334,7 +1333,7 @@ mod tests {
     }
 
     /// A failed check that went back to the builder still failed, and one a person sent back from
-    /// has their words too. One that stands for a check that didn't run again printed nothing.
+    /// has their words too.
     #[test]
     fn a_check_that_went_back_to_the_builder_is_still_a_check_that_failed() {
         use crate::testing::recorded;
@@ -1343,17 +1342,13 @@ mod tests {
             ("check", "check", "check", AttemptState::Returned),
             ("check", "check", "check", AttemptState::Failed),
         ]);
-        for attempt in &mut attempts {
+        for (round, attempt) in attempts.iter_mut().enumerate() {
+            attempt.round = round as i64;
             attempt.prompt = "make test".into();
             attempt.exit_code = Some(2);
             attempt.reason = Some(json!({ "code": "checkFailed", "exitCode": 2 }));
         }
-        attempts[1].round = 1;
         attempts[1].output = Some(json!({ "instructions": "Use the other parser" }));
-        attempts[2].round = 2;
-        attempts[2].exit_code = None;
-        attempts[2].reason =
-            Some(json!({ "code": "checkFailed", "exitCode": 2, "unchanged": true }));
         let entries = trail_entries(&attempts, &[]);
         let what: Vec<(&Happened, i64)> = entries.iter().map(|e| (&e.what, e.round)).collect();
         let failed = Happened::CheckFailed {
@@ -1366,6 +1361,7 @@ mod tests {
                 (&failed, 0),
                 (&failed, 1),
                 (&Happened::SentBack { by: None }, 1),
+                (&failed, 2),
             ]
         );
         assert_eq!(entries[2].text, "Use the other parser");

@@ -33,10 +33,10 @@ describe("a failed check Keel didn't send back to the builder by itself", () => 
     expect(reasonText(t("es"), once)).toBe("La verificación falló con código 1. El trabajo ya se había devuelto las veces que Keel lo devuelve por su cuenta, así que ahora decides tú.");
   });
 
-  it("says the builder changed nothing, so the check didn't run again", () => {
+  it("says it failed again and the builder had changed nothing, so it didn't go back again", () => {
     const unchanged = { code: "checkFailed", exitCode: 1, unchanged: true };
-    expect(reasonText(t("en"), unchanged)).toBe("The check failed with code 1 and the work went back, but the builder changed nothing. Keel didn't run the check again: on the same code it would say the same.");
-    expect(reasonText(t("es"), unchanged)).toBe("La verificación falló con código 1 y el trabajo se devolvió, pero el builder no cambió nada. Keel no volvió a correr la verificación: sobre el mismo código diría lo mismo.");
+    expect(reasonText(t("en"), unchanged)).toBe("The check failed again with code 1. The work had gone back, but the builder changed nothing, so Keel didn't send it back again. It's your call now.");
+    expect(reasonText(t("es"), unchanged)).toBe("La verificación volvió a fallar con código 1. El trabajo se había devuelto, pero el builder no cambió nada, así que Keel no lo devolvió otra vez. Ahora decides tú.");
     expect(needsProjectSettings(unchanged)).toBe(false);
   });
 });

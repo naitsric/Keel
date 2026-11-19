@@ -1795,16 +1795,16 @@ describe("a check that failed after a builder", () => {
   });
 
   it("tells it in the check's activity, in both languages", async () => {
-    const events = [event(1, "checkResult", { kind: "check", exitCode: 1, stdout: "", stderr: "" }), event(2, "checkSentBack", { round: 1 }), event(3, "checkNotSentBack", { failedTimes: 3, rounds: 2 }), event(4, "checkNotRunAgain", {})];
+    const events = [event(1, "checkResult", { kind: "check", exitCode: 1, stdout: "", stderr: "" }), event(2, "checkSentBack", { round: 1 }), event(3, "checkNotSentBack", { failedTimes: 3, rounds: 2 }), event(4, "checkNotSentBack", { unchanged: true })];
     act(() => root.render(<ActivityTab events={events} role="worker" corrected={false} />));
     expect(page()).toContain("It failed, so Keel sent the work back to the builder for round 2");
     expect(page()).toContain("Keel had already sent the work back as often as it does on its own");
-    expect(page()).toContain("The builder changed nothing, so Keel didn't run the check again");
+    expect(page()).toContain("The builder had changed nothing, so Keel didn't send the work back again");
     await i18next.changeLanguage("es");
     act(() => root.render(<ActivityTab events={events} role="worker" corrected={false} />));
     expect(page()).toContain("Falló, así que Keel le devolvió el trabajo al builder para la ronda 2");
     expect(page()).toContain("Keel ya había devuelto el trabajo las veces que lo devuelve por su cuenta");
-    expect(page()).toContain("El builder no cambió nada, así que Keel no volvió a correr la verificación");
+    expect(page()).toContain("El builder no había cambiado nada, así que Keel no devolvió el trabajo otra vez");
   });
 });
 

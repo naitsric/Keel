@@ -338,6 +338,16 @@ fn why_from_check(steps: &[WorkflowStep], attempts: &[Attempt], round: i64) -> O
     )
 }
 
+/// A check that failed earlier in the run and sent the work back, whoever sent it. The check that
+/// passed since only says the command passes now, not how it was made to: only the reviews and the
+/// approver are told to look for a test weakened to get past it, so they have to run.
+fn why_from_earlier_check(attempts: &[Attempt]) -> Option<WhyNotSmall> {
+    attempts
+        .iter()
+        .any(crate::failed_checks::went_back)
+        .then_some(WhyNotSmall::CheckWentBack)
+}
+
 /// What the round's checks say against it being small, when the workflow has `wanted` of them.
 fn why_from_fact(fact: &CheckFact, wanted: usize) -> Option<WhyNotSmall> {
     match fact {
@@ -502,6 +512,7 @@ fn why_from_verifier(steps: &[WorkflowStep], attempts: &[Attempt], round: i64) -
 pub fn decide(facts: &Facts) -> Decision {
     let mut why = why_from_spec(facts.attempts);
     why.extend(why_from_check(facts.steps, facts.attempts, facts.round));
+    why.extend(why_from_earlier_check(facts.attempts));
     why.extend(why_from_issue(facts.issue, facts.account));
     why.extend(
         facts

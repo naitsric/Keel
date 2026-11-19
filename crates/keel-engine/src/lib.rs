@@ -1270,6 +1270,12 @@ impl Engine {
         }
         let pid = {
             let mut controls = locked(&self.inner.controls);
+            // Looked at again with this held. A check that fails sends the work back with it held
+            // too, so a stop either gets there first and wins, or finds the step already over.
+            let now = self.inner.store.attempt(attempt_id)?;
+            if !AttemptState::parse(&now.state).is_some_and(AttemptState::is_active) {
+                return Err(Error::InvalidState);
+            }
             let control = controls.entry(attempt_id.to_owned()).or_default();
             control.stop_requested = true;
             control.pid
@@ -2696,10 +2702,6 @@ impl Inner {
                         let id = self.record_skipped(run_id, spec, &attempts, reason)?;
                         self.say_size(spec, &id, &run, &attempts, &mut size)?;
                         continue 'round;
-                    }
-                    // Sent back for a failed check, and nothing changed: see `failed_checks`.
-                    if self.check_would_prove_nothing(&run, &attempts, step)? {
-                        return Ok(());
                     }
                     let number = workflows::next_number(&attempts, step.id());
                     let id = self.start_step(run_id, step, number, None, Some(&mut size))?;

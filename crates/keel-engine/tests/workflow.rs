@@ -631,10 +631,10 @@ fn a_retry_with_the_fixed_setup_runs_it_first_and_then_the_step_that_failed() {
     assert!(events.iter().any(|e| e.kind == "setupLimited"));
 }
 
-/// Sent back for a failed check, a builder that changes nothing leaves the check to the person
-/// without running it. Starting it over is theirs, also when a new setup has to run first.
+/// Sent back for a failed check, a builder that changes nothing leaves the check, once it has
+/// failed again, to the person. Starting it over is theirs, also with a new setup first.
 #[test]
-fn a_check_left_because_nothing_changed_runs_when_the_person_starts_it_over_with_a_new_setup() {
+fn a_check_that_failed_again_on_unchanged_work_can_be_started_over_with_a_new_setup() {
     keel_harness::needs!(sandbox);
     let w = world();
     w.flag("no-change");

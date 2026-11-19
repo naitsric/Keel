@@ -1,6 +1,7 @@
 //! A check that fails after a builder sends the work back to it, against a fake `claude` whose
 //! builder does what a file says, one line per call: `break` and `fix` commit a change the check
-//! reads, and `nothing` leaves the code as it is. The check itself is a real command in the sandbox.
+//! reads, `nothing` leaves the code as it is, and `ignored` writes only a file git ignores. The
+//! check itself is a real command in the sandbox.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,6 +61,7 @@ BUILD*)
   case "$move" in
   break) echo "bad $(date +%s%N)" > state.txt; git add -A && git commit -qm "build: broken";;
   fix) echo good > state.txt; git add -A && git commit -qm "build: fixed";;
+  ignored) echo good > local.txt;;
   esac
   result='{{"type":"result","subtype":"success","is_error":false,"result":"Built it.","num_turns":1}}';;
 REVIEW*)
@@ -92,6 +94,7 @@ fn world_with(configure: impl FnOnce(&mut Config)) -> World {
     git(&repo, &["config", "user.name", "T"]);
     git(&repo, &["config", "user.email", "t@example.com"]);
     std::fs::write(repo.join("README.md"), "x\n").unwrap();
+    std::fs::write(repo.join(".gitignore"), "local.txt\n").unwrap();
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-qm", "init"]);
     let store = Arc::new(Store::open(&dir.path().join("keel.db")).unwrap());
@@ -162,7 +165,7 @@ fn reviewed() -> Vec<WorkflowStep> {
             "review",
             ToolProfile::ReadOnly,
             StepRole::Reviewer,
-            "REVIEW",
+            "REVIEW\n{{rework}}",
         ),
         agent(
             "approver",
@@ -171,7 +174,7 @@ fn reviewed() -> Vec<WorkflowStep> {
                 rework_to: "builder".into(),
                 max_rounds: 2,
             },
-            "APPROVE",
+            "APPROVE\n{{rework}}",
         ),
         human(),
     ]
@@ -480,16 +483,17 @@ fn an_approver_s_rework_and_a_failed_check_count_in_the_same_two_rounds() {
 }
 
 #[test]
-fn a_builder_that_changed_nothing_leaves_the_check_to_the_person_without_running_it_again() {
+fn a_check_that_fails_again_on_work_the_builder_left_as_it_was_waits_for_the_person() {
     keel_harness::needs!(sandbox);
     let w = world();
     w.builder_will(&["break", "nothing"]);
     let run = w.start(simple());
-    w.wait(&run, "check", 1, AttemptState::Failed);
+    let waiting = w.wait(&run, "check", 1, AttemptState::Failed);
     w.settled(&run);
-    let waiting = w.all(&run, "check").pop().unwrap();
 
-    assert_eq!(w.round(&run), 1);
+    // The check did run again: it costs nothing, and it's the real command that answers.
+    assert_eq!(waiting.exit_code, Some(3));
+    assert!(w.events(&waiting).contains(&"checkResult".to_owned()));
     assert_eq!(
         reason(&waiting),
         Reason::CheckFailed {
@@ -499,64 +503,157 @@ fn a_builder_that_changed_nothing_leaves_the_check_to_the_person_without_running
             unchanged: true,
         }
     );
-    // It never ran: nothing started, and it has no result of its own.
-    assert_eq!(waiting.exit_code, None);
-    assert_eq!(w.events(&waiting), ["checkNotRunAgain"]);
+    assert!(w.events(&waiting).contains(&"checkNotSentBack".to_owned()));
+    assert_eq!(w.round(&run), 1, "it didn't go back again");
     assert_eq!(w.all(&run, "builder").len(), 2);
     assert!(w.all(&run, "human").is_empty());
 
-    // The person can still run it, and it's the real command that answers.
+    // Starting it over says the same, since nothing has changed since.
     w.engine.retry(&waiting.id, false).unwrap();
-    let ran = w
-        .all(&run, "check")
-        .into_iter()
-        .find(|a| a.number == waiting.number + 1)
-        .unwrap();
-    assert_eq!(ran.round, 1);
+    let again = w.wait(&run, "check", 1, AttemptState::Failed);
+    w.settled(&run);
+    assert_eq!(again.number, waiting.number + 1);
+    assert!(matches!(
+        reason(&again),
+        Reason::CheckFailed {
+            unchanged: true,
+            ..
+        }
+    ));
+    assert_eq!(w.all(&run, "builder").len(), 2);
+
+    // And the person can still send it back with their own words.
+    w.engine.send_back(&again.id, "Fix the state").unwrap();
     w.wait(&run, "human", 2, AttemptState::WaitingApproval);
+}
+
+/// A fix can be something git doesn't keep, such as installing what the tests need. Keel's commit
+/// of the round has nothing in it then, and the check passes all the same.
+#[test]
+fn a_fix_that_changes_only_what_git_ignores_still_gets_its_check() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.builder_will(&["nothing", "ignored"]);
+    let reads_ignored = "grep -q good local.txt || exit 3";
+    let run = w.start(vec![builder(), check(reads_ignored), human()]);
+    w.wait(&run, "human", 1, AttemptState::WaitingApproval);
     assert_eq!(
         w.went(&run, "check"),
-        [
-            (0, "returned".into()),
-            (1, "failed".into()),
-            (1, "returned".into()),
-            (2, "succeeded".into())
-        ],
-        "it failed for real, so the work went back once more, and the builder fixed it"
+        [(0, "returned".into()), (1, "succeeded".into())]
     );
+    let fixed = &w.all(&run, "builder")[1];
+    assert_eq!(fixed.sha_before, fixed.sha_after, "no commit came of it");
+}
+
+/// A check can leave files of its own behind, and the builder's next commit takes them. That
+/// commit isn't the builder's work, so it doesn't send the work round again until the limit.
+#[test]
+fn what_a_check_left_behind_does_not_pass_for_the_builder_s_work() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.builder_will(&["break", "nothing", "nothing"]);
+    let leaves_a_mess = "date +%s%N >> README.md; grep -q good state.txt || exit 3";
+    let run = w.start(vec![builder(), check(leaves_a_mess), human()]);
+    let waiting = w.wait(&run, "check", 1, AttemptState::Failed);
+    w.settled(&run);
+    let second = &w.all(&run, "builder")[1];
+    assert_ne!(
+        second.sha_before, second.sha_after,
+        "what the check left was committed after the builder"
+    );
+    assert!(
+        matches!(
+            reason(&waiting),
+            Reason::CheckFailed {
+                unchanged: true,
+                ..
+            }
+        ),
+        "{:?}",
+        waiting.reason
+    );
+    assert_eq!(w.round(&run), 1);
+    assert_eq!(w.all(&run, "builder").len(), 2);
+
+    // A builder that does change something goes on, mess or no mess.
+    let w = world();
+    w.builder_will(&["break", "fix"]);
+    let passes_dirty = "date +%s%N >> README.md; grep -q good state.txt || exit 3";
+    let run = w.start(vec![builder(), check(passes_dirty), human()]);
+    w.wait(&run, "human", 1, AttemptState::WaitingApproval);
 }
 
 #[test]
 fn a_check_that_did_not_really_run_sends_nothing_back() {
     keel_harness::needs!(sandbox);
     let w = world();
-
-    // Stopped by the person.
-    let run = w.start(vec![builder(), check("sleep 30"), human()]);
-    let running = w.wait(&run, "check", 0, AttemptState::Running);
-    w.engine.stop(&running.id).unwrap();
-    w.wait(&run, "check", 0, AttemptState::Stopped);
-    w.settled(&run);
-    assert_eq!(w.round(&run), 0);
-    assert_eq!(w.all(&run, "builder").len(), 1);
-
+    let stays = |command: &str, exit_code: i32, localhost_refused: bool| {
+        let run = w.start(vec![builder(), check(command), human()]);
+        let failed = w.wait(&run, "check", 0, AttemptState::Failed);
+        w.settled(&run);
+        assert_eq!(
+            reason(&failed),
+            Reason::CheckFailed {
+                exit_code: Some(exit_code),
+                localhost_refused,
+                failed_times: None,
+                unchanged: false,
+            },
+            "{command}"
+        );
+        assert_eq!(w.round(&run), 0, "{command}");
+        assert_eq!(w.all(&run, "builder").len(), 1, "{command}");
+        assert!(!w.events(&failed).contains(&"checkSentBack".to_owned()));
+    };
+    // The shell couldn't find the command.
+    stays("no-such-command-keel-test", 127, false);
+    // A signal cut it short, which a wrapper around it reports as a code above 128.
+    stays("exit 143", 143, false);
     // Refused by the sandbox: what Node prints when it can't start a server on localhost.
-    let refused = "echo 'Error: listen EPERM: operation not permitted 127.0.0.1:3000' >&2; exit 1";
-    let run = w.start(vec![builder(), check(refused), human()]);
+    stays(
+        "echo 'Error: listen EPERM: operation not permitted 127.0.0.1:3000' >&2; exit 1",
+        1,
+        true,
+    );
+}
+
+/// The person can still send the work back from one of these. The builder gets their words and
+/// what happened, and isn't told the work failed a check that never ran on it.
+#[test]
+fn sent_back_from_a_check_that_never_ran_the_builder_is_not_told_the_work_failed_it() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.start(vec![
+        builder(),
+        check("no-such-command-keel-test"),
+        agent(
+            "review",
+            ToolProfile::ReadOnly,
+            StepRole::Reviewer,
+            "REVIEW\n{{rework}}",
+        ),
+        human(),
+    ]);
     let failed = w.wait(&run, "check", 0, AttemptState::Failed);
     w.settled(&run);
-    assert_eq!(
-        reason(&failed),
-        Reason::CheckFailed {
-            exit_code: Some(1),
-            localhost_refused: true,
-            failed_times: None,
-            unchanged: false,
-        }
+    w.engine.send_back(&failed.id, "ADD-THE-SCRIPT").unwrap();
+    w.wait(&run, "check", 1, AttemptState::Failed);
+    w.settled(&run);
+    let prompt = &w.all(&run, "builder")[1].prompt;
+    assert!(
+        prompt.contains("A person sent this work back. This is the only thing to change in this round, and it counts as part of the scope:\nADD-THE-SCRIPT"),
+        "{prompt}"
     );
-    assert_eq!(w.round(&run), 0);
-    assert_eq!(w.all(&run, "builder").len(), 1);
-    assert!(!w.events(&failed).contains(&"checkSentBack".to_owned()));
+    assert!(
+        prompt.contains("Keel's check didn't really run on this work, so how it ended says nothing about the work."),
+        "{prompt}"
+    );
+    assert!(
+        prompt.contains("Keel ran `no-such-command-keel-test` and it ended with exit code 127."),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("failed on the work"), "{prompt}");
+    assert!(!prompt.contains("weakening the check"), "{prompt}");
 }
 
 #[test]
@@ -683,6 +780,70 @@ fn a_round_a_person_asked_for_leaves_the_run_its_own_two() {
         "{:?}",
         last.reason
     );
+}
+
+/// The approver asks for something in round 1. The builder does it in round 2, and that round's
+/// check fails, so nobody judged it. In round 3 it still reaches whoever builds and whoever judges.
+#[test]
+fn what_the_approver_asked_for_survives_the_round_its_check_failed_in() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.builder_will(&["fix", "break", "fix"]);
+    w.approver_will(&["rework"]);
+    let run = w.start(reviewed());
+    w.wait(&run, "human", 2, AttemptState::WaitingApproval);
+    assert_eq!(
+        w.went(&run, "check"),
+        [
+            (0, "succeeded".into()),
+            (1, "returned".into()),
+            (2, "succeeded".into())
+        ]
+    );
+    let stands = "Before the check failed, the approver sent this work back for this. It still stands, so don't undo it, and it counts as part of the scope:\nFROM-THE-APPROVER";
+    let asked = "The approver sent this work back. This is the only thing to change in this round, and it counts as part of the scope:\nFROM-THE-APPROVER";
+    let builders = w.all(&run, "builder");
+    assert!(builders[1].prompt.contains(asked), "{}", builders[1].prompt);
+    assert!(
+        builders[2].prompt.contains(stands),
+        "{}",
+        builders[2].prompt
+    );
+    assert!(builders[2].prompt.contains("<check-output"));
+    // Round 2 never got to a review, so these are round 3's.
+    for id in ["review", "approver"] {
+        let judged = w.all(&run, id).pop().unwrap();
+        assert_eq!(judged.round, 2, "{id}");
+        assert!(judged.prompt.contains(stands), "{id}: {}", judged.prompt);
+    }
+}
+
+#[test]
+fn a_step_that_builds_after_the_check_is_not_told_to_fix_it() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.builder_will(&["break", "fix"]);
+    let run = w.start(vec![
+        builder(),
+        check(CHECK),
+        agent("docs", ToolProfile::Build, StepRole::Worker, "DOCS"),
+        agent(
+            "approver",
+            ToolProfile::ReadOnly,
+            StepRole::Approver {
+                rework_to: "builder".into(),
+                max_rounds: 2,
+            },
+            "APPROVE",
+        ),
+        human(),
+    ]);
+    w.wait(&run, "human", 1, AttemptState::WaitingApproval);
+    assert!(w.all(&run, "builder")[1].prompt.contains("<check-output"));
+    // It runs once the check has passed, so what the check printed before is no longer so.
+    let docs = w.all(&run, "docs").pop().unwrap();
+    assert_eq!(docs.round, 1);
+    assert!(!docs.prompt.contains("check"), "{}", docs.prompt);
 }
 
 #[test]

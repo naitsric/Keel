@@ -150,10 +150,23 @@ impl Git {
     /// Git on a run's workspace, in the same sandbox as a `check` step. Whatever the workspace
     /// makes git run gets no more than that step did.
     fn run_in_workspace(&self, workspace: &Path, args: &[&str]) -> Result<String, GitError> {
+        self.run_in_workspace_on(workspace, None, args)
+    }
+
+    /// `run_in_workspace`, staging in `index` instead of the workspace's own when given one.
+    fn run_in_workspace_on(
+        &self,
+        workspace: &Path,
+        index: Option<&Path>,
+        args: &[&str],
+    ) -> Result<String, GitError> {
         let profile = self.workspace_profile(workspace)?;
         let mut command = Command::new("/usr/bin/sandbox-exec");
         command.args(["-p", &profile]).arg(&self.bin);
         Self::harden(&mut command, workspace);
+        if let Some(index) = index {
+            command.env("GIT_INDEX_FILE", index);
+        }
         command.args(args);
         let (ok, stdout, stderr) = bounded_output(command, self.limit)?;
         if ok {
@@ -521,6 +534,33 @@ impl Git {
             .collect();
         let diff = self.diff_range(workspace, &range)?;
         Ok(Snapshot { sha, files, diff })
+    }
+
+    /// The files a commit has, as one name: two commits with the same files have the same one.
+    pub fn tree_of(&self, workspace: &Path, commit: &str) -> Result<String, GitError> {
+        let tree = format!("{commit}^{{tree}}");
+        self.run_in_workspace(workspace, &["rev-parse", "--verify", "-q", &tree])
+    }
+
+    /// The same name for the workspace as it is right now, with whatever is uncommitted in it, as
+    /// `snapshot` would commit it. Nothing is committed or staged: it's worked out in an index of
+    /// its own, beside the workspace's.
+    pub fn tree_as_left(&self, workspace: &Path) -> Result<String, GitError> {
+        if self
+            .run_in_workspace(workspace, &["status", "--porcelain"])?
+            .is_empty()
+        {
+            return self.tree_of(workspace, "HEAD");
+        }
+        let git_dir = workspace.join(".git");
+        let index = git_dir.join("keel-as-left-index");
+        // From the workspace's own, so git doesn't have to read every file again.
+        let _ = std::fs::copy(git_dir.join("index"), &index);
+        let tree = self
+            .run_in_workspace_on(workspace, Some(&index), &["add", "-A"])
+            .and_then(|_| self.run_in_workspace_on(workspace, Some(&index), &["write-tree"]));
+        let _ = std::fs::remove_file(&index);
+        tree
     }
 
     /// The change itself. Between two commits no filter applies, and these flags keep what the
@@ -910,6 +950,24 @@ mod tests {
         assert!(!p.canary.exists(), "it could not reach the home folder");
         assert_eq!(snapshot.files, [".gitattributes", "a.txt"]);
         assert!(!snapshot.sha.is_empty());
+    }
+
+    #[test]
+    fn what_the_workspace_would_be_committed_as_is_known_without_committing_it() {
+        keel_harness::needs!(sandbox);
+        let p = poisoned("");
+        let head = p.git.head(&p.workspace).unwrap();
+        let left = p.git.tree_as_left(&p.workspace).unwrap();
+        assert_ne!(left, p.git.tree_of(&p.workspace, &head).unwrap());
+        // Nothing was committed or staged, and the index it used is gone.
+        assert_eq!(p.git.head(&p.workspace).unwrap(), head);
+        sh(&p.workspace, "git diff --cached --quiet");
+        assert!(p.git.is_dirty(&p.workspace));
+        assert!(!p.workspace.join(".git/keel-as-left-index").exists());
+        // It's what the next commit of the workspace has.
+        let snapshot = p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        assert_eq!(p.git.tree_of(&p.workspace, &snapshot.sha).unwrap(), left);
+        assert_eq!(p.git.tree_as_left(&p.workspace).unwrap(), left);
     }
 
     #[test]
