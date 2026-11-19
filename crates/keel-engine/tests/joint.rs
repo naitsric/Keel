@@ -1277,6 +1277,55 @@ fn each_part_reads_the_whole_request_and_not_only_its_own_line() {
 }
 
 #[test]
+fn a_change_in_spanish_asks_each_part_for_its_part_in_spanish() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.short_workflows();
+    w.answers(&[both(), plain("Valora envía el token"), json!({}), json!({})]);
+    let card = w
+        .engine
+        .card_create(
+            &w.app,
+            "Entrar por Valora",
+            "El token viaja en `x_valora_token`.",
+        )
+        .unwrap();
+    w.engine
+        .card_set_projects(&card, std::slice::from_ref(&w.valora))
+        .unwrap();
+    w.engine.card_move(&card, CardLane::Todo, 0, "es").unwrap();
+    w.engine.board_tick().unwrap();
+    let run = w.store.card(&card).unwrap().run_id.expect("it started");
+    // The step where a person approves what was agreed is named in the run's language too.
+    let approval = w.wait_for(&run, "humano", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&approval.id, true, "").unwrap();
+    let parts = w.parts(&card);
+
+    w.engine.board_tick().unwrap();
+    let first = w.store.card(&parts[0].id).unwrap().run_id.unwrap();
+    w.wait_for(&first, "approval", AttemptState::WaitingApproval);
+    // What the run keeps as its request, which every prompt of the part carries.
+    let opened = w.store.run(&first).unwrap();
+    assert_eq!(opened.language, "es");
+    assert_eq!(
+        opened.request,
+        "Esta es una parte de un cambio en varios proyectos. En este proyecto: Sends the token\n\
+         \n\
+         El pedido de abajo es para todo el cambio. Donde lo que se acordó, o lo que respondió la persona, diga otra cosa, eso manda. Haz solo la parte de este proyecto.\n\
+         \n\
+         Lo que se pidió, para todo el cambio:\n\
+         \n\
+         Entrar por Valora\n\nEl token viaja en `x_valora_token`.\n"
+    );
+    // Its specifier's prompt is all of it: no English in the middle.
+    let prompt = &w.attempts(&first, "spec")[0].prompt;
+    assert!(prompt.contains(&opened.request), "{prompt}");
+    for english in ["This is one part", "The request below", "What was asked"] {
+        assert!(!prompt.contains(english), "{english}: {prompt}");
+    }
+}
+
+#[test]
 fn each_part_verifies_the_contract_points_that_name_it_and_the_change_shows_each() {
     keel_harness::needs!(sandbox);
     let w = world();

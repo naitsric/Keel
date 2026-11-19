@@ -754,6 +754,7 @@ impl Engine {
                     &said,
                     self.inner.asked_of(card)?.as_deref(),
                     issue.as_ref(),
+                    &language,
                 ),
             ),
             Some(issue) => (
