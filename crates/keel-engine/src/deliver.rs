@@ -180,6 +180,22 @@ impl Inner {
             &auth,
         )
         .map_err(git_failed)?;
+        // What Keel pushed is its own work from here on, whatever becomes of opening the pull
+        // request: a look before this delivery is tried again mustn't count it as added by someone.
+        // What was counted was counted from another commit. A run that delivers again counts from
+        // this delivery.
+        let head = git.head(&workspace).ok();
+        store.patch_run(
+            &run.id,
+            &[
+                (
+                    "pr_delivered",
+                    head.clone().map_or(Value::Null, Value::Text),
+                ),
+                ("pr_commits_added", Value::Null),
+                ("pr_counted_at", Value::Null),
+            ],
+        )?;
 
         // A pull request is read by people who never saw the run, and what it says stays on GitHub.
         let body = mask_secrets(&self.pull_request_body(&run, &project)?);
@@ -206,10 +222,6 @@ impl Inner {
         )?;
 
         let number = url.rsplit('/').next().and_then(|n| n.parse::<i64>().ok());
-        // What it was pushed at, so that a commit someone adds on GitHub later shows. A run that
-        // delivers again counts what's added from this delivery, since the rest is its own work.
-        let head = git.head(&workspace).ok();
-        let delivered = head.clone();
         // One just opened is a draft, with no need to ask. Of one that was already there Keel knows
         // nothing, so the next look finds out, and until then nothing claims anything about it.
         let known = |value: Value| if opened_now { value } else { Value::Null };
@@ -225,11 +237,11 @@ impl Inner {
                 ),
                 ("pr_state_at", known(Value::Text(now()))),
                 ("pr_checked_at", known(Value::Text(now()))),
+                // What it was pushed at, so that a commit someone adds on GitHub later shows.
                 ("pr_head", head.map_or(Value::Null, Value::Text)),
                 // What its CI said was about another commit.
                 ("pr_ci", Value::Null),
                 ("pr_ci_failed", Value::Null),
-                ("pr_delivered", delivered.map_or(Value::Null, Value::Text)),
                 // Nothing was added to one just opened. To one already there, someone may have.
                 ("pr_commits_added", known(Value::Integer(0))),
             ],

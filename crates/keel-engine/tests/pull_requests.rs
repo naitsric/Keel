@@ -93,7 +93,8 @@ echo "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\
 }
 
 /// `api graphql` answers with what's in `pr-view`, and fails without it, or when asked about the
-/// checks with `no-checks` there. `pr create` refuses a description GitHub would refuse.
+/// checks with `no-checks` there. `pr create` refuses a description GitHub would refuse, and fails
+/// with `pr-fails` there.
 fn fake_gh(log: &Path, flags: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -108,6 +109,7 @@ case "$1 $2" in
   if [ -f "{flags}/no-comments" ]; then echo "HTTP 403: Resource not accessible by personal access token" >&2; exit 1; fi
   echo '{{}}'; exit 0;;
 "pr create")
+  if [ -f "{flags}/pr-fails" ]; then echo "HTTP 502: Bad Gateway (https://api.github.com/graphql)" >&2; exit 1; fi
   if [ -f "{flags}/pr-exists" ]; then echo "a pull request for branch already exists:" >&2; echo "https://github.com/acme/app/pull/99" >&2; exit 1; fi
   prev=""
   for a in "$@"; do [ "$prev" = "--body-file" ] && cp "$a" "{log}/pr-body.md"; prev="$a"; done
@@ -1412,6 +1414,17 @@ fn what_was_added_is_not_known_when_nothing_says_where_keel_left_it() {
     w.look_with_commits(&run, "OPEN", &many);
     w.wait_added(&run, None);
 
+    // GitHub lists only so many commits of a pull request. Past that the list stops short of
+    // where the branch is, and what's missing is the newest: a count from it would come out low.
+    w.look_with_commits(&run, "OPEN", &["init", &delivered, "fix-1"]);
+    w.wait_added(&run, Some(1));
+    let short = pr_view_with_commits("OPEN", &["init", &delivered, "fix-1"])
+        .replace(r#""headRefOid":"fix-1""#, r#""headRefOid":"fix-251""#);
+    std::fs::write(w.flags.join("pr-view"), short).unwrap();
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.wait_added(&run, None);
+
     // Back in sight, and then the answer says nothing of its commits though the branch moved.
     w.look_with_commits(&run, "OPEN", &["init", &delivered, "fix-1"]);
     w.wait_added(&run, Some(1));
@@ -1442,13 +1455,13 @@ fn what_was_added_is_not_known_when_nothing_says_where_keel_left_it() {
 }
 
 #[test]
-fn a_pull_request_merged_before_keel_counted_gets_one_more_look_and_no_more() {
+fn a_pull_request_merged_before_keel_counted_is_owed_a_look_until_github_answers() {
     keel_harness::needs!(sandbox);
     let w = world_with(|config| config.pr_look_again = Duration::from_millis(30));
     let run = w.delivered();
     let delivered = w.pushed(&run);
     let other = w.delivered();
-    // As the update leaves two that were merged before it: owed a look, with nothing counted.
+    // As the update leaves two that were merged before it: looked at long ago, nothing counted.
     for id in [&run, &other] {
         w.store
             .patch_run(
@@ -1457,26 +1470,109 @@ fn a_pull_request_merged_before_keel_counted_gets_one_more_look_and_no_more() {
                     ("pr_state", Value::Text("merged".into())),
                     ("pr_state_at", Value::Text("2026-11-06T10:00:00Z".into())),
                     ("pr_commits_added", Value::Null),
-                    ("pr_checked_at", Value::Null),
+                    ("pr_counted_at", Value::Null),
+                    (
+                        "pr_checked_at",
+                        Value::Text("2026-11-06T10:05:00.000Z".into()),
+                    ),
                 ],
             )
             .unwrap();
     }
-    // Both get this answer, and it only has the commit Keel delivered to the first.
+
+    // GitHub can't be reached: the fake has no answer yet. Each look counts as having looked, and
+    // they stay owed one, at the pace of any other.
+    w.engine.start_pr_watch();
+    w.until("it asking again after failing", || w.asked_about_prs() >= 6);
+    assert_eq!((w.added(&run), w.added(&other)), (None, None));
+    assert_eq!(w.store.run(&run).unwrap().pr_counted_at, None);
+
+    // Then it answers. Both get this answer, and it only has the commit Keel delivered to the
+    // first: of the other it says that nothing tells, and asking again wouldn't change that.
     std::fs::write(
         w.flags.join("pr-view"),
         pr_view_with_commits("MERGED", &["init", &delivered, "fix-1", "fix-2"]),
     )
     .unwrap();
-    w.engine.start_pr_watch();
     w.wait_added(&run, Some(2));
-    w.until("the other one being looked at", || {
-        w.store.run(&other).unwrap().pr_checked_at.is_some()
+    w.until("the other one getting its answer", || {
+        w.store.run(&other).unwrap().pr_counted_at.is_some()
     });
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(w.asked_about_prs(), 2, "once each, known or not");
     assert_eq!(w.added(&other), None);
     assert_eq!(w.merged_as_delivered(), (2, 0, 1));
+    std::thread::sleep(Duration::from_millis(100));
+    let asked = w.asked_about_prs();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        w.asked_about_prs(),
+        asked,
+        "answered, so that's the end of it"
+    );
+}
+
+#[test]
+fn opening_a_merged_run_keel_has_not_counted_looks_at_its_pull_request() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.delivered();
+    let delivered = w.pushed(&run);
+    w.store
+        .patch_run(
+            &run,
+            &[
+                ("pr_state", Value::Text("merged".into())),
+                ("pr_commits_added", Value::Null),
+            ],
+        )
+        .unwrap();
+    w.look_with_commits(&run, "MERGED", &["init", &delivered, "fix-1"]);
+    w.wait_added(&run, Some(1));
+    // Counted, so opening it again asks nothing more.
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(w.asked_about_prs(), 1);
+}
+
+#[test]
+fn what_keel_pushed_is_never_counted_as_added_though_opening_the_pull_request_failed() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.delivered();
+    let first = w.pushed(&run);
+    w.look_with_commits(&run, "OPEN", &["init", &first, "fix-1"]);
+    w.wait_added(&run, Some(1));
+
+    // The builder works again and the person delivers that, but GitHub fails after the push.
+    let builder = w.step(&run, "builder").unwrap();
+    w.engine.retry(&builder.id, false).unwrap();
+    w.until("the builder working again", || {
+        w.step(&run, "builder")
+            .is_some_and(|a| a.id != builder.id && a.state == AttemptState::Succeeded.as_str())
+            && w.store.run(&run).unwrap().finished_at.is_some()
+    });
+    std::fs::write(w.flags.join("pr-fails"), "").unwrap();
+    let delivery = w.step(&run, "pr").unwrap();
+    w.engine.retry(&delivery.id, false).unwrap();
+    w.until("the delivery failing", || {
+        w.step(&run, "pr")
+            .is_some_and(|a| a.id != delivery.id && a.state == AttemptState::Blocked.as_str())
+    });
+    let second = w.pushed(&run);
+    assert_ne!(second, first, "the push went through");
+    let found = w.store.run(&run).unwrap();
+    assert_eq!(found.pr_delivered.as_deref(), Some(second.as_str()));
+    assert_eq!(
+        found.pr_commits_added, None,
+        "what was counted was from another commit"
+    );
+
+    // A look before anyone retries it: the new commit is Keel's own.
+    w.look_with_commits(&run, "OPEN", &["init", &first, &second]);
+    w.until("it looking", || w.asked_about_prs() == 2);
+    w.wait_added(&run, Some(0));
+    w.look_with_commits(&run, "OPEN", &["init", &first, &second, "fix-1"]);
+    w.wait_added(&run, Some(1));
 }
 
 #[test]

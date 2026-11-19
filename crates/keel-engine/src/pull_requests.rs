@@ -49,8 +49,9 @@ impl Engine {
     }
 
     /// A person opened this run, so they may be wondering. Returns at once: what it finds arrives as
-    /// a change, and a run with no pull request, or a merged one, has nothing to find. One closed
-    /// long ago is looked at too, since this is the only way Keel finds out it was reopened.
+    /// a change, and a run with no pull request, or a merged one, has nothing to find, unless Keel
+    /// still doesn't know what was added to it. One closed long ago is looked at too, since this is
+    /// the only way Keel finds out it was reopened.
     /// A part of a change across projects is looked at with the parts before it, whose pull
     /// requests it was built on.
     pub fn look_at_pr(&self, run_id: &str) {
@@ -76,7 +77,8 @@ impl Inner {
             .pr_checked_at
             .as_deref()
             .is_some_and(|at| at >= time_ago(WHEN_OPENED_LOOK_AGAIN).as_str());
-        if run.pr_url.is_none() || run.pr_state == Some(PrState::Merged) || looked_lately {
+        let nothing_to_find = run.pr_state == Some(PrState::Merged) && !owed_a_count(&run);
+        if run.pr_url.is_none() || nothing_to_find || looked_lately {
             return;
         }
         let inner = self.clone();
@@ -126,6 +128,7 @@ impl Inner {
         else {
             return;
         };
+        let (added, counted_at) = commits_added(run, &status);
         // An answer that doesn't say which commit leaves what Keel knew of it. One that doesn't say
         // what the CI says leaves that unknown: what Keel knew may be about another commit by now.
         let head = status.head.or_else(|| run.pr_head.clone());
@@ -133,13 +136,13 @@ impl Inner {
             Some(checks) => (Some(checks.state), checks.failed),
             None => (None, Vec::new()),
         };
-        let added = commits_added(run, head.as_deref(), status.commits.as_ref());
         if run.pr_state == Some(status.state)
             && run.pr_state_at == status.at
             && run.pr_head == head
             && run.pr_ci == ci
             && run.pr_ci_failed == failed
             && run.pr_commits_added == added
+            && run.pr_counted_at == counted_at
         {
             return;
         }
@@ -161,6 +164,7 @@ impl Inner {
                     "pr_commits_added",
                     added.map_or(Value::Null, Value::Integer),
                 ),
+                ("pr_counted_at", counted_at.map_or(Value::Null, Value::Text)),
             ],
         );
         if saved.is_ok() {
@@ -169,22 +173,29 @@ impl Inner {
     }
 }
 
-/// How many commits the pull request got after the one Keel delivered, not counting merges. A
-/// branch still at that commit got none, whatever else the answer says. Otherwise its commits say,
-/// and when the one delivered isn't among them, or Keel never knew which it was, it's not known. An
-/// answer that doesn't list them leaves what Keel knew while the branch hasn't moved.
-fn commits_added(
-    run: &Run,
-    head: Option<&str>,
-    commits: Option<&github::PrCommits>,
-) -> Option<i64> {
-    let delivered = run.pr_delivered.as_deref()?;
-    if head == Some(delivered) {
-        return Some(0);
-    }
-    match commits {
-        Some(commits) => commits.added_after(delivered),
-        None if head == run.pr_head.as_deref() => run.pr_commits_added,
-        None => None,
+/// Whether Keel knows which commit it delivered and no answer has yet said what was added since.
+/// A merged pull request, or one closed long ago, is still looked at while this holds: a look that
+/// failed mustn't leave it unknown for good. Once GitHub has answered it no longer does, also when
+/// the answer is that nothing tells, which asking again won't change.
+fn owed_a_count(run: &Run) -> bool {
+    run.pr_delivered.is_some() && run.pr_commits_added.is_none() && run.pr_counted_at.is_none()
+}
+
+/// How many commits the pull request got after the one Keel delivered, not counting merges, and
+/// when an answer first said so. A branch still at that commit got none. Otherwise its commits
+/// say, and when the one delivered isn't among them, or they stop short of where the branch is,
+/// the answer is that it's not known. An answer that doesn't say where the branch is, or doesn't
+/// list its commits, says nothing: what Keel knew stands while the branch hasn't moved, and is
+/// gone once it has.
+fn commits_added(run: &Run, status: &github::PrStatus) -> (Option<i64>, Option<String>) {
+    let Some(delivered) = run.pr_delivered.as_deref() else {
+        return (None, None);
+    };
+    let said = || run.pr_counted_at.clone().or_else(|| Some(now()));
+    match (status.head.as_deref(), &status.commits) {
+        (Some(head), _) if head == delivered => (Some(0), said()),
+        (Some(head), Some(commits)) => (commits.added_after(delivered, head), said()),
+        (Some(head), None) if Some(head) != run.pr_head.as_deref() => (None, None),
+        _ => (run.pr_commits_added, run.pr_counted_at.clone()),
     }
 }

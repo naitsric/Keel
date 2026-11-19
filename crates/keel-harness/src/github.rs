@@ -124,10 +124,15 @@ pub struct PrCommit {
 }
 
 impl PrCommits {
-    /// How many commits were added after `delivered`, not counting merges. None when it isn't
-    /// among them, so nothing says where to count from: more were added than one answer brings,
-    /// or the branch was rewritten and that commit is gone.
-    pub fn added_after(&self, delivered: &str) -> Option<i64> {
+    /// How many commits were added after `delivered`, not counting merges, on a branch that is at
+    /// `head`. None when `delivered` isn't among them, so nothing says where to count from: more
+    /// were added than one answer brings, or the branch was rewritten and that commit is gone.
+    /// None too when they don't end at `head`: GitHub lists only so many commits of a pull
+    /// request, and past that the newest are missing, so the count would come out low.
+    pub fn added_after(&self, delivered: &str, head: &str) -> Option<i64> {
+        if self.0.last()?.sha != head {
+            return None;
+        }
         let at = self.0.iter().rposition(|commit| commit.sha == delivered)?;
         Some(self.0[at + 1..].iter().filter(|c| !c.merge).count() as i64)
     }
@@ -1158,10 +1163,12 @@ mod tests {
         serde_json::json!({ "state": "MERGED", "newest": { "nodes": nodes } })
     }
 
+    /// What was added after `delivered` to a branch that is at the last of these commits.
     fn added_after(delivered: &str, shas: &[&str]) -> Option<i64> {
+        let head = shas.last().copied().unwrap_or_default();
         parse_pr_status(&with_commits(shas))
             .and_then(|status| status.commits)
-            .and_then(|commits| commits.added_after(delivered))
+            .and_then(|commits| commits.added_after(delivered, head))
     }
 
     #[test]
@@ -1189,6 +1196,13 @@ mod tests {
         let newest: Vec<&str> = newest.iter().map(String::as_str).collect();
         assert_eq!(added_after("b", &newest), None);
         assert_eq!(added_after("c0", &newest), Some(99));
+        // GitHub lists only the first 250 commits of a pull request, so on a longer one the list
+        // stops short of where the branch is, and what's missing is the newest.
+        let listed = parse_pr_status(&with_commits(&["a", "b", "c"]))
+            .and_then(|status| status.commits)
+            .unwrap();
+        assert_eq!(listed.added_after("b", "c"), Some(1));
+        assert_eq!(listed.added_after("b", "newer"), None);
         // An answer that says nothing of its commits, or leaves one of them half said.
         let silent = serde_json::json!({ "state": "MERGED" });
         assert_eq!(parse_pr_status(&silent).unwrap().commits, None);
