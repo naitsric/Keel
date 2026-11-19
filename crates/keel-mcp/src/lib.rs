@@ -33,8 +33,10 @@ pub use http::{MCP_PATH, ServerStatus, StartError};
 pub use token::{hash_token, new_token};
 pub use tools::{MAX_DRAFTS, MAX_OPEN_RUNS};
 
-/// The port the server listens on unless the person picks another. IdeDB's is 7412.
-pub const DEFAULT_PORT: u16 = 7413;
+/// The port the server listens on unless the person picks another. IdeDB's is 7412. A debug build,
+/// which is a Keel built from a branch, takes the next one, so it can listen while the installed
+/// Keel does.
+pub const DEFAULT_PORT: u16 = if cfg!(debug_assertions) { 7414 } else { 7413 };
 
 const SETTINGS_KEY: &str = "mcp";
 

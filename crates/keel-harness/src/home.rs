@@ -68,12 +68,21 @@ pub fn env(home: &Path, real_home: &Path) -> Vec<(String, String)> {
     env
 }
 
+/// Claude Code gives the shell of each Bash command a pipe to read from that nobody writes to, and
+/// points the command at `/dev/null` instead only when it has no `<` or `<<` of its own. One that
+/// has, and reads what it wasn't given, such as a `head` with no file or `git checkout -p`, would
+/// wait on that pipe for as long as its time limit. The script runs in that shell ahead of the
+/// command, so this closes it for all of them.
+const NOTHING_TO_READ: &str = "exec </dev/null\n";
+
 /// `env` as a script, one `export` a line, for a process that has to keep the real home folder and
 /// runs it ahead of each command it starts: an agent's `claude`, whose login and sessions are there.
+/// It ends by leaving the command nothing to read: see `NOTHING_TO_READ`.
 pub fn script(home: &Path, real_home: &Path) -> String {
     env(home, real_home)
         .iter()
         .map(|(name, value)| format!("export {name}='{}'\n", value.replace('\'', r"'\''")))
+        .chain(std::iter::once(NOTHING_TO_READ.to_owned()))
         .collect()
 }
 
@@ -185,6 +194,40 @@ mod tests {
             let said = String::from_utf8(output.stdout).unwrap();
             let values: Vec<&str> = env.iter().map(|(_, value)| value.as_str()).collect();
             assert_eq!(said.lines().collect::<Vec<_>>(), values, "{shell}");
+        }
+    }
+
+    /// As Claude Code starts a Bash command: the shell reads from a pipe that stays open, with
+    /// nothing ever written to it. A builder's `head` with no file waited there until a person
+    /// stepped in.
+    #[test]
+    fn after_the_script_a_command_that_reads_what_nobody_writes_ends_at_once() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+        let script = script(Path::new("/r/w/.keel-cache/home"), Path::new("/Users/me"));
+        for shell in ["/bin/sh", "/bin/bash", "/bin/zsh"] {
+            let mut child = Command::new(shell)
+                .arg("-c")
+                .arg(format!("{script}/usr/bin/head -1; echo \"read=$?\""))
+                .env_clear()
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .unwrap();
+            // Held open, as Claude Code holds it.
+            let pipe = child.stdin.take();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while child.try_wait().unwrap().is_none() {
+                if Instant::now() >= deadline {
+                    child.kill().unwrap();
+                    child.wait().unwrap();
+                    panic!("{shell}: the command waited for something to read");
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            drop(pipe);
+            let said = child.wait_with_output().unwrap().stdout;
+            assert_eq!(String::from_utf8_lossy(&said), "read=0\n", "{shell}");
         }
     }
 

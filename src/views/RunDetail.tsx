@@ -72,6 +72,13 @@ function CiStatus({ run }: { run: Run }) {
   return null;
 }
 
+/** How many commits the pull request got after Keel delivered, when some were. Nothing when none were, or when Keel doesn't know. */
+function CommitsAdded({ run }: { run: Run }) {
+  const { t } = useTranslation();
+  if (!run.prCommitsAdded) return null;
+  return <span>{t("run.pr.commitsAdded", { count: run.prCommitsAdded })}</span>;
+}
+
 function SummaryBlock({ title, note, children }: { title: string; note?: string; children: React.ReactNode }) {
   return (
     <div>
@@ -1407,8 +1414,10 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       return line(t("activity.commandKilled", { command: data.command }));
     case "abandoned":
       return line(data.by ? t("activity.abandonedBy", { client: data.by }) : t("activity.abandoned"));
-    // Only an assistant's retry leaves one, so the person sees it wasn't them.
+    // Only an assistant's retry leaves one, so the person sees it wasn't them, and Keel's own, when
+    // it continues a step after a usage limit.
     case "retryRequested":
+      if (data.automatic) return line(t("activity.continuedByItself"));
       return data.by ? line(t("activity.retryRequested", { client: data.by })) : null;
     case "commandsUpdated":
       return (
@@ -1892,6 +1901,7 @@ export function RunDetail({ runId }: { runId: string }) {
             <p className="mt-0.5 flex flex-wrap gap-x-3 text-[12px] text-subtle">
               {run?.prUrl && run.prState && <PrStatus state={run.prState} at={run.prStateAt} />}
               {run?.prUrl && <CiStatus run={run} />}
+              {run?.prUrl && <CommitsAdded run={run} />}
               {isReadOnlyTask(run) && <span className="rounded border border-border px-1 text-[11px] text-muted">{t("run.readOnly")}</span>}
               {joint && (
                 <button type="button" className="inline-flex items-center gap-1 text-accent hover:underline" onClick={() => setJointOpen(true)}>

@@ -24,9 +24,15 @@ const theme = params.get("theme") ?? "dark";
 document.documentElement.dataset.theme = theme;
 void i18next.changeLanguage(params.get("lang") ?? "en");
 
+// ?state=blocked&limit=continues is a usage limit Keel will continue the step after by itself, and
+// limit=waits one it leaves to the person.
+const usageLimit = (continues: boolean): Reason => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3 * 3600;
+  return { code: "rateLimited", resetsAt, ...(continues ? { continuesAt: resetsAt + 60 } : {}) };
+};
 const REASONS: Partial<Record<AttemptState, Reason>> = {
   stalled: { code: "stalled", command: "uv run pytest -q", pid: 4242, minutes: 11, cpuPercent: 0.2 },
-  blocked: { code: "unexpectedAuth", source: "ANTHROPIC_API_KEY" },
+  blocked: params.get("limit") ? usageLimit(params.get("limit") === "continues") : { code: "unexpectedAuth", source: "ANTHROPIC_API_KEY" },
   failed: { code: "resultError", subtype: "error_max_turns", detail: "Reached the turn limit." },
   interrupted: { code: "agentLost" },
   queued: { code: "waitingForProject", step: "builder", runId: "r9", title: "Fix the calendar" },
@@ -53,7 +59,7 @@ const attempt: Attempt = {
   tools: "build",
   language: "en",
   cliVersion: "2.1.318 (Claude Code)",
-  apiKeySource: state === "blocked" ? "ANTHROPIC_API_KEY" : "none",
+  apiKeySource: state === "blocked" && !params.get("limit") ? "ANTHROPIC_API_KEY" : "none",
   account: "you@example.com (max)",
   prompt: "The add function in calc.py is wrong. Fix it, then run the tests.",
   settings: { sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, filesystem: { denyRead: ["~"], allowRead: ["<workspace>"] }, network: { allowedDomains: [] } } },
@@ -496,6 +502,8 @@ const proposals: BrainNote[] = [{ ...note(7, "Migrations must be added in order:
 const prShown = params.get("pr") ?? "draft";
 const prState: PrState | null = delivered && prShown !== "unknown" ? (prShown as PrState) : null;
 const prCi = prState ? ((params.get("ci") as CiState | null) ?? null) : null;
+// added=2 is how many commits the pull request got after Keel delivered. Without it Keel doesn't know.
+const prCommitsAdded = prState && params.has("added") ? Number(params.get("added")) : null;
 const run: Run = {
   id: "r1",
   startedBy: params.get("mcp") === "on" || params.get("task") === "1" ? "Claude Code" : null,
@@ -516,6 +524,7 @@ const run: Run = {
   prCheckedAt: prState ? at(2) : null,
   prCi,
   prCiFailed: prCi === "failed" ? ["lint", "pyright"] : [],
+  prCommitsAdded,
   round: flowScene?.round ?? (params.get("round") === "2" ? 1 : 0),
   createdAt: at(4),
   finishedAt: delivered ? at(0) : null,
@@ -701,7 +710,7 @@ const setupAccounts = (account: string | null | undefined) => {
 
 const PR = "https://github.com/acme/app/pull/12";
 const issueOf = (number: number, title: string) => ({ number, title, author: "someone", url: `https://github.com/acme/app/issues/${number}` });
-const boardCard = (id: string, title: string, column: BoardColumn, extra: Partial<BoardCard> = {}): BoardCard => ({ id, projectId: "p1", title, body: "", issue: null, column, position: 0, runId: null, runState: null, reason: null, prUrl: null, prState: null, prStateAt: null, prCi: null, prCiFailed: [], rejection: null, startBlocked: null, createdAt: at(100), jointChangeId: null, alsoTouches: [], part: null, ...extra });
+const boardCard = (id: string, title: string, column: BoardColumn, extra: Partial<BoardCard> = {}): BoardCard => ({ id, projectId: "p1", title, body: "", issue: null, column, position: 0, runId: null, runState: null, reason: null, prUrl: null, prState: null, prStateAt: null, prCi: null, prCiFailed: [], prCommitsAdded: null, rejection: null, startBlocked: null, createdAt: at(100), jointChangeId: null, alsoTouches: [], part: null, ...extra });
 const inRun = (runState: AttemptState, reason: Reason | null = null) => ({ runId: "r1", runState, reason });
 let boardCards: BoardCard[] =
   params.get("cards") === "none"
@@ -726,14 +735,16 @@ let boardCards: BoardCard[] =
         boardCard("c27", "What to do with empty invoices", "humanReview", inRun("waitingAnswers")),
         boardCard("c15", "Speed up the search index", "humanReview", inRun("failed", { code: "checkFailed", exitCode: 1 })),
         boardCard("c16", "Remove the legacy API routes", "humanReview", inRun("blocked", { code: "reworkLimit", rounds: 2 })),
+        boardCard("c31", "Translate the onboarding emails", "humanReview", inRun("blocked", usageLimit(true))),
         boardCard("c17", "Upgrade the database driver", "humanReview", inRun("stalled", REASONS.stalled ?? null)),
         boardCard("c18", "Add tests to the importer", "humanReview", inRun("interrupted", { code: "agentLost" })),
         boardCard("c19", "Split the settings page", "humanReview", inRun("stopped")),
-        boardCard("c20", "Show the invoice number on the receipt", "done", { ...inRun("succeeded"), prUrl: PR, prState: "merged", prStateAt: at(600) }),
+        boardCard("c20", "Show the invoice number on the receipt", "done", { ...inRun("succeeded"), prUrl: PR, prState: "merged", prStateAt: at(600), prCommitsAdded: 0 }),
+        boardCard("c29", "Send the receipt by email", "done", { ...inRun("succeeded"), prUrl: PR, prState: "merged", prStateAt: at(900), prCommitsAdded: 2 }),
         boardCard("c23", "Add a filter to the orders list", "done", { ...inRun("succeeded"), prUrl: PR, prState: "closed", prStateAt: at(2000) }),
         boardCard("c24", "Show the plan name in the header", "done", { ...inRun("succeeded"), prUrl: PR, prState: "open", prStateAt: at(90) }),
         boardCard("c25", "Trim the weekly email", "done", { ...inRun("succeeded"), prUrl: PR, prState: "draft", prStateAt: at(20) }),
-        boardCard("c28", "Type the settings form", "done", { ...inRun("succeeded"), prUrl: PR, prState: "draft", prStateAt: at(15), prCi: "failed", prCiFailed: ["lint", "pyright"] }),
+        boardCard("c28", "Type the settings form", "done", { ...inRun("succeeded"), prUrl: PR, prState: "draft", prStateAt: at(15), prCi: "failed", prCiFailed: ["lint", "pyright"], prCommitsAdded: 1 }),
         boardCard("c26", "A pull request Keel hasn't looked at yet", "done", { ...inRun("succeeded"), prUrl: PR }),
         boardCard("c21", "Write the map of the project", "done", inRun("succeeded")),
         boardCard("c22", "Rotate the payments key", "done", { ...inRun("succeeded"), projectId: "p2", prUrl: PR }),
@@ -842,12 +853,12 @@ const workflowResults: WorkflowResults[] =
   params.get("results") === "none"
     ? []
     : params.get("results") === "few"
-      ? [{ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 2, finished: 1, merged: 1, closed: 0, costPerMergedUsd: 2.4, averageRounds: 1, stoppedToAsk: 1, answers: 2, answersRecommended: 1, sentBack: 0, criteriaMet: 1, criteriaUnmet: 0, criteriaUnverified: 2, ...noneFitted }]
+      ? [{ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 2, finished: 1, merged: 1, closed: 0, mergedAsDelivered: 0, mergedCounted: 0, costPerMergedUsd: 2.4, averageRounds: 1, stoppedToAsk: 1, answers: 2, answersRecommended: 1, sentBack: 0, criteriaMet: 1, criteriaUnmet: 0, criteriaUnverified: 2, ...noneFitted }]
       : [
-          { workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 24, finished: 22, merged: 15, closed: 3, costPerMergedUsd: 3.12, averageRounds: 0.7, stoppedToAsk: 6, answers: 9, answersRecommended: 7, sentBack: 2, criteriaMet: 41, criteriaUnmet: 3, criteriaUnverified: 28, ...noneFitted },
-          { workflowId: "builtin:organic", workflowName: "Fits the change", runs: 17, finished: 16, merged: 12, closed: 1, costPerMergedUsd: 1.04, averageRounds: 0.2, stoppedToAsk: 2, answers: 2, answersRecommended: 2, sentBack: 1, criteriaMet: 30, criteriaUnmet: 1, criteriaUnverified: 9, shortRoute: 9, movedUp: 7, movedUpBecause: [{ code: "sensitiveFiles", runs: 3 }, { code: "specNotSmall", runs: 3 }, { code: "tooManyLines", runs: 1 }, { code: "personAsked", runs: 1 }] },
-          { workflowId: "mine", workflowName: "Reviews only", runs: 6, finished: 5, merged: 1, closed: 2, costPerMergedUsd: 1.8, averageRounds: 0, ...noAsking, ...noneChecked, ...noneFitted },
-          { workflowId: "gone", workflowName: "A workflow since deleted", runs: 9, finished: 9, merged: 4, closed: 1, costPerMergedUsd: 0.86, averageRounds: 0.25, ...noAsking, ...noneChecked, ...noneFitted },
+          { workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 24, finished: 22, merged: 15, closed: 3, mergedAsDelivered: 3, mergedCounted: 9, costPerMergedUsd: 3.12, averageRounds: 0.7, stoppedToAsk: 6, answers: 9, answersRecommended: 7, sentBack: 2, criteriaMet: 41, criteriaUnmet: 3, criteriaUnverified: 28, ...noneFitted },
+          { workflowId: "builtin:organic", workflowName: "Fits the change", runs: 17, finished: 16, merged: 12, closed: 1, mergedAsDelivered: 12, mergedCounted: 12, costPerMergedUsd: 1.04, averageRounds: 0.2, stoppedToAsk: 2, answers: 2, answersRecommended: 2, sentBack: 1, criteriaMet: 30, criteriaUnmet: 1, criteriaUnverified: 9, shortRoute: 9, movedUp: 7, movedUpBecause: [{ code: "sensitiveFiles", runs: 3 }, { code: "specNotSmall", runs: 3 }, { code: "tooManyLines", runs: 1 }, { code: "personAsked", runs: 1 }] },
+          { workflowId: "mine", workflowName: "Reviews only", runs: 6, finished: 5, merged: 1, closed: 2, mergedAsDelivered: 0, mergedCounted: 1, costPerMergedUsd: 1.8, averageRounds: 0, ...noAsking, ...noneChecked, ...noneFitted },
+          { workflowId: "gone", workflowName: "A workflow since deleted", runs: 9, finished: 9, merged: 4, closed: 1, mergedAsDelivered: 0, mergedCounted: 0, costPerMergedUsd: 0.86, averageRounds: 0.25, ...noAsking, ...noneChecked, ...noneFitted },
         ];
 
 // Same as the backend: the card lands at that index of its project's cards in the lane, and the rest close up around it.

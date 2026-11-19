@@ -41,6 +41,9 @@ pub enum Parsed {
         status: Option<String>,
         resets_at: Option<i64>,
         kind: Option<String>,
+        /// The plan's limit is used up and the request went through on extra usage. The status
+        /// stays `rejected`, about the plan, while the step goes on working.
+        using_overage: bool,
     },
     Result(ResultEvent),
     Other {
@@ -174,6 +177,7 @@ pub fn parse_line(line: &str) -> Vec<Parsed> {
                 status: text_of(&info, "status"),
                 resets_at: info.get("resetsAt").and_then(Value::as_i64),
                 kind: text_of(&info, "rateLimitType"),
+                using_overage: info.get("isUsingOverage").and_then(Value::as_bool) == Some(true),
             }]
         }
         ("result", _) => vec![Parsed::Result(parse_result(&value))],

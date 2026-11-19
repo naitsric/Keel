@@ -1204,7 +1204,7 @@ describe("the workflow editor", () => {
     });
   });
   describe("the results", () => {
-    const of = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0, shortRoute: 0, movedUp: 0, movedUpBecause: [], ...fields });
+    const of = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 0, finished: 0, merged: 0, closed: 0, mergedAsDelivered: 0, mergedCounted: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0, shortRoute: 0, movedUp: 0, movedUpBecause: [], ...fields });
     const cells = (row: string) => [...document.querySelectorAll("tr")].find((tr) => tr.querySelector("th")?.textContent?.startsWith(row))?.querySelectorAll("td");
 
     it("say how often the workflow took the short way, and why runs didn't, where that means something", async () => {
@@ -1233,6 +1233,19 @@ describe("the workflow editor", () => {
       expect(texts("Closed without merging")).toEqual(["5", "2"]);
       expect(texts("Average cost per merged pull request")).toEqual(["$3.20", "$0.50"]);
       expect(texts("Average times sent back")).toEqual(["0", "1.3"]);
+    });
+
+    it("say how many merged pull requests were merged as Keel delivered them", async () => {
+      results = [of({ workflowId: "mine", runs: 6, merged: 4, mergedAsDelivered: 0, mergedCounted: 0 }), of({ runs: 30, merged: 12, mergedAsDelivered: 3, mergedCounted: 9 }), of({ workflowId: "gone", workflowName: "Gone", runs: 2 })];
+      await open();
+      const texts = (row: string) => [...(cells(row) ?? [])].map((td) => td.textContent);
+      // Keel doesn't know what was added to Mine's, which isn't the same as none, and Gone has none merged.
+      expect(texts("Merged as delivered")).toEqual(["3 of 9", "Not known yet", "Not enough data yet"]);
+      expect(page()).toContain("With no commit added after Keel delivered.");
+      await i18next.changeLanguage("es");
+      await open();
+      expect(texts("Mergeados como se entregaron")).toEqual(["3 de 9", "Aún no se sabe", "Aún no hay datos suficientes"]);
+      await i18next.changeLanguage("en");
     });
 
     it("don't average too few runs, and say why", async () => {

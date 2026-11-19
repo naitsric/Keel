@@ -49,6 +49,7 @@
     "back": "Back",
     "nextWaiting": "Next run waiting for you",
     "previousWaiting": "Previous run waiting for you",
+    "showLog": "Show Keel's error log in Finder",
     "newRun": "New run",
     "newTask": "New task",
     "showChanges": "Show the run's changes",
@@ -133,6 +134,7 @@
     "sessionRejected": "Claude Code rejected the session: {{detail}}",
     "rateLimited": "You reached your plan's usage limit.",
     "rateLimitedUntil": "You reached your plan's usage limit. It resets {{date}}.",
+    "rateLimitedContinues": "You reached your plan's usage limit. Keel will continue this step by itself {{date}}.",
     "stalled": "No progress for {{minutes}} min. It's running “{{command}}” at {{cpu}}% CPU.",
     "stalledModel": "No progress for {{minutes}} min, and no command is running. It may be waiting on the model.",
     "waitingForProject": "Waiting for its turn. Each run works in its own copy, but a project runs one step with commands at a time.",
@@ -294,7 +296,9 @@
       "merged": "Pull request merged",
       "closed": "Pull request closed without merging",
       "mergedAt": "Pull request merged on {{when}}",
-      "closedAt": "Pull request closed without merging on {{when}}"
+      "closedAt": "Pull request closed without merging on {{when}}",
+      "commitsAdded_one": "{{count}} commit added after Keel delivered",
+      "commitsAdded_other": "{{count}} commits added after Keel delivered"
     },
     "ci": {
       "failed": "CI failed: {{checks}}",
@@ -514,6 +518,7 @@
     "abandoned": "You left this run",
     "abandonedBy": "{{client}} closed this run",
     "retryRequested": "{{client}} tried it again",
+    "continuedByItself": "Keel continued it by itself once the usage limit reset",
     "commandsUpdated": "Started over with the project's new commands",
     "setupLimited": "Runs with no more permissions than the agents, because an agent that can change the code ran before it: no internet, and not the project's shared cache. An install that needs to download something may fail for it. Only a setup before any such agent, as at the start of a new run, gets the internet.",
     "recovered": "Keel reopened and picked this step up again",
@@ -688,6 +693,13 @@
     "leaveRunning": "Quit, keep them running",
     "stopAndQuit": "Stop them and quit"
   },
+  "cantOpen": {
+    "title": "Keel can't open its data",
+    "newer": "A newer Keel has used this data, and this one would damage it. Nothing was changed. Open the newest Keel you have.",
+    "different": "A different version of Keel has used this data, and this one would damage it. Nothing was changed. Open the Keel you used last.",
+    "other": "Something went wrong when opening it: {{detail}}",
+    "where": "The data is in {{folder}}"
+  },
   "menu": {
     "about": "About Keel",
     "settings": "Settings…",
@@ -825,6 +837,10 @@
       "none": "There isn't enough data yet. No workflow has run in this project since Keel began keeping track.",
       "runs": "Runs",
       "merged": "Pull requests merged",
+      "asDelivered": "Merged as delivered",
+      "asDeliveredNote": "With no commit added after Keel delivered. Those Keel doesn't know about aren't counted.",
+      "asDeliveredValue": "{{same}} of {{known}}",
+      "asDeliveredNotKnown": "Not known yet",
       "closed": "Closed without merging",
       "cost": "Average cost per merged pull request",
       "rounds": "Average times sent back",
@@ -972,6 +988,8 @@
     },
     "ciFailed": "CI failed: {{checks}}",
     "ciFailedUnnamed": "CI failed",
+    "commitsAdded_one": "{{count}} commit added after Keel delivered",
+    "commitsAdded_other": "{{count}} commits added after Keel delivered",
     "needed": {
       "waitingApproval": "Open it to approve or reject.",
       "waitingAnswers": "Open it to answer.",

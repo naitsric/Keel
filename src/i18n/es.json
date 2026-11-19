@@ -49,6 +49,7 @@
     "back": "Volver",
     "nextWaiting": "Siguiente ejecución que te espera",
     "previousWaiting": "Ejecución anterior que te espera",
+    "showLog": "Ver el registro de errores de Keel en Finder",
     "newRun": "Nueva ejecución",
     "newTask": "Nueva tarea",
     "showChanges": "Ver los cambios de la ejecución",
@@ -133,6 +134,7 @@
     "sessionRejected": "Claude Code rechazó la sesión: {{detail}}",
     "rateLimited": "Llegaste al límite de uso de tu plan.",
     "rateLimitedUntil": "Llegaste al límite de uso de tu plan. Se renueva {{date}}.",
+    "rateLimitedContinues": "Llegaste al límite de uso de tu plan. Keel continuará este paso por su cuenta {{date}}.",
     "stalled": "Sin avances desde hace {{minutes}} min. Está corriendo «{{command}}» con {{cpu}}% de CPU.",
     "stalledModel": "Sin avances desde hace {{minutes}} min y sin comandos corriendo. Puede estar esperando al modelo.",
     "waitingForProject": "Espera su turno. Cada corrida trabaja en su propia copia, pero un proyecto corre un solo paso con comandos a la vez.",
@@ -294,7 +296,9 @@
       "merged": "Pull request mergeado",
       "closed": "Pull request cerrado sin mergear",
       "mergedAt": "Pull request mergeado el {{when}}",
-      "closedAt": "Pull request cerrado sin mergear el {{when}}"
+      "closedAt": "Pull request cerrado sin mergear el {{when}}",
+      "commitsAdded_one": "{{count}} commit agregado después de que Keel entregó",
+      "commitsAdded_other": "{{count}} commits agregados después de que Keel entregó"
     },
     "ci": {
       "failed": "CI en rojo: {{checks}}",
@@ -514,6 +518,7 @@
     "abandoned": "Dejaste esta ejecución",
     "abandonedBy": "{{client}} cerró esta ejecución",
     "retryRequested": "{{client}} lo reintentó",
+    "continuedByItself": "Keel lo continuó por su cuenta al renovarse el límite de uso",
     "commandsUpdated": "Empezó de nuevo con los comandos nuevos del proyecto",
     "setupLimited": "Corre sin más permisos que los agentes, porque antes corrió un agente que puede cambiar el código: sin internet y sin la caché compartida del proyecto. Una instalación que necesite descargar algo puede fallar por eso. Solo una preparación antes de cualquier agente así, como al empezar una ejecución nueva, tiene internet.",
     "recovered": "Keel se reabrió y retomó este paso",
@@ -688,6 +693,13 @@
     "leaveRunning": "Salir y dejarlos corriendo",
     "stopAndQuit": "Detenerlos y salir"
   },
+  "cantOpen": {
+    "title": "Keel no puede abrir sus datos",
+    "newer": "Un Keel más nuevo usó estos datos, y este los dañaría. No se cambió nada. Abre el Keel más nuevo que tengas.",
+    "different": "Otra versión de Keel usó estos datos, y esta los dañaría. No se cambió nada. Abre el Keel que usaste la última vez.",
+    "other": "Algo falló al abrirlos: {{detail}}",
+    "where": "Los datos están en {{folder}}"
+  },
   "menu": {
     "about": "Acerca de Keel",
     "settings": "Ajustes…",
@@ -825,6 +837,10 @@
       "none": "Aún no hay datos suficientes. Ningún workflow ha corrido en este proyecto desde que Keel lleva este registro.",
       "runs": "Ejecuciones",
       "merged": "Pull requests mergeados",
+      "asDelivered": "Mergeados como se entregaron",
+      "asDeliveredNote": "Sin commits agregados después de que Keel entregó. No cuentan los que Keel no conoce.",
+      "asDeliveredValue": "{{same}} de {{known}}",
+      "asDeliveredNotKnown": "Aún no se sabe",
       "closed": "Cerrados sin mergear",
       "cost": "Costo promedio por pull request mergeado",
       "rounds": "Veces devuelto, en promedio",
@@ -972,6 +988,8 @@
     },
     "ciFailed": "CI en rojo: {{checks}}",
     "ciFailedUnnamed": "CI en rojo",
+    "commitsAdded_one": "{{count}} commit agregado después de que Keel entregó",
+    "commitsAdded_other": "{{count}} commits agregados después de que Keel entregó",
     "needed": {
       "waitingApproval": "Ábrela para aprobar o rechazar.",
       "waitingAnswers": "Ábrela para responder.",

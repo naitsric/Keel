@@ -9,7 +9,9 @@ mod diffs;
 mod git;
 mod issues;
 mod joint;
+mod limits;
 mod localhost;
+mod log;
 mod notes;
 mod project_commands;
 mod project_proposals;
@@ -50,6 +52,7 @@ use keel_store::rusqlite_value::Value;
 use keel_store::{
     Decision, IssueTold, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
 };
+pub use limits::MOST_CONTINUED_BY_ITSELF;
 pub use notes::split_assistant_notes;
 pub use project_commands::{CommandChange, CommandKind, retry_runs_something_new};
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
@@ -130,6 +133,10 @@ pub struct Config {
     pub pr_look_again: Duration,
     /// How often Keel looks at the issues of the projects that watch them.
     pub issue_look_again: Duration,
+    /// How long after a usage limit resets Keel continues the step it stopped. See `limits`.
+    pub continue_after_reset: Duration,
+    /// How often Keel looks for a step to continue after a usage limit.
+    pub limit_look_again: Duration,
     /// What Claude Code runs around each Bash command of a step that can edit, to tell the agent
     /// which project files changed (see `keel_harness::hook`). The app installs it. Without it, or
     /// without git, no hook.
@@ -152,6 +159,8 @@ impl Config {
             github_git_base: "https://github.com".to_owned(),
             pr_look_again: pull_requests::LOOK_AGAIN,
             issue_look_again: issues::LOOK_AGAIN,
+            continue_after_reset: limits::AFTER_RESET,
+            limit_look_again: limits::LOOK_AGAIN,
             bash_hook: None,
         }
     }
@@ -1017,7 +1026,9 @@ impl Engine {
             // place on the board, and the next launch would start it after all.
             let store = &self.inner.store;
             if store.attempts_of_run(&run_id).is_ok_and(|a| a.is_empty()) {
-                let _ = store.patch_run(&run_id, &[("finished_at", Value::Text(now()))]);
+                let closed = store.patch_run(&run_id, &[("finished_at", Value::Text(now()))]);
+                self.inner
+                    .noted("closing a run that couldn't start", &run_id, closed);
             }
             return Err(error);
         }
@@ -1578,13 +1589,25 @@ impl Engine {
     /// closes out the rest, and continues any run that stopped between two steps. Approvals and
     /// questions simply keep waiting: nothing is running for them. Ended runs that still hold what
     /// their tools built are freed in the background.
+    ///
+    /// A step or a run that can't be picked up is written to the log, and the rest still are. The
+    /// step ends as interrupted, so nothing is left showing as running with nothing watching it.
     pub fn recover(&self) -> Result<()> {
         self.inner.store.release_claimed_cards()?;
         for attempt in self.inner.store.active_attempts()? {
-            self.inner.recover_attempt(&attempt)?;
+            let recovered = self.inner.recover_attempt(&attempt);
+            if self
+                .inner
+                .noted("picking a step up again", &attempt.id, recovered)
+                .is_none()
+            {
+                self.inner.end_unrecovered(&attempt);
+            }
         }
         for run in self.inner.store.open_runs()? {
-            self.inner.advance(&run.id)?;
+            let advanced = self.inner.advance(&run.id);
+            self.inner
+                .noted("moving a run on to its next step", &run.id, advanced);
         }
         self.inner.free_ended_runs();
         Ok(())
@@ -2028,9 +2051,10 @@ impl Inner {
             return;
         };
         if run.finished_at.is_none() && is_trial(&run) {
-            let _ = self
+            let closed = self
                 .store
                 .patch_run(run_id, &[("finished_at", Value::Text(now()))]);
+            self.noted("closing a trial that failed", run_id, closed);
             self.free_builds(run_id);
         }
     }

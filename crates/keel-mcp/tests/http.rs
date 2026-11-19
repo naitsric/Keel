@@ -442,6 +442,7 @@ async fn get_run_says_which_workflow_it_used_and_what_became_of_its_pull_request
     assert_eq!(started["workflowId"], json!(w.workflow_id));
     assert_eq!(started["workflowName"], "Build and ask");
     assert_eq!(started["prState"], Json::Null, "no pull request yet");
+    assert!(started.get("prCommitsAdded").is_none(), "{started}");
 
     w.store
         .patch_run(
@@ -461,6 +462,17 @@ async fn get_run_says_which_workflow_it_used_and_what_became_of_its_pull_request
     assert_eq!(view["prState"], "merged");
     assert_eq!(view["prStateAt"], "2026-11-06T10:00:00Z");
     assert_eq!(view["prCheckedAt"], "2026-11-06T10:05:00Z");
+    assert!(
+        view.get("prCommitsAdded").is_none(),
+        "merged, and Keel doesn't know what was added: {view}"
+    );
+    for added in [0, 2] {
+        w.store
+            .patch_run(&run, &[("pr_commits_added", Value::Integer(added))])
+            .unwrap();
+        let view = ok(&call(&client, "get_run", json!({ "run": run })).await);
+        assert_eq!(view["prCommitsAdded"], added, "{view}");
+    }
     client.cancel().await.unwrap();
 }
 

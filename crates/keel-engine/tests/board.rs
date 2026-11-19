@@ -1955,7 +1955,13 @@ fn a_blocked_run_goes_to_human_review_with_the_reason() {
     let id = w.queued("card-1");
     let card = w.wait_column(&id, BoardColumn::HumanReview);
     assert_eq!(card.run_state, Some(AttemptState::Blocked));
-    assert_eq!(card.reason, Some(Reason::RateLimited { resets_at: None }));
+    assert_eq!(
+        card.reason,
+        Some(Reason::RateLimited {
+            resets_at: None,
+            continues_at: None
+        })
+    );
     assert_eq!(w.working(), 0);
 }
 
@@ -2942,6 +2948,7 @@ fn the_board_has_the_shape_the_contract_says() {
             "position",
             "prCi",
             "prCiFailed",
+            "prCommitsAdded",
             "prState",
             "prStateAt",
             "prUrl",
@@ -3236,7 +3243,10 @@ fn a_usage_limit_does_not_spend_the_queue_and_lifts_when_the_person_acts() {
             w.queued(&format!("card-{n}"))
         })
         .collect();
-    let limit = Some(Reason::RateLimited { resets_at: None });
+    let limit = Some(Reason::RateLimited {
+        resets_at: None,
+        continues_at: None,
+    });
 
     w.engine.start_board();
     w.wait_column(&cards[0], BoardColumn::HumanReview);
@@ -3280,7 +3290,10 @@ fn retrying_the_only_blocked_run_lifts_the_pause() {
     let waiting = w.queued("card-2");
     w.engine.start_board();
     w.wait_column(&blocked, BoardColumn::HumanReview);
-    w.wait_paused(Some(Reason::RateLimited { resets_at: None }));
+    w.wait_paused(Some(Reason::RateLimited {
+        resets_at: None,
+        continues_at: None,
+    }));
     assert_eq!(w.card(&waiting).column, BoardColumn::Todo);
 
     w.unflag("limit-card-1");
@@ -3301,6 +3314,7 @@ fn a_usage_limit_with_a_known_reset_lifts_once_that_time_has_passed() {
         "card-1",
         &Reason::RateLimited {
             resets_at: Some(now + 3600),
+            continues_at: None,
         },
     );
     let waiting = w.queued("card-2");
@@ -3310,7 +3324,8 @@ fn a_usage_limit_with_a_known_reset_lifts_once_that_time_has_passed() {
     assert_eq!(
         w.paused(),
         Some(Reason::RateLimited {
-            resets_at: Some(now + 3600)
+            resets_at: Some(now + 3600),
+            continues_at: None,
         })
     );
 
@@ -3322,6 +3337,7 @@ fn a_usage_limit_with_a_known_reset_lifts_once_that_time_has_passed() {
             AttemptState::Blocked,
             Some(&Reason::RateLimited {
                 resets_at: Some(now - 1),
+                continues_at: None,
             }),
         )
         .unwrap();
@@ -3402,7 +3418,10 @@ fn a_run_started_by_hand_that_is_blocked_pauses_the_queue_too() {
     }
     let waiting = w.queued("card-1");
     w.engine.start_board();
-    w.wait_paused(Some(Reason::RateLimited { resets_at: None }));
+    w.wait_paused(Some(Reason::RateLimited {
+        resets_at: None,
+        continues_at: None,
+    }));
     std::thread::sleep(A_MOMENT);
     assert_eq!(w.card(&waiting).column, BoardColumn::Todo);
 
@@ -3416,7 +3435,10 @@ fn a_pause_is_still_there_after_reopening() {
     keel_harness::needs!(sandbox);
     let mut w = world();
     w.use_one_step();
-    let limit = Reason::RateLimited { resets_at: None };
+    let limit = Reason::RateLimited {
+        resets_at: None,
+        continues_at: None,
+    };
     let blocked = blocked_on(&w, "card-1", &limit);
     let waiting = w.queued("card-2");
 
@@ -3560,7 +3582,14 @@ fn a_change_goes_out_when_paused_changes_and_only_then() {
 fn paused_has_the_shape_of_any_other_reason() {
     let w = world();
     w.use_one_step();
-    blocked_on(&w, "card-1", &Reason::RateLimited { resets_at: None });
+    blocked_on(
+        &w,
+        "card-1",
+        &Reason::RateLimited {
+            resets_at: None,
+            continues_at: None,
+        },
+    );
     w.engine.board_tick().unwrap();
     assert_eq!(
         serde_json::to_value(w.engine.board(&w.project_id).unwrap()).unwrap()["paused"],

@@ -2021,6 +2021,7 @@ dependencies = [
  "keel-harness",
  "keel-mcp",
  "keel-store",
+ "rusqlite",
  "serde",
  "serde_json",
  "tauri",
@@ -2028,6 +2029,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-single-instance",
  "tauri-plugin-window-state",
+ "tempfile",
 ]
 
 [[package]]
@@ -2037,6 +2039,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]
@@ -2115,6 +2118,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.21",
 ]
