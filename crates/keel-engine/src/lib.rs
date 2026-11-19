@@ -2496,6 +2496,14 @@ impl Inner {
                 text.push_str(&format!("\n\n{added}"));
             }
         }
+        // Whoever judges the round reads what the builder said it assumed or couldn't test, whatever
+        // a saved workflow's prompt leaves out. An approver gets the builder's list instead, below.
+        if matches!(spec.role, StepRole::Reviewer | StepRole::Verifier) {
+            let account = workflows::builder_account(&attempts, &run.language);
+            if !account.is_empty() && !text.contains(&account) {
+                text.push_str(&format!("\n\n{account}"));
+            }
+        }
         // Every approver can say in which round something the change added appeared, so every one
         // is told which round this is, and what the builder said it added, whatever its prompt says.
         if matches!(spec.role, StepRole::Approver { .. }) {
@@ -2583,6 +2591,10 @@ impl Inner {
                 &run.language,
             ))),
             "answers" => Some(with_tags(workflows::answers_text(attempts, &run.language))),
+            "builder" => Some(with_tags(workflows::builder_account(
+                attempts,
+                &run.language,
+            ))),
             "projects" => self
                 .agreement(&run.id)
                 .ok()

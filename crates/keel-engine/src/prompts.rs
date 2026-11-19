@@ -118,8 +118,8 @@ pub fn system_prompt(
     (text, json!(sources))
 }
 
-/// Fills in `{{request}}`, `{{diff}}`, `{{rework}}`, `{{answers}}`, `{{check}}`, `{{trail}}` and
-/// `{{steps.<id>.output}}`. One pass only: text that comes from an agent, an issue or a person is
+/// Fills in `{{request}}`, `{{diff}}`, `{{rework}}`, `{{answers}}`, `{{check}}`, `{{builder}}`,
+/// `{{trail}}` and `{{steps.<id>.output}}`. One pass only: text that comes from an agent, an issue or a person is
 /// never expanded again, so it can't reach other values. Whoever fills them in fences what isn't
 /// Keel's own words, with [`fenced`].
 pub fn render(template: &str, lookup: impl Fn(&str) -> Option<String>) -> String {
@@ -391,6 +391,8 @@ const VERIFY_PROMPT_EN: &str = r#"What has to be true:
 
 {{rework}}
 
+{{builder}}
+
 Change:
 {{diff}}
 
@@ -412,6 +414,8 @@ const VERIFY_PROMPT_ES: &str = r#"Lo que tiene que cumplirse:
 {{steps.spec.output}}
 
 {{rework}}
+
+{{builder}}
 
 Cambio:
 {{diff}}
