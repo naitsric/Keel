@@ -7,6 +7,9 @@ export const ENOUGH_FOR_AN_AVERAGE = 3;
 /** Null until there are enough merged pull requests to go on. */
 export const costPerMerged = (results: WorkflowResults) => (results.merged >= ENOUGH_FOR_AN_AVERAGE ? results.costPerMergedUsd : null);
 
+/** Of the merged pull requests, how many were merged as Keel delivered them, out of those where Keel knows. Null when it knows of none. */
+export const mergedAsDelivered = (results: WorkflowResults) => (results.mergedCounted > 0 ? { same: results.mergedAsDelivered, known: results.mergedCounted } : null);
+
 /** Null until there are enough finished runs to go on. */
 export const averageRounds = (results: WorkflowResults) => (results.finished >= ENOUGH_FOR_AN_AVERAGE ? results.averageRounds : null);
 

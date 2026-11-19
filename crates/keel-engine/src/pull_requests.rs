@@ -133,11 +133,13 @@ impl Inner {
             Some(checks) => (Some(checks.state), checks.failed),
             None => (None, Vec::new()),
         };
+        let added = commits_added(run, head.as_deref(), status.commits.as_ref());
         if run.pr_state == Some(status.state)
             && run.pr_state_at == status.at
             && run.pr_head == head
             && run.pr_ci == ci
             && run.pr_ci_failed == failed
+            && run.pr_commits_added == added
         {
             return;
         }
@@ -155,10 +157,34 @@ impl Inner {
                     ci.map_or(Value::Null, |ci| Value::Text(ci.as_str().to_owned())),
                 ),
                 ("pr_ci_failed", failed.map_or(Value::Null, Value::Text)),
+                (
+                    "pr_commits_added",
+                    added.map_or(Value::Null, Value::Integer),
+                ),
             ],
         );
         if saved.is_ok() {
             self.changed(&run.id);
         }
+    }
+}
+
+/// How many commits the pull request got after the one Keel delivered, not counting merges. A
+/// branch still at that commit got none, whatever else the answer says. Otherwise its commits say,
+/// and when the one delivered isn't among them, or Keel never knew which it was, it's not known. An
+/// answer that doesn't list them leaves what Keel knew while the branch hasn't moved.
+fn commits_added(
+    run: &Run,
+    head: Option<&str>,
+    commits: Option<&github::PrCommits>,
+) -> Option<i64> {
+    let delivered = run.pr_delivered.as_deref()?;
+    if head == Some(delivered) {
+        return Some(0);
+    }
+    match commits {
+        Some(commits) => commits.added_after(delivered),
+        None if head == run.pr_head.as_deref() => run.pr_commits_added,
+        None => None,
     }
 }

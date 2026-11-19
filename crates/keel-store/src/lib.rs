@@ -433,6 +433,24 @@ const MIGRATIONS: &[&str] = &[
     alter table run add column issue_told_started text;
     alter table run add column issue_told_pr text;
 "#,
+    // 24: The commit Keel delivered to a run's pull request, and how many commits were added after
+    // it, as of `pr_checked_at`. Null until Keel knows. A run from before gets the commit from its
+    // steps: where the last one that worked on the code left it before the pull request was opened.
+    // Only GitHub can say what was added, so a pull request that was merged or closed is owed one
+    // more look.
+    r#"
+    alter table run add column pr_delivered text;
+    alter table run add column pr_commits_added integer;
+    update run set pr_delivered = (
+        select a.sha_after from attempt a
+        where a.run_id = run.id and a.sha_after is not null
+          and a.rowid < (select max(d.rowid) from attempt d
+                         where d.run_id = run.id and d.kind = 'deliver' and d.state = 'succeeded')
+        order by a.rowid desc limit 1)
+    where pr_url is not null;
+    update run set pr_checked_at = null
+    where pr_delivered is not null and pr_state in ('merged', 'closed');
+"#,
 ];
 
 /// Whether the card a query calls `card` can start as far as other cards go: it waits for none,
@@ -851,6 +869,11 @@ pub struct Run {
     /// before saving it. False for any other run.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub extra_localhost: bool,
+    /// The commit Keel pushed when it last delivered. None for a run that delivered nothing.
+    pub pr_delivered: Option<String>,
+    /// How many commits its pull request got after that one, not counting merges, as of
+    /// `pr_checked_at`. None when Keel doesn't know.
+    pub pr_commits_added: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -872,7 +895,7 @@ pub struct NewRun {
     pub started_by: Option<String>,
 }
 
-const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by, workflow_id, workflow_name, pr_state, pr_state_at, pr_checked_at, pr_head, extra_read, pr_ci, pr_ci_failed, extra_localhost";
+const RUN_COLUMNS: &str = "id, project_id, title, base_ref, request, workflow, language, source_issue, branch, pr_url, pr_number, created_at, finished_at, round, started_by, workflow_id, workflow_name, pr_state, pr_state_at, pr_checked_at, pr_head, extra_read, pr_ci, pr_ci_failed, extra_localhost, pr_delivered, pr_commits_added";
 
 fn pr_state_from(text: Option<String>) -> Option<PrState> {
     text.as_deref().and_then(PrState::parse)
@@ -916,6 +939,8 @@ fn run_from(r: &Row) -> rusqlite::Result<Run> {
         pr_ci: ci_state_from(r.get(22)?),
         pr_ci_failed: names_from(r.get(23)?),
         extra_localhost: r.get(24)?,
+        pr_delivered: r.get(25)?,
+        pr_commits_added: r.get(26)?,
     })
 }
 
@@ -1180,6 +1205,10 @@ pub struct WorkflowResults {
     pub moved_up: i64,
     /// Why they weren't, most common first. A run counts once per reason, and can have several.
     pub moved_up_because: Vec<MovedUpBecause>,
+    /// Of the merged pull requests, those merged with no commit added after Keel delivered, out of
+    /// those where Keel knows how many were added. One it doesn't know about is in neither.
+    pub merged_as_delivered: i64,
+    pub merged_counted: i64,
 }
 
 /// How many of a workflow's runs weren't small for one reason. `code` is a `WhyNotSmall`'s.
@@ -1230,6 +1259,8 @@ pub struct Card {
     pub pr_state_at: Option<String>,
     pub pr_ci: Option<CiState>,
     pub pr_ci_failed: Vec<String>,
+    /// Commits its pull request got after Keel delivered. None when Keel doesn't know.
+    pub pr_commits_added: Option<i64>,
     /// What the person wrote when rejecting it. Empty if they wrote nothing.
     pub rejection: Option<String>,
     /// The change across several projects it belongs to, as the card where it's agreed or as one
@@ -1355,6 +1386,7 @@ fn card_from(r: &Row) -> rusqlite::Result<Card> {
         pr_state_at: r.get("run_pr_state_at")?,
         pr_ci: ci_state_from(r.get("run_pr_ci")?),
         pr_ci_failed: names_from(r.get("run_pr_ci_failed")?),
+        pr_commits_added: r.get("run_pr_commits_added")?,
         // A rejection with nothing written leaves no decision, and is still a rejection.
         rejection: (run_state == Some(AttemptState::Rejected))
             .then(|| rejection.unwrap_or_default()),
@@ -1379,6 +1411,7 @@ fn read_cards<P: rusqlite::Params>(
         "select c.*, r.created_at as run_started_at, r.finished_at as run_finished_at, r.pr_url as run_pr_url,
                 r.pr_state as run_pr_state, r.pr_state_at as run_pr_state_at,
                 r.pr_ci as run_pr_ci, r.pr_ci_failed as run_pr_ci_failed,
+                r.pr_commits_added as run_pr_commits_added,
                 a.state as attempt_state, a.reason as attempt_reason, {ready} as is_ready,
                 (select d.text from decision d where d.attempt_id = a.id and d.answer = 'reject'
                  order by d.seq desc limit 1) as rejection
@@ -2162,7 +2195,8 @@ impl Store {
     /// removed project's runs wait until it's back.
     /// Pull requests last looked at before `before`, longest waiting first. A merged one is done, and
     /// one closed before `closed_before` is left alone: it could still be reopened, but asking about
-    /// it forever would crowd out the ones that are moving.
+    /// it forever would crowd out the ones that are moving. One never looked at is due whatever
+    /// became of it, which is how one from before Keel counted the commits added gets its one look.
     pub fn runs_with_pr_due(
         &self,
         before: &str,
@@ -2173,9 +2207,10 @@ impl Store {
         let mut stmt = conn.prepare(&format!(
             "select {RUN_COLUMNS} from run
              where pr_url is not null
-               and coalesce(pr_state, '') <> 'merged'
-               and not (pr_state = 'closed' and pr_state_at is not null and pr_state_at < ?2)
-               and (pr_checked_at is null or pr_checked_at < ?1)
+               and (pr_checked_at is null
+                    or (pr_checked_at < ?1
+                        and coalesce(pr_state, '') <> 'merged'
+                        and not (pr_state = 'closed' and pr_state_at is not null and pr_state_at < ?2)))
                and project_id in (select id from project where removed_at is null)
              order by pr_checked_at is not null, pr_checked_at, created_at
              limit ?3"
@@ -2228,7 +2263,9 @@ impl Store {
                          order by e.seq desc limit 1) end), 0),
                     coalesce(sum(exists (select 1 from event e join attempt a on a.id = e.attempt_id
                                          where a.run_id = r.id and e.kind = 'sizeDecided'
-                                           and json_extract(e.data, '$.small') = 0)), 0)
+                                           and json_extract(e.data, '$.small') = 0)), 0),
+                    coalesce(sum(r.pr_state = 'merged' and r.pr_commits_added = 0), 0),
+                    coalesce(sum(r.pr_state = 'merged' and r.pr_commits_added is not null), 0)
              from run r
              where r.project_id = ?1 and r.workflow_id is not null
              group by r.workflow_id
@@ -2263,6 +2300,8 @@ impl Store {
                 short_route: r.get(15)?,
                 moved_up: r.get(16)?,
                 moved_up_because: Vec::new(),
+                merged_as_delivered: r.get(17)?,
+                merged_counted: r.get(18)?,
             })
         })?;
         let mut results: Vec<WorkflowResults> = rows.collect::<rusqlite::Result<_>>()?;
@@ -3626,6 +3665,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 alter table run drop column pr_commits_added;
+                 alter table run drop column pr_delivered;
                  alter table run drop column issue_told_pr;
                  alter table run drop column issue_told_started;
                  drop trigger card_issue_seen;
@@ -3964,6 +4005,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 15;
+                 alter table run drop column pr_commits_added;
+                 alter table run drop column pr_delivered;
                  alter table run drop column issue_told_pr;
                  alter table run drop column issue_told_started;
                  drop trigger card_issue_seen;
@@ -4042,6 +4085,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 22;
+                 alter table run drop column pr_commits_added;
+                 alter table run drop column pr_delivered;
                  alter table run drop column issue_told_pr;
                  alter table run drop column issue_told_started;
                  drop trigger card_issue_seen;
@@ -4147,6 +4192,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 20;
+                 alter table run drop column pr_commits_added;
+                 alter table run drop column pr_delivered;
                  alter table run drop column issue_told_pr;
                  alter table run drop column issue_told_started;
                  drop trigger card_issue_seen;
@@ -4228,6 +4275,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 21;
+                 alter table run drop column pr_commits_added;
+                 alter table run drop column pr_delivered;
                  alter table run drop column issue_told_pr;
                  alter table run drop column issue_told_started;
                  drop trigger card_issue_seen;
@@ -4524,6 +4573,167 @@ mod tests {
     }
 
     #[test]
+    fn a_pull_request_from_before_gets_the_commit_keel_delivered_and_one_more_look() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        {
+            let store = Store::open(&path).unwrap();
+            seeded(&store);
+            // What each step left the code at, in order. A delivery leaves none.
+            let steps = |run: &str, steps: &[(&str, AttemptState, Option<&str>)]| {
+                for (number, (kind, state, sha)) in steps.iter().enumerate() {
+                    let id = format!("{run}-{number}");
+                    store
+                        .add_attempt(&NewAttempt {
+                            kind: (*kind).into(),
+                            ..new_attempt(&id, run, &format!("s{number}"), *state)
+                        })
+                        .unwrap();
+                    if let Some(sha) = sha {
+                        store
+                            .patch_attempt(&id, &[("sha_after", Value::Text((*sha).into()))])
+                            .unwrap();
+                    }
+                }
+            };
+            let (ok, blocked) = (AttemptState::Succeeded, AttemptState::Blocked);
+            let then = Some("2026-01-01T00:00:00.000Z");
+            run_with_pr(&store, "merged", Some("merged"), then);
+            steps(
+                "merged",
+                &[
+                    ("agent", ok, Some("built")),
+                    ("agent", ok, Some("reviewed")),
+                    ("approval", ok, None),
+                    ("deliver", ok, None),
+                    // What a step did after the pull request was opened isn't in it.
+                    ("agent", ok, Some("later")),
+                ],
+            );
+            run_with_pr_at(&store, "closedLongAgo", Some("closed"), then, then);
+            steps(
+                "closedLongAgo",
+                &[
+                    ("agent", ok, Some("first")),
+                    ("deliver", blocked, None),
+                    ("deliver", ok, None),
+                    // Delivered again, with more work: that's what counts from here on.
+                    ("agent", ok, Some("second")),
+                    ("deliver", ok, None),
+                ],
+            );
+            run_with_pr(&store, "open", Some("open"), then);
+            steps(
+                "open",
+                &[("agent", ok, Some("built")), ("deliver", ok, None)],
+            );
+            // Nothing says what Keel pushed, so there's nothing to count from.
+            run_with_pr(&store, "unknown", Some("merged"), then);
+            steps(
+                "unknown",
+                &[("agent", ok, Some("built")), ("deliver", blocked, None)],
+            );
+        }
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "pragma user_version = 23;
+                 alter table run drop column pr_commits_added;
+                 alter table run drop column pr_delivered;",
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+        let delivered = |id: &str| store.run(id).unwrap().pr_delivered;
+        assert_eq!(delivered("merged").as_deref(), Some("reviewed"));
+        assert_eq!(delivered("closedLongAgo").as_deref(), Some("second"));
+        assert_eq!(delivered("open").as_deref(), Some("built"));
+        assert_eq!(delivered("unknown"), None);
+        assert_eq!(delivered("r"), None, "it opened no pull request");
+        for id in ["merged", "closedLongAgo", "open", "unknown"] {
+            assert_eq!(store.run(id).unwrap().pr_commits_added, None, "{id}");
+        }
+        // Only GitHub can say what was added. The open one is looked at anyway, and the ones Keel
+        // had stopped looking at are looked at once more.
+        let due = |before: &str| -> Vec<String> {
+            let due = store.runs_with_pr_due(before, "2026-06-01T00:00:00.000Z", 10);
+            let mut ids: Vec<String> = due.unwrap().into_iter().map(|run| run.id).collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(due("0"), ["closedLongAgo", "merged"]);
+        for id in ["merged", "closedLongAgo"] {
+            store
+                .patch_run(id, &[("pr_checked_at", Value::Text(now()))])
+                .unwrap();
+        }
+        assert_eq!(due(&now()), ["open"], "and then never again");
+    }
+
+    #[test]
+    fn results_say_how_many_merged_pull_requests_were_merged_as_keel_delivered_them() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let add = |id: &str, workflow: &str, state: &str, added: Option<i64>| {
+            store
+                .add_run(&NewRun {
+                    id: id.into(),
+                    project_id: "p".into(),
+                    title: id.into(),
+                    request: id.into(),
+                    workflow: "[]".into(),
+                    language: "en".into(),
+                    source_issue: None,
+                    request_written: None,
+                    workflow_id: Some(workflow.into()),
+                    workflow_name: Some(workflow.into()),
+                    started_by: None,
+                })
+                .unwrap();
+            store
+                .patch_run(
+                    id,
+                    &[
+                        ("pr_state", Value::Text(state.into())),
+                        (
+                            "pr_commits_added",
+                            added.map_or(Value::Null, Value::Integer),
+                        ),
+                    ],
+                )
+                .unwrap();
+        };
+        add("as-delivered", "full", "merged", Some(0));
+        add("as-delivered-2", "full", "merged", Some(0));
+        add("two-added", "full", "merged", Some(2));
+        // Keel doesn't know what was added to it, so it's on neither side.
+        add("not-known", "full", "merged", None);
+        // Not merged, so however they stand they say nothing yet.
+        add("closed", "full", "closed", Some(0));
+        add("open", "full", "open", Some(3));
+        add("other", "simple", "merged", Some(1));
+        add("nothing-known", "old", "merged", None);
+
+        let results = store.workflow_results("p").unwrap();
+        let of = |id: &str| {
+            let found = results.iter().find(|r| r.workflow_id == id).unwrap();
+            (
+                found.merged,
+                found.merged_as_delivered,
+                found.merged_counted,
+            )
+        };
+        assert_eq!(of("full"), (4, 2, 3));
+        assert_eq!(of("simple"), (1, 0, 1));
+        assert_eq!(of("old"), (1, 0, 0));
+        let full = results.iter().find(|r| r.workflow_id == "full").unwrap();
+        let as_sent = serde_json::to_value(full).unwrap();
+        assert_eq!(as_sent["mergedAsDelivered"], 2);
+        assert_eq!(as_sent["mergedCounted"], 3);
+    }
+
+    #[test]
     fn results_count_each_workflow_on_its_own_and_only_what_is_final() {
         let (_dir, store) = store();
         seeded(&store);
@@ -4631,6 +4841,8 @@ mod tests {
                 short_route: 0,
                 moved_up: 0,
                 moved_up_because: vec![],
+                merged_as_delivered: 0,
+                merged_counted: 0,
             }
         );
         assert_eq!(of("builtin:simple").merged, 0);
@@ -6014,6 +6226,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 alter table run drop column pr_commits_added;
+                 alter table run drop column pr_delivered;
                  alter table run drop column issue_told_pr;
                  alter table run drop column issue_told_started;
                  drop trigger card_issue_seen;
@@ -6858,6 +7072,8 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "pragma user_version = 16;
+             alter table run drop column pr_commits_added;
+             alter table run drop column pr_delivered;
              alter table run drop column issue_told_pr;
              alter table run drop column issue_told_started;
              drop trigger card_issue_seen;

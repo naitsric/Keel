@@ -1734,6 +1734,10 @@ impl McpServer {
         if left_out > 0 {
             view["earlierAttemptsLeftOut"] = json!(left_out);
         }
+        // Left out when Keel doesn't know, so that nothing reads it as none.
+        if let Some(added) = run.pr_commits_added {
+            view["prCommitsAdded"] = json!(added);
+        }
         // Only while it can still be retried with them. It's extra, and not finding out mustn't
         // hide the run.
         if run.finished_at.is_none()

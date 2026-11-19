@@ -206,8 +206,10 @@ impl Inner {
         )?;
 
         let number = url.rsplit('/').next().and_then(|n| n.parse::<i64>().ok());
-        // What it was pushed at, so that a commit someone adds on GitHub later shows.
+        // What it was pushed at, so that a commit someone adds on GitHub later shows. A run that
+        // delivers again counts what's added from this delivery, since the rest is its own work.
         let head = git.head(&workspace).ok();
+        let delivered = head.clone();
         // One just opened is a draft, with no need to ask. Of one that was already there Keel knows
         // nothing, so the next look finds out, and until then nothing claims anything about it.
         let known = |value: Value| if opened_now { value } else { Value::Null };
@@ -227,6 +229,9 @@ impl Inner {
                 // What its CI said was about another commit.
                 ("pr_ci", Value::Null),
                 ("pr_ci_failed", Value::Null),
+                ("pr_delivered", delivered.map_or(Value::Null, Value::Text)),
+                // Nothing was added to one just opened. To one already there, someone may have.
+                ("pr_commits_added", known(Value::Integer(0))),
             ],
         )?;
         store.patch_attempt(&attempt.id, &[("account", Value::Text(account.clone()))])?;

@@ -17,7 +17,8 @@ starting over. You can edit each project's workflows in the app. See the
 
 Keel looks up what became of each pull request it opened, and never writes to one again. The
 **Workflows** page compares workflows with that: what got merged, at what cost, how often work went
-back, and how often a run stopped to ask.
+back, and how often a run stopped to ask. It also says how many were merged as Keel delivered
+them, with no commit added afterwards, and a merge of the base branch doesn't count as one.
 
 ## A workflow that fits the change
 

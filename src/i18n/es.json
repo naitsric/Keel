@@ -294,7 +294,9 @@
       "merged": "Pull request mergeado",
       "closed": "Pull request cerrado sin mergear",
       "mergedAt": "Pull request mergeado el {{when}}",
-      "closedAt": "Pull request cerrado sin mergear el {{when}}"
+      "closedAt": "Pull request cerrado sin mergear el {{when}}",
+      "commitsAdded_one": "{{count}} commit agregado después de que Keel entregó",
+      "commitsAdded_other": "{{count}} commits agregados después de que Keel entregó"
     },
     "ci": {
       "failed": "CI en rojo: {{checks}}",
@@ -825,6 +827,10 @@
       "none": "Aún no hay datos suficientes. Ningún workflow ha corrido en este proyecto desde que Keel lleva este registro.",
       "runs": "Ejecuciones",
       "merged": "Pull requests mergeados",
+      "asDelivered": "Mergeados como se entregaron",
+      "asDeliveredNote": "Sin commits agregados después de que Keel entregó. No cuentan los que Keel no conoce.",
+      "asDeliveredValue": "{{same}} de {{known}}",
+      "asDeliveredNotKnown": "Aún no se sabe",
       "closed": "Cerrados sin mergear",
       "cost": "Costo promedio por pull request mergeado",
       "rounds": "Veces devuelto, en promedio",
@@ -972,6 +978,8 @@
     },
     "ciFailed": "CI en rojo: {{checks}}",
     "ciFailedUnnamed": "CI en rojo",
+    "commitsAdded_one": "{{count}} commit agregado después de que Keel entregó",
+    "commitsAdded_other": "{{count}} commits agregados después de que Keel entregó",
     "needed": {
       "waitingApproval": "Ábrela para aprobar o rechazar.",
       "waitingAnswers": "Ábrela para responder.",

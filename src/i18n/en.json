@@ -294,7 +294,9 @@
       "merged": "Pull request merged",
       "closed": "Pull request closed without merging",
       "mergedAt": "Pull request merged on {{when}}",
-      "closedAt": "Pull request closed without merging on {{when}}"
+      "closedAt": "Pull request closed without merging on {{when}}",
+      "commitsAdded_one": "{{count}} commit added after Keel delivered",
+      "commitsAdded_other": "{{count}} commits added after Keel delivered"
     },
     "ci": {
       "failed": "CI failed: {{checks}}",
@@ -825,6 +827,10 @@
       "none": "There isn't enough data yet. No workflow has run in this project since Keel began keeping track.",
       "runs": "Runs",
       "merged": "Pull requests merged",
+      "asDelivered": "Merged as delivered",
+      "asDeliveredNote": "With no commit added after Keel delivered. Those Keel doesn't know about aren't counted.",
+      "asDeliveredValue": "{{same}} of {{known}}",
+      "asDeliveredNotKnown": "Not known yet",
       "closed": "Closed without merging",
       "cost": "Average cost per merged pull request",
       "rounds": "Average times sent back",
@@ -972,6 +978,8 @@
     },
     "ciFailed": "CI failed: {{checks}}",
     "ciFailedUnnamed": "CI failed",
+    "commitsAdded_one": "{{count}} commit added after Keel delivered",
+    "commitsAdded_other": "{{count}} commits added after Keel delivered",
     "needed": {
       "waitingApproval": "Open it to approve or reject.",
       "waitingAnswers": "Open it to answer.",

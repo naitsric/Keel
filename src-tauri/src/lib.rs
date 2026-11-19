@@ -1287,6 +1287,7 @@ mod tests {
                 pr_state_at: None,
                 pr_ci: None,
                 pr_ci_failed: Vec::new(),
+                pr_commits_added: None,
                 rejection: Some(said.clone()),
                 start_blocked: Some(failed.clone()),
                 created_at: "2026-11-05T10:00:00Z".into(),
