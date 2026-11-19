@@ -3,16 +3,16 @@
 
 use std::process::Command;
 
-use keel_core::Masked;
+use keel_core::{Log, Masked};
 use keel_mcp::{McpServer, McpSettings, ServerStatus};
 use keel_store::{McpCall, McpClient};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::{AppState, CommandError, CommandResult};
+use crate::{AppState, CommandError, CommandResult, launch};
 
 /// What Claude Code lists the server as, and the name of the client that connecting creates.
-const SERVER_NAME: &str = "keel";
+const SERVER_NAME: &str = launch::mcp_server_name(launch::BRANCH_BUILD);
 const CLAUDE_CLIENT: &str = "Claude Code";
 const CALLS_SHOWN: i64 = 30;
 /// For the status bar. A server that starts or stops says nothing else that the UI would hear.
@@ -21,7 +21,7 @@ const MCP_EVENT: &str = "keel://mcp-changed";
 pub struct McpState(pub McpServer);
 
 /// Starts the server if the person left it on. A failure is in its status, for the UI to show.
-pub fn start_if_enabled(server: McpServer, app: AppHandle) {
+pub fn start_if_enabled(server: McpServer, app: AppHandle, log: &Log) {
     match server.settings() {
         Ok(settings) if settings.enabled => {
             tauri::async_runtime::spawn(async move {
@@ -30,7 +30,7 @@ pub fn start_if_enabled(server: McpServer, app: AppHandle) {
             });
         }
         Ok(_) => {}
-        Err(e) => eprintln!("MCP server not started: {e}"),
+        Err(e) => log.write(&format!("reading whether the MCP server is on: {e}")),
     }
 }
 

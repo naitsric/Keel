@@ -176,6 +176,23 @@ describe("the run page's flow", () => {
       expect(page()).toContain("CI passed");
     });
 
+    it("says how many commits were added after Keel delivered, when some were", async () => {
+      delivered({ prState: "merged", prStateAt: "2026-11-06T10:00:00Z", prCommitsAdded: 2 });
+      await open();
+      expect(page()).toContain("Pull request merged");
+      expect(page()).toContain("2 commits added after Keel delivered");
+      delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z", prCommitsAdded: 1 });
+      await update();
+      expect(page()).toContain("1 commit added after Keel delivered");
+      // Merged as delivered, or Keel doesn't know: nothing about it.
+      for (const prCommitsAdded of [0, null]) {
+        delivered({ prState: "merged", prStateAt: "2026-11-06T10:00:00Z", prCommitsAdded });
+        await update();
+        expect(page()).toContain("Pull request merged");
+        expect(page()).not.toContain("added after Keel delivered");
+      }
+    });
+
     it("says nothing about CI it doesn't know, a repo without it, or a pull request that's over", async () => {
       // A run from before Keel followed the CI has nothing about it.
       delivered({ prState: "open", prStateAt: "2026-11-06T10:00:00Z" });
@@ -847,6 +864,16 @@ describe("the run page's flow", () => {
       await open();
       await choose(radio("Attempt 1"));
       expect(page()).toContain("Claude Code tried it again");
+    });
+
+    it("says Keel continued a step by itself after a usage limit, on the attempt it continued", async () => {
+      const limited = attempt("builder", "blocked", { reason: { code: "rateLimited", resetsAt: 1800000000, continuesAt: 1800000060 } });
+      attempts = [attempt("spec", "succeeded"), limited, attempt("builder", "running", { number: 2 })];
+      events = { [limited.id]: [event(limited.id, "finished", { state: "blocked" }), event(limited.id, "retryRequested", { by: "Keel", resume: true, automatic: true }, 2)] };
+      await open();
+      await choose(radio("Attempt 1"));
+      expect(page()).toContain("Keel continued it by itself once the usage limit reset");
+      expect(page()).not.toContain("Keel tried it again");
     });
 
     it("says which assistant asked a step to stop", async () => {

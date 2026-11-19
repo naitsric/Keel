@@ -198,12 +198,14 @@ fn text(language: &str) -> Text {
     }
 }
 
-/// What `{{diff}}` becomes. A change that fits goes in whole. Otherwise every file's diff is saved
-/// in `folder`, the whole files that fit go in, and each one left out is named with where to read
-/// it. `judging` is for an agent that decides on the change, which has to read all of it.
-pub fn for_prompt(diff: String, folder: &Path, language: &str, judging: bool) -> String {
+/// What `{{diff}}` becomes: what Keel says about the change, and the change itself, which goes in
+/// a tag of its own. A change that fits goes in whole, and Keel says nothing. Otherwise every
+/// file's diff is saved in `folder`, the whole files that fit go in, and each one left out is named
+/// with where to read it. `judging` is for an agent that decides on the change, which has to read
+/// all of it.
+pub fn for_prompt(diff: String, folder: &Path, language: &str, judging: bool) -> (String, String) {
     if diff.len() <= PROMPT_LIMIT {
-        return diff;
+        return (String::new(), diff);
     }
     let text = text(language);
     let files = split(&diff);
@@ -265,7 +267,8 @@ pub fn for_prompt(diff: String, folder: &Path, language: &str, judging: bool) ->
     } else {
         out.push_str(text.others_not_saved);
     }
-    out.push_str("\n\n");
+    // From here on it's the change: the list of its files, and the diffs that fit.
+    let mut change = String::new();
     if list_fits || !saved {
         let list = if saved {
             list
@@ -282,23 +285,25 @@ pub fn for_prompt(diff: String, folder: &Path, language: &str, judging: bool) ->
                 })
                 .collect()
         };
-        out.push_str(&format!("{}\n{list}", text.heading));
+        change.push_str(&format!("{}\n{list}", text.heading));
     } else {
         let at = folder.join(LIST_FILE);
+        out.push_str("\n\n");
         out.push_str(
             &text
                 .list_elsewhere
                 .replace("{list}", &at.display().to_string()),
         );
-        out.push('\n');
     }
     for (file, below) in files.iter().zip(&below) {
         if *below {
-            out.push('\n');
-            out.push_str(&file.text);
+            if !change.is_empty() {
+                change.push('\n');
+            }
+            change.push_str(&file.text);
         }
     }
-    out
+    (out, change)
 }
 
 /// Saves the change's files to one side and moves them into place, so a folder that's there is
@@ -384,6 +389,47 @@ mod tests {
         assert_eq!(
             files.iter().map(|f| f.text.as_str()).collect::<String>(),
             diff
+        );
+    }
+
+    /// All of it, as it reads in a prompt without the tag the change goes in.
+    fn for_prompt(diff: String, folder: &Path, language: &str, judging: bool) -> String {
+        let (says, change) = super::for_prompt(diff, folder, language, judging);
+        if says.is_empty() {
+            change
+        } else {
+            format!("{says}\n\n{change}")
+        }
+    }
+
+    #[test]
+    fn what_keel_says_about_a_change_too_big_stays_apart_from_the_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let diff: String = (0..30)
+            .map(|i| added(&format!("f{i}.ts"), 100, 100))
+            .collect();
+        let (says, change) = super::for_prompt(diff.clone(), &dir.path().join("a"), "en", true);
+        // What to do about it is Keel's, and goes outside the tag the change is in.
+        assert!(says.starts_with("This change is too big to fit here whole: 30 files"));
+        assert!(
+            says.ends_with("Read them all before you judge the change, and a long one in parts.")
+        );
+        assert!(!says.contains("diff --git"));
+        // The change is its list of files and the diffs that fit, and nothing Keel tells it to do.
+        assert!(
+            change.starts_with("Changed files:\n- f0.ts +100 -0"),
+            "{}",
+            &change[..80]
+        );
+        assert!(change.contains("\ndiff --git "));
+        for told in ["too big", "Read them all", "you can read but not change"] {
+            assert!(!change.contains(told), "{told}");
+        }
+        // One that fits has nothing said about it.
+        let small = added("a.ts", 3, 10);
+        assert_eq!(
+            super::for_prompt(small.clone(), &dir.path().join("b"), "en", true),
+            (String::new(), small)
         );
     }
 

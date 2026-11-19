@@ -93,7 +93,8 @@ echo "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\
 }
 
 /// `api graphql` answers with what's in `pr-view`, and fails without it, or when asked about the
-/// checks with `no-checks` there. `pr create` refuses a description GitHub would refuse.
+/// checks with `no-checks` there. `pr create` refuses a description GitHub would refuse, and fails
+/// with `pr-fails` there.
 fn fake_gh(log: &Path, flags: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -108,6 +109,7 @@ case "$1 $2" in
   if [ -f "{flags}/no-comments" ]; then echo "HTTP 403: Resource not accessible by personal access token" >&2; exit 1; fi
   echo '{{}}'; exit 0;;
 "pr create")
+  if [ -f "{flags}/pr-fails" ]; then echo "HTTP 502: Bad Gateway (https://api.github.com/graphql)" >&2; exit 1; fi
   if [ -f "{flags}/pr-exists" ]; then echo "a pull request for branch already exists:" >&2; echo "https://github.com/acme/app/pull/99" >&2; exit 1; fi
   prev=""
   for a in "$@"; do [ "$prev" = "--body-file" ] && cp "$a" "{log}/pr-body.md"; prev="$a"; done
@@ -1230,6 +1232,396 @@ fn a_token_that_cannot_read_the_checks_still_follows_the_pull_request() {
         .collect();
     assert_eq!(asked.len(), 2, "{asked:?}");
     assert!(!asked[1].contains("statusCheckRollup"), "{asked:?}");
+}
+
+/// A pull request in `state` whose branch has these commits, oldest first, as the query asks for
+/// them. One named `merge…` has two parents, as a merge of the base branch into it does.
+fn pr_view_with_commits(state: &str, shas: &[&str]) -> String {
+    let nodes: Vec<String> = shas
+        .iter()
+        .map(|sha| {
+            let parents = if sha.starts_with("merge") { 2 } else { 1 };
+            format!(r#"{{"commit":{{"oid":"{sha}","parents":{{"totalCount":{parents}}}}}}}"#)
+        })
+        .collect();
+    let head = shas.last().copied().unwrap_or_default();
+    answer(&format!(
+        r#"{{"state":"{state}","isDraft":false,"mergedAt":"2026-11-06T10:00:00Z","closedAt":"2026-11-06T10:00:00Z","updatedAt":"2026-11-06T10:00:00Z","headRefOid":"{head}","newest":{{"nodes":[{}]}}}}"#,
+        nodes.join(",")
+    ))
+}
+
+impl World {
+    /// Where the run's branch is on GitHub: the commit Keel pushed.
+    fn pushed(&self, run: &str) -> String {
+        let branch = self.store.run(run).unwrap().branch.unwrap();
+        let remote = self._dir.path().join("remotes/acme/app.git");
+        git_out(&remote, &["rev-parse", &format!("refs/heads/{branch}")])
+    }
+
+    /// A person opens the run while GitHub says this of its pull request.
+    fn look_with_commits(&self, run: &str, state: &str, shas: &[&str]) {
+        std::fs::write(
+            self.flags.join("pr-view"),
+            pr_view_with_commits(state, shas),
+        )
+        .unwrap();
+        self.forget_looking(run);
+        self.engine.look_at_pr(run);
+    }
+
+    fn added(&self, run: &str) -> Option<i64> {
+        self.store.run(run).unwrap().pr_commits_added
+    }
+
+    fn wait_added(&self, run: &str, added: Option<i64>) {
+        self.until(&format!("{added:?} commits added"), || {
+            self.added(run) == added
+        });
+    }
+
+    /// Of the project's pull requests, as its workflows' results count them: merged, merged as
+    /// delivered, and merged where Keel knows how many commits were added.
+    fn merged_as_delivered(&self) -> (i64, i64, i64) {
+        let results = self.engine.workflow_results(&self.project_id).unwrap();
+        let sum = |count: fn(&keel_store::WorkflowResults) -> i64| results.iter().map(count).sum();
+        (
+            sum(|r| r.merged),
+            sum(|r| r.merged_as_delivered),
+            sum(|r| r.merged_counted),
+        )
+    }
+}
+
+#[test]
+fn a_pull_request_merged_as_keel_delivered_it_has_no_commit_added() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.delivered();
+    let delivered = w.pushed(&run);
+    let found = w.store.run(&run).unwrap();
+    assert_eq!(found.pr_delivered.as_deref(), Some(delivered.as_str()));
+    assert_eq!(
+        found.pr_commits_added,
+        Some(0),
+        "it has only just opened it"
+    );
+    assert_eq!(
+        w.merged_as_delivered(),
+        (0, 0, 0),
+        "and it isn't merged yet"
+    );
+
+    w.look_with_commits(&run, "MERGED", &["init", &delivered]);
+    w.wait_pr_state(&run, PrState::Merged);
+    assert_eq!(w.added(&run), Some(0));
+    assert_eq!(w.merged_as_delivered(), (1, 1, 1));
+    // Still one question per look.
+    assert_eq!(w.asked_about_prs(), 1);
+    assert!(
+        w.gh_log().contains("newest:commits(last:100)"),
+        "{}",
+        w.gh_log()
+    );
+}
+
+#[test]
+fn two_commits_added_after_keel_delivered_show_on_the_run_and_its_card_and_count_once_merged() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let workflow = w.saved(delivering_steps());
+    let run = w
+        .engine
+        .start_run_on_board(StartRun {
+            project_id: w.project_id.clone(),
+            title: None,
+            request: "Fix the bug".into(),
+            workflow: workflow.steps.clone(),
+            saved_workflow: Some(workflow.reference()),
+            language: "en".into(),
+            source_issue: None,
+            started_by: None,
+        })
+        .unwrap();
+    let human = w.wait_step(&run, "human", AttemptState::WaitingApproval);
+    w.engine.answer_approval(&human.id, true, "").unwrap();
+    w.until("the run finishing", || {
+        w.store.run(&run).unwrap().finished_at.is_some()
+    });
+    let delivered = w.pushed(&run);
+    let told = w.changes.lock().unwrap().len();
+
+    // CI went red and someone fixed it, twice.
+    w.look_with_commits(&run, "OPEN", &["init", &delivered, "fix-1", "fix-2"]);
+    w.wait_added(&run, Some(2));
+    w.until("the app hearing of it", || {
+        w.changes.lock().unwrap()[told..].contains(&run)
+    });
+    let card = w.engine.board(&w.project_id).unwrap().cards.remove(0);
+    assert_eq!(card.pr_commits_added, Some(2));
+    assert_eq!(serde_json::to_value(card).unwrap()["prCommitsAdded"], 2);
+    assert_eq!(
+        serde_json::to_value(w.store.run(&run).unwrap()).unwrap()["prCommitsAdded"],
+        2
+    );
+    assert_eq!(w.merged_as_delivered(), (0, 0, 0), "open says nothing yet");
+
+    // Then the base branch is merged into it, which fixes nothing, and it's merged.
+    w.look_with_commits(
+        &run,
+        "MERGED",
+        &["init", &delivered, "fix-1", "fix-2", "merge-main"],
+    );
+    w.wait_pr_state(&run, PrState::Merged);
+    assert_eq!(w.added(&run), Some(2));
+    assert_eq!(w.merged_as_delivered(), (1, 0, 1));
+}
+
+#[test]
+fn a_merge_of_the_base_branch_alone_leaves_a_pull_request_as_delivered() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.delivered();
+    let delivered = w.pushed(&run);
+    // GitHub's "Update branch", twice. The branch moved, and nobody fixed anything.
+    w.look_with_commits(
+        &run,
+        "MERGED",
+        &["init", &delivered, "merge-main", "merge-main-again"],
+    );
+    w.wait_pr_state(&run, PrState::Merged);
+    let found = w.store.run(&run).unwrap();
+    assert_eq!(found.pr_head.as_deref(), Some("merge-main-again"));
+    assert_eq!(found.pr_commits_added, Some(0));
+    assert_eq!(w.merged_as_delivered(), (1, 1, 1));
+}
+
+#[test]
+fn what_was_added_is_not_known_when_nothing_says_where_keel_left_it() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    // The pull request was already there, so someone may have added to it by now.
+    std::fs::write(w.flags.join("pr-exists"), "").unwrap();
+    let run = w.delivered();
+    let delivered = w.pushed(&run);
+    assert_eq!(w.added(&run), None);
+    w.look_with_commits(&run, "OPEN", &["init", &delivered, "fix-1"]);
+    w.wait_added(&run, Some(1));
+
+    // More were added than one answer brings, so the one Keel delivered is out of sight.
+    let many: Vec<String> = (0..100).map(|n| format!("later-{n}")).collect();
+    let many: Vec<&str> = many.iter().map(String::as_str).collect();
+    w.look_with_commits(&run, "OPEN", &many);
+    w.wait_added(&run, None);
+
+    // GitHub lists only so many commits of a pull request. Past that the list stops short of
+    // where the branch is, and what's missing is the newest: a count from it would come out low.
+    w.look_with_commits(&run, "OPEN", &["init", &delivered, "fix-1"]);
+    w.wait_added(&run, Some(1));
+    let short = pr_view_with_commits("OPEN", &["init", &delivered, "fix-1"])
+        .replace(r#""headRefOid":"fix-1""#, r#""headRefOid":"fix-251""#);
+    std::fs::write(w.flags.join("pr-view"), short).unwrap();
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.wait_added(&run, None);
+
+    // Back in sight, and then the answer says nothing of its commits though the branch moved.
+    w.look_with_commits(&run, "OPEN", &["init", &delivered, "fix-1"]);
+    w.wait_added(&run, Some(1));
+    std::fs::write(
+        w.flags.join("pr-view"),
+        answer(
+            r#"{"state":"OPEN","isDraft":false,"updatedAt":"2026-11-06T11:00:00Z","headRefOid":"moved"}"#,
+        ),
+    )
+    .unwrap();
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    w.wait_added(&run, None);
+
+    // The branch was rewritten, so that commit is gone, and it's merged like that.
+    w.look_with_commits(&run, "MERGED", &["init", "rewritten", "fix-1"]);
+    w.wait_pr_state(&run, PrState::Merged);
+    assert_eq!(w.added(&run), None);
+    assert_eq!(
+        w.merged_as_delivered(),
+        (1, 0, 0),
+        "merged, and on neither side"
+    );
+    assert_eq!(
+        serde_json::to_value(w.store.run(&run).unwrap()).unwrap()["prCommitsAdded"],
+        serde_json::Value::Null
+    );
+}
+
+#[test]
+fn a_pull_request_merged_before_keel_counted_is_owed_a_look_until_github_answers() {
+    keel_harness::needs!(sandbox);
+    let w = world_with(|config| config.pr_look_again = Duration::from_millis(30));
+    let run = w.delivered();
+    let delivered = w.pushed(&run);
+    let other = w.delivered();
+    // As the update leaves two that were merged before it: looked at long ago, nothing counted.
+    for id in [&run, &other] {
+        w.store
+            .patch_run(
+                id,
+                &[
+                    ("pr_state", Value::Text("merged".into())),
+                    ("pr_state_at", Value::Text("2026-11-06T10:00:00Z".into())),
+                    ("pr_commits_added", Value::Null),
+                    ("pr_counted_at", Value::Null),
+                    (
+                        "pr_checked_at",
+                        Value::Text("2026-11-06T10:05:00.000Z".into()),
+                    ),
+                ],
+            )
+            .unwrap();
+    }
+
+    // GitHub can't be reached: the fake has no answer yet. Each look counts as having looked, and
+    // they stay owed one, at the pace of any other.
+    w.engine.start_pr_watch();
+    w.until("it asking again after failing", || w.asked_about_prs() >= 6);
+    assert_eq!((w.added(&run), w.added(&other)), (None, None));
+    assert_eq!(w.store.run(&run).unwrap().pr_counted_at, None);
+
+    // Then it answers. Both get this answer, and it only has the commit Keel delivered to the
+    // first: of the other it says that nothing tells, and asking again wouldn't change that.
+    std::fs::write(
+        w.flags.join("pr-view"),
+        pr_view_with_commits("MERGED", &["init", &delivered, "fix-1", "fix-2"]),
+    )
+    .unwrap();
+    w.wait_added(&run, Some(2));
+    w.until("the other one getting its answer", || {
+        w.store.run(&other).unwrap().pr_counted_at.is_some()
+    });
+    assert_eq!(w.added(&other), None);
+    assert_eq!(w.merged_as_delivered(), (2, 0, 1));
+    std::thread::sleep(Duration::from_millis(100));
+    let asked = w.asked_about_prs();
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        w.asked_about_prs(),
+        asked,
+        "answered, so that's the end of it"
+    );
+}
+
+#[test]
+fn opening_a_merged_run_keel_has_not_counted_looks_at_its_pull_request() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.delivered();
+    let delivered = w.pushed(&run);
+    w.store
+        .patch_run(
+            &run,
+            &[
+                ("pr_state", Value::Text("merged".into())),
+                ("pr_commits_added", Value::Null),
+            ],
+        )
+        .unwrap();
+    w.look_with_commits(&run, "MERGED", &["init", &delivered, "fix-1"]);
+    w.wait_added(&run, Some(1));
+    // Counted, so opening it again asks nothing more.
+    w.forget_looking(&run);
+    w.engine.look_at_pr(&run);
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(w.asked_about_prs(), 1);
+}
+
+#[test]
+fn what_keel_pushed_is_never_counted_as_added_though_opening_the_pull_request_failed() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.delivered();
+    let first = w.pushed(&run);
+    w.look_with_commits(&run, "OPEN", &["init", &first, "fix-1"]);
+    w.wait_added(&run, Some(1));
+
+    // The builder works again and the person delivers that, but GitHub fails after the push.
+    let builder = w.step(&run, "builder").unwrap();
+    w.engine.retry(&builder.id, false).unwrap();
+    w.until("the builder working again", || {
+        w.step(&run, "builder")
+            .is_some_and(|a| a.id != builder.id && a.state == AttemptState::Succeeded.as_str())
+            && w.store.run(&run).unwrap().finished_at.is_some()
+    });
+    std::fs::write(w.flags.join("pr-fails"), "").unwrap();
+    let delivery = w.step(&run, "pr").unwrap();
+    w.engine.retry(&delivery.id, false).unwrap();
+    w.until("the delivery failing", || {
+        w.step(&run, "pr")
+            .is_some_and(|a| a.id != delivery.id && a.state == AttemptState::Blocked.as_str())
+    });
+    let second = w.pushed(&run);
+    assert_ne!(second, first, "the push went through");
+    let found = w.store.run(&run).unwrap();
+    assert_eq!(found.pr_delivered.as_deref(), Some(second.as_str()));
+    assert_eq!(
+        found.pr_commits_added, None,
+        "what was counted was from another commit"
+    );
+
+    // A look before anyone retries it: the new commit is Keel's own.
+    w.look_with_commits(&run, "OPEN", &["init", &first, &second]);
+    w.until("it looking", || w.asked_about_prs() == 2);
+    w.wait_added(&run, Some(0));
+    w.look_with_commits(&run, "OPEN", &["init", &first, &second, "fix-1"]);
+    w.wait_added(&run, Some(1));
+}
+
+#[test]
+fn a_run_that_delivers_again_counts_from_its_last_delivery() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let workflow = w.saved(delivering_steps());
+    let run = w.start(&workflow);
+    let human = w.wait_step(&run, "human", AttemptState::WaitingApproval);
+    // The first try at delivering can't get a token, so nothing is pushed.
+    std::fs::write(w.flags.join("no-token"), "").unwrap();
+    w.engine.answer_approval(&human.id, true, "").unwrap();
+    let failed = w.wait_step(&run, "pr", AttemptState::Blocked);
+    assert_eq!(w.store.run(&run).unwrap().pr_delivered, None);
+    std::fs::remove_file(w.flags.join("no-token")).unwrap();
+    w.engine.retry(&failed.id, false).unwrap();
+    w.until("the run finishing", || {
+        w.store.run(&run).unwrap().finished_at.is_some()
+    });
+    let first = w.pushed(&run);
+    let found = w.store.run(&run).unwrap();
+    assert_eq!(found.pr_delivered.as_deref(), Some(first.as_str()));
+    assert_eq!(found.pr_commits_added, Some(0));
+
+    // The person has the builder work again on the finished run, and then delivers that too.
+    let builder = w.step(&run, "builder").unwrap();
+    w.engine.retry(&builder.id, false).unwrap();
+    w.until("the builder working again", || {
+        w.step(&run, "builder")
+            .is_some_and(|a| a.id != builder.id && a.state == AttemptState::Succeeded.as_str())
+            && w.store.run(&run).unwrap().finished_at.is_some()
+    });
+    assert_eq!(w.pushed(&run), first, "nothing delivers it on its own");
+    let delivery = w.step(&run, "pr").unwrap();
+    w.engine.retry(&delivery.id, false).unwrap();
+    w.until("it delivering again", || {
+        w.store.run(&run).unwrap().pr_delivered.as_deref() != Some(first.as_str())
+    });
+    let second = w.pushed(&run);
+    assert_ne!(second, first);
+    assert_eq!(
+        w.store.run(&run).unwrap().pr_delivered.as_deref(),
+        Some(second.as_str())
+    );
+
+    // What Keel pushed the second time is its own work. Only what came after it was added.
+    w.look_with_commits(&run, "MERGED", &["init", &first, &second, "fix-1"]);
+    w.wait_pr_state(&run, PrState::Merged);
+    assert_eq!(w.added(&run), Some(1));
 }
 
 #[test]

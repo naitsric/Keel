@@ -8,6 +8,8 @@ export function reasonText(t: TFunction, reason: Reason): string {
   const data = reason as Record<string, any>;
   switch (reason.code) {
     case "rateLimited":
+      // Only while it's still to come: on a step Keel already continued, it's when the limit reset.
+      if (data.continuesAt * 1000 > Date.now()) return t("reasons.rateLimitedContinues", { date: formatDateTime(new Date(data.continuesAt * 1000).toISOString()) });
       return data.resetsAt
         ? t("reasons.rateLimitedUntil", { date: formatDateTime(new Date(data.resetsAt * 1000).toISOString()) })
         : t("reasons.rateLimited");

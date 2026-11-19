@@ -25,6 +25,7 @@ const card = (id: string, column: BoardColumn, extra: Partial<BoardCard> = {}): 
   prStateAt: null,
   prCi: null,
   prCiFailed: [],
+  prCommitsAdded: null,
   rejection: null,
   startBlocked: null,
   createdAt: "2026-11-05T00:00:00Z",
@@ -84,6 +85,22 @@ describe("what a done card says about its pull request", () => {
       const label = done(extra);
       expect(label?.state).not.toBe("failed");
       expect(label?.detail ?? "").not.toContain("CI");
+    }
+  });
+
+  it("says how many commits were added after Keel delivered, when some were", () => {
+    const merged = done({ prState: "merged", prStateAt: "2026-11-06T10:00:00Z", prCommitsAdded: 2 });
+    expect(merged?.label).toBe("Merged");
+    expect(merged?.detail).toContain("2026");
+    expect(merged?.detail).toContain("2 commits added after Keel delivered");
+    expect(done({ prState: "open", prCommitsAdded: 1 })?.detail).toBe("1 commit added after Keel delivered");
+    expect(done({ prState: "draft", prCi: "failed", prCiFailed: ["lint"], prCommitsAdded: 3 })?.detail).toBe("CI failed: lint · 3 commits added after Keel delivered");
+    expect(cardLabel(t("es"), card("d", "done", { prState: "open", prCommitsAdded: 2 }))?.detail).toBe("2 commits agregados después de que Keel entregó");
+    expect(cardLabel(t("es"), card("d", "done", { prState: "open", prCommitsAdded: 1 }))?.detail).toBe("1 commit agregado después de que Keel entregó");
+    // Merged as delivered, or Keel doesn't know: nothing about it.
+    for (const prCommitsAdded of [0, null]) {
+      expect(done({ prState: "open", prCommitsAdded })?.detail).toBeNull();
+      expect(done({ prState: "merged", prStateAt: "2026-11-06T10:00:00Z", prCommitsAdded })?.detail ?? "").not.toContain("commit");
     }
   });
 
@@ -272,6 +289,23 @@ describe("waitingForRoom", () => {
   it("isn't the explanation when the board is paused", () => {
     expect(waitingForRoom(board(2, 2, { code: "rateLimited", resetsAt: null }), withTodo)).toBe(false);
     expect(waitingForRoom(board(0, 2, { code: "claudeLoggedOut" }), withTodo)).toBe(false);
+  });
+});
+
+describe("a card whose step a usage limit stopped", () => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const limited = (reason: BoardCard["reason"], language = "en") => cardLabel(t(language), card("l", "humanReview", { runId: "r1", runState: "blocked", reason }));
+
+  it("says Keel will continue it by itself, and when, in both languages", () => {
+    const continues = { code: "rateLimited", resetsAt, continuesAt: resetsAt + 60 };
+    expect(limited(continues)?.detail).toContain("Keel will continue this step by itself");
+    expect(limited(continues, "es")?.detail).toContain("Keel continuará este paso por su cuenta");
+  });
+
+  it("says only when the limit resets where it waits for the person", () => {
+    const detail = limited({ code: "rateLimited", resetsAt })?.detail;
+    expect(detail).toContain("It resets");
+    expect(detail).not.toContain("by itself");
   });
 });
 
