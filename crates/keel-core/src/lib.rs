@@ -337,6 +337,11 @@ pub enum Reason {
     },
     RateLimited {
         resets_at: Option<i64>,
+        /// When Keel will continue the step by itself, shortly after the limit resets. `None` when
+        /// nobody knows when that is, and once Keel has continued the step as often as it does: it
+        /// then waits for the person.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continues_at: Option<i64>,
     },
     Stalled {
         command: Option<String>,
@@ -704,7 +709,7 @@ impl Reason {
     pub fn stops_every_card(&self, now: i64) -> bool {
         match self {
             // The usage is the account's, whichever project is asking.
-            Self::RateLimited { resets_at } => resets_at.is_none_or(|at| at > now),
+            Self::RateLimited { resets_at, .. } => resets_at.is_none_or(|at| at > now),
             // The session itself. The preflight can't see these: it reads what's on this Mac, which
             // can say signed in while the server refuses it.
             Self::SessionRejected { .. } => true,
@@ -1017,7 +1022,13 @@ mod tests {
                 true,
             ),
             (Reason::SessionRejected { detail: text() }, true),
-            (Reason::RateLimited { resets_at: None }, true),
+            (
+                Reason::RateLimited {
+                    resets_at: None,
+                    continues_at: None,
+                },
+                true,
+            ),
             (
                 Reason::Stalled {
                     command: None,
@@ -1209,11 +1220,48 @@ mod tests {
 
     #[test]
     fn a_usage_limit_with_a_known_reset_stops_cards_until_then() {
-        let limit = |resets_at| Reason::RateLimited { resets_at };
+        let limit = |resets_at| Reason::RateLimited {
+            resets_at,
+            continues_at: None,
+        };
         assert!(limit(None).stops_every_card(1_000), "nobody knows when");
         assert!(limit(Some(1_001)).stops_every_card(1_000));
         assert!(!limit(Some(1_000)).stops_every_card(1_000));
         assert!(!limit(Some(999)).stops_every_card(1_000));
+        // Cards start again at the reset, whether or not Keel continues the step a moment later.
+        let continues = Reason::RateLimited {
+            resets_at: Some(1_000),
+            continues_at: Some(1_060),
+        };
+        assert!(continues.stops_every_card(999));
+        assert!(!continues.stops_every_card(1_000));
+    }
+
+    /// What the app and MCP clients read to say a step will go on by itself. A limit saved before
+    /// Keel did that, or one it won't continue, reads as it always did.
+    #[test]
+    fn a_usage_limit_says_when_keel_continues_the_step_only_when_it_will() {
+        let limit = Reason::RateLimited {
+            resets_at: Some(1_800_000_000),
+            continues_at: Some(1_800_000_060),
+        };
+        let saved = serde_json::json!({
+            "code": "rateLimited",
+            "resetsAt": 1_800_000_000_i64,
+            "continuesAt": 1_800_000_060_i64,
+        });
+        assert_eq!(serde_json::to_value(&limit).unwrap(), saved);
+        assert_eq!(serde_json::from_value::<Reason>(saved).unwrap(), limit);
+        let before = serde_json::json!({ "code": "rateLimited", "resetsAt": 1_800_000_000_i64 });
+        let waits = Reason::RateLimited {
+            resets_at: Some(1_800_000_000),
+            continues_at: None,
+        };
+        assert_eq!(
+            serde_json::from_value::<Reason>(before.clone()).unwrap(),
+            waits
+        );
+        assert_eq!(serde_json::to_value(&waits).unwrap(), before);
     }
 
     /// What the app and MCP clients read about who has a project's turn.

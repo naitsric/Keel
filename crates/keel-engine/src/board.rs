@@ -460,8 +460,11 @@ impl Engine {
         Ok(())
     }
 
-    /// Starts the thread that moves cards out of Todo. Call it once, after `recover`.
+    /// Starts the thread that moves cards out of Todo, and the one that continues steps a usage
+    /// limit stopped. Call it once, after `recover`.
     pub fn start_board(&self) {
+        // What a usage limit stopped starts again from here too: see `limits`.
+        self.start_limit_watch();
         // It doesn't keep the engine alive, so one that's gone doesn't go on starting runs.
         let inner = Arc::downgrade(&self.inner);
         let wake = self.inner.board_wake.clone();

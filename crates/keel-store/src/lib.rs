@@ -5795,7 +5795,10 @@ mod tests {
         let (_dir, store) = store();
         seeded(&store);
         assert_eq!(store.blocked_reasons().unwrap(), vec![]);
-        let limit = Reason::RateLimited { resets_at: None };
+        let limit = Reason::RateLimited {
+            resets_at: None,
+            continues_at: None,
+        };
         store
             .set_state("a", AttemptState::Blocked, Some(&limit))
             .unwrap();

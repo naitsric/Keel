@@ -1176,7 +1176,10 @@ impl Inner {
                 kind,
             } => {
                 if status.as_deref() == Some("rejected") {
-                    m.block = Some(Reason::RateLimited { resets_at });
+                    m.block = Some(Reason::RateLimited {
+                        resets_at,
+                        continues_at: None,
+                    });
                 }
                 let _ = store.append_event(
                     &m.attempt_id,
@@ -1358,6 +1361,16 @@ impl Inner {
         }) = &mut reason
         {
             *refused = localhost_refused;
+        }
+        // A limit that says when it resets: Keel goes on with the step by itself then, a few times.
+        // Not with a learner, which the run doesn't wait for.
+        if let Some(Reason::RateLimited {
+            resets_at: Some(resets_at),
+            continues_at,
+        }) = &mut reason
+            && m.role != "learner"
+        {
+            *continues_at = self.continues_at(&m.run_id, &m.step_id, *resets_at);
         }
         // If Keel can't tell what the step changed, it can't say the step went well.
         if snapshot_failed && state == AttemptState::Succeeded {
@@ -1848,7 +1861,10 @@ fn classify(
             } else if lower.contains("rate limit") || lower.contains("usage limit") {
                 (
                     AttemptState::Blocked,
-                    Some(Reason::RateLimited { resets_at: None }),
+                    Some(Reason::RateLimited {
+                        resets_at: None,
+                        continues_at: None,
+                    }),
                 )
             } else {
                 (

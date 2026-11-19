@@ -36,6 +36,22 @@ describe("reasonText", () => {
     expect(reasonText(t("en"), { code: "rateLimited", resetsAt: null })).not.toContain("resets");
   });
 
+  it("says when Keel will continue a step by itself after a usage limit", () => {
+    const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+    const continues = { code: "rateLimited", resetsAt, continuesAt: resetsAt + 60 };
+    const english = reasonText(t("en"), continues);
+    expect(english).toContain("Keel will continue this step by itself");
+    expect(english).toContain(new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date((resetsAt + 60) * 1000)));
+    expect(reasonText(t("es"), continues)).toContain("Keel continuará este paso por su cuenta");
+    // One it won't continue waits for the person, and says what it always said.
+    expect(reasonText(t("en"), { code: "rateLimited", resetsAt })).not.toContain("by itself");
+    expect(reasonText(t("en"), { code: "rateLimited", resetsAt })).toContain("resets");
+    // Once that time is behind, it's no longer something to come.
+    const past = { code: "rateLimited", resetsAt: 1700000000, continuesAt: 1700000060 };
+    expect(reasonText(t("en"), past)).not.toContain("by itself");
+    expect(reasonText(t("en"), past)).toContain("resets");
+  });
+
   it("does not escape commands or paths", () => {
     const text = reasonText(t("en"), { code: "stalled", command: "echo 'a' && b", minutes: 1, cpuPercent: 0 });
     expect(text).toContain("echo 'a' && b");

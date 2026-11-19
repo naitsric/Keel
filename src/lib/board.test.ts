@@ -275,6 +275,23 @@ describe("waitingForRoom", () => {
   });
 });
 
+describe("a card whose step a usage limit stopped", () => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+  const limited = (reason: BoardCard["reason"], language = "en") => cardLabel(t(language), card("l", "humanReview", { runId: "r1", runState: "blocked", reason }));
+
+  it("says Keel will continue it by itself, and when, in both languages", () => {
+    const continues = { code: "rateLimited", resetsAt, continuesAt: resetsAt + 60 };
+    expect(limited(continues)?.detail).toContain("Keel will continue this step by itself");
+    expect(limited(continues, "es")?.detail).toContain("Keel continuará este paso por su cuenta");
+  });
+
+  it("says only when the limit resets where it waits for the person", () => {
+    const detail = limited({ code: "rateLimited", resetsAt })?.detail;
+    expect(detail).toContain("It resets");
+    expect(detail).not.toContain("by itself");
+  });
+});
+
 describe("pausedText", () => {
   const es = t("es");
   const resetsAt = 1800000000;

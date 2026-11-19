@@ -438,9 +438,255 @@ fn a_usage_limit_blocks_with_its_reset_time() {
     assert_eq!(
         reason(&a),
         Reason::RateLimited {
-            resets_at: Some(1800000000)
+            resets_at: Some(1800000000),
+            // A minute after, Keel goes on with it by itself.
+            continues_at: Some(1800000060),
         }
     );
+}
+
+fn now_in_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+/// A fake whose session runs out of usage, as Claude Code says it: the request was rejected, and
+/// `resets` is when the limit resets, or nothing if it doesn't say. With `go_on`, a session it
+/// continues gets through. Without, that one runs out too.
+fn out_of_usage(resets: Option<i64>, go_on: bool) -> String {
+    let resets = resets.map_or(String::new(), |at| format!(",\"resetsAt\":{at}"));
+    let limited = format!(
+        "echo '{{\"type\":\"rate_limit_event\",\"rate_limit_info\":{{\"status\":\"rejected\"{resets},\"rateLimitType\":\"five_hour\"}}}}'\nexit 1"
+    );
+    let resumed = if go_on {
+        format!("case \" $* \" in *\" --resume \"*) {OK_RESULT}; exit 0;; esac\n")
+    } else {
+        String::new()
+    };
+    format!(
+        "cat > /dev/null\n{}\n{resumed}{limited}",
+        init(BUILD_TOOLS, "none")
+    )
+}
+
+/// The limit of a blocked step reset a while ago, as if that long had gone by with it waiting.
+fn the_limit_resets(h: &Harness, attempt: &keel_store::Attempt) {
+    let now = now_in_seconds();
+    let Reason::RateLimited { continues_at, .. } = reason(attempt) else {
+        panic!("not a usage limit: {:?}", attempt.reason)
+    };
+    h.store
+        .set_state(
+            &attempt.id,
+            AttemptState::Blocked,
+            Some(&Reason::RateLimited {
+                resets_at: Some(now - 61),
+                continues_at: continues_at.map(|_| now - 1),
+            }),
+        )
+        .unwrap();
+}
+
+/// A step the usage limit stopped used to wait for a person to continue it, however long ago the
+/// limit had reset: a run left overnight was still there in the morning.
+#[test]
+fn a_step_the_usage_limit_stopped_goes_on_by_itself_shortly_after_the_reset() {
+    keel_harness::needs!(sandbox);
+    let resets = now_in_seconds() + 3600;
+    let h = harness(&out_of_usage(Some(resets), true));
+    let run = h.start(ToolProfile::Build);
+    let blocked = h.wait_for(&run, &[AttemptState::Blocked]);
+    // It says when, a minute after the reset, for the run's page and its card to say so.
+    assert_eq!(
+        reason(&blocked),
+        Reason::RateLimited {
+            resets_at: Some(resets),
+            continues_at: Some(resets + 60),
+        }
+    );
+    assert_eq!(
+        blocked.reason.as_ref().unwrap()["continuesAt"],
+        serde_json::json!(resets + 60)
+    );
+
+    // Not before then.
+    assert!(h.engine.continue_after_limits().unwrap().is_empty());
+    assert_eq!(h.store.attempts_of_run(&run).unwrap().len(), 1);
+
+    // The person quits Keel, the limit resets, and they open it again. Nobody presses anything:
+    // all it goes by is what was stored.
+    the_limit_resets(&h, &blocked);
+    let reopened = restart_with(&h, |c| c.limit_look_again = Duration::from_millis(50));
+    reopened.recover().unwrap();
+    reopened.start_board();
+    let done = h.wait_for(&run, &[AttemptState::Succeeded]);
+
+    // The same session, continued, as the person's «Continue» does.
+    assert_eq!(done.number, 2);
+    assert_eq!(done.resumed_from.as_deref(), Some(blocked.id.as_str()));
+    assert_eq!(done.session_id, blocked.session_id);
+    let started = h.store.events(&done.id, 0).unwrap()[0].data["args"].to_string();
+    assert!(
+        started.contains("--resume") && started.contains(&blocked.session_id),
+        "{started}"
+    );
+    // The record says Keel did it, and nobody else.
+    let said: Vec<_> = h
+        .store
+        .events(&blocked.id, 0)
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.kind == "retryRequested")
+        .map(|e| e.data)
+        .collect();
+    assert_eq!(
+        said,
+        [serde_json::json!({ "by": "Keel", "resume": true, "automatic": true })]
+    );
+    // Once, however often it looks.
+    assert!(reopened.continue_after_limits().unwrap().is_empty());
+    assert_eq!(h.store.attempts_of_run(&run).unwrap().len(), 2);
+}
+
+#[test]
+fn keel_leaves_a_limited_step_to_the_person_who_already_decided() {
+    keel_harness::needs!(sandbox);
+    let h = harness(&out_of_usage(Some(now_in_seconds() + 3600), true));
+    let limited = || {
+        let run = h.start(ToolProfile::Build);
+        let blocked = h.wait_for(&run, &[AttemptState::Blocked]);
+        the_limit_resets(&h, &blocked);
+        (run, blocked)
+    };
+
+    // They tried it again themselves: another go on top of theirs would run the step twice.
+    let (retried, blocked) = limited();
+    let theirs = h.engine.retry(&blocked.id, true).unwrap();
+    h.wait_for_attempt(&theirs, AttemptState::Succeeded);
+    assert!(h.engine.continue_after_limits().unwrap().is_empty());
+    assert_eq!(h.store.attempts_of_run(&retried).unwrap().len(), 2);
+    assert!(!h.kinds(&blocked.id).contains(&"retryRequested".to_owned()));
+
+    // They left the step, which closes the run.
+    let (left, blocked) = limited();
+    h.engine.abandon(&blocked.id).unwrap();
+    assert!(h.engine.continue_after_limits().unwrap().is_empty());
+    assert_eq!(h.store.attempts_of_run(&left).unwrap().len(), 1);
+    assert_eq!(h.latest(&left).state, "abandoned");
+
+    // The run was closed some other way, with the step still as the limit left it.
+    let (closed, blocked) = limited();
+    h.store
+        .patch_run(
+            &closed,
+            &[(
+                "finished_at",
+                keel_store::rusqlite_value::Value::Text(keel_store::now()),
+            )],
+        )
+        .unwrap();
+    assert!(h.engine.continue_after_limits().unwrap().is_empty());
+    assert_eq!(h.store.attempts_of_run(&closed).unwrap().len(), 1);
+    assert_eq!(h.store.attempt(&blocked.id).unwrap().state, "blocked");
+    assert!(h.store.run(&closed).unwrap().finished_at.is_some());
+}
+
+/// A step that runs out of usage again every time it's continued must not go round for ever.
+#[test]
+fn keel_continues_a_step_by_itself_three_times_and_then_waits_for_the_person() {
+    keel_harness::needs!(sandbox);
+    // The limit says it has reset already, and the step runs out again each time.
+    let h = harness_with(
+        &out_of_usage(Some(now_in_seconds() - 5), false),
+        LOGGED_IN,
+        "2.1.318",
+        |c| c.continue_after_reset = Duration::ZERO,
+    );
+    let run = h.start(ToolProfile::Build);
+    let mut blocked = h.wait_for(&run, &[AttemptState::Blocked]);
+    for time in 1..=3 {
+        assert!(
+            matches!(
+                reason(&blocked),
+                Reason::RateLimited {
+                    continues_at: Some(_),
+                    ..
+                }
+            ),
+            "time {time}: {:?}",
+            blocked.reason
+        );
+        let started = h.engine.continue_after_limits().unwrap();
+        assert_eq!(started.len(), 1, "time {time}");
+        blocked = h.wait_for_attempt(&started[0], AttemptState::Blocked);
+        assert_eq!(blocked.number, time + 1);
+    }
+    // The fourth time it's as it always was: it says when the limit resets, and waits.
+    let Reason::RateLimited {
+        resets_at,
+        continues_at,
+    } = reason(&blocked)
+    else {
+        panic!("not a usage limit: {:?}", blocked.reason)
+    };
+    assert!(resets_at.is_some());
+    assert_eq!(continues_at, None);
+    assert!(
+        blocked
+            .reason
+            .as_ref()
+            .unwrap()
+            .get("continuesAt")
+            .is_none()
+    );
+    assert!(h.engine.continue_after_limits().unwrap().is_empty());
+    assert_eq!(h.store.attempts_of_run(&run).unwrap().len(), 4);
+    // The person can still continue it, as before.
+    assert!(h.engine.retry(&blocked.id, true).is_ok());
+}
+
+/// Nearly every usage event only says how much is left, with the time the limit resets, and some
+/// say `rejected` about something else. None of them stops a step, so none is continued.
+#[test]
+fn a_usage_limit_with_no_reset_time_or_one_that_only_informs_changes_nothing() {
+    keel_harness::needs!(sandbox);
+    // As Claude Code wrote it in a session that went through.
+    let informs = r#"echo '{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1700000000,"rateLimitType":"seven_day","overageStatus":"rejected","overageDisabledReason":"org_level_disabled","isUsingOverage":false}}'"#;
+    let body = format!(
+        "cat > /dev/null\n{}\n{informs}\n{OK_RESULT}",
+        init(BUILD_TOOLS, "none")
+    );
+    let h = harness_with(&body, LOGGED_IN, "2.1.318", |c| {
+        c.continue_after_reset = Duration::ZERO
+    });
+    let run = h.start(ToolProfile::Build);
+    let done = h.wait_for(&run, &[AttemptState::Succeeded, AttemptState::Blocked]);
+    assert_eq!(done.state, "succeeded", "{:?}", done.reason);
+    assert!(h.kinds(&done.id).contains(&"rateLimit".to_owned()));
+    assert!(h.engine.continue_after_limits().unwrap().is_empty());
+    assert_eq!(h.store.attempts_of_run(&run).unwrap().len(), 1);
+
+    // Rejected, with nothing about when it resets: it waits for the person, as it always has.
+    let h = harness_with(&out_of_usage(None, true), LOGGED_IN, "2.1.318", |c| {
+        c.continue_after_reset = Duration::ZERO
+    });
+    let run = h.start(ToolProfile::Build);
+    let blocked = h.wait_for(&run, &[AttemptState::Blocked]);
+    assert_eq!(
+        reason(&blocked),
+        Reason::RateLimited {
+            resets_at: None,
+            continues_at: None,
+        }
+    );
+    assert_eq!(
+        blocked.reason,
+        Some(serde_json::json!({ "code": "rateLimited", "resetsAt": null }))
+    );
+    assert!(h.engine.continue_after_limits().unwrap().is_empty());
+    assert_eq!(h.store.attempts_of_run(&run).unwrap().len(), 1);
 }
 
 #[test]
@@ -858,6 +1104,10 @@ fn a_folder_without_git_is_refused() {
 }
 
 fn restart(h: &Harness) -> Engine {
+    restart_with(h, |_| {})
+}
+
+fn restart_with(h: &Harness, tune: impl FnOnce(&mut Config)) -> Engine {
     let tools = Tools::from_dirs(&[
         h.dir.path().join("bin"),
         PathBuf::from("/usr/bin"),
@@ -866,6 +1116,7 @@ fn restart(h: &Harness) -> Engine {
     let mut config = Config::new(h.dir.path().join("data"));
     config.tick = Duration::from_millis(20);
     config.keep_awake = false;
+    tune(&mut config);
     Engine::new(h.store.clone(), config, tools, |_| {})
 }
 

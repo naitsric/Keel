@@ -849,6 +849,16 @@ describe("the run page's flow", () => {
       expect(page()).toContain("Claude Code tried it again");
     });
 
+    it("says Keel continued a step by itself after a usage limit, on the attempt it continued", async () => {
+      const limited = attempt("builder", "blocked", { reason: { code: "rateLimited", resetsAt: 1800000000, continuesAt: 1800000060 } });
+      attempts = [attempt("spec", "succeeded"), limited, attempt("builder", "running", { number: 2 })];
+      events = { [limited.id]: [event(limited.id, "finished", { state: "blocked" }), event(limited.id, "retryRequested", { by: "Keel", resume: true, automatic: true }, 2)] };
+      await open();
+      await choose(radio("Attempt 1"));
+      expect(page()).toContain("Keel continued it by itself once the usage limit reset");
+      expect(page()).not.toContain("Keel tried it again");
+    });
+
     it("says which assistant asked a step to stop", async () => {
       const stopped = attempt("builder", "stopped");
       attempts = [attempt("spec", "succeeded"), stopped];
