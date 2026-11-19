@@ -340,6 +340,77 @@ fn a_step_that_cant_be_picked_up_gives_back_its_place_and_its_process_is_ended()
     }
 }
 
+/// Both at once, as the app reopens: a step that can't be picked up is ended and written down,
+/// and a check that was over by then still gets its real result. Its run moves on afterwards, from
+/// `recover` itself, once every step has been looked at.
+#[test]
+fn reopening_past_a_step_that_cant_be_picked_up_still_gives_a_check_that_was_over_its_result() {
+    keel_harness::needs!(sandbox);
+    let h = harness();
+    // The app that starts the check never looks at it again, as one that was closed doesn't.
+    let tools = Tools::from_dirs(&[
+        h.dir.path().join("bin"),
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+    ]);
+    let mut config = Config::new(h.dir.path().join("data"));
+    config.tick = Duration::from_secs(3600);
+    config.keep_awake = false;
+    let closed = Engine::new(h.store.clone(), config, tools, |_| {});
+    let run = closed
+        .start_run(StartRun {
+            project_id: h.project_id.clone(),
+            title: None,
+            request: "x".into(),
+            workflow: vec![
+                WorkflowStep::Check {
+                    id: "check".into(),
+                    run: "true".into(),
+                },
+                WorkflowStep::Approval { id: "human".into() },
+            ],
+            saved_workflow: None,
+            language: "en".into(),
+            source_issue: None,
+            started_by: None,
+        })
+        .unwrap();
+    let latest = || h.store.attempts_of_run(&run).unwrap().pop().unwrap();
+    let until = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !done() {
+            assert!(Instant::now() < deadline, "{what} never happened");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    };
+    until("the check to start", &|| latest().state == "running");
+    let check = latest();
+    let exit = Path::new(&check.raw_path).with_extension("exit");
+    until("the check to end", &|| exit.exists());
+    // The first to be picked up belongs to a run the database no longer has.
+    h.add_running_step("orphan", "run-that-is-gone", "2026-01-01T00:00:00.000Z");
+
+    h.engine.recover().unwrap();
+
+    let orphan = h.store.attempt("orphan").unwrap();
+    assert_eq!(orphan.state, "interrupted");
+    assert_eq!(reason(&orphan), Reason::AgentLost);
+    let log = h.log();
+    assert!(
+        log.contains("picking a step up again (orphan)"),
+        "the log says which step: {log:?}"
+    );
+    assert!(!log.contains(&check.id), "and only that one: {log:?}");
+    // The check passed, and says so, and its run is where it would be had the app never closed.
+    let check = h.store.attempt(&check.id).unwrap();
+    assert_eq!(check.state, "succeeded", "{:?}", check.reason);
+    assert_eq!(check.exit_code, Some(0));
+    until("the run to move on", &|| {
+        let next = latest();
+        next.step_id == "human" && next.state == "waitingApproval"
+    });
+}
+
 #[test]
 fn a_step_whose_end_cant_be_written_says_so_in_the_log() {
     keel_harness::needs!(sandbox);

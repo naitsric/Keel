@@ -9,6 +9,7 @@ mod diffs;
 mod git;
 mod issues;
 mod joint;
+mod limits;
 mod localhost;
 mod log;
 mod notes;
@@ -51,6 +52,7 @@ use keel_store::rusqlite_value::Value;
 use keel_store::{
     Decision, IssueTold, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
 };
+pub use limits::MOST_CONTINUED_BY_ITSELF;
 pub use notes::split_assistant_notes;
 pub use project_commands::{CommandChange, CommandKind, retry_runs_something_new};
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
@@ -131,6 +133,10 @@ pub struct Config {
     pub pr_look_again: Duration,
     /// How often Keel looks at the issues of the projects that watch them.
     pub issue_look_again: Duration,
+    /// How long after a usage limit resets Keel continues the step it stopped. See `limits`.
+    pub continue_after_reset: Duration,
+    /// How often Keel looks for a step to continue after a usage limit.
+    pub limit_look_again: Duration,
     /// What Claude Code runs around each Bash command of a step that can edit, to tell the agent
     /// which project files changed (see `keel_harness::hook`). The app installs it. Without it, or
     /// without git, no hook.
@@ -153,6 +159,8 @@ impl Config {
             github_git_base: "https://github.com".to_owned(),
             pr_look_again: pull_requests::LOOK_AGAIN,
             issue_look_again: issues::LOOK_AGAIN,
+            continue_after_reset: limits::AFTER_RESET,
+            limit_look_again: limits::LOOK_AGAIN,
             bash_hook: None,
         }
     }

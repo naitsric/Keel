@@ -1414,8 +1414,10 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       return line(t("activity.commandKilled", { command: data.command }));
     case "abandoned":
       return line(data.by ? t("activity.abandonedBy", { client: data.by }) : t("activity.abandoned"));
-    // Only an assistant's retry leaves one, so the person sees it wasn't them.
+    // Only an assistant's retry leaves one, so the person sees it wasn't them, and Keel's own, when
+    // it continues a step after a usage limit.
     case "retryRequested":
+      if (data.automatic) return line(t("activity.continuedByItself"));
       return data.by ? line(t("activity.retryRequested", { client: data.by })) : null;
     case "commandsUpdated":
       return (

@@ -93,6 +93,20 @@ impl Monitor {
     }
 }
 
+impl Monitor {
+    /// How a setup or check that outlived the app ended, going by the exit code it left (see
+    /// `process::keeping_exit_code`), which is all Keel has then. `None` while it runs, for one an
+    /// older Keel started, and for an agent, which says how it ended in what it writes. An exit
+    /// code above 128 is the shell's word for a signal: logging out, a kill, or its services going
+    /// with the app. That isn't the check failing, so there's no code to go by, as before.
+    fn ended_while_away(&self) -> Option<Option<i32>> {
+        matches!(self.kind.as_str(), "check" | "setup")
+            .then(|| process::kept_exit_code(&self.raw_path))
+            .flatten()
+            .map(|code| (code <= 128).then_some(code))
+    }
+}
+
 /// Whether one of the project's allowed domains is `host` or a subdomain of it.
 fn allows_host(domains: &[String], host: &str) -> bool {
     domains.iter().any(|domain| {
@@ -780,16 +794,19 @@ impl Inner {
             return Ok(None);
         }
         std::fs::write(&prompt_file, "")?;
-        let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
-        command
-            .args(["-p", &profile, "/bin/sh", "-c", command_text])
-            .current_dir(&workspace)
-            .env_clear()
-            .envs(
-                keel_harness::clean_env(&tools.path_env)
-                    .into_iter()
-                    .filter(|(name, _)| !name.starts_with("CLAUDE_") && !name.starts_with("BASH_")),
-            );
+        // Its exit code goes to a file as well, for the app that reopens while it runs: see
+        // `process::keeping_exit_code`. What waits for it is outside the sandbox, where the
+        // command can't write that file.
+        let mut command = process::keeping_exit_code(
+            std::path::Path::new("/usr/bin/sandbox-exec"),
+            &["-p", &profile, "/bin/sh", "-c", command_text],
+            &raw_path,
+        );
+        command.current_dir(&workspace).env_clear().envs(
+            keel_harness::clean_env(&tools.path_env)
+                .into_iter()
+                .filter(|(name, _)| !name.starts_with("CLAUDE_") && !name.starts_with("BASH_")),
+        );
         screenshots::empty(&workspace, &dir)?;
         let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
         // A setup before any agent that can write writes to the project's home. Anything else
@@ -894,7 +911,9 @@ impl Inner {
                 slots.command_steps.entry(project_id).or_insert(turn);
             }
         }
-        if alive {
+        // A setup or check that left its exit code is over, whatever its pid looks like now.
+        let ended = context.ended_while_away();
+        if alive && ended.is_none() {
             let mut context = context;
             if context.holds_project {
                 // The bridges died with the app. The step may still need them.
@@ -914,7 +933,8 @@ impl Inner {
             let inner = self.clone();
             std::thread::spawn(move || inner.monitor(context));
         } else {
-            self.finish(context, None, true);
+            // With its real exit code if it left one. One that didn't, or an agent, was lost.
+            self.finish(context, ended.flatten(), true);
         }
         Ok(())
     }
@@ -958,13 +978,15 @@ impl Inner {
                     }
                 }
                 // Not Keel's child: after a restart, its pid may already be someone else's, so
-                // its group is left alone.
-                None => {
+                // its group is left alone. Nobody tells Keel how it ended either, so a setup or
+                // check says it in a file, which is there as soon as it's over.
+                None => m.ended_while_away().or_else(|| {
                     let alive = m
                         .root_pid
                         .is_some_and(|pid| process::signal_process(pid, 0));
-                    if alive { None } else { Some(None) }
-                }
+                    // Looked at again, since it may have ended between the two looks.
+                    (!alive).then(|| m.ended_while_away().flatten())
+                }),
             };
             if let Some(code) = exit {
                 self.finish(m, code, false);
@@ -1169,14 +1191,19 @@ impl Inner {
                 status,
                 resets_at,
                 kind,
+                using_overage,
             } => {
-                if status.as_deref() == Some("rejected") {
-                    m.block = Some(Reason::RateLimited { resets_at });
+                // On extra usage the request was served, and `rejected` is only about the plan.
+                if status.as_deref() == Some("rejected") && !using_overage {
+                    m.block = Some(Reason::RateLimited {
+                        resets_at,
+                        continues_at: None,
+                    });
                 }
                 self.record_event(
                     &m.attempt_id,
                     "rateLimit",
-                    &json!({ "status": status, "resetsAt": resets_at, "kind": kind }),
+                    &json!({ "status": status, "resetsAt": resets_at, "kind": kind, "usingOverage": using_overage }),
                 );
             }
             Parsed::Result(result) => {
@@ -1354,6 +1381,16 @@ impl Inner {
         {
             *refused = localhost_refused;
         }
+        // A limit that says when it resets: Keel goes on with the step by itself then, a few times.
+        // Not with a learner, which the run doesn't wait for.
+        if let Some(Reason::RateLimited {
+            resets_at: Some(resets_at),
+            continues_at,
+        }) = &mut reason
+            && m.role != "learner"
+        {
+            *continues_at = self.continues_at(&m.run_id, &m.step_id, *resets_at);
+        }
         // If Keel can't tell what the step changed, it can't say the step went well.
         if snapshot_failed && state == AttemptState::Succeeded {
             state = AttemptState::Failed;
@@ -1461,7 +1498,9 @@ impl Inner {
             }
             return;
         }
-        if state == AttemptState::Succeeded || m.role == "learner" {
+        // Not for a step found over as the app reopens: `Engine::recover` moves every run on once
+        // each step still running has its place again, so none starts in a place that's taken.
+        if (state == AttemptState::Succeeded || m.role == "learner") && !process_lost {
             self.noted(
                 "moving a run on to its next step",
                 &m.run_id,
@@ -1847,7 +1886,10 @@ fn classify(
             } else if lower.contains("rate limit") || lower.contains("usage limit") {
                 (
                     AttemptState::Blocked,
-                    Some(Reason::RateLimited { resets_at: None }),
+                    Some(Reason::RateLimited {
+                        resets_at: None,
+                        continues_at: None,
+                    }),
                 )
             } else {
                 (

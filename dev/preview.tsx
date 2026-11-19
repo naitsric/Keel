@@ -24,9 +24,15 @@ const theme = params.get("theme") ?? "dark";
 document.documentElement.dataset.theme = theme;
 void i18next.changeLanguage(params.get("lang") ?? "en");
 
+// ?state=blocked&limit=continues is a usage limit Keel will continue the step after by itself, and
+// limit=waits one it leaves to the person.
+const usageLimit = (continues: boolean): Reason => {
+  const resetsAt = Math.floor(Date.now() / 1000) + 3 * 3600;
+  return { code: "rateLimited", resetsAt, ...(continues ? { continuesAt: resetsAt + 60 } : {}) };
+};
 const REASONS: Partial<Record<AttemptState, Reason>> = {
   stalled: { code: "stalled", command: "uv run pytest -q", pid: 4242, minutes: 11, cpuPercent: 0.2 },
-  blocked: { code: "unexpectedAuth", source: "ANTHROPIC_API_KEY" },
+  blocked: params.get("limit") ? usageLimit(params.get("limit") === "continues") : { code: "unexpectedAuth", source: "ANTHROPIC_API_KEY" },
   failed: { code: "resultError", subtype: "error_max_turns", detail: "Reached the turn limit." },
   interrupted: { code: "agentLost" },
   queued: { code: "waitingForProject", step: "builder", runId: "r9", title: "Fix the calendar" },
@@ -53,7 +59,7 @@ const attempt: Attempt = {
   tools: "build",
   language: "en",
   cliVersion: "2.1.318 (Claude Code)",
-  apiKeySource: state === "blocked" ? "ANTHROPIC_API_KEY" : "none",
+  apiKeySource: state === "blocked" && !params.get("limit") ? "ANTHROPIC_API_KEY" : "none",
   account: "you@example.com (max)",
   prompt: "The add function in calc.py is wrong. Fix it, then run the tests.",
   settings: { sandbox: { enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false, filesystem: { denyRead: ["~"], allowRead: ["<workspace>"] }, network: { allowedDomains: [] } } },
@@ -729,6 +735,7 @@ let boardCards: BoardCard[] =
         boardCard("c27", "What to do with empty invoices", "humanReview", inRun("waitingAnswers")),
         boardCard("c15", "Speed up the search index", "humanReview", inRun("failed", { code: "checkFailed", exitCode: 1 })),
         boardCard("c16", "Remove the legacy API routes", "humanReview", inRun("blocked", { code: "reworkLimit", rounds: 2 })),
+        boardCard("c31", "Translate the onboarding emails", "humanReview", inRun("blocked", usageLimit(true))),
         boardCard("c17", "Upgrade the database driver", "humanReview", inRun("stalled", REASONS.stalled ?? null)),
         boardCard("c18", "Add tests to the importer", "humanReview", inRun("interrupted", { code: "agentLost" })),
         boardCard("c19", "Split the settings page", "humanReview", inRun("stopped")),
