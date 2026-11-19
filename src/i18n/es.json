@@ -185,7 +185,8 @@
     "newCommandsNeedSetupOrCheck": "Solo una preparación o una verificación puede empezar de nuevo con los comandos nuevos del proyecto.",
     "assistantMayNotRun": "{{client}} volvió a poner esta tarjeta en Por hacer y ya no puede lanzar ejecuciones. Muévela tú a Por hacer para empezarla.",
     "rerunWorkflowMissing": "Esta tarjeta volvió a Por hacer para correr de nuevo con el workflow “{{workflow}}”, que ya no existe. Muévela tú a Por hacer para empezarla con el workflow por defecto del proyecto.",
-    "contractNotValid": "No se guardó la corrección: {{problems}}."
+    "contractNotValid": "No se guardó la corrección: {{problems}}.",
+    "copyFreed": "Keel liberó la copia privada de esta corrida 7 días después de que terminó. El registro de auditoría de cada paso sigue aquí."
   },
   "errors": {
     "notARepo": "{{detail}} no es un repositorio git con al menos un commit.",

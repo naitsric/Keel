@@ -185,7 +185,8 @@
     "newCommandsNeedSetupOrCheck": "Only a setup or a check can start over with the project's new commands.",
     "assistantMayNotRun": "{{client}} put this card back in Todo and can no longer start runs. Move it to Todo yourself to start it.",
     "rerunWorkflowMissing": "This card was put back in Todo to run again with the workflow “{{workflow}}”, which no longer exists. Move it to Todo yourself to start it with the project's default workflow.",
-    "contractNotValid": "The correction wasn't saved: {{problems}}."
+    "contractNotValid": "The correction wasn't saved: {{problems}}.",
+    "copyFreed": "Keel freed this run's private copy 7 days after it ended. The audit record of every step is still here."
   },
   "errors": {
     "notARepo": "{{detail}} isn't a git repository with at least one commit.",

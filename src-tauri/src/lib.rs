@@ -1095,6 +1095,11 @@ pub fn run() {
                     engine.start_board();
                     engine.start_pr_watch();
                     engine.start_issue_watch();
+                    // A copy that should have gone and didn't is written to the log.
+                    let copies_log = log.clone();
+                    engine.start_freeing_old_copies(move |failed| {
+                        copies_log.write(&failed.to_string());
+                    });
                     ready.set();
                     let _ = handle.emit(CHANGED_EVENT, "");
                     // After the tools are known, so no client ever finds Keel half ready.

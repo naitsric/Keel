@@ -199,6 +199,14 @@ describe("what a specifier got wrong", () => {
   });
 });
 
+describe("a run whose copy Keel freed", () => {
+  it("says when it went and that the record stays, in both languages", () => {
+    const refused = { code: "blocked", reason: { code: "copyFreed" }, detail: null };
+    expect(errorText(t("en"), refused)).toBe("Keel freed this run's private copy 7 days after it ended. The audit record of every step is still here.");
+    expect(errorText(t("es"), refused)).toBe("Keel liberó la copia privada de esta corrida 7 días después de que terminó. El registro de auditoría de cada paso sigue aquí.");
+  });
+});
+
 describe("errorText", () => {
   it("turns a backend error into a sentence", () => {
     expect(errorText(t("es"), { code: "blocked", reason: { code: "claudeLoggedOut" }, detail: null })).toContain("No has iniciado sesión");

@@ -137,6 +137,7 @@ mod tests {
         "84eb72f63738f6fb1698788b557dd2d55f0e2b7cec2c7ef09a135d0cd73c5355",
         "08a51892d6ba1df754800b4c73bc7e3b6771c60a4fad135d73ecd5bf8821ec4c",
         "eb544c5f688650d0811560a5a3a75bdf273e3c0da730473988f98cf7aaed86ca",
+        "b45cc6943a7f47cba97e2f8b0bb6cf7ba7c19e983c85735cde20629edcab28c6",
     ];
 
     fn database() -> (tempfile::TempDir, std::path::PathBuf) {

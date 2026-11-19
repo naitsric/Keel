@@ -1888,7 +1888,8 @@ export function RunDetail({ runId }: { runId: string }) {
   const rawCheck = worstRawCheck(Object.values(rawChecks));
   const files = useMemo(() => filesChangedBy(attempts), [attempts]);
   const sizeDecision = useMemo(() => latestSizeDecision(Object.values(eventsByAttempt).flat()), [eventsByAttempt]);
-  const showChanges = () => void api.runDiff(runId).then(setRunDiff);
+  // A run whose copy Keel freed has no whole change to read anymore, and says so.
+  const showChanges = () => void api.runDiff(runId).then(setRunDiff, (e) => setError(errorText(t, e)));
 
   useRunCommands({
     showChanges: files.length > 0 ? showChanges : null,
