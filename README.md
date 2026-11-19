@@ -115,6 +115,11 @@ You need:
 
 The first screen checks these and says how to get what's missing.
 
+## If something goes wrong
+
+If Keel can't open its data when it starts, it says why and closes. It won't open data that a newer
+Keel has used, because it would damage it, and it leaves that data as it was.
+
 ## Develop
 
 ```bash
@@ -124,6 +129,20 @@ pnpm test             # UI tests
 pnpm check:i18n       # English and Spanish stay complete
 cargo test --workspace
 ```
+
+`pnpm app` runs a Keel built from the branch you're on, next to the one you installed, and the two
+share nothing either writes. The branch build keeps its data in
+`~/Library/Application Support/io.github.naitsric.keel.dev` and its runs in `~/.keel-dev`, and its
+MCP server is `keel-dev`, on port 7414 unless you change it. It never opens the installed Keel's
+database. It does use your `claude` and `gh`, so its runs spend your Claude usage and its pull
+requests are real. Delete those two folders to start it from nothing. Two branch builds share them,
+so only one runs at a time.
+
+How the database is laid out changes one numbered migration at a time, in `MIGRATIONS` in
+`crates/keel-store/src/lib.rs`. Only ever add one at the end. A database keeps a hash of each one
+it ran, and Keel refuses to open one where a migration differs from its own, as happens when two
+branches each add the next number, or one that has more than it knows. `cargo test` fails if a
+migration that shipped is edited or moved.
 
 Inside a sandbox, as when Keel runs this project's check, macOS won't let a test start a sandbox
 of its own, open a local socket or run `ps`. The tests that need one of these print

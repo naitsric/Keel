@@ -9,10 +9,10 @@ use keel_store::{McpCall, McpClient};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
-use crate::{AppState, CommandError, CommandResult};
+use crate::{AppState, CommandError, CommandResult, launch};
 
 /// What Claude Code lists the server as, and the name of the client that connecting creates.
-const SERVER_NAME: &str = "keel";
+const SERVER_NAME: &str = launch::mcp_server_name(launch::BRANCH_BUILD);
 const CLAUDE_CLIENT: &str = "Claude Code";
 const CALLS_SHOWN: i64 = 30;
 /// For the status bar. A server that starts or stops says nothing else that the UI would hear.

@@ -1,5 +1,6 @@
 //! The desktop shell. Commands are thin: the rules live in `keel-engine`.
 
+mod launch;
 mod mcp;
 mod menu;
 
@@ -979,12 +980,18 @@ fn app_quit(
 }
 
 fn wants_confirmation(app: &tauri::AppHandle) -> bool {
-    let state = app.state::<AppState>();
+    // Without its data Keel has no state, and nothing running to ask about: see `launch`.
+    let Some(state) = app.try_state::<AppState>() else {
+        return false;
+    };
     !state.quit_allowed.load(Ordering::SeqCst) && state.engine.must_ask_before_quitting()
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let mut context = tauri::generate_context!();
+    let config = context.config_mut();
+    config.identifier = launch::identifier(&config.identifier, launch::BRANCH_BUILD);
     let app = tauri::Builder::default()
         // First, so a second copy leaves before it opens the database. Two copies would each
         // supervise the same runs.
@@ -1008,13 +1015,27 @@ pub fn run() {
         })
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&data_dir)?;
-            let store = Arc::new(Store::open(&data_dir.join("keel.db"))?);
+            let database = data_dir.join("keel.db");
+            let opened = std::fs::create_dir_all(&data_dir)
+                .map_err(|e| (launch::Why::Other, e.to_string()))
+                .and_then(|()| {
+                    Store::open(&database).map_err(|e| (launch::Why::from(&e), e.to_string()))
+                });
+            let store = match opened {
+                Ok(store) => Arc::new(store),
+                Err((why, detail)) => {
+                    let language = launch::language(&database);
+                    let notice = launch::cant_open(language, why, &detail, &data_dir);
+                    launch::tell_and_quit(app, notice);
+                    return Ok(());
+                }
+            };
             let handle = app.handle().clone();
             let mut config = Config::new(data_dir.clone());
             // No spaces, and macOS doesn't clear it on its own.
             if let Some(home) = std::env::var_os("HOME") {
-                let keel = std::path::PathBuf::from(home).join(".keel");
+                let keel =
+                    std::path::PathBuf::from(home).join(launch::home_folder(launch::BRANCH_BUILD));
                 config.runs_dir = keel.join("runs");
                 // Without it, builders just get no note.
                 config.bash_hook = keel_harness::hook::install(&keel.join("bin"), BASH_HOOK).ok();
@@ -1148,7 +1169,7 @@ pub fn run() {
             app_quit,
             menu::menu_set,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building the app");
 
     app.run(|handle, event| {
