@@ -647,6 +647,95 @@ fn keel_continues_a_step_by_itself_three_times_and_then_waits_for_the_person() {
     assert!(h.engine.retry(&blocked.id, true).is_ok());
 }
 
+/// A continuation that can't start used to be tried again every 20 seconds, for ever, with nothing
+/// to show for it.
+#[test]
+fn a_continuation_that_cannot_start_is_on_the_record_and_keel_gives_up_after_three() {
+    keel_harness::needs!(sandbox);
+    let h = harness(&out_of_usage(Some(now_in_seconds() + 3600), true));
+    let run = h.start(ToolProfile::Build);
+    let blocked = h.wait_for(&run, &[AttemptState::Blocked]);
+    the_limit_resets(&h, &blocked);
+    // The run no longer has the step, so there's nothing to start it from.
+    h.store
+        .patch_run(
+            &run,
+            &[(
+                "workflow",
+                keel_store::rusqlite_value::Value::Text("[]".into()),
+            )],
+        )
+        .unwrap();
+    let failures = || {
+        let events = h.store.events(&blocked.id, 0).unwrap();
+        events
+            .into_iter()
+            .filter(|e| e.kind == "continueFailed")
+            .map(|e| e.data["error"].as_str().unwrap_or_default().to_owned())
+            .collect::<Vec<_>>()
+    };
+    for time in 1..=3 {
+        assert!(h.engine.continue_after_limits().unwrap().is_empty());
+        assert_eq!(failures().len(), time);
+        assert!(!failures()[0].is_empty(), "it says why");
+    }
+    // It no longer says it will go on by itself, and waits for the person.
+    let waits = h.store.attempt(&blocked.id).unwrap();
+    assert_eq!(waits.state, "blocked");
+    assert!(
+        matches!(
+            reason(&waits),
+            Reason::RateLimited {
+                resets_at: Some(_),
+                continues_at: None
+            }
+        ),
+        "{:?}",
+        waits.reason
+    );
+    // And Keel leaves it alone from then on.
+    for _ in 0..3 {
+        assert!(h.engine.continue_after_limits().unwrap().is_empty());
+    }
+    assert_eq!(failures().len(), 3);
+    assert_eq!(h.store.attempts_of_run(&run).unwrap().len(), 1);
+}
+
+/// What keeps cards from starting keeps a continuation waiting too: here, another step that ran
+/// out of usage with nobody knowing when it resets.
+#[test]
+fn a_continuation_waits_while_the_board_holds_every_start() {
+    keel_harness::needs!(sandbox);
+    let h = harness(&out_of_usage(Some(now_in_seconds() + 3600), true));
+    let run = h.start(ToolProfile::Build);
+    let blocked = h.wait_for(&run, &[AttemptState::Blocked]);
+    the_limit_resets(&h, &blocked);
+    let other = h.start(ToolProfile::Build);
+    let unknown = h.wait_for(&other, &[AttemptState::Blocked]);
+    h.store
+        .set_state(
+            &unknown.id,
+            AttemptState::Blocked,
+            Some(&Reason::RateLimited {
+                resets_at: None,
+                continues_at: None,
+            }),
+        )
+        .unwrap();
+    assert!(h.engine.continue_after_limits().unwrap().is_empty());
+    assert_eq!(h.store.attempts_of_run(&run).unwrap().len(), 1);
+
+    // The person deals with that one, and the first goes on.
+    h.engine.abandon(&unknown.id).unwrap();
+    let started = h.engine.continue_after_limits().unwrap();
+    assert_eq!(started.len(), 1);
+    assert_eq!(
+        h.wait_for_attempt(&started[0], AttemptState::Succeeded)
+            .run_id,
+        run
+    );
+}
+
 /// Nearly every usage event only says how much is left, with the time the limit resets, and some
 /// say `rejected` about something else. None of them stops a step, so none is continued.
 #[test]
@@ -667,6 +756,22 @@ fn a_usage_limit_with_no_reset_time_or_one_that_only_informs_changes_nothing() {
     assert!(h.kinds(&done.id).contains(&"rateLimit".to_owned()));
     assert!(h.engine.continue_after_limits().unwrap().is_empty());
     assert_eq!(h.store.attempts_of_run(&run).unwrap().len(), 1);
+
+    // The plan ran out and the request went through on extra usage: Claude Code still says
+    // `rejected`, about the plan, and the step goes on working. Stopping it would be Keel's doing.
+    let on_extra_usage = r#"echo '{"type":"rate_limit_event","rate_limit_info":{"status":"rejected","resetsAt":1900000000,"rateLimitType":"five_hour","overageStatus":"allowed","isUsingOverage":true}}'"#;
+    let body = format!(
+        "cat > /dev/null\n{}\n{on_extra_usage}\nsleep 0.3\n{OK_RESULT}",
+        init(BUILD_TOOLS, "none")
+    );
+    let h = harness(&body);
+    let run = h.start(ToolProfile::Build);
+    let done = h.wait_for(&run, &[AttemptState::Succeeded, AttemptState::Blocked]);
+    assert_eq!(done.state, "succeeded", "{:?}", done.reason);
+    let events = h.store.events(&done.id, 0).unwrap();
+    let limit = events.iter().find(|e| e.kind == "rateLimit").unwrap();
+    assert_eq!(limit.data["status"], "rejected");
+    assert_eq!(limit.data["usingOverage"], true);
 
     // Rejected, with nothing about when it resets: it waits for the person, as it always has.
     let h = harness_with(&out_of_usage(None, true), LOGGED_IN, "2.1.318", |c| {
@@ -1391,7 +1496,13 @@ fn a_check_that_ended_while_the_app_was_closed_keeps_whether_it_passed_or_failed
 
     // One that failed with nobody watching, one that passed, and one from a Keel that left no
     // exit code, which is all the app had to go by before.
-    for (number, exit) in [(7, Some("3\n")), (8, Some("0\n")), (9, None)] {
+    for (number, exit) in [
+        (7, Some("3\n")),
+        (8, Some("0\n")),
+        (9, None),
+        (10, Some("143\n")),
+        (11, Some("137\n")),
+    ] {
         let raw = dir.join(format!("check-{number}.log"));
         std::fs::write(&raw, "ran\n").unwrap();
         if let Some(exit) = exit {
@@ -1418,6 +1529,55 @@ fn a_check_that_ended_while_the_app_was_closed_keeps_whether_it_passed_or_failed
     assert_eq!(unknown.state, "interrupted");
     assert_eq!(reason(&unknown), Reason::AgentLost);
     assert_eq!(unknown.exit_code, None);
+    // Killed by a signal, as when the person logs out or its services go with the app: the shell
+    // writes 128 and the signal. That's not the check failing, and it reads as it did before.
+    for killed in ["left-10", "left-11"] {
+        let killed = h.store.attempt(killed).unwrap();
+        assert_eq!(killed.state, "interrupted", "{:?}", killed.reason);
+        assert_eq!(reason(&killed), Reason::AgentLost);
+        assert_eq!(killed.exit_code, None);
+    }
+}
+
+/// A check that passed while the app was closed used to move its run on as soon as Keel found it,
+/// before the agents still running had their places back, so its next step could take one of them.
+#[test]
+fn reopening_gives_every_step_still_running_its_place_before_any_run_moves_on() {
+    keel_harness::needs!(sandbox);
+    // Runs until the test lets it go, and never more than 20 seconds.
+    let body = format!(
+        "cat > /dev/null\n{}\ni=0; while [ ! -f let-go ] && [ $i -lt 200 ]; do sleep 0.1; i=$((i+1)); done\n{OK_RESULT}",
+        init(r#"["Read","Grep","Glob"]"#, "none")
+    );
+    // The app that starts them never looks at them again, as one that was closed doesn't.
+    let h = harness_with(&body, LOGGED_IN, "2.1.318", |c| {
+        c.tick = Duration::from_secs(3600);
+    });
+    // First a check that's over by the time the app reopens, then an agent that isn't.
+    let checked = start_checked(&h.engine, &h.project_id, "true");
+    let check = h.wait_for(&checked, &[AttemptState::Running]);
+    let exit = Path::new(&check.raw_path).with_extension("exit");
+    until("the check to end", || exit.exists());
+    let agent = h.start(ToolProfile::ReadOnly);
+    let running = h.wait_for(&agent, &[AttemptState::Running]);
+
+    let reopened = restart(&h);
+    reopened.recover().unwrap();
+    let waiting = h.wait_for(&checked, &[AttemptState::WaitingApproval]);
+    assert_eq!(h.store.attempt(&check.id).unwrap().state, "succeeded");
+    // The agent was picked up again before the check's run went on to its next step.
+    let seq = |attempt: &str, kind: &str| {
+        let events = h.store.events(attempt, 0).unwrap();
+        events.iter().find(|e| e.kind == kind).unwrap().seq
+    };
+    assert!(
+        seq(&running.id, "recovered") < seq(&waiting.id, "waiting"),
+        "the run moved on before the agent still running was counted"
+    );
+    assert_eq!(h.latest(&agent).state, "running");
+    // Nothing is left behind. The app that started it is the one that would see it end, and here
+    // that one never looks.
+    std::fs::write(Path::new(&running.workspace).join("let-go"), "").unwrap();
 }
 
 #[test]

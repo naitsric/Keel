@@ -23,6 +23,8 @@ pub(crate) const LOOK_AGAIN: Duration = Duration::from_secs(20);
 pub const MOST_CONTINUED_BY_ITSELF: usize = 3;
 /// Who the record says continued the step.
 const BY_ITSELF: &str = "Keel";
+/// The event a continuation that couldn't start leaves on the step.
+const COULD_NOT_CONTINUE: &str = "continueFailed";
 
 fn now_in_seconds() -> i64 {
     chrono::Utc::now().timestamp()
@@ -70,7 +72,12 @@ impl Inner {
         let now = now_in_seconds();
         // Nearly every look finds nothing, and this is one small question.
         let due = |reason: &Reason| matches!(reason, Reason::RateLimited { continues_at: Some(at), .. } if *at <= now);
-        if !self.store.blocked_reasons()?.iter().any(due) {
+        let blocked = self.store.blocked_reasons()?;
+        // What keeps cards in Todo keeps these waiting too: starting one would end the same way.
+        if !blocked.iter().any(due)
+            || blocked.iter().any(|reason| reason.stops_every_card(now))
+            || locked(&self.board_paused).is_some()
+        {
             return Ok(Vec::new());
         }
         let mut started = Vec::new();
@@ -81,12 +88,59 @@ impl Inner {
                     && continues_at(attempt.reason.as_ref()).is_some_and(|at| at <= now)
                     && workflows::is_latest_of_its_step(&attempts, attempt)
                 {
-                    // One that can't go on, such as a removed project's, mustn't hold up the rest.
-                    started.extend(self.continue_by_itself(&attempt.id).ok().flatten());
+                    // One that can't start mustn't hold up the rest.
+                    match self.continue_by_itself(&attempt.id) {
+                        Ok(new) => started.extend(new),
+                        Err(error) => self.could_not_continue(attempt, &error),
+                    }
                 }
             }
         }
         Ok(started)
+    }
+
+    /// A continuation that couldn't start goes on the step's record, and to stderr until Keel
+    /// keeps a log. After as many as Keel continues a step, it stops trying: the step no longer
+    /// says it will go on by itself, and waits for the person.
+    fn could_not_continue(&self, attempt: &keel_store::Attempt, error: &Error) {
+        eprintln!(
+            "keel: could not continue step {} of run {} after its usage limit: {error}",
+            attempt.step_id, attempt.run_id
+        );
+        let store = &self.store;
+        let _ = store.append_event(
+            &attempt.id,
+            COULD_NOT_CONTINUE,
+            &json!({ "error": error.to_string() }),
+        );
+        let failed = store.events(&attempt.id, 0).map_or(usize::MAX, |events| {
+            events
+                .iter()
+                .filter(|event| event.kind == COULD_NOT_CONTINUE)
+                .count()
+        });
+        if failed < MOST_CONTINUED_BY_ITSELF {
+            return;
+        }
+        // Held as for a retry, and only if it's still as it was: a person may have just acted.
+        let _guard = locked(&self.advancing);
+        let Ok(now) = store.attempt(&attempt.id) else {
+            return;
+        };
+        let reason = now
+            .reason
+            .clone()
+            .and_then(|reason| serde_json::from_value(reason).ok());
+        if now.state == AttemptState::Blocked.as_str()
+            && let Some(Reason::RateLimited { resets_at, .. }) = reason
+        {
+            let waits = Reason::RateLimited {
+                resets_at,
+                continues_at: None,
+            };
+            let _ = store.set_state(&attempt.id, AttemptState::Blocked, Some(&waits));
+            self.changed(&attempt.run_id);
+        }
     }
 
     /// Continues one step's session, as the person's «Continue» would, if it's still where the

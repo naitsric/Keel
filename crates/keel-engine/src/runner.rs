@@ -94,13 +94,16 @@ impl Monitor {
 }
 
 impl Monitor {
-    /// The exit code a setup or check left as it ended (see `process::keeping_exit_code`), which is
-    /// all Keel has when the step outlived the app that started it. `None` while it runs, for one
-    /// an older Keel started, and for an agent, which says how it ended in what it writes.
-    fn kept_exit_code(&self) -> Option<i32> {
+    /// How a setup or check that outlived the app ended, going by the exit code it left (see
+    /// `process::keeping_exit_code`), which is all Keel has then. `None` while it runs, for one an
+    /// older Keel started, and for an agent, which says how it ended in what it writes. An exit
+    /// code above 128 is the shell's word for a signal: logging out, a kill, or its services going
+    /// with the app. That isn't the check failing, so there's no code to go by, as before.
+    fn ended_while_away(&self) -> Option<Option<i32>> {
         matches!(self.kind.as_str(), "check" | "setup")
             .then(|| process::kept_exit_code(&self.raw_path))
             .flatten()
+            .map(|code| (code <= 128).then_some(code))
     }
 }
 
@@ -884,7 +887,9 @@ impl Inner {
                 slots.command_steps.entry(project_id).or_insert(turn);
             }
         }
-        if alive {
+        // A setup or check that left its exit code is over, whatever its pid looks like now.
+        let ended = context.ended_while_away();
+        if alive && ended.is_none() {
             let mut context = context;
             if context.holds_project {
                 // The bridges died with the app. The step may still need them.
@@ -904,10 +909,8 @@ impl Inner {
             let inner = self.clone();
             std::thread::spawn(move || inner.monitor(context));
         } else {
-            // A setup or check that ended while the app was closed left its exit code. One that
-            // didn't, or an agent, was lost.
-            let exit_code = context.kept_exit_code();
-            self.finish(context, exit_code, true);
+            // With its real exit code if it left one. One that didn't, or an agent, was lost.
+            self.finish(context, ended.flatten(), true);
         }
         Ok(())
     }
@@ -953,12 +956,12 @@ impl Inner {
                 // Not Keel's child: after a restart, its pid may already be someone else's, so
                 // its group is left alone. Nobody tells Keel how it ended either, so a setup or
                 // check says it in a file, which is there as soon as it's over.
-                None => m.kept_exit_code().map(Some).or_else(|| {
+                None => m.ended_while_away().or_else(|| {
                     let alive = m
                         .root_pid
                         .is_some_and(|pid| process::signal_process(pid, 0));
                     // Looked at again, since it may have ended between the two looks.
-                    (!alive).then(|| m.kept_exit_code())
+                    (!alive).then(|| m.ended_while_away().flatten())
                 }),
             };
             if let Some(code) = exit {
@@ -1174,8 +1177,10 @@ impl Inner {
                 status,
                 resets_at,
                 kind,
+                using_overage,
             } => {
-                if status.as_deref() == Some("rejected") {
+                // On extra usage the request was served, and `rejected` is only about the plan.
+                if status.as_deref() == Some("rejected") && !using_overage {
                     m.block = Some(Reason::RateLimited {
                         resets_at,
                         continues_at: None,
@@ -1184,7 +1189,7 @@ impl Inner {
                 let _ = store.append_event(
                     &m.attempt_id,
                     "rateLimit",
-                    &json!({ "status": status, "resetsAt": resets_at, "kind": kind }),
+                    &json!({ "status": status, "resetsAt": resets_at, "kind": kind, "usingOverage": using_overage }),
                 );
             }
             Parsed::Result(result) => {
@@ -1479,7 +1484,9 @@ impl Inner {
             }
             return;
         }
-        if state == AttemptState::Succeeded || m.role == "learner" {
+        // Not for a step found over as the app reopens: `Engine::recover` moves every run on once
+        // each step still running has its place again, so none starts in a place that's taken.
+        if (state == AttemptState::Succeeded || m.role == "learner") && !process_lost {
             let _ = self.advance(&m.run_id);
         }
     }

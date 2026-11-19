@@ -353,9 +353,10 @@ mod tests {
         assert_eq!(var("GIT_TERMINAL_PROMPT"), Some("0"));
     }
 
-    /// With the real git: a commit with no message would open an editor and wait for it.
+    /// With the real git, and an editor on the PATH that says when it's opened: git asks for none.
+    /// Without the variables it opens `vi`, or refuses because there's no terminal to open it on.
     #[test]
-    fn git_gives_up_at_once_where_it_would_open_an_editor() {
+    fn git_opens_no_editor_and_no_pager_where_it_would() {
         let Some(git) = [
             "/usr/bin/git",
             "/opt/homebrew/bin/git",
@@ -366,27 +367,48 @@ mod tests {
             return;
         };
         let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        let opened = dir.path().join("opened");
+        crate::testing::write_script(
+            &bin.join("vi"),
+            &format!("#!/bin/sh\necho opened > '{}'\n", opened.display()),
+        )
+        .unwrap();
+        let path_env = format!("{}:/usr/bin:/bin", bin.display());
         let run = |args: &[&str]| {
-            let mut command = Command::new(git);
-            command
+            Command::new(git)
                 .args(args)
-                .current_dir(dir.path())
+                .current_dir(&repo)
                 .env_clear()
-                .envs(clean_env("/usr/bin:/bin"));
-            crate::process::stdout_within(command, std::time::Duration::from_secs(30)).unwrap()
+                .envs(clean_env(&path_env))
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap()
         };
-        assert!(run(&["init", "-q"]).is_some());
-        let commit = [
+        let said = |args: &[&str]| String::from_utf8_lossy(&run(args).stdout).trim().to_owned();
+        assert!(run(&["init", "-q"]).status.success());
+        // What git itself says it would open.
+        assert_eq!(said(&["var", "GIT_EDITOR"]), "true");
+        assert_eq!(said(&["var", "GIT_PAGER"]), "cat");
+        // A commit with no message: the editor that isn't one leaves it empty, and git says so.
+        let commit = run(&[
             "-c",
             "user.name=T",
             "-c",
             "user.email=t@example.com",
             "commit",
             "--allow-empty",
-        ];
-        assert!(run(&commit).is_some(), "it waited for an editor");
-        // Nothing was committed, since nobody wrote a message.
-        let log = run(&["log", "--oneline"]).unwrap();
-        assert!(log.is_empty(), "{}", String::from_utf8_lossy(&log));
+        ]);
+        let complaint = String::from_utf8_lossy(&commit.stderr).into_owned();
+        assert!(!commit.status.success(), "{complaint}");
+        assert!(
+            complaint.contains("empty commit message"),
+            "git gave up for another reason: {complaint}"
+        );
+        assert!(!opened.exists(), "git opened an editor");
+        assert_eq!(said(&["log", "--oneline", "--all"]), "");
     }
 }
