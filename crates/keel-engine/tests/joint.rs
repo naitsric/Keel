@@ -1664,7 +1664,7 @@ fn a_correction_keeps_its_points_ids_never_gives_one_again_and_is_checked_like_t
             position: 1
         }]
     );
-    let long = "x".repeat(200);
+    let long = "x".repeat(230);
     assert!(matches!(
         problems(&[point(Some("K1"), &long, "b", &["valora"])])[..],
         [SpecProblem::ContractTooLong { .. }]

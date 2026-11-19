@@ -269,7 +269,7 @@ fn only_they_know(id: &str, text: &str) -> Value {
 
 fn too_long() -> Value {
     let mut output = good();
-    output["summary"] = json!("x".repeat(201));
+    output["summary"] = json!("x".repeat(231));
     output
 }
 
@@ -1055,6 +1055,31 @@ fn a_question_with_none_recommended_always_runs_the_agent_with_the_answer() {
 }
 
 #[test]
+fn a_spec_a_few_characters_over_a_limit_goes_on_without_a_second_attempt() {
+    keel_harness::needs!(sandbox);
+    // As real specs went back: 211 of 200 in the summary, and 141 of 140 in what it decided alone.
+    let mut barely_over = good();
+    barely_over["summary"] = json!("x".repeat(211));
+    barely_over["decided"] = json!([{ "text": "y".repeat(141) }]);
+    let w = world();
+    w.answers(&[barely_over]);
+    let run = w.start(no_approver());
+    w.wait_for(&run, "builder", AttemptState::Succeeded);
+    let attempts = w.all(&run, "spec");
+    assert_eq!(attempts.len(), 1, "no second turn of the agent");
+    assert_eq!(attempts[0].state, "succeeded");
+    assert!(
+        !w.kinds(&attempts[0].id)
+            .contains(&"specCorrected".to_owned())
+    );
+    // The person reads it as it was written.
+    let kept = attempts[0].output.as_ref().unwrap();
+    assert_eq!(kept["summary"], json!("x".repeat(211)));
+    assert_eq!(kept["decided"][0]["text"], json!("y".repeat(141)));
+    assert_eq!(w.call_count(), 2, "the spec once, and the builder");
+}
+
+#[test]
 fn going_over_the_limits_once_gets_corrected_and_twice_ends_blocked() {
     keel_harness::needs!(sandbox);
     let w = world();
@@ -1068,7 +1093,7 @@ fn going_over_the_limits_once_gets_corrected_and_twice_ends_blocked() {
     assert!(
         attempts[1]
             .prompt
-            .contains("`summary` has 201 characters, and the limit is 200."),
+            .contains("`summary` has 231 characters, and the limit is 200."),
         "exactly what to fix: {}",
         attempts[1].prompt
     );
@@ -1085,7 +1110,7 @@ fn going_over_the_limits_once_gets_corrected_and_twice_ends_blocked() {
         reason_of(&blocked),
         Reason::SpecNotUsable {
             problems: vec![SpecProblem::SummaryTooLong {
-                chars: 201,
+                chars: 231,
                 limit: 200
             }]
         }
@@ -1100,7 +1125,7 @@ fn fixing_a_limit_does_not_use_up_the_rounds_of_questions() {
     keel_harness::needs!(sandbox);
     let w = world();
     let mut broken_with_a_question = asking("Q1", "First?");
-    broken_with_a_question["summary"] = json!("x".repeat(201));
+    broken_with_a_question["summary"] = json!("x".repeat(231));
     w.answers(&[
         broken_with_a_question,
         asking("Q1", "First?"),
@@ -1153,7 +1178,7 @@ fn resuming_by_hand_says_again_what_to_fix() {
     assert_eq!(attempts.len(), 3);
     assert_eq!(attempts[2].session_id, blocked.session_id);
     assert!(
-        attempts[2].prompt.contains("`summary` has 201 characters"),
+        attempts[2].prompt.contains("`summary` has 231 characters"),
         "{}",
         attempts[2].prompt
     );
