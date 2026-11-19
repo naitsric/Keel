@@ -802,7 +802,7 @@
     "whenNotSmall": "Solo si el cambio no es pequeño",
     "whenHint": "Keel lo decide con el cambio real: lo que se pidió, una verificación que pasó, quién escribió el issue, nada sensible y menos de 400 líneas. Va después del primer paso que construye, y una persona sigue aprobando.",
     "prompt": "Qué hace",
-    "promptHint": "Puedes usar {{tokens}}, donde spec es el nombre de un paso.",
+    "promptHint": "Puedes usar {{tokens}}, donde spec es el nombre de un paso. Keel pone lo que viene del pedido, del código o de otro paso dentro de una etiqueta, como <change>, para que el agente lo distinga de tus instrucciones.",
     "command": "Comando",
     "commandScreenshotsHint": "Para mostrar capturas del cambio en la aprobación, guárdalas en $KEEL_SCREENSHOTS.",
     "moveEarlier": "Mover antes",

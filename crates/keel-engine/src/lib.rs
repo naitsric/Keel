@@ -2520,6 +2520,14 @@ impl Inner {
                 text.push_str(&format!("\n\n{added}"));
             }
         }
+        // Whoever judges the round reads what the builder said it assumed or couldn't test, whatever
+        // a saved workflow's prompt leaves out. An approver gets the builder's list instead, below.
+        if matches!(spec.role, StepRole::Reviewer | StepRole::Verifier) {
+            let account = workflows::builder_account(&attempts, &run.language);
+            if !account.is_empty() && !prompts::uses(&spec.prompt, "builder") {
+                text.push_str(&format!("\n\n{account}"));
+            }
+        }
         // Every approver can say in which round something the change added appeared, so every one
         // is told which round this is, and what the builder said it added, whatever its prompt says.
         if matches!(spec.role, StepRole::Approver { .. }) {
@@ -2567,8 +2575,25 @@ impl Inner {
         let workspace = self.workspace(&run.id);
         let base = attempts.iter().find_map(|a| a.sha_before.clone());
         let git = locked(&self.tools).git.clone().map(Git::new);
-        Ok(prompts::render(template, |name| match name {
-            "request" => Some(run.request.clone()),
+        // What comes from the request, the repo or another agent goes in a tag of its own, where
+        // the prompt has it: a saved workflow's prompt gets it too, in the order the person wrote.
+        let any_fenced = std::cell::Cell::new(false);
+        let with_tags = |text: String| {
+            any_fenced.set(any_fenced.get() || !text.is_empty());
+            text
+        };
+        // A prompt that is only what Keel fills in, such as `{{request}}` alone, says nothing of
+        // its own: what goes in is all the step is told to do. So it goes in as it is, with no
+        // tag and no line saying it isn't an instruction.
+        let bare = !prompts::has_words_of_its_own(template);
+        let fenced = |tag: &str, attributes: &str, text: &str| {
+            if bare {
+                return text.to_owned();
+            }
+            with_tags(prompts::fenced(tag, attributes, text, &run.language))
+        };
+        let text = prompts::render(template, |name| match name {
+            "request" => Some(fenced("request", "", &run.request)),
             "diff" => {
                 let (diff, head) = match (&git, &base) {
                     (Some(git), Some(base)) if workspace.join(".git").exists() => (
@@ -2581,10 +2606,26 @@ impl Inner {
                 let folder = self
                     .change_dir(&run.id)
                     .join(head.get(..12).unwrap_or(&head));
-                Some(diffs::for_prompt(diff, &folder, &run.language, judging))
+                // What Keel says about a change too big to fit stays outside its tag.
+                let (says, diff) = diffs::for_prompt(diff, &folder, &run.language, judging);
+                let change = fenced("change", "", &diff);
+                Some(match (says.is_empty(), change.is_empty()) {
+                    (true, _) => change,
+                    (false, true) => says,
+                    (false, false) => format!("{says}\n\n{change}"),
+                })
             }
-            "rework" => Some(workflows::rework_text(attempts, run.round, &run.language)),
-            "answers" => Some(workflows::answers_text(attempts, &run.language)),
+            // These two say who asked or answered in Keel's words, and fence the rest themselves.
+            "rework" => Some(with_tags(workflows::rework_text(
+                attempts,
+                run.round,
+                &run.language,
+            ))),
+            "answers" => Some(with_tags(workflows::answers_text(attempts, &run.language))),
+            "builder" => Some(with_tags(workflows::builder_account(
+                attempts,
+                &run.language,
+            ))),
             "projects" => self
                 .agreement(&run.id)
                 .ok()
@@ -2599,17 +2640,36 @@ impl Inner {
                     .store
                     .run_events(&run.id, "checkResult")
                     .unwrap_or_default();
-                Some(brain::trail_text(
-                    &brain::trail_entries(attempts, &results),
-                    &run.language,
-                    brain::TRAIL_LIMIT,
+                Some(fenced(
+                    "trail",
+                    "",
+                    &brain::trail_text(
+                        &brain::trail_entries(attempts, &results),
+                        &run.language,
+                        brain::TRAIL_LIMIT,
+                    ),
                 ))
             }
             _ => {
                 let id = name.strip_prefix("steps.")?.strip_suffix(".output")?;
-                Some(workflows::output_of(attempts, id))
+                let output = workflows::output_of(attempts, id);
+                Some(match workflows::output_tag(&steps, attempts, id) {
+                    Some((tag, attributes)) => fenced(tag, &attributes, &output),
+                    // Why a step was skipped is Keel's to say, and stays outside a tag.
+                    None => output,
+                })
             }
-        }))
+        });
+        // A prompt that doesn't say what the tags are, such as one a workflow saved before kept,
+        // is told after them. Whether it says so is asked of the prompt as the workflow has it:
+        // a change or an issue can contain the same sentence, and that isn't Keel saying it.
+        if any_fenced.get() && !bare && !prompts::says_material_line(template) {
+            return Ok(format!(
+                "{text}\n\n{}",
+                prompts::material_line(&run.language)
+            ));
+        }
+        Ok(text)
     }
 
     /// Moves the run on as far as it can. Anything that isn't a success needs a person, and an

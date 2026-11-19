@@ -15,7 +15,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::git::Git;
-use crate::{Engine, Error, Inner, Result, StartRun, locked, workflows};
+use crate::{Engine, Error, Inner, Result, StartRun, locked, prompts, workflows};
 
 /// How much of what people decided and accepted reaches each step. Decisions go first, then what
 /// was learned.
@@ -77,13 +77,15 @@ pub fn learner_step(id: &str, language: &str, model: &str, reviewers: &[&str]) -
         .iter()
         .map(|id| format!("{id}: {{{{steps.{id}.output}}}}\n"))
         .collect();
+    // What it learns from goes first, each piece in its tag, and what to do with it after.
+    let material = prompts::material_line(language);
     let prompt = if language.starts_with("es") {
         format!(
-            "Esta ejecución terminó, y no editas nada. Propón como máximo {MAX_PROPOSALS} cosas que alguien que trabaje en este repo debería saber, que no sean obvias leyendo el código y que esta ejecución haya demostrado. Cada una con su evidencia (qué pasó, en qué archivo o con qué comando) y las rutas que cubre, sin comodines. No repitas lo que ya está en lo que Keel sabe del proyecto, ni lo que el cambio ya dejó escrito en el repo, en un comentario, una prueba o un archivo de instrucciones: eso ya llega a quien trabaje ahí. Nada de opiniones ni de detalles de este cambio en particular. Busca sobre todo lo que el builder tuvo que esquivar del entorno o del repo (algo que falló, que tardó o que no funcionó como se esperaba) en lo que dijo, en los checks que fallaron y en lo que se devolvió: eso no se ve en el código. Si no hay nada que valga la pena, devuelve la lista vacía: es la respuesta normal. Cada una en menos de 200 caracteres, en español.\n\nPedido:\n{{{{request}}}}\n\nRevisiones:\n{reviews}\n{{{{trail}}}}\n\nCambio:\n{{{{diff}}}}"
+            "Pedido:\n{{{{request}}}}\n\nRevisiones:\n{reviews}\n{{{{trail}}}}\n\nCambio:\n{{{{diff}}}}\n\n{material}\n\nEsta ejecución terminó, y no editas nada. Propón como máximo {MAX_PROPOSALS} cosas que alguien que trabaje en este repo debería saber, que no sean obvias leyendo el código y que esta ejecución haya demostrado. Cada una con su evidencia (qué pasó, en qué archivo o con qué comando) y las rutas que cubre, sin comodines. No repitas lo que ya está en lo que Keel sabe del proyecto, ni lo que el cambio ya dejó escrito en el repo, en un comentario, una prueba o un archivo de instrucciones: eso ya llega a quien trabaje ahí. Nada de opiniones ni de detalles de este cambio en particular. Busca sobre todo lo que el builder tuvo que esquivar del entorno o del repo (algo que falló, que tardó o que no funcionó como se esperaba) en lo que dijo, en los checks que fallaron y en lo que se devolvió: eso no se ve en el código. Si no hay nada que valga la pena, devuelve la lista vacía: es la respuesta normal. Cada una en menos de 200 caracteres, en español."
         )
     } else {
         format!(
-            "This run has ended, and you edit nothing. Propose at most {MAX_PROPOSALS} things someone working on this repo should know, that aren't obvious from reading the code and that this run proved. Each with its evidence (what happened, in which file or with which command) and the paths it covers, with no wildcards. Don't repeat what's already in what Keel knows about the project, or what the change already wrote down in the repo, in a comment, a test or an instructions file: that already reaches whoever works there. No opinions, and no details of this particular change. Look above all for what the builder had to work around in the environment or the repo (something that failed, was slow, or didn't work as expected), in what it said, in the checks that failed and in what was sent back: the code doesn't show that. If nothing is worth it, return an empty list: that's the normal answer. Each under 200 characters.\n\nRequest:\n{{{{request}}}}\n\nReviews:\n{reviews}\n{{{{trail}}}}\n\nChange:\n{{{{diff}}}}"
+            "Request:\n{{{{request}}}}\n\nReviews:\n{reviews}\n{{{{trail}}}}\n\nChange:\n{{{{diff}}}}\n\n{material}\n\nThis run has ended, and you edit nothing. Propose at most {MAX_PROPOSALS} things someone working on this repo should know, that aren't obvious from reading the code and that this run proved. Each with its evidence (what happened, in which file or with which command) and the paths it covers, with no wildcards. Don't repeat what's already in what Keel knows about the project, or what the change already wrote down in the repo, in a comment, a test or an instructions file: that already reaches whoever works there. No opinions, and no details of this particular change. Look above all for what the builder had to work around in the environment or the repo (something that failed, was slow, or didn't work as expected), in what it said, in the checks that failed and in what was sent back: the code doesn't show that. If nothing is worth it, return an empty list: that's the normal answer. Each under 200 characters."
         )
     };
     StepSpec {
