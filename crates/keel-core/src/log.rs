@@ -19,6 +19,9 @@ const FILE: &str = "keel.log";
 const OLDER_FILE: &str = "keel.1.log";
 /// Each of the two files stays under this.
 const MAX_BYTES: u64 = 1024 * 1024;
+/// How much of one message is written. An error can carry everything a command printed, and one
+/// of those must not fill the file on its own.
+const MAX_MESSAGE_BYTES: usize = 8 * 1024;
 
 /// One writer at a time in this process, so two can't both decide the file is full.
 static WRITING: Mutex<()> = Mutex::new(());
@@ -78,20 +81,23 @@ impl Log {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default(),
         );
-        let text: String = mask_secrets(message)
+        // Hidden first, then cut: a secret cut in half wouldn't be recognised as one.
+        let text: String = cut(&mask_secrets(message))
             .lines()
             .map(|line| format!("{time} {line}\n"))
             .collect();
-        let _writing = writing(wait);
-        let _ = self.append(text.as_bytes());
+        let writing = writing(wait);
+        // Only whoever has the turn moves the file aside, or two could each do it and lose the
+        // older one. Without the turn this only adds, and the file may end a message over.
+        let _ = self.append(text.as_bytes(), writing.is_some());
     }
 
-    fn append(&self, text: &[u8]) -> std::io::Result<()> {
+    fn append(&self, text: &[u8], may_move_aside: bool) -> std::io::Result<()> {
         if let Some(dir) = self.path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let size = std::fs::metadata(&self.path).map_or(0, |file| file.len());
-        if size > 0 && size + text.len() as u64 > self.max_bytes {
+        if may_move_aside && size > 0 && size + text.len() as u64 > self.max_bytes {
             std::fs::rename(&self.path, self.older_path())?;
         }
         // Private: an error can name the person's folders and repos.
@@ -104,8 +110,26 @@ impl Log {
     }
 }
 
-/// A panic can come while this thread is writing, and then waiting would never end. Without the
-/// turn, the worst is two files getting full at once.
+/// The start of a message too long to write whole, on a character's edge, saying how much there
+/// was.
+fn cut(message: &str) -> std::borrow::Cow<'_, str> {
+    if message.len() <= MAX_MESSAGE_BYTES {
+        return message.into();
+    }
+    let mut end = MAX_MESSAGE_BYTES;
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n(cut here: the message was {} bytes)",
+        &message[..end],
+        message.len()
+    )
+    .into()
+}
+
+/// A panic can come while this thread is writing, and then waiting would never end. So a panic
+/// doesn't wait for the turn: see `Log::add`.
 fn writing(wait: bool) -> Option<MutexGuard<'static, ()>> {
     match WRITING.try_lock() {
         Ok(guard) => Some(guard),
@@ -118,16 +142,14 @@ fn writing(wait: bool) -> Option<MutexGuard<'static, ()>> {
 }
 
 /// Has a panic leave what it said in the log, then go on as before. A release build ends right
-/// after a panic, with nothing on screen, so this is all that says why Keel closed.
+/// after a panic, with nothing on screen, so this is all that says why Keel closed. A debug build
+/// only loses the thread, so what's written says there was a panic, not that Keel stopped.
 pub fn log_panics(log: Log) {
     let before = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let thread = std::thread::current();
         let name = thread.name().unwrap_or("unnamed");
-        log.add(
-            &format!("Keel stopped on a panic in thread {name}: {info}"),
-            false,
-        );
+        log.add(&format!("A panic in thread {name}: {info}"), false);
         before(info);
     }));
 }
@@ -248,6 +270,50 @@ mod tests {
     }
 
     #[test]
+    fn a_message_too_long_is_cut_on_a_character_and_says_so() {
+        let (_dir, log) = log();
+        // Two bytes each, so the limit falls in the middle of one.
+        let long = format!("x{}", "ñ".repeat(MAX_MESSAGE_BYTES));
+        log.write(&format!("git said: {long}"));
+        log.write("and a short one after it");
+
+        let text = read(log.path());
+        assert!(text.len() < MAX_MESSAGE_BYTES + 300, "{}", text.len());
+        assert!(text.contains(" git said: xññ"), "it keeps how it starts");
+        let said = format!("(cut here: the message was {} bytes)", long.len() + 10);
+        assert!(text.contains(&said), "{}", &text[text.len() - 200..]);
+        assert!(text.lines().all(has_time));
+        assert!(text.ends_with(" and a short one after it\n"));
+    }
+
+    #[test]
+    fn a_panic_that_cant_have_the_turn_still_writes_and_leaves_the_older_file_alone() {
+        let (_dir, log) = log();
+        let log = log.with_max_bytes(200);
+        let line = "x".repeat(60);
+        log.write(&format!("one {line}"));
+        log.write(&format!("two {line}"));
+        log.write(&format!("three {line}"));
+        let older = read(&log.older_path());
+
+        // Another thread is in the middle of writing, as when a panic comes during a write.
+        let turn = WRITING.lock().unwrap_or_else(|e| e.into_inner());
+        log.add(&format!("panic-1 {line}"), false);
+        log.add(&format!("panic-2 {line}"), false);
+        drop(turn);
+
+        assert_eq!(read(&log.older_path()), older);
+        let text = read(log.path());
+        assert!(
+            text.contains(" three ") && text.contains(" panic-1 ") && text.contains(" panic-2 ")
+        );
+        // The next write with the turn moves it aside as usual.
+        log.write("after");
+        assert!(read(&log.older_path()).contains(" panic-2 "));
+        assert!(read(log.path()).ends_with(" after\n"));
+    }
+
+    #[test]
     fn the_log_can_only_be_read_by_the_person() {
         let (_dir, log) = log();
         log.write("something");
@@ -288,7 +354,7 @@ mod tests {
         std::panic::set_hook(original);
         assert!(ended.is_err());
         let text = read(log.path());
-        assert!(text.contains("Keel stopped on a panic"), "{text}");
+        assert!(text.contains("A panic in thread"), "{text}");
         assert!(text.contains("made-up failure"), "{text}");
         assert!(text.contains("log.rs"), "it says where: {text}");
         assert!(!text.contains("made-up-Value-123"), "{text}");

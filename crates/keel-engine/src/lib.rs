@@ -1582,14 +1582,19 @@ impl Engine {
     /// questions simply keep waiting: nothing is running for them. Ended runs that still hold what
     /// their tools built are freed in the background.
     ///
-    /// A step or a run that can't be picked up is written to the log, and the rest still are: one
-    /// that fails must not leave the others showing as running with nothing watching them.
+    /// A step or a run that can't be picked up is written to the log, and the rest still are. The
+    /// step ends as interrupted, so nothing is left showing as running with nothing watching it.
     pub fn recover(&self) -> Result<()> {
         self.inner.store.release_claimed_cards()?;
         for attempt in self.inner.store.active_attempts()? {
             let recovered = self.inner.recover_attempt(&attempt);
-            self.inner
-                .noted("picking a step up again", &attempt.id, recovered);
+            if self
+                .inner
+                .noted("picking a step up again", &attempt.id, recovered)
+                .is_none()
+            {
+                self.inner.end_unrecovered(&attempt);
+            }
         }
         for run in self.inner.store.open_runs()? {
             let advanced = self.inner.advance(&run.id);

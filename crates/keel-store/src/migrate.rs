@@ -168,8 +168,37 @@ mod tests {
             .unwrap()
     }
 
-    /// Everything a refusal must leave as it was: the schema, the version and the hashes.
-    fn shape(path: &Path) -> (i64, Vec<String>, Vec<(i64, String)>) {
+    /// A database nobody opened through `Store`, so it's as SQLite makes one: its own journal
+    /// mode, not WAL, and hashes only if asked for. `count` is how many migrations it says it had.
+    fn made_by_hand(path: &Path, migrations: &[&str], count: usize, with_hashes: bool) {
+        let conn = Connection::open(path).unwrap();
+        for migration in migrations {
+            conn.execute_batch(migration).unwrap();
+        }
+        if with_hashes {
+            conn.execute_batch(HASHES).unwrap();
+            for (index, migration) in migrations.iter().enumerate() {
+                conn.execute(
+                    "insert into migration_hash (number, sha256) values (?1, ?2)",
+                    (index as i64 + 1, hash(migration)),
+                )
+                .unwrap();
+            }
+        }
+        conn.pragma_update(None, "user_version", count as i64)
+            .unwrap();
+    }
+
+    /// Everything a refusal must leave as it was.
+    #[derive(Debug, PartialEq)]
+    struct Shape {
+        version: i64,
+        journal: String,
+        schema: Vec<String>,
+        hashes: Vec<(i64, String)>,
+    }
+
+    fn shape(path: &Path) -> Shape {
         let conn = Connection::open(path).unwrap();
         let schema = conn
             .prepare("select coalesce(sql, name) from sqlite_master order by name")
@@ -178,7 +207,21 @@ mod tests {
             .unwrap()
             .collect::<rusqlite::Result<_>>()
             .unwrap();
-        (version(path), schema, recorded(&conn).unwrap())
+        Shape {
+            version: version(path),
+            journal: conn
+                .query_row("pragma journal_mode", [], |row| row.get(0))
+                .unwrap(),
+            schema,
+            hashes: recorded(&conn).unwrap(),
+        }
+    }
+
+    fn keeps_hashes(shape: &Shape) -> bool {
+        shape
+            .schema
+            .iter()
+            .any(|sql| sql.contains("migration_hash"))
     }
 
     #[test]
@@ -243,8 +286,12 @@ mod tests {
         let (_dir, path) = database();
         let mut newer = MIGRATIONS.to_vec();
         newer.push("create table from_a_newer_keel (id text primary key);");
-        Store::open_with(&path, &newer).unwrap();
+        // Never opened by a Keel that keeps hashes, so a refusal that wrote anything would show:
+        // there's no table for them, and the journal isn't the one Keel sets.
+        made_by_hand(&path, &newer, newer.len(), false);
         let before = shape(&path);
+        assert_eq!(before.journal, "delete");
+        assert!(!keeps_hashes(&before));
 
         let Err(error) = Store::open(&path) else {
             panic!("a database from a newer Keel was opened")
@@ -256,9 +303,11 @@ mod tests {
                 if found == newer.len() as i64 && known == MIGRATIONS.len()
         ));
         assert!(error.to_string().contains("a newer Keel"), "{error}");
+        // The version, the schema with no table for hashes, and how it journals.
         assert_eq!(shape(&path), before);
         // The Keel that left it there still opens it.
         Store::open_with(&path, &newer).unwrap();
+        assert_eq!(shape(&path).journal, "wal");
     }
 
     #[test]
@@ -269,8 +318,10 @@ mod tests {
         ours.push("create table from_this_branch (id text primary key);");
         let mut theirs = MIGRATIONS.to_vec();
         theirs.push("create table from_another_branch (id text primary key);");
-        Store::open_with(&path, &theirs).unwrap();
+        made_by_hand(&path, &theirs, theirs.len(), true);
         let before = shape(&path);
+        assert_eq!(before.journal, "delete");
+        assert_eq!(before.hashes.len(), theirs.len());
 
         let Err(error) = Store::open_with(&path, &ours) else {
             panic!("a database another branch changed was opened")
@@ -329,11 +380,16 @@ mod tests {
         let (_dir, path) = database();
         let mut newer = MIGRATIONS.to_vec();
         newer.push("create table from_a_newer_keel (id text primary key);");
-        Store::open_with(&path, &newer)
+        made_by_hand(&path, &newer, newer.len(), false);
+        Connection::open(&path)
             .unwrap()
-            .set_setting("language", "es")
+            .execute(
+                "insert into setting (key, value) values ('language', 'es')",
+                [],
+            )
             .unwrap();
         let before = shape(&path);
+        assert_eq!(before.journal, "delete");
 
         assert_eq!(saved_setting(&path, "language").as_deref(), Some("es"));
         assert_eq!(saved_setting(&path, "nothing"), None);

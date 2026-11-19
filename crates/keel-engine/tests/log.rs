@@ -2,15 +2,18 @@
 //! repo and a fake `claude`, and a database made to refuse the one write each test is about.
 
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use keel_core::{AttemptState, Log, StepSpec, ToolProfile, WorkflowStep};
+use keel_core::{AttemptState, Log, Reason, StepSpec, ToolProfile, WorkflowStep};
 use keel_engine::{Config, Engine, StartRun};
 use keel_harness::Tools;
-use keel_store::{NewAttempt, NewRun, Store};
+use keel_harness::process::process_start;
+use keel_store::rusqlite_value::Value;
+use keel_store::{Attempt, NewAttempt, NewRun, Store};
 
 const FAKE_CLAUDE: &str = r#"#!/bin/bash
 case "$1" in
@@ -42,14 +45,8 @@ fn git(repo: &Path, args: &[&str]) {
     );
 }
 
-fn harness() -> Harness {
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let claude = bin.join("claude");
-    std::fs::write(&claude, FAKE_CLAUDE).unwrap();
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let repo = dir.path().join("demo");
+fn new_repo(dir: &Path, name: &str) -> PathBuf {
+    let repo = dir.join(name);
     std::fs::create_dir(&repo).unwrap();
     git(&repo, &["init", "-q", "-b", "main"]);
     git(&repo, &["config", "user.name", "Tester"]);
@@ -57,6 +54,57 @@ fn harness() -> Harness {
     std::fs::write(repo.join("README.md"), "demo\n").unwrap();
     git(&repo, &["add", "-A"]);
     git(&repo, &["commit", "-qm", "init"]);
+    repo
+}
+
+/// A process standing in for an agent that outlived the app. It never outlives its test.
+struct Outlived(std::process::Child);
+
+impl Outlived {
+    fn start() -> Self {
+        let child = Command::new("/bin/sleep")
+            .arg("60")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        Self(child)
+    }
+
+    fn pid(&self) -> i32 {
+        self.0.id() as i32
+    }
+
+    fn has_ended_within(&mut self, patience: Duration) -> bool {
+        let deadline = Instant::now() + patience;
+        while self.0.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        true
+    }
+}
+
+impl Drop for Outlived {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+fn reason(attempt: &Attempt) -> Reason {
+    serde_json::from_value(attempt.reason.clone().expect("has a reason")).unwrap()
+}
+
+fn harness() -> Harness {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let claude = bin.join("claude");
+    std::fs::write(&claude, FAKE_CLAUDE).unwrap();
+    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let repo = new_repo(dir.path(), "demo");
 
     let store = Arc::new(Store::open(&dir.path().join("keel.db")).unwrap());
     let tools = Tools::from_dirs(&[bin, PathBuf::from("/usr/bin"), PathBuf::from("/bin")]);
@@ -109,20 +157,28 @@ impl Harness {
         }
     }
 
-    /// Has the database refuse a write from here on, the way a full disk or a damaged file would.
-    fn refuse(&self, name: &str, when: &str) {
+    /// Changes the database behind the engine's back.
+    fn sql(&self, sql: &str) {
         let conn = rusqlite::Connection::open(self.dir.path().join("keel.db")).unwrap();
         conn.busy_timeout(Duration::from_secs(5)).unwrap();
-        conn.execute_batch(&format!(
+        conn.execute_batch(sql).unwrap();
+    }
+
+    /// Has the database refuse a write from here on, the way a full disk or a damaged file would.
+    fn refuse(&self, name: &str, when: &str) {
+        self.sql(&format!(
             "create trigger {name} before {when} begin select raise(abort, 'made-up failure'); end;"
-        ))
-        .unwrap();
+        ));
     }
 
     fn start(&self, steps: &[&str]) -> String {
+        self.start_in(&self.project_id, steps)
+    }
+
+    fn start_in(&self, project_id: &str, steps: &[&str]) -> String {
         self.engine
             .start_run(StartRun {
-                project_id: self.project_id.clone(),
+                project_id: project_id.to_owned(),
                 title: None,
                 request: "Fix the bug".into(),
                 workflow: steps
@@ -202,10 +258,14 @@ fn reopening_picks_up_the_other_steps_when_one_cant_be_and_the_log_says_which() 
 
     h.engine.recover().unwrap();
 
-    // Nothing is left showing as running with nobody watching it.
-    for id in ["lost-1", "lost-2"] {
-        assert_eq!(h.store.attempt(id).unwrap().state, "interrupted", "{id}");
+    // Nothing is left showing as running with nobody watching it, the one that failed included.
+    for id in ["orphan", "lost-1", "lost-2"] {
+        let attempt = h.store.attempt(id).unwrap();
+        assert_eq!(attempt.state, "interrupted", "{id}");
+        assert_eq!(reason(&attempt), Reason::AgentLost, "{id}");
+        assert!(attempt.finished_at.is_some(), "{id}");
     }
+    assert_eq!(h.engine.active_count().unwrap(), 0);
     let log = h.log();
     assert!(
         log.contains("picking a step up again (orphan)"),
@@ -213,6 +273,71 @@ fn reopening_picks_up_the_other_steps_when_one_cant_be_and_the_log_says_which() 
     );
     assert!(log.contains("run-that-is-gone"), "and why: {log:?}");
     assert!(!log.contains("lost-1"), "and only that one: {log:?}");
+}
+
+#[test]
+fn a_step_that_cant_be_picked_up_gives_back_its_place_and_its_process_is_ended() {
+    keel_harness::needs!(sandbox, ps);
+    let h = harness();
+    // One agent at a time, so a place that isn't given back stops every other run.
+    h.engine.set_max_agents(1).unwrap();
+    let other = h
+        .engine
+        .add_project(&new_repo(h.dir.path(), "other"))
+        .unwrap()
+        .id;
+    h.add_run("first-run");
+    h.add_running_step("held", "first-run", "2026-01-01T00:00:00.000Z");
+    // Its process outlived the app, as an agent does.
+    let mut agent = Outlived::start();
+    let pid = agent.pid();
+    h.store
+        .patch_attempt(
+            "held",
+            &[
+                ("pid", Value::Integer(i64::from(pid))),
+                ("pid_started", Value::Text(process_start(pid).unwrap())),
+            ],
+        )
+        .unwrap();
+    // Its project can't be read, which picking it up finds out only after it has taken a place
+    // among the agents and the project's turn.
+    h.sql(&format!(
+        "delete from project where id = '{}'",
+        h.project_id
+    ));
+
+    h.engine.recover().unwrap();
+
+    let log = h.log();
+    assert!(
+        log.contains("picking a step up again (held)")
+            && log.contains(&format!("project {}", h.project_id)),
+        "{log:?}"
+    );
+    let held = h.store.attempt("held").unwrap();
+    assert_eq!(held.state, "interrupted");
+    assert_eq!(reason(&held), Reason::AgentLost);
+    assert!(
+        agent.has_ended_within(Duration::from_secs(5)),
+        "its process went on with nothing watching it"
+    );
+    // The place is free: a run of another project gets it and ends.
+    let run = h.start_in(&other, &["builder"]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let attempt = h.store.attempts_of_run(&run).unwrap().pop().unwrap();
+        if attempt.state == "succeeded" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "stuck in {} ({:?})",
+            attempt.state,
+            attempt.reason
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 #[test]

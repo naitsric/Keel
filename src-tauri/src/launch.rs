@@ -250,18 +250,33 @@ mod tests {
         assert_eq!(choose_language(None, Some("")), "en");
     }
 
+    /// What a refusal must leave alone: the version, how it journals, and whether it keeps hashes.
+    fn shape(path: &Path) -> (i64, String, i64) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let read = |sql: &str| conn.query_row(sql, [], |row| row.get(0));
+        (
+            read("pragma user_version").unwrap(),
+            conn.query_row("pragma journal_mode", [], |row| row.get(0))
+                .unwrap(),
+            read("select count(*) from sqlite_master where name = 'migration_hash'").unwrap(),
+        )
+    }
+
     #[test]
     fn a_database_a_newer_keel_used_gets_a_notice_in_the_persons_language_and_stays_as_it_was() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("keel.db");
-        keel_store::Store::open(&path)
+        // As a Keel with more migrations than this one leaves it, made by hand so that anything
+        // this build wrote would show: no table for hashes, and not the journal Keel sets.
+        rusqlite::Connection::open(&path)
             .unwrap()
-            .set_setting(LANGUAGE_KEY, "es")
+            .execute_batch(
+                "create table setting (key text primary key, value text not null);
+                 insert into setting (key, value) values ('language', 'es');
+                 pragma user_version = 999;",
+            )
             .unwrap();
-        // As a Keel with more migrations than this one leaves it.
-        let newer = rusqlite::Connection::open(&path).unwrap();
-        newer.pragma_update(None, "user_version", 999).unwrap();
-        drop(newer);
+        assert_eq!(shape(&path), (999, "delete".to_owned(), 0));
 
         let Err(error) = keel_store::Store::open(&path) else {
             panic!("it opened data from a newer Keel")
@@ -276,10 +291,6 @@ mod tests {
         assert_eq!(notice.title, "Keel no puede abrir sus datos");
         assert!(notice.body.contains("Un Keel más nuevo"), "{}", notice.body);
         assert!(notice.body.contains(&*dir.path().to_string_lossy()));
-        let after = rusqlite::Connection::open(&path).unwrap();
-        let version: i64 = after
-            .query_row("pragma user_version", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 999);
+        assert_eq!(shape(&path), (999, "delete".to_owned(), 0));
     }
 }

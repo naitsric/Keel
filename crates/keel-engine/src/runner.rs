@@ -361,6 +361,34 @@ impl Inner {
         self.slot_freed.notify_all();
     }
 
+    /// Ends a step that couldn't be picked up again as one whose process died ends: interrupted,
+    /// for a person to retry. Nothing watches it, so it mustn't go on showing as running, or keep
+    /// a place among the agents or its project's turn, which picking it up may have taken before
+    /// failing. A process it still has is ended too: nothing would ever read what it did, and a
+    /// retry would work on the same copy beside it. What can't be written here goes to the log.
+    pub(crate) fn end_unrecovered(self: &Arc<Self>, attempt: &Attempt) {
+        if let (Some(pid), Some(started)) = (attempt.pid, &attempt.pid_started)
+            && process::is_same_process(pid as i32, started)
+        {
+            process::signal_group(pid as i32, process::SIGKILL);
+        }
+        {
+            let mut slots = locked(&self.slots);
+            slots.active.remove(&attempt.id);
+            // Without the project's id, which may be what couldn't be read.
+            slots
+                .command_steps
+                .retain(|_, turn| turn.attempt_id != attempt.id);
+        }
+        self.slot_freed.notify_all();
+        self.end_early(
+            &attempt.id,
+            &attempt.run_id,
+            AttemptState::Interrupted,
+            Some(Reason::AgentLost),
+        );
+    }
+
     pub(crate) fn end_early(
         self: &Arc<Self>,
         attempt_id: &str,
