@@ -2620,6 +2620,48 @@ async fn a_big_change_comes_in_short_and_every_part_of_it_reads_whole_in_pieces(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_step_of_a_run_whose_copy_keel_freed_still_reads_whole() {
+    keel_harness::needs!(sandbox, sockets);
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let run = w.person_run("Fix the bug");
+    let view = settled(&client, &run).await;
+    let builder = view["steps"][0]["attemptId"].as_str().unwrap().to_owned();
+    let before = ok(&call(&client, "get_step", json!({ "attempt": builder })).await);
+    assert!(before["diff"].as_str().unwrap().contains("fixed.txt"));
+
+    // The person rejected it long ago, and Keel freed the clone it worked in.
+    w.engine
+        .answer_approval(&waiting_attempt(&view), false, "Not this way")
+        .unwrap();
+    let long_ago = Value::Text("2026-01-01T00:00:00.000Z".into());
+    w.store
+        .patch_run(&run, &[("finished_at", long_ago)])
+        .unwrap();
+    let workspace = PathBuf::from(w.store.attempt(&builder).unwrap().workspace);
+    // What its build left goes through the same trash, right when it ends.
+    for _ in 0..500 {
+        if !workspace.with_file_name("trash").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let pass = w.engine.free_old_copies();
+    assert_eq!((pass.freed, pass.failed), (vec![run.clone()], vec![]));
+    assert!(!workspace.exists());
+
+    let after = ok(&call(&client, "get_step", json!({ "attempt": builder })).await);
+    assert_eq!(after["diff"], before["diff"]);
+    assert_eq!(after["filesChanged"], before["filesChanged"]);
+    assert_eq!(after["result"], before["result"]);
+    let part = json!({ "attempt": builder, "part": "prompt" });
+    let (prompt, _) = read_whole(&client, part).await;
+    assert!(prompt.contains("Fix the bug"), "{prompt}");
+    ok(&call(&client, "get_run", json!({ "run": run })).await);
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_check_that_printed_a_lot_shows_how_it_ended_and_reads_whole_in_pieces() {
     keel_harness::needs!(sandbox, sockets);
     let w = world().await;

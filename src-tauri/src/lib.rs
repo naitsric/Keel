@@ -1044,6 +1044,8 @@ pub fn run() {
                     engine.start_board();
                     engine.start_pr_watch();
                     engine.start_issue_watch();
+                    // Until Keel keeps a log of its own, only a Keel started from a terminal shows it.
+                    engine.start_freeing_old_copies(|failed| eprintln!("{failed}"));
                     ready.set();
                     let _ = handle.emit(CHANGED_EVENT, "");
                     // After the tools are known, so no client ever finds Keel half ready.

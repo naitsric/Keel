@@ -503,6 +503,9 @@ pub enum Reason {
     RerunWorkflowMissing {
         workflow: String,
     },
+    /// The run ended long ago and Keel freed the copy it worked in, so no step can run there again
+    /// and its change can't be read from it. What each step did is still on record.
+    CopyFreed,
 }
 
 /// Why a run doesn't count as small. Each is a fact the engine checked for itself, and any one is
@@ -769,6 +772,8 @@ impl Reason {
             // One project that's only read. Its account being signed out must not hold up the rest.
             Self::ReadCopyFailed { .. } => false,
             Self::NewCommandsNeedSetupOrCheck => false,
+            // One run, and one that has ended.
+            Self::CopyFreed => false,
         }
     }
 }
@@ -1132,6 +1137,7 @@ mod tests {
             (Reason::AssistantMayNotRun { client: text() }, false),
             (Reason::RerunWorkflowMissing { workflow: text() }, false),
             (Reason::ContractNotValid { problems: vec![] }, false),
+            (Reason::CopyFreed, false),
         ]
     }
 
@@ -1191,6 +1197,7 @@ mod tests {
             Reason::RerunWorkflowMissing { .. } => 50,
             Reason::NoMatchingRisks { .. } => 51,
             Reason::ContractNotValid { .. } => 52,
+            Reason::CopyFreed => 53,
         }
     }
 
@@ -1204,7 +1211,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=52).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=53).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]

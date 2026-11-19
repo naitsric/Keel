@@ -57,7 +57,9 @@ one of them is part of the change and reaches no agent as a rule until you merge
 
 ## How it isolates agents
 
-- Each run works in its own private clone. Your repo isn't touched.
+- Each run works in its own private clone. Your repo isn't touched. Keel frees the clone 7 days
+  after the run ended, once its pull request is merged or closed, or if it never had one. The
+  audit record stays.
 - Agents can't read your home folder, including your credentials, or reach the network
   beyond the domains a project allows. `docs/m0-report.md` has the tests behind this.
 - Keel uses your own signed-in `claude` and `gh`, and never stores a credential. Agents never

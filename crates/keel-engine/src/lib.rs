@@ -3,6 +3,7 @@
 
 mod board;
 mod brain;
+mod copies;
 mod deliver;
 mod detect;
 mod diffs;
@@ -34,6 +35,7 @@ use std::time::{Duration, Instant};
 
 pub use board::{Board, BoardCard, BoardIssue};
 pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
+pub use copies::{CopiesFreed, CopyNotFreed};
 pub use detect::{CiGap, CiLeftOut, CiWhy, Guess};
 pub use git::{ChangeSize, Git, GitError, Snapshot};
 pub use issues::{CommentFailed, IssueWatch, IssueWatchProblem, MOST_LABEL_CHARS};
@@ -1430,6 +1432,10 @@ impl Engine {
         if store.project_is_removed(&run.project_id)? {
             return Err(Error::Blocked(Reason::ProjectRemoved));
         }
+        // Its steps would start in a new clone with none of the run's work, a delivery included.
+        if self.inner.copy_freed(&run) {
+            return Err(Error::Blocked(Reason::CopyFreed));
+        }
         // An approval answers what was agreed then. Something new agreed would go through on it, and
         // the parts may already be on the board.
         if state == AttemptState::Succeeded && self.inner.agreement(&attempt.run_id)?.is_some() {
@@ -1611,6 +1617,10 @@ impl Engine {
         };
         let workspace = self.inner.workspace(run_id);
         if !workspace.join(".git").exists() {
+            // Nothing to read it from anymore, which isn't a run that changed nothing.
+            if self.inner.copy_freed(&self.inner.store.run(run_id)?) {
+                return Err(Error::Blocked(Reason::CopyFreed));
+            }
             return Ok(String::new());
         }
         Ok(self.git()?.diff_since(&workspace, &base)?)
