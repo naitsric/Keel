@@ -1,11 +1,12 @@
 //! Starts a step and keeps track of it. The output goes to a file, not a pipe, so the agent
 //! and its audit trail both survive if the app dies; a reopened app can reconnect.
 
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -36,6 +37,48 @@ pub fn spawn_step(
         .stderr(Stdio::from(create_private(stderr_file)?))
         .process_group(0);
     command.spawn()
+}
+
+/// Waits for the command and writes down how it ended, whoever is still there to see it. The file
+/// appears whole or not at all, and only once the command is over.
+const KEEPS_EXIT_CODE: &str = r#"file=$1; shift
+"$@"
+code=$?
+umask 077
+printf '%s\n' "$code" > "$file.part" && /bin/mv -f "$file.part" "$file"
+exit "$code"
+"#;
+
+/// Where a command's exit code is kept: beside what it printed.
+pub fn exit_code_file(raw_file: &Path) -> PathBuf {
+    raw_file.with_extension("exit")
+}
+
+/// `program` with `args`, run so that its exit code reaches `exit_code_file(raw_file)` as it ends,
+/// and is the command's own as well. A parent gets the exit code of its child, and a step that
+/// outlives the app has no parent left to get it: the app that reopens reads the file instead. The
+/// shell that waits is Keel's own few lines, and takes the command as arguments, never as text.
+pub fn keeping_exit_code<S: AsRef<OsStr>>(program: &Path, args: &[S], raw_file: &Path) -> Command {
+    let file = exit_code_file(raw_file);
+    // One from before isn't this command's.
+    let _ = std::fs::remove_file(&file);
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", KEEPS_EXIT_CODE, "sh"])
+        .arg(file)
+        .arg(program)
+        .args(args);
+    command
+}
+
+/// The exit code a command left with `keeping_exit_code`, once it has ended. `None` while it runs,
+/// if it was killed before it could say, or if it was started without it.
+pub fn kept_exit_code(raw_file: &Path) -> Option<i32> {
+    std::fs::read_to_string(exit_code_file(raw_file))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// Reads complete lines added to a file since the last call. A partial line stays for later.
@@ -350,6 +393,59 @@ mod tests {
         assert!(has_ended(pid).unwrap());
         assert_eq!(child.wait().unwrap().code(), Some(3));
         assert!(has_ended(pid).is_err(), "nothing left to wait for");
+    }
+
+    /// What the app that reopens goes by: the one that started the command is gone, and only a
+    /// parent is told how its child ended.
+    #[test]
+    fn a_command_leaves_its_exit_code_beside_its_output_for_whoever_comes_later() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = dir.path().join("check-1.log");
+        assert_eq!(exit_code_file(&raw), dir.path().join("check-1.exit"));
+        assert_eq!(kept_exit_code(&raw), None, "nothing ran yet");
+        for (script, code) in [
+            ("exit 0", 0),
+            ("echo out; exit 3", 3),
+            ("kill -TERM $$", 143),
+        ] {
+            let mut child = keeping_exit_code(
+                Path::new("/bin/sh"),
+                &["-c", script, "sh", "it's \"one\""],
+                &raw,
+            )
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+            // The parent still gets it, as it always did.
+            assert_eq!(child.wait().unwrap().code(), Some(code), "{script}");
+            assert_eq!(kept_exit_code(&raw), Some(code), "{script}");
+        }
+        // Starting again forgets how the last one ended, and says nothing until this one has.
+        let mut child = keeping_exit_code(Path::new("/bin/sh"), &["-c", "read line"], &raw)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        assert_eq!(kept_exit_code(&raw), None, "still running");
+        drop(child.stdin.take());
+        assert_eq!(child.wait().unwrap().code(), Some(1));
+        assert_eq!(kept_exit_code(&raw), Some(1));
+        // The arguments reached the command as they were, and the file is the owner's alone.
+        use std::os::unix::fs::PermissionsExt;
+        let mode = exit_code_file(&raw)
+            .metadata()
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0);
+        let said = keeping_exit_code(
+            Path::new("/bin/sh"),
+            &["-c", "printf '%s|' \"$@\"", "sh", "a b", "$HOME", "it's"],
+            &raw,
+        )
+        .output()
+        .unwrap();
+        assert_eq!(String::from_utf8_lossy(&said.stdout), "a b|$HOME|it's|");
     }
 
     #[test]

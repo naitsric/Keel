@@ -11,7 +11,7 @@ use keel_core::{AttemptState, PrState, Reason, StepSpec, ToolProfile, WorkflowSt
 use keel_engine::{Config, CopiesFreed, Engine, Error, RawCheck, StartRun};
 use keel_harness::Tools;
 use keel_store::rusqlite_value::Value;
-use keel_store::{ProjectSettings, Store};
+use keel_store::{NewAttempt, ProjectSettings, Store};
 
 struct World {
     dir: tempfile::TempDir,
@@ -733,6 +733,104 @@ fn trying_a_step_again_in_a_freed_copy_says_it_was_freed_and_starts_nothing() {
     }
     assert_eq!(w.store.attempts_of_run(&run).unwrap().len(), attempts);
     assert_eq!(w.store.run(&run).unwrap().finished_at, ended_at);
+    assert!(!w.workspace(&run).exists(), "no new clone was made");
+}
+
+/// A retry isn't the only way a step starts. A person can send the work back from a check that
+/// failed, and Keel continues by itself a step that a usage limit stopped. Neither starts one in
+/// a clone that's gone: a freed run has ended, and both leave a run that has ended alone.
+#[test]
+fn neither_a_send_back_from_a_failed_check_nor_a_usage_limit_starts_a_step_in_a_freed_copy() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.rejected();
+    // Its record from before it was closed: a check that failed after the builder, and a step
+    // that ran out of usage, whose limit reset long ago.
+    let workflow = vec![
+        builder(),
+        WorkflowStep::Check {
+            id: "check".into(),
+            run: "false".into(),
+        },
+        WorkflowStep::Approval { id: "human".into() },
+    ];
+    let workflow = serde_json::to_string(&workflow).unwrap();
+    w.store
+        .patch_run(&run, &[("workflow", Value::Text(workflow))])
+        .unwrap();
+    let built = w.step(&run, "builder");
+    let record = |id: &str, step: &str, kind: &str, state: AttemptState, reason: Reason| {
+        w.store
+            .add_attempt(&NewAttempt {
+                id: id.into(),
+                run_id: run.clone(),
+                step_id: step.into(),
+                kind: kind.into(),
+                role: "worker".into(),
+                round: 0,
+                number: 2,
+                state: AttemptState::Running,
+                model_requested: "fake".into(),
+                effort: None,
+                tools: if kind == "check" { "check" } else { "build" }.into(),
+                max_turns: None,
+                max_budget_usd: None,
+                language: "en".into(),
+                prompt: "x".into(),
+                system_prompt_sources: "[]".into(),
+                settings: "{}".into(),
+                session_id: id.into(),
+                resumed_from: None,
+                workspace: built.workspace.clone(),
+                raw_path: format!("{}.{id}", built.raw_path),
+                started_at: keel_store::now(),
+            })
+            .unwrap();
+        w.store.set_state(id, state, Some(&reason)).unwrap();
+    };
+    record(
+        "failed-check",
+        "check",
+        "check",
+        AttemptState::Failed,
+        Reason::CheckFailed {
+            exit_code: Some(1),
+            localhost_refused: false,
+            failed_times: None,
+            unchanged: false,
+        },
+    );
+    record(
+        "limited",
+        "builder",
+        "agent",
+        AttemptState::Blocked,
+        Reason::RateLimited {
+            resets_at: Some(1),
+            continues_at: Some(61),
+        },
+    );
+    w.ended(&run, 8);
+    assert_eq!(w.freed(), vec![run.clone()]);
+    let ended_at = w.store.run(&run).unwrap().finished_at;
+    let attempts = w.store.attempts_of_run(&run).unwrap().len();
+
+    assert!(matches!(
+        w.engine.send_back("failed-check", "Fix it"),
+        Err(Error::InvalidState)
+    ));
+    assert_eq!(
+        w.engine.continue_after_limits().unwrap(),
+        Vec::<String>::new()
+    );
+    // And trying either again says the copy is gone, as for any step of the run.
+    for step in ["failed-check", "limited"] {
+        let again = w.engine.retry(step, false);
+        assert_eq!(blocked(again), Reason::CopyFreed, "{step}");
+    }
+    assert_eq!(w.store.attempts_of_run(&run).unwrap().len(), attempts);
+    assert_eq!(w.store.run(&run).unwrap().finished_at, ended_at);
+    assert_eq!(w.store.run(&run).unwrap().round, 0);
     assert!(!w.workspace(&run).exists(), "no new clone was made");
 }
 

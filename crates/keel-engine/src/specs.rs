@@ -346,6 +346,16 @@ fn chars(text: &str) -> usize {
     text.chars().count()
 }
 
+/// How far past its limit a text may go and still be taken as it is, in hundredths of the limit.
+const NEAR_MISS: usize = 15;
+
+/// Whether a text of `length` characters is too long for `limit`. Models count characters loosely,
+/// and one a few over reads the same to the person, so a near miss is taken as it is rather than
+/// spending another turn of the agent on it. Only lengths: how many items a list has is exact.
+fn too_long(length: usize, limit: usize) -> bool {
+    length > limit + limit * NEAR_MISS / 100
+}
+
 /// These are all shown in a line or read as one, so a line break can't fake a heading anywhere.
 pub(crate) fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -363,7 +373,7 @@ impl Spec {
         // Nothing depends on how long these are, so a long one is cut rather than sent back.
         let cut = |text: &mut String| {
             tidy(text);
-            if chars(text) > MAX_LISTED_TEXT {
+            if too_long(chars(text), MAX_LISTED_TEXT) {
                 let kept: String = text.chars().take(MAX_LISTED_TEXT - 1).collect();
                 *text = format!("{}…", kept.trim_end());
             }
@@ -413,7 +423,7 @@ impl Spec {
         let mut problems = Vec::new();
         if self.summary.is_empty() {
             problems.push(SpecProblem::NoSummary);
-        } else if chars(&self.summary) > MAX_SUMMARY {
+        } else if too_long(chars(&self.summary), MAX_SUMMARY) {
             problems.push(SpecProblem::SummaryTooLong {
                 chars: chars(&self.summary),
                 limit: MAX_SUMMARY,
@@ -445,7 +455,7 @@ impl Spec {
                     id: criterion.id.clone(),
                 });
             }
-            if length > MAX_CRITERION {
+            if too_long(length, MAX_CRITERION) {
                 problems.push(SpecProblem::CriterionTooLong {
                     id: criterion.id.clone(),
                     chars: length,
@@ -494,7 +504,7 @@ impl Spec {
             });
         }
         for (index, decided) in own {
-            if chars(&decided.text) > MAX_DECIDED_TEXT {
+            if too_long(chars(&decided.text), MAX_DECIDED_TEXT) {
                 problems.push(SpecProblem::DecidedTooLong {
                     position: index + 1,
                     chars: chars(&decided.text),
@@ -560,7 +570,7 @@ impl Spec {
                 problems.push(SpecProblem::ContractNeedsText { id: id(), position });
             }
             let length = chars(&point.when) + chars(&point.then);
-            if length > MAX_CRITERION {
+            if too_long(length, MAX_CRITERION) {
                 problems.push(SpecProblem::ContractTooLong {
                     id: id(),
                     position,
@@ -657,7 +667,7 @@ impl Spec {
         if question.text.is_empty() {
             problems.push(SpecProblem::QuestionNeedsText { id: id() });
         }
-        if chars(&question.text) > MAX_QUESTION_TEXT {
+        if too_long(chars(&question.text), MAX_QUESTION_TEXT) {
             problems.push(SpecProblem::QuestionTooLong {
                 id: id(),
                 chars: chars(&question.text),
@@ -674,7 +684,7 @@ impl Spec {
         }
         let mut labels = HashSet::new();
         for option in &question.options {
-            if chars(&option.label) > MAX_OPTION_LABEL {
+            if too_long(chars(&option.label), MAX_OPTION_LABEL) {
                 problems.push(SpecProblem::OptionTooLong {
                     id: id(),
                     chars: chars(&option.label),
@@ -2057,6 +2067,9 @@ mod tests {
         let spec = validate_spec(&with("limits", json!(["é".repeat(300)]))).unwrap();
         assert_eq!(spec.limits[0].chars().count(), MAX_LISTED_TEXT);
         assert!(spec.limits[0].ends_with('…'));
+        // One a little over reads whole, with nothing cut off its end.
+        let spec = validate_spec(&with("limits", json!(["é".repeat(211)]))).unwrap();
+        assert_eq!(spec.limits[0], "é".repeat(211));
     }
 
     fn question(id: &str, text: &str, options: &[(&str, bool)]) -> Value {
@@ -2086,9 +2099,9 @@ mod tests {
         let at_the_limit = with("summary", json!("ñ".repeat(MAX_SUMMARY)));
         assert!(validate_spec(&at_the_limit).is_ok(), "twice as many bytes");
         assert_eq!(
-            problems(with("summary", json!("ñ".repeat(MAX_SUMMARY + 1)))),
+            problems(with("summary", json!("ñ".repeat(231)))),
             [SpecProblem::SummaryTooLong {
-                chars: 201,
+                chars: 231,
                 limit: 200
             }]
         );
@@ -2105,10 +2118,10 @@ mod tests {
             [SpecProblem::TooManyCriteria { count: 8, limit: 7 }]
         );
         assert_eq!(
-            problems(with("criteria", json!([criterion(1, 150, 51)]))),
+            problems(with("criteria", json!([criterion(1, 150, 81)]))),
             [SpecProblem::CriterionTooLong {
                 id: "C1".into(),
-                chars: 201,
+                chars: 231,
                 limit: 200
             }]
         );
@@ -2129,12 +2142,79 @@ mod tests {
             [SpecProblem::TooManyDecided { count: 6, limit: 5 }]
         );
         assert_eq!(
-            problems(with("decided", json!([one("x".repeat(141))]))),
+            problems(with("decided", json!([one("x".repeat(162))]))),
             [SpecProblem::DecidedTooLong {
                 position: 1,
-                chars: 141,
+                chars: 162,
                 limit: 140
             }]
+        );
+    }
+
+    /// Real specs went back for 141 of 140, 211 of 200 and 216 of 200, each at the cost of a second
+    /// turn of the agent. A text up to 15 % over reads the same to the person, so it's taken as it is.
+    #[test]
+    fn a_text_a_little_over_its_limit_is_taken_as_it_is_and_one_far_over_goes_back() {
+        let good = [("Yes", true), ("No", false)];
+        let criterion = |then: usize| json!([{ "id": "C1", "when": "w".repeat(100), "then": "t".repeat(then) }]);
+        let point = |then: usize| json!([{ "when": "w".repeat(100), "then": "t".repeat(then), "projects": ["valora"] }]);
+        // Each text at the most that still fits, and one character more.
+        for (field, of, most) in [
+            (
+                "summary",
+                &(|n| json!("ñ".repeat(n))) as &dyn Fn(usize) -> Value,
+                230,
+            ),
+            ("criteria", &|n| criterion(n - 100), 230),
+            ("decided", &|n| json!([{ "text": "x".repeat(n) }]), 161),
+            (
+                "questions",
+                &|n| json!([question("Q1", &"x".repeat(n), &good)]),
+                161,
+            ),
+            (
+                "questions",
+                &|n| {
+                    json!([question(
+                        "Q1",
+                        "a?",
+                        &[(&"x".repeat(n), true), ("No", false)]
+                    )])
+                },
+                69,
+            ),
+        ] {
+            let spec = validate_spec(&with(field, of(most)));
+            assert!(spec.is_ok(), "{field} of {most}: {spec:?}");
+            assert_eq!(problems(with(field, of(most + 1))).len(), 1, "{field}");
+        }
+        // The ones a real run went back for.
+        for (field, value) in [
+            ("decided", json!([{ "text": "x".repeat(141) }])),
+            ("summary", json!("x".repeat(211))),
+            ("criteria", criterion(116)),
+        ] {
+            let Verdict::Ready(output) = judge(Some(&with(field, value.clone())), false, 0) else {
+                panic!("{field} went back")
+            };
+            // As it was written, with nothing cut.
+            if field == "summary" {
+                assert_eq!(output[field], value);
+            }
+        }
+        // A point of the contract goes by the same limit as a criterion.
+        let contract = |then: usize| {
+            let mut output = agreed(json!([part("valora", "x")]), json!([]));
+            output["contract"] = point(then);
+            judged(&output)
+        };
+        assert!(matches!(contract(130), Verdict::Ready(_)));
+        assert!(matches!(contract(131), Verdict::Correct(_)));
+        // How many items a list has is exact, as it was.
+        let six: Vec<Value> = (0..6).map(|_| json!({ "text": "x" })).collect();
+        assert_eq!(
+            problems(with("decided", json!(six))),
+            [SpecProblem::TooManyDecided { count: 6, limit: 5 }]
         );
     }
 
@@ -2186,27 +2266,27 @@ mod tests {
             );
         }
 
-        // Written past the 120 it was asked for, a decision still fits. Past the 140 Keel takes,
-        // it goes back once, saying which one and by how much.
+        // Written past the 120 it was asked for, a decision still fits. Far past the 140 Keel
+        // takes, it goes back once, saying which one and by how much.
         let decided = |chars: usize| with("decided", json!([{ "text": "x".repeat(chars) }]));
         assert!(matches!(
             judge(Some(&decided(140)), false, 0),
             Verdict::Ready(_)
         ));
-        let Verdict::Correct(problems) = judge(Some(&decided(141)), false, 0) else {
+        let Verdict::Correct(problems) = judge(Some(&decided(162)), false, 0) else {
             panic!()
         };
         assert_eq!(
             problems,
             [SpecProblem::DecidedTooLong {
                 position: 1,
-                chars: 141,
+                chars: 162,
                 limit: 140
             }]
         );
         assert!(
             correction_prompt(&problems, "en")
-                .contains("Item 1 of `decided` has 141 characters, and the limit is 140.")
+                .contains("Item 1 of `decided` has 162 characters, and the limit is 140.")
         );
         // The fix is asked for below the limit too, or it may miss it again by one and stop.
         assert!(
@@ -2234,10 +2314,10 @@ mod tests {
             [SpecProblem::TooManyQuestions { count: 4, limit: 3 }]
         );
         assert_eq!(
-            of(json!([question("Q1", &"x".repeat(141), &good)])),
+            of(json!([question("Q1", &"x".repeat(162), &good)])),
             [SpecProblem::QuestionTooLong {
                 id: "Q1".into(),
-                chars: 141,
+                chars: 162,
                 limit: 140
             }]
         );
@@ -2261,7 +2341,7 @@ mod tests {
             of(json!([question("Q1", "a?", &five)]))[0],
             SpecProblem::WrongNumberOfOptions { count: 5, .. }
         ));
-        let long = "x".repeat(61);
+        let long = "x".repeat(70);
         assert_eq!(
             of(json!([question(
                 "Q1",
@@ -2270,7 +2350,7 @@ mod tests {
             )])),
             [SpecProblem::OptionTooLong {
                 id: "Q1".into(),
-                chars: 61,
+                chars: 70,
                 limit: 60
             }]
         );
@@ -2977,7 +3057,7 @@ mod tests {
     #[test]
     fn a_limit_a_spec_line_breaks_is_told_by_the_spec_s_own_numbers() {
         let asked = typed("Decided:\n- Old threads stay.");
-        let decided = json!([{ "text": "Old threads stay." }, { "text": "Own" }, { "text": "x".repeat(141) }]);
+        let decided = json!([{ "text": "Old threads stay." }, { "text": "Own" }, { "text": "x".repeat(162) }]);
         let Verdict::Correct(problems) =
             super::judge(Some(&with("decided", decided)), &asked, false, 0)
         else {
@@ -2987,7 +3067,7 @@ mod tests {
             problems,
             [SpecProblem::DecidedTooLong {
                 position: 3,
-                chars: 141,
+                chars: 162,
                 limit: 140
             }]
         );
@@ -3192,7 +3272,7 @@ mod tests {
             "questions",
             json!([question("Q1", "a?", &[("Yes", true), ("No", false)])]),
         );
-        let broken = with("summary", json!("x".repeat(201)));
+        let broken = with("summary", json!("x".repeat(231)));
 
         assert!(matches!(judge(Some(&valid()), false, 0), Verdict::Ready(_)));
         assert!(matches!(judge(Some(&valid()), true, 2), Verdict::Ready(_)));
@@ -3684,11 +3764,11 @@ mod tests {
             }]
         );
         assert_eq!(
-            problems(json!([point(&"x".repeat(180), &["valora"])])),
+            problems(json!([point(&"x".repeat(210), &["valora"])])),
             [SpecProblem::ContractTooLong {
                 id: "K1".into(),
                 position: 1,
-                chars: 180 + 24,
+                chars: 210 + 24,
                 limit: MAX_CRITERION
             }]
         );
@@ -3717,7 +3797,7 @@ mod tests {
         let fine = point("a", &["valora"]);
         for contract in [
             json!([fine, { "when": "a", "then": " ", "projects": ["valora"] }]),
-            json!([fine, point(&"x".repeat(180), &["valora"])]),
+            json!([fine, point(&"x".repeat(210), &["valora"])]),
             json!([fine, point("a", &["valora", "dupplaBack"])]),
             json!([fine, point("a", &["back-adm"])]),
         ] {

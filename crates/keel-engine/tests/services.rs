@@ -463,7 +463,9 @@ fn with_localhost_closed_no_step_can_start_a_server_and_the_check_says_why() {
         reason_of(&tests),
         Reason::CheckFailed {
             exit_code: Some(1),
-            localhost_refused: true
+            localhost_refused: true,
+            failed_times: None,
+            unchanged: false,
         },
         "{}",
         w.check_output(&tests)
@@ -479,7 +481,9 @@ fn with_localhost_closed_no_step_can_start_a_server_and_the_check_says_why() {
         reason_of(&other),
         Reason::CheckFailed {
             exit_code: Some(3),
-            localhost_refused: false
+            localhost_refused: false,
+            failed_times: None,
+            unchanged: false,
         }
     );
 
@@ -550,7 +554,9 @@ fn with_localhost_open_the_check_and_the_builder_get_it_and_setup_does_not() {
         reason_of(&w.wait_done(&run, "prints")),
         Reason::CheckFailed {
             exit_code: Some(1),
-            localhost_refused: false
+            localhost_refused: false,
+            failed_times: None,
+            unchanged: false,
         }
     );
 

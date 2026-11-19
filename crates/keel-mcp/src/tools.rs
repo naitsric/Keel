@@ -374,8 +374,9 @@ pub struct DraftAgent {
     pub id: String,
     /// `fable`, `opus`, `sonnet`, `haiku` or a full model id.
     pub model: String,
-    /// What it's told to do. It can use {{request}}, {{diff}}, {{rework}}, {{answers}}, {{check}}, {{trail}} and
-    /// {{steps.<id>.output}}. {{trail}} is what the builder said each round and the checks that failed.
+    /// What it's told to do. It can use {{request}}, {{diff}}, {{rework}}, {{answers}}, {{check}}, {{builder}},
+    /// {{trail}} and {{steps.<id>.output}}. {{builder}} is what the builder said when it finished the round, and
+    /// {{trail}} is what it said each round and the checks that failed.
     pub prompt: String,
     /// What it may do. Read-only unless you say otherwise.
     #[serde(default)]
@@ -1733,6 +1734,10 @@ impl McpServer {
         });
         if left_out > 0 {
             view["earlierAttemptsLeftOut"] = json!(left_out);
+        }
+        // Left out when Keel doesn't know, so that nothing reads it as none.
+        if let Some(added) = run.pr_commits_added {
+            view["prCommitsAdded"] = json!(added);
         }
         // Only while it can still be retried with them. It's extra, and not finding out mustn't
         // hide the run.

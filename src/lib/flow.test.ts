@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AttemptState, StepRole, StepSpec, WorkflowStep } from "./api";
-import { allNodes, attemptChoices, type FlowAttempt, flowOf, layoutFlow, nextItem, nodeOfAttempt, nodeWithKey, parseSteps, pathKey, pathOfKey, problemKeys, scrollToShow, canSendBack, reworkIndex, isReadOnlyTask } from "./flow";
+import { allNodes, attemptChoices, type FlowAttempt, flowOf, layoutFlow, nextItem, nodeOfAttempt, nodeWithKey, parseSteps, pathKey, pathOfKey, problemKeys, scrollToShow, canSendBack, canSendBackFromCheck, reworkIndex, isReadOnlyTask } from "./flow";
 
 const spec = (id: string, model = "sonnet", role?: StepRole): StepSpec => ({ id, model, effort: null, tools: "readOnly", prompt: "p", maxTurns: null, maxBudgetUsd: null, ...(role ? { role } : {}) });
 const agent = (id: string, model = "sonnet", role?: StepRole): WorkflowStep => ({ type: "agent", ...spec(id, model, role) });
@@ -167,6 +167,23 @@ describe("where work goes back to", () => {
     expect(nodeWithKey(flow, "0")).toMatchObject({ outdated: false });
     expect(nodeWithKey(flow, "2")).toMatchObject({ outdated: true });
     expect(nodeWithKey(flow, "3")).toMatchObject({ state: "returned", outdated: true });
+  });
+
+  it("doesn't count a failed check Keel sent back as the approver's doing either", () => {
+    const failed = attempt("check", "returned", { kind: "check" });
+    expect(flowOf(FULL, [failed, attempt("builder", "running", { round: 1, number: 2 })], 1).reworks[0].times).toBe(0);
+    // The check that went back reads as out of date, not as a step that waits for anyone.
+    expect(nodeWithKey(flowOf(FULL, [failed, attempt("builder", "running", { round: 1, number: 2 })], 1), "2")).toMatchObject({ state: "returned", outdated: true });
+  });
+
+  it("lets a person send the work back from a failed check only when a builder comes before it", () => {
+    const check = { type: "check", id: "check", run: "x" } as WorkflowStep;
+    expect(canSendBackFromCheck([reader("spec"), worker("builder"), check, human], "check")).toBe(true);
+    expect(canSendBackFromCheck([worker("builder"), check, approver("approver", "builder"), human], "check")).toBe(true);
+    expect(canSendBackFromCheck([check], "check")).toBe(false);
+    expect(canSendBackFromCheck([check, worker("builder"), human], "check")).toBe(false);
+    expect(canSendBackFromCheck([reader("spec"), check, human], "check")).toBe(false);
+    expect(canSendBackFromCheck([worker("builder"), check, human], "builder")).toBe(false);
   });
 
   it("doesn't count what a person sent back as the approver's doing", () => {

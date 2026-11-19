@@ -20,6 +20,27 @@ describe("a check whose tests were refused localhost", () => {
   });
 });
 
+describe("a failed check Keel didn't send back to the builder by itself", () => {
+  it("says how many times it failed and that Keel already sent it back, in both languages", () => {
+    const atTheLimit = { code: "checkFailed", exitCode: 2, failedTimes: 3 };
+    expect(reasonText(t("en"), atTheLimit)).toBe("The check failed 3 times, the last with code 2. Keel already sent the work back to the builder, and won't again on its own. It's your call now.");
+    expect(reasonText(t("es"), atTheLimit)).toBe("La verificación falló 3 veces, la última con código 2. Keel ya le devolvió el trabajo al builder, y no lo hará otra vez por su cuenta. Ahora decides tú.");
+  });
+
+  it("doesn't say it failed 1 times when the approver had used the rounds", () => {
+    const once = { code: "checkFailed", exitCode: 1, failedTimes: 1 };
+    expect(reasonText(t("en"), once)).toBe("The check failed with code 1. This work had already gone back as often as Keel sends it on its own, so it's your call now.");
+    expect(reasonText(t("es"), once)).toBe("La verificación falló con código 1. El trabajo ya se había devuelto las veces que Keel lo devuelve por su cuenta, así que ahora decides tú.");
+  });
+
+  it("says it failed again and the builder had changed nothing, so it didn't go back again", () => {
+    const unchanged = { code: "checkFailed", exitCode: 1, unchanged: true };
+    expect(reasonText(t("en"), unchanged)).toBe("The check failed again with code 1. The work had gone back, but the builder changed nothing, so Keel didn't send it back again. It's your call now.");
+    expect(reasonText(t("es"), unchanged)).toBe("La verificación volvió a fallar con código 1. El trabajo se había devuelto, pero el builder no cambió nada, así que Keel no lo devolvió otra vez. Ahora decides tú.");
+    expect(needsProjectSettings(unchanged)).toBe(false);
+  });
+});
+
 describe("reasonText", () => {
   it("names the stuck command, in both languages", () => {
     const reason = { code: "stalled", command: "uv run pytest", minutes: 11, cpuPercent: 0.2 };
@@ -34,6 +55,22 @@ describe("reasonText", () => {
   it("gives the reset time of a usage limit when known", () => {
     expect(reasonText(t("en"), { code: "rateLimited", resetsAt: 1800000000 })).toContain("resets");
     expect(reasonText(t("en"), { code: "rateLimited", resetsAt: null })).not.toContain("resets");
+  });
+
+  it("says when Keel will continue a step by itself after a usage limit", () => {
+    const resetsAt = Math.floor(Date.now() / 1000) + 3600;
+    const continues = { code: "rateLimited", resetsAt, continuesAt: resetsAt + 60 };
+    const english = reasonText(t("en"), continues);
+    expect(english).toContain("Keel will continue this step by itself");
+    expect(english).toContain(new Intl.DateTimeFormat("en", { dateStyle: "medium", timeStyle: "short" }).format(new Date((resetsAt + 60) * 1000)));
+    expect(reasonText(t("es"), continues)).toContain("Keel continuará este paso por su cuenta");
+    // One it won't continue waits for the person, and says what it always said.
+    expect(reasonText(t("en"), { code: "rateLimited", resetsAt })).not.toContain("by itself");
+    expect(reasonText(t("en"), { code: "rateLimited", resetsAt })).toContain("resets");
+    // Once that time is behind, it's no longer something to come.
+    const past = { code: "rateLimited", resetsAt: 1700000000, continuesAt: 1700000060 };
+    expect(reasonText(t("en"), past)).not.toContain("by itself");
+    expect(reasonText(t("en"), past)).toContain("resets");
   });
 
   it("does not escape commands or paths", () => {

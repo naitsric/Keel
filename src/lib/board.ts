@@ -162,11 +162,18 @@ export function cardLabel(t: TFunction, card: BoardCard): CardLabel | null {
     case "done":
       if (!card.prState) return null;
       // Only while it can still be merged: a red CI is what's in the way.
-      if (card.prCi === "failed" && (card.prState === "open" || card.prState === "draft")) return { state: "failed", label: t(`board.pr.${card.prState}`), detail: card.prCiFailed.length > 0 ? t("board.ciFailed", { checks: card.prCiFailed.join(", ") }) : t("board.ciFailedUnnamed") };
-      return { state: PR_BADGES[card.prState], label: t(`board.pr.${card.prState}`), detail: card.prStateAt && (card.prState === "merged" || card.prState === "closed") ? formatDateTime(card.prStateAt) : null };
+      if (card.prCi === "failed" && (card.prState === "open" || card.prState === "draft")) return { state: "failed", label: t(`board.pr.${card.prState}`), detail: withCommitsAdded(t, card, card.prCiFailed.length > 0 ? t("board.ciFailed", { checks: card.prCiFailed.join(", ") }) : t("board.ciFailedUnnamed")) };
+      return { state: PR_BADGES[card.prState], label: t(`board.pr.${card.prState}`), detail: withCommitsAdded(t, card, card.prStateAt && (card.prState === "merged" || card.prState === "closed") ? formatDateTime(card.prStateAt) : null) };
     default:
       return null;
   }
+}
+
+/** What a done card says under its pull request, and after it how many commits were added once Keel delivered, when some were. */
+function withCommitsAdded(t: TFunction, card: BoardCard, detail: string | null): string | null {
+  if (!card.prCommitsAdded) return detail;
+  const added = t("board.commitsAdded", { count: card.prCommitsAdded });
+  return detail ? `${detail} · ${added}` : added;
 }
 
 export const partText = (t: TFunction, part: PartOf) => t("board.joint.part", { position: part.position, total: part.total });

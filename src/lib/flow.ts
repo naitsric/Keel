@@ -117,6 +117,17 @@ export function canSendBack(steps: WorkflowStep[], approvalId: string): boolean 
   return from !== null && at >= 0 && from < at;
 }
 
+/**
+ * Whether a person can send the work back from this check when it failed, like `has_a_builder_before`
+ * in the engine: what does the work again comes before it, with a step that can change files.
+ */
+export function canSendBackFromCheck(steps: WorkflowStep[], checkId: string): boolean {
+  const from = reworkIndex(steps);
+  const at = steps.findIndex((s) => s.type === "check" && s.id === checkId);
+  if (from === null || at < 0 || from >= at) return false;
+  return steps.slice(from, at).some((s) => (s.type === "agent" && s.tools === "build") || (s.type === "parallel" && s.steps.some((member) => member.tools === "build")));
+}
+
 function reworksOf(steps: WorkflowStep[], attempts: FlowAttempt[], round: number): FlowRework[] {
   const approvers = steps.flatMap((step, from) => (step.type === "agent" && step.role?.kind === "approver" ? [{ id: step.id, role: step.role, from }] : []));
   return approvers.flatMap(({ id, role, from }) => {

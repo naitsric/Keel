@@ -7,17 +7,20 @@ what each step did, and keeps an audit record you can check. A person always dec
 **Status: early, macOS only.** Keel takes a request from the app or a GitHub issue and works out
 what it will change. If something can only be decided by you, the run stops and asks. It recommends
 an option only when the code or the request backs one up, and taking it costs nothing. When nothing
-does, such as an amount or a business rule, it recommends none and you choose. A builder does the work and a check runs. Then
+does, such as an amount or a business rule, it recommends none and you choose. A builder does the work and a check runs.
+If the check fails, the work goes back to the builder with what it printed. Then
 an agent goes through what was asked and says what a test really proves and what nothing does.
-Reviewers look at the change at the same time, and an approver can send the work back, at most
-twice, and every review runs again. Then a person approves, and Keel opens a draft pull request. At
+Reviewers look at the change at the same time, and an approver can send the work back too, and
+every review runs again. A run goes back at most twice on its own, counting both, and after that
+you decide. Then a person approves, and Keel opens a draft pull request. At
 that approval you can also change anything it decided on its own, which sends the work back without
 starting over. You can edit each project's workflows in the app. See the
 [M0 report](docs/m0-report.md) for what's behind the isolation.
 
 Keel looks up what became of each pull request it opened, and never writes to one again. The
 **Workflows** page compares workflows with that: what got merged, at what cost, how often work went
-back, and how often a run stopped to ask.
+back, and how often a run stopped to ask. It also says how many were merged as Keel delivered
+them, with no commit added afterwards, and a merge of the base branch doesn't count as one.
 
 ## A workflow that fits the change
 
@@ -26,6 +29,8 @@ decides that itself from what it can see, and an agent or an issue saying so doe
 
 - What was asked was worked out as small, with no risks named, such as money or personal data.
 - The project's check passed, on this code. With no check, nothing is ever small.
+- The check never failed on the way. Once it has sent the work back, the reviews look at how it
+  was made to pass.
 - The run doesn't come from an issue by anyone other than the project's GitHub account, or from an
   assistant over MCP.
 - The change touches nothing sensitive: `.github/`, build and dependency files, test settings,
@@ -91,8 +96,9 @@ one of them is part of the change and reaches no agent as a rule until you merge
 
 ## Secrets in what it shows
 
-Keel hides known secrets when it shows a run, when an assistant reads one over MCP, and in a pull
-request's title and description. The audit record and what agents receive keep the original.
+Keel hides known secrets when it shows a run, when an assistant reads one over MCP, in a pull
+request's title and description, and in its own error log. The audit record and what agents receive
+keep the original.
 
 It goes by known token shapes and names like `API_KEY`, so some secrets will slip through. It also
 doesn't stop a secret an agent committed from being pushed with the branch, so review the draft
@@ -118,6 +124,16 @@ You need:
 
 The first screen checks these and says how to get what's missing.
 
+## If something goes wrong
+
+Keel writes down what fails with nowhere to show it, such as a step whose result couldn't be saved,
+and what it was doing if it closes on its own. That goes in `keel.log`, in
+`~/Library/Application Support/io.github.naitsric.keel`, and **Navigate → Show Keel's error log in
+Finder** takes you to it. The file stays under 1 MB, with one older file next to it.
+
+If Keel can't open its data when it starts, it says why and closes. It won't open data that a newer
+Keel has used, because it would damage it, and it leaves that data as it was.
+
 ## Develop
 
 ```bash
@@ -127,6 +143,20 @@ pnpm test             # UI tests
 pnpm check:i18n       # English and Spanish stay complete
 cargo test --workspace
 ```
+
+`pnpm app` runs a Keel built from the branch you're on, next to the one you installed, and the two
+share nothing either writes. The branch build keeps its data in
+`~/Library/Application Support/io.github.naitsric.keel.dev` and its runs in `~/.keel-dev`, and its
+MCP server is `keel-dev`, on port 7414 unless you change it. It never opens the installed Keel's
+database. It does use your `claude` and `gh`, so its runs spend your Claude usage and its pull
+requests are real. Delete those two folders to start it from nothing. Two branch builds share them,
+so only one runs at a time.
+
+How the database is laid out changes one numbered migration at a time, in `MIGRATIONS` in
+`crates/keel-store/src/lib.rs`. Only ever add one at the end. A database keeps a hash of each one
+it ran, and Keel refuses to open one where a migration differs from its own, as happens when two
+branches each add the next number, or one that has more than it knows. `cargo test` fails if a
+migration that shipped is edited or moved.
 
 Inside a sandbox, as when Keel runs this project's check, macOS won't let a test start a sandbox
 of its own, open a local socket or run `ps`. The tests that need one of these print

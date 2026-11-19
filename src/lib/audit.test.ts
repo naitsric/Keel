@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { Attempt, AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, agentCouldHaveWritten, answersIn, approvalOutcome, askedText, breakableIds, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, findingsOf, focusAttempt, gist, latestOfEachStep, localhostOpenIn, notProvenInRound, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows, whyNotProven } from "./audit";
+import { accountsOf, activityFrom, agentCouldHaveWritten, answersIn, approvalOutcome, askedText, breakableIds, checkSentBackInto, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, findingsOf, focusAttempt, gist, latestOfEachStep, localhostOpenIn, notProvenInRound, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows, whyNotProven } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -478,6 +478,23 @@ describe("what a review found", () => {
     expect(findingsOf(null, breakable)).toEqual([]);
     expect(findingsOf({ verdict: "approved" }, breakable)).toEqual([]);
     expect(findingsOf({ findings: "Not a list" }, breakable)).toEqual([]);
+  });
+});
+
+describe("a round that began with a failed check Keel sent back", () => {
+  const check = (round: number, state: string, output: unknown = null) => ({ kind: "check", state, round, output });
+
+  it("is the one right after the check that went back", () => {
+    const attempts = [check(0, "returned"), { kind: "agent", state: "running", round: 1, output: null }];
+    expect(checkSentBackInto(attempts, 1)).toBe(true);
+    expect(checkSentBackInto(attempts, 0)).toBe(false);
+    expect(checkSentBackInto(attempts, 2)).toBe(false);
+  });
+
+  it("isn't one a person sent back from the check, or from their approval", () => {
+    expect(checkSentBackInto([check(0, "returned", { instructions: "Use the other parser" })], 1)).toBe(false);
+    expect(checkSentBackInto([{ kind: "approval", state: "returned", round: 0, output: { instructions: "Rename it" } }], 1)).toBe(false);
+    expect(checkSentBackInto([check(0, "failed")], 1)).toBe(false);
   });
 });
 

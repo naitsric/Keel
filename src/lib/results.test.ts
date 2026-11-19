@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { WorkflowResults } from "./api";
 import i18next from "../i18n";
-import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE, matchedShare, movedUpReasons } from "./results";
+import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE, matchedShare, mergedAsDelivered, movedUpReasons } from "./results";
 
-const results = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "w", workflowName: "W", runs: 0, finished: 0, merged: 0, closed: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0, shortRoute: 0, movedUp: 0, movedUpBecause: [], ...fields });
+const results = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "w", workflowName: "W", runs: 0, finished: 0, merged: 0, closed: 0, mergedAsDelivered: 0, mergedCounted: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0, shortRoute: 0, movedUp: 0, movedUpBecause: [], ...fields });
 
 describe("averages", () => {
   it("wait for enough merged pull requests or finished runs", () => {
@@ -26,6 +26,16 @@ describe("how often answers took the recommended option", () => {
   it("says nothing until there are enough answers to go on", () => {
     expect(matchedShare(results({ answers: ENOUGH_FOR_AN_AVERAGE - 1, answersRecommended: 1 }))).toBeNull();
     expect(matchedShare(results({ answers: 4, answersRecommended: 3 }))).toBe(0.75);
+  });
+});
+
+describe("how many pull requests were merged as Keel delivered them", () => {
+  it("counts only the merged ones where Keel knows what was added", () => {
+    expect(mergedAsDelivered(results({ merged: 12, mergedAsDelivered: 3, mergedCounted: 9 }))).toEqual({ same: 3, known: 9 });
+    expect(mergedAsDelivered(results({ merged: 2, mergedAsDelivered: 0, mergedCounted: 2 }))).toEqual({ same: 0, known: 2 });
+    // None merged, or merged and Keel doesn't know: nothing to say, which isn't "0 of 0".
+    expect(mergedAsDelivered(results({ merged: 0 }))).toBeNull();
+    expect(mergedAsDelivered(results({ merged: 4, mergedAsDelivered: 0, mergedCounted: 0 }))).toBeNull();
   });
 });
 

@@ -93,6 +93,20 @@ impl Monitor {
     }
 }
 
+impl Monitor {
+    /// How a setup or check that outlived the app ended, going by the exit code it left (see
+    /// `process::keeping_exit_code`), which is all Keel has then. `None` while it runs, for one an
+    /// older Keel started, and for an agent, which says how it ended in what it writes. An exit
+    /// code above 128 is the shell's word for a signal: logging out, a kill, or its services going
+    /// with the app. That isn't the check failing, so there's no code to go by, as before.
+    fn ended_while_away(&self) -> Option<Option<i32>> {
+        matches!(self.kind.as_str(), "check" | "setup")
+            .then(|| process::kept_exit_code(&self.raw_path))
+            .flatten()
+            .map(|code| (code <= 128).then_some(code))
+    }
+}
+
 /// Whether one of the project's allowed domains is `host` or a subdomain of it.
 fn allows_host(domains: &[String], host: &str) -> bool {
     domains.iter().any(|domain| {
@@ -325,9 +339,7 @@ impl Inner {
                 return true;
             };
             if last_reason.as_ref() != Some(&reason) {
-                let _ = self
-                    .store
-                    .set_state(attempt_id, AttemptState::Queued, Some(&reason));
+                self.keep_state(attempt_id, AttemptState::Queued, Some(&reason));
                 self.changed(run_id);
                 last_reason = Some(reason);
             }
@@ -363,6 +375,34 @@ impl Inner {
         self.slot_freed.notify_all();
     }
 
+    /// Ends a step that couldn't be picked up again as one whose process died ends: interrupted,
+    /// for a person to retry. Nothing watches it, so it mustn't go on showing as running, or keep
+    /// a place among the agents or its project's turn, which picking it up may have taken before
+    /// failing. A process it still has is ended too: nothing would ever read what it did, and a
+    /// retry would work on the same copy beside it. What can't be written here goes to the log.
+    pub(crate) fn end_unrecovered(self: &Arc<Self>, attempt: &Attempt) {
+        if let (Some(pid), Some(started)) = (attempt.pid, &attempt.pid_started)
+            && process::is_same_process(pid as i32, started)
+        {
+            process::signal_group(pid as i32, process::SIGKILL);
+        }
+        {
+            let mut slots = locked(&self.slots);
+            slots.active.remove(&attempt.id);
+            // Without the project's id, which may be what couldn't be read.
+            slots
+                .command_steps
+                .retain(|_, turn| turn.attempt_id != attempt.id);
+        }
+        self.slot_freed.notify_all();
+        self.end_early(
+            &attempt.id,
+            &attempt.run_id,
+            AttemptState::Interrupted,
+            Some(Reason::AgentLost),
+        );
+    }
+
     pub(crate) fn end_early(
         self: &Arc<Self>,
         attempt_id: &str,
@@ -370,11 +410,9 @@ impl Inner {
         state: AttemptState,
         reason: Option<Reason>,
     ) {
-        let _ = self.store.set_state(attempt_id, state, reason.as_ref());
-        let _ = self
-            .store
-            .patch_attempt(attempt_id, &[("finished_at", Value::Text(now()))]);
-        let _ = self.store.append_event(
+        self.keep_state(attempt_id, state, reason.as_ref());
+        self.keep_fields(attempt_id, &[("finished_at", Value::Text(now()))]);
+        self.record_event(
             attempt_id,
             "finished",
             &json!({ "state": state.as_str(), "reason": reason }),
@@ -756,16 +794,19 @@ impl Inner {
             return Ok(None);
         }
         std::fs::write(&prompt_file, "")?;
-        let mut command = std::process::Command::new("/usr/bin/sandbox-exec");
-        command
-            .args(["-p", &profile, "/bin/sh", "-c", command_text])
-            .current_dir(&workspace)
-            .env_clear()
-            .envs(
-                keel_harness::clean_env(&tools.path_env)
-                    .into_iter()
-                    .filter(|(name, _)| !name.starts_with("CLAUDE_") && !name.starts_with("BASH_")),
-            );
+        // Its exit code goes to a file as well, for the app that reopens while it runs: see
+        // `process::keeping_exit_code`. What waits for it is outside the sandbox, where the
+        // command can't write that file.
+        let mut command = process::keeping_exit_code(
+            std::path::Path::new("/usr/bin/sandbox-exec"),
+            &["-p", &profile, "/bin/sh", "-c", command_text],
+            &raw_path,
+        );
+        command.current_dir(&workspace).env_clear().envs(
+            keel_harness::clean_env(&tools.path_env)
+                .into_iter()
+                .filter(|(name, _)| !name.starts_with("CLAUDE_") && !name.starts_with("BASH_")),
+        );
         screenshots::empty(&workspace, &dir)?;
         let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
         // A setup before any agent that can write writes to the project's home. Anything else
@@ -870,7 +911,9 @@ impl Inner {
                 slots.command_steps.entry(project_id).or_insert(turn);
             }
         }
-        if alive {
+        // A setup or check that left its exit code is over, whatever its pid looks like now.
+        let ended = context.ended_while_away();
+        if alive && ended.is_none() {
             let mut context = context;
             if context.holds_project {
                 // The bridges died with the app. The step may still need them.
@@ -879,7 +922,7 @@ impl Inner {
                 match self.start_services(attempt, &project, &path_env) {
                     Ok((set, _)) => context.services = set,
                     Err(error) => {
-                        let _ = self.store.append_event(
+                        self.record_event(
                             &attempt.id,
                             "servicesLost",
                             &json!({ "error": error.to_string() }),
@@ -890,7 +933,8 @@ impl Inner {
             let inner = self.clone();
             std::thread::spawn(move || inner.monitor(context));
         } else {
-            self.finish(context, None, true);
+            // With its real exit code if it left one. One that didn't, or an agent, was lost.
+            self.finish(context, ended.flatten(), true);
         }
         Ok(())
     }
@@ -934,13 +978,15 @@ impl Inner {
                     }
                 }
                 // Not Keel's child: after a restart, its pid may already be someone else's, so
-                // its group is left alone.
-                None => {
+                // its group is left alone. Nobody tells Keel how it ended either, so a setup or
+                // check says it in a file, which is there as soon as it's over.
+                None => m.ended_while_away().or_else(|| {
                     let alive = m
                         .root_pid
                         .is_some_and(|pid| process::signal_process(pid, 0));
-                    if alive { None } else { Some(None) }
-                }
+                    // Looked at again, since it may have ended between the two looks.
+                    (!alive).then(|| m.ended_while_away().flatten())
+                }),
             };
             if let Some(code) = exit {
                 self.finish(m, code, false);
@@ -977,12 +1023,8 @@ impl Inner {
         if let Ok(attempt) = self.store.attempt(&m.attempt_id)
             && attempt.state == AttemptState::Stalled.as_str()
         {
-            let _ = self
-                .store
-                .set_state(&m.attempt_id, AttemptState::Running, None);
-            let _ = self
-                .store
-                .append_event(&m.attempt_id, "stallCleared", &json!({}));
+            self.keep_state(&m.attempt_id, AttemptState::Running, None);
+            self.record_event(&m.attempt_id, "stallCleared", &json!({}));
         }
     }
 
@@ -1022,15 +1064,11 @@ impl Inner {
                 return;
             };
             let already = attempt.state == AttemptState::Stalled.as_str();
-            let _ = self
-                .store
-                .set_state(&m.attempt_id, AttemptState::Stalled, Some(&reason));
+            self.keep_state(&m.attempt_id, AttemptState::Stalled, Some(&reason));
             already
         };
         if !already {
-            let _ = self
-                .store
-                .append_event(&m.attempt_id, "stalled", &json!({ "reason": reason }));
+            self.record_event(&m.attempt_id, "stalled", &json!({ "reason": reason }));
         }
         self.changed(&m.run_id);
     }
@@ -1039,7 +1077,6 @@ impl Inner {
     /// arrive every 30 s while a command runs, so they are read and saved but are not progress.
     /// Without this, a hung command could never be reported as a stall.
     fn handle_lines(&self, m: &mut Monitor, lines: &[String]) -> bool {
-        let store = &self.store;
         let mut progressed = m.kind != "agent";
         if m.kind == "agent" {
             for line in lines {
@@ -1058,12 +1095,11 @@ impl Inner {
         if progressed {
             fields.push(("last_activity_at", Value::Text(now())));
         }
-        let _ = store.patch_attempt(&m.attempt_id, &fields);
+        self.keep_fields(&m.attempt_id, &fields);
         progressed
     }
 
     fn handle_parsed(&self, m: &mut Monitor, parsed: Parsed) {
-        let store = &self.store;
         match parsed {
             Parsed::Init {
                 session_id,
@@ -1073,14 +1109,14 @@ impl Inner {
                 permission_mode,
                 cli_version,
             } => {
-                let _ = store.patch_attempt(
+                self.keep_fields(
                     &m.attempt_id,
                     &[
                         ("model_actual", text_value(model.clone())),
                         ("api_key_source", text_value(api_key_source.clone())),
                     ],
                 );
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "init",
                     &json!({ "sessionId": session_id, "model": model, "tools": tools, "apiKeySource": api_key_source, "permissionMode": permission_mode, "cliVersion": cli_version }),
@@ -1109,7 +1145,7 @@ impl Inner {
                 }
             }
             Parsed::AssistantText { text } => {
-                let _ = store.append_event(&m.attempt_id, "text", &json!({ "text": text }));
+                self.record_event(&m.attempt_id, "text", &json!({ "text": text }));
             }
             Parsed::ToolCall {
                 id,
@@ -1117,7 +1153,7 @@ impl Inner {
                 input,
                 parent,
             } => {
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "toolCall",
                     &json!({ "id": id, "name": name, "input": input, "parent": parent }),
@@ -1135,17 +1171,17 @@ impl Inner {
                 } else {
                     text
                 };
-                let _ = store.append_event(&m.attempt_id, "toolResult", &json!({ "id": id, "isError": is_error, "text": kept, "truncated": truncated, "exitCode": exit_code }));
+                self.record_event(&m.attempt_id, "toolResult", &json!({ "id": id, "isError": is_error, "text": kept, "truncated": truncated, "exitCode": exit_code }));
             }
             Parsed::ApiRetry { attempt, error } => {
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "apiRetry",
                     &json!({ "attempt": attempt, "error": error }),
                 );
             }
             Parsed::PermissionDenied { tool, detail } => {
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "permissionDenied",
                     &json!({ "tool": tool, "detail": detail }),
@@ -1155,18 +1191,23 @@ impl Inner {
                 status,
                 resets_at,
                 kind,
+                using_overage,
             } => {
-                if status.as_deref() == Some("rejected") {
-                    m.block = Some(Reason::RateLimited { resets_at });
+                // On extra usage the request was served, and `rejected` is only about the plan.
+                if status.as_deref() == Some("rejected") && !using_overage {
+                    m.block = Some(Reason::RateLimited {
+                        resets_at,
+                        continues_at: None,
+                    });
                 }
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "rateLimit",
-                    &json!({ "status": status, "resetsAt": resets_at, "kind": kind }),
+                    &json!({ "status": status, "resetsAt": resets_at, "kind": kind, "usingOverage": using_overage }),
                 );
             }
             Parsed::Result(result) => {
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "result",
                     &json!({
@@ -1243,7 +1284,7 @@ impl Inner {
                 }
                 Err(error) => {
                     snapshot_failed = true;
-                    let _ = store.append_event(
+                    self.record_event(
                         &m.attempt_id,
                         "snapshotFailed",
                         &json!({ "error": error.to_string() }),
@@ -1284,7 +1325,7 @@ impl Inner {
                     .into_owned()
             };
             let dirty = git.as_ref().is_some_and(|g| g.is_dirty(&m.workspace));
-            let _ = store.append_event(
+            self.record_event(
                 &m.attempt_id,
                 "checkResult",
                 &json!({ "kind": m.kind, "exitCode": exit_code, "stdout": tail(&output), "stderr": tail(&stderr), "truncated": output.len() > EVENT_TEXT_LIMIT, "leftWorkspaceDirty": dirty }),
@@ -1330,7 +1371,7 @@ impl Inner {
                 fields.push(("model_actual", Value::Text(result.models.join(", "))));
             }
         }
-        let _ = store.patch_attempt(&m.attempt_id, &fields);
+        self.keep_fields(&m.attempt_id, &fields);
 
         let (mut state, mut reason) = classify(&m, exit_code, stop_requested, process_lost);
         if let Some(Reason::CheckFailed {
@@ -1339,6 +1380,16 @@ impl Inner {
         }) = &mut reason
         {
             *refused = localhost_refused;
+        }
+        // A limit that says when it resets: Keel goes on with the step by itself then, a few times.
+        // Not with a learner, which the run doesn't wait for.
+        if let Some(Reason::RateLimited {
+            resets_at: Some(resets_at),
+            continues_at,
+        }) = &mut reason
+            && m.role != "learner"
+        {
+            *continues_at = self.continues_at(&m.run_id, &m.step_id, *resets_at);
         }
         // If Keel can't tell what the step changed, it can't say the step went well.
         if snapshot_failed && state == AttemptState::Succeeded {
@@ -1353,7 +1404,7 @@ impl Inner {
                 Ok(Verdict::Ask { output, questions }) => {
                     self.keep_output(&m, &output);
                     state = AttemptState::WaitingAnswers;
-                    let _ = store.append_event(
+                    self.record_event(
                         &m.attempt_id,
                         "questionsAsked",
                         &json!({ "questions": questions }),
@@ -1365,7 +1416,7 @@ impl Inner {
                     rounds,
                 }) => {
                     self.keep_output(&m, &output);
-                    let _ = store.append_event(
+                    self.record_event(
                         &m.attempt_id,
                         "questionsTaken",
                         &json!({ "settled": settled, "rounds": rounds }),
@@ -1407,8 +1458,10 @@ impl Inner {
         if state == AttemptState::Succeeded && m.role == "reviewer" {
             self.correct_review(&m);
         }
-        let _ = store.set_state(&m.attempt_id, state, reason.as_ref());
-        let _ = store.append_event(
+        // A check that ran and failed sends the work back to the builder: see `failed_checks`.
+        let sent_back = self.failed_check_goes_back(&m.attempt_id, &mut state, &mut reason);
+        self.keep_state(&m.attempt_id, state, reason.as_ref());
+        self.record_event(
             &m.attempt_id,
             "finished",
             &json!({ "state": state.as_str(), "reason": reason, "exitCode": exit_code, "rawSha256": raw_sha, "shaAfter": sha_after, "files": files }),
@@ -1429,7 +1482,7 @@ impl Inner {
             && let Ok(attempt) = store.attempt(&m.attempt_id)
             && let Err(error) = self.record_brain_output(&attempt)
         {
-            let _ = store.append_event(
+            self.record_event(
                 &m.attempt_id,
                 "brainFailed",
                 &json!({ "error": error.to_string() }),
@@ -1438,7 +1491,7 @@ impl Inner {
         if let Some(problems) = correction {
             if let Err(error) = self.ask_for_correction(&m.attempt_id, &problems) {
                 // Nobody was told this finished, because the correction was meant to follow it.
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "correctionFailed",
                     &json!({ "error": error.to_string() }),
@@ -1447,8 +1500,15 @@ impl Inner {
             }
             return;
         }
-        if state == AttemptState::Succeeded || m.role == "learner" {
-            let _ = self.advance(&m.run_id);
+        // Not for a step found over as the app reopens: `Engine::recover` moves every run on once
+        // each step still running has its place again, so none starts in a place that's taken.
+        // That goes for a check found failed too, whose run has a new round for its builder.
+        if (state == AttemptState::Succeeded || m.role == "learner" || sent_back) && !process_lost {
+            self.noted(
+                "moving a run on to its next step",
+                &m.run_id,
+                self.advance(&m.run_id),
+            );
         }
     }
 
@@ -1461,7 +1521,7 @@ impl Inner {
             Ok(Some(taken)) => (screenshots::EVENT, json!(taken)),
             Err(error) => ("screenshotsFailed", json!({ "error": error.to_string() })),
         };
-        let _ = self.store.append_event(&m.attempt_id, kind, &data);
+        self.record_event(&m.attempt_id, kind, &data);
     }
 
     /// The attempts before this one in its session, nearest first.
@@ -1536,7 +1596,7 @@ impl Inner {
                 )?;
             }
             if !replaced.is_empty() {
-                let _ = self.store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "contractReplaced",
                     &json!({ "replaced": replaced }),
@@ -1650,7 +1710,7 @@ impl Inner {
     /// What it answered, without anything an agent added beyond the structure. The whole answer as
     /// it came stays on the record, in the `result` event.
     fn keep_output(&self, m: &Monitor, output: &serde_json::Value) {
-        let _ = self.store.patch_attempt(
+        self.keep_fields(
             &m.attempt_id,
             &[("output", Value::Text(output.to_string()))],
         );
@@ -1686,7 +1746,7 @@ impl Inner {
             .filter(|checked| checked.corrected.is_some())
             .collect();
         if !changed.is_empty() || !corrected.dropped.is_empty() {
-            let _ = self.store.append_event(
+            self.record_event(
                 &m.attempt_id,
                 "verificationCorrected",
                 &json!({ "corrected": changed, "dropped": corrected.dropped, "check": check }),
@@ -1714,14 +1774,14 @@ impl Inner {
         };
         self.keep_output(m, &kept);
         if !why.unread.is_empty() {
-            let _ = self.store.append_event(
+            self.record_event(
                 &m.attempt_id,
                 "reviewIncomplete",
                 &json!({ "unread": why.unread }),
             );
         }
         if !why.breaks.is_empty() {
-            let _ = self.store.append_event(
+            self.record_event(
                 &m.attempt_id,
                 "reviewBreaks",
                 &json!({ "breaks": why.breaks }),
@@ -1786,6 +1846,8 @@ fn classify(
                 Reason::CheckFailed {
                     exit_code,
                     localhost_refused: false,
+                    failed_times: None,
+                    unchanged: false,
                 }
             }
         };
@@ -1829,7 +1891,10 @@ fn classify(
             } else if lower.contains("rate limit") || lower.contains("usage limit") {
                 (
                     AttemptState::Blocked,
-                    Some(Reason::RateLimited { resets_at: None }),
+                    Some(Reason::RateLimited {
+                        resets_at: None,
+                        continues_at: None,
+                    }),
                 )
             } else {
                 (

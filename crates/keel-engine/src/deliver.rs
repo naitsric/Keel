@@ -91,24 +91,29 @@ impl Inner {
         std::thread::spawn(move || {
             let _creating = locked(&inner.creating_workspace);
             let mirror = inner.mirror(&id);
-            let _ = inner.update_mirror_from_github(&Git::new(git), &mirror, &account, &repo);
+            let updated = inner.update_mirror_from_github(&Git::new(git), &mirror, &account, &repo);
+            inner.noted(
+                "bringing a project's copy up to date from GitHub",
+                &id,
+                updated,
+            );
         });
         Ok(())
     }
 
     pub(crate) fn deliver(self: &Arc<Self>, attempt: &Attempt) {
-        let _ = self
-            .store
-            .set_state(&attempt.id, AttemptState::Running, None);
+        self.keep_state(&attempt.id, AttemptState::Running, None);
         self.changed(&attempt.run_id);
         match self.try_deliver(attempt) {
             Ok(url) => {
-                let _ = self
-                    .store
-                    .patch_attempt(&attempt.id, &[("result_text", Value::Text(url))]);
+                self.keep_fields(&attempt.id, &[("result_text", Value::Text(url))]);
                 self.tell_issue_soon(&attempt.run_id, keel_store::IssueTold::PullRequest);
                 self.end_early(&attempt.id, &attempt.run_id, AttemptState::Succeeded, None);
-                let _ = self.advance(&attempt.run_id);
+                self.noted(
+                    "moving a run on to its next step",
+                    &attempt.run_id,
+                    self.advance(&attempt.run_id),
+                );
             }
             Err(Error::Blocked(reason)) => self.end_early(
                 &attempt.id,
@@ -180,6 +185,22 @@ impl Inner {
             &auth,
         )
         .map_err(git_failed)?;
+        // What Keel pushed is its own work from here on, whatever becomes of opening the pull
+        // request: a look before this delivery is tried again mustn't count it as added by someone.
+        // What was counted was counted from another commit. A run that delivers again counts from
+        // this delivery.
+        let head = git.head(&workspace).ok();
+        store.patch_run(
+            &run.id,
+            &[
+                (
+                    "pr_delivered",
+                    head.clone().map_or(Value::Null, Value::Text),
+                ),
+                ("pr_commits_added", Value::Null),
+                ("pr_counted_at", Value::Null),
+            ],
+        )?;
 
         // A pull request is read by people who never saw the run, and what it says stays on GitHub.
         let body = mask_secrets(&self.pull_request_body(&run, &project)?);
@@ -206,8 +227,6 @@ impl Inner {
         )?;
 
         let number = url.rsplit('/').next().and_then(|n| n.parse::<i64>().ok());
-        // What it was pushed at, so that a commit someone adds on GitHub later shows.
-        let head = git.head(&workspace).ok();
         // One just opened is a draft, with no need to ask. Of one that was already there Keel knows
         // nothing, so the next look finds out, and until then nothing claims anything about it.
         let known = |value: Value| if opened_now { value } else { Value::Null };
@@ -223,10 +242,13 @@ impl Inner {
                 ),
                 ("pr_state_at", known(Value::Text(now()))),
                 ("pr_checked_at", known(Value::Text(now()))),
+                // What it was pushed at, so that a commit someone adds on GitHub later shows.
                 ("pr_head", head.map_or(Value::Null, Value::Text)),
                 // What its CI said was about another commit.
                 ("pr_ci", Value::Null),
                 ("pr_ci_failed", Value::Null),
+                // Nothing was added to one just opened. To one already there, someone may have.
+                ("pr_commits_added", known(Value::Integer(0))),
             ],
         )?;
         store.patch_attempt(&attempt.id, &[("account", Value::Text(account.clone()))])?;

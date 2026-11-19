@@ -8,6 +8,8 @@ export function reasonText(t: TFunction, reason: Reason): string {
   const data = reason as Record<string, any>;
   switch (reason.code) {
     case "rateLimited":
+      // Only while it's still to come: on a step Keel already continued, it's when the limit reset.
+      if (data.continuesAt * 1000 > Date.now()) return t("reasons.rateLimitedContinues", { date: formatDateTime(new Date(data.continuesAt * 1000).toISOString()) });
       return data.resetsAt
         ? t("reasons.rateLimitedUntil", { date: formatDateTime(new Date(data.resetsAt * 1000).toISOString()) })
         : t("reasons.rateLimited");
@@ -38,7 +40,11 @@ export function reasonText(t: TFunction, reason: Reason): string {
     case "setupFailed":
       return t("reasons.setupFailed", { exitCode: data.exitCode ?? "?" });
     case "checkFailed":
-      return data.localhostRefused === true ? t("reasons.checkFailedLocalhost", { exitCode: data.exitCode ?? "?", setting: t("settings.localhost") }) : t("reasons.checkFailed", { exitCode: data.exitCode ?? "?" });
+      if (data.localhostRefused === true) return t("reasons.checkFailedLocalhost", { exitCode: data.exitCode ?? "?", setting: t("settings.localhost") });
+      // Keel sends the work back to the builder by itself, and says why when it didn't.
+      if (data.unchanged === true) return t("reasons.checkFailedUnchanged", { exitCode: data.exitCode ?? "?" });
+      if (typeof data.failedTimes === "number") return t("reasons.checkFailedLimit", { count: data.failedTimes, exitCode: data.exitCode ?? "?" });
+      return t("reasons.checkFailed", { exitCode: data.exitCode ?? "?" });
     case "exitedWithoutResult":
       return t("reasons.exitedWithoutResult", { exitCode: data.exitCode ?? "?" });
     case "waitingForProject":
