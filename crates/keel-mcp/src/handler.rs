@@ -54,7 +54,9 @@ const GET_RUN: &str = "Get a run: its overall state (working, waitingForPerson o
                        reviews couldn't check by reading the code, as Keel counts them), the \
                        `reviews`, steps `skipped` for being a small change, and its pull request with what \
                        its CI says: `prCi` is pending, passed, failed or noCi, and `prCiFailed` names the \
-                       checks that failed. Asking makes Keel look at GitHub again, at most once a \
+                       checks that failed. `prCommitsAdded` is how many commits it got after Keel \
+                       delivered, not counting merges, and is absent when Keel doesn't know. Asking \
+                       makes Keel look at GitHub again, at most once a \
                        minute, and the answer shows on your next call. `waitingFor` \
                        says what it waits for: the `questions` the person has to answer, or whether an \
                        approval canSendBack, and `youCan`, the tools this client may use on it now. Answering \

@@ -9,7 +9,7 @@ import { BoardView, TaskDialog } from "./BoardView";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const card = (extra: Partial<BoardCard> = {}): BoardCard => ({ id: "c1", projectId: "p1", title: "Log in through Valora", body: "", issue: null, column: "backlog", position: 0, runId: null, runState: null, reason: null, prUrl: null, prState: null, prStateAt: null, prCi: null, prCiFailed: [], rejection: null, startBlocked: null, createdAt: "2026-11-10T00:00:00Z", jointChangeId: null, alsoTouches: [], part: null, ...extra });
+const card = (extra: Partial<BoardCard> = {}): BoardCard => ({ id: "c1", projectId: "p1", title: "Log in through Valora", body: "", issue: null, column: "backlog", position: 0, runId: null, runState: null, reason: null, prUrl: null, prState: null, prStateAt: null, prCi: null, prCiFailed: [], prCommitsAdded: null, rejection: null, startBlocked: null, createdAt: "2026-11-10T00:00:00Z", jointChangeId: null, alsoTouches: [], part: null, ...extra });
 
 describe("a card that touches other projects", () => {
   let root: Root;

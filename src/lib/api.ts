@@ -500,6 +500,8 @@ export interface Run {
   prCi: CiState | null;
   /** The checks that failed, by name. */
   prCiFailed: string[];
+  /** Commits its pull request got after Keel delivered, not counting merges. Null when Keel doesn't know. */
+  prCommitsAdded: number | null;
 }
 
 /** How a workflow's runs in a project have gone. */
@@ -512,6 +514,9 @@ export interface WorkflowResults {
   finished: number;
   merged: number;
   closed: number;
+  /** Of the merged ones, those with no commit added after Keel delivered, out of those where Keel knows. */
+  mergedAsDelivered: number;
+  mergedCounted: number;
   /** Null if no pull request was merged. */
   costPerMergedUsd: number | null;
   /** Null if no run finished. */
@@ -677,6 +682,8 @@ export interface BoardCard {
   prStateAt: string | null;
   prCi: CiState | null;
   prCiFailed: string[];
+  /** Commits it got after Keel delivered, not counting merges. Null when Keel doesn't know. */
+  prCommitsAdded: number | null;
   /** What the person wrote when rejecting. It may be empty. */
   rejection: string | null;
   startBlocked: Reason | null;

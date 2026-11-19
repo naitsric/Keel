@@ -102,6 +102,8 @@ pub struct BoardCard {
     /// What its CI said then, and the checks that failed.
     pub pr_ci: Option<CiState>,
     pub pr_ci_failed: Vec<String>,
+    /// Commits it got after Keel delivered, not counting merges. None when Keel doesn't know.
+    pub pr_commits_added: Option<i64>,
     #[serde(serialize_with = "keel_core::serialize_masked")]
     pub rejection: Option<String>,
     #[serde(serialize_with = "keel_core::serialize_masked")]
@@ -141,6 +143,7 @@ impl From<Card> for BoardCard {
             pr_state_at: card.pr_state_at,
             pr_ci: card.pr_ci,
             pr_ci_failed: card.pr_ci_failed,
+            pr_commits_added: card.pr_commits_added,
             rejection: card.rejection,
             created_at: card.created_at,
             joint_change_id: card.joint_change_id,
