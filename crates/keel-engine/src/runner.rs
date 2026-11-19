@@ -1458,6 +1458,8 @@ impl Inner {
         if state == AttemptState::Succeeded && m.role == "reviewer" {
             self.correct_review(&m);
         }
+        // A check that ran and failed sends the work back to the builder: see `failed_checks`.
+        let sent_back = self.failed_check_goes_back(&m.attempt_id, &mut state, &mut reason);
         self.keep_state(&m.attempt_id, state, reason.as_ref());
         self.record_event(
             &m.attempt_id,
@@ -1500,7 +1502,8 @@ impl Inner {
         }
         // Not for a step found over as the app reopens: `Engine::recover` moves every run on once
         // each step still running has its place again, so none starts in a place that's taken.
-        if (state == AttemptState::Succeeded || m.role == "learner") && !process_lost {
+        // That goes for a check found failed too, whose run has a new round for its builder.
+        if (state == AttemptState::Succeeded || m.role == "learner" || sent_back) && !process_lost {
             self.noted(
                 "moving a run on to its next step",
                 &m.run_id,
@@ -1843,6 +1846,8 @@ fn classify(
                 Reason::CheckFailed {
                     exit_code,
                     localhost_refused: false,
+                    failed_times: None,
+                    unchanged: false,
                 }
             }
         };

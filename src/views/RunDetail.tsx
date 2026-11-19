@@ -4,9 +4,9 @@ import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CommandChange, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, breakableIds, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, type FindingShown, focusAttempt, gist, latestOfEachStep, notProvenInRound, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf, whyNotProven } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, breakableIds, checkSentBackInto, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, type FindingShown, focusAttempt, gist, latestOfEachStep, notProvenInRound, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf, whyNotProven } from "../lib/audit";
 import { contractChangedText, partText, partWarningText } from "../lib/board";
-import { attemptChoices, canSendBack, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
+import { attemptChoices, canSendBack, canSendBackFromCheck, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText, specProblemText } from "../lib/reason";
 import { allRecommend, answerFrom, differsFromRecommended, isAnswered, needsText, type QuestionPick, recommendedAnswers, recommendedOption, startingPick } from "../lib/questions";
@@ -171,6 +171,7 @@ export function Summary({ run, attempts, current, commands, rawCheck, closedBy, 
           {latestChecks.length > 0 && (
             <p className={cx(checksPassed === latestChecks.length ? "text-muted" : "font-medium text-danger")}>{t("run.checksPassed", { passed: checksPassed, total: latestChecks.length })}</p>
           )}
+          {run && checkSentBackInto(attempts, run.round) && <p className="text-warning">{t("run.checkSentBack", { number: run.round + 1 })}</p>}
           {checksSkipped > 0 && <p className="font-medium text-warning">{t("run.testsSkipped", { count: checksSkipped })}</p>}
           <NotProvenByReviews unchecked={unchecked} />
           {verification && <VerificationProof verification={verification} allProven={unchecked.length === 0} />}
@@ -1145,10 +1146,12 @@ function CommandChanges({ changes, setupFirst, limited }: { changes: CommandChan
  * has had the run's copy: a setup started then gets no more than the agents do, and the person is told
  * before choosing.
  */
-export function Actions({ attempt, projectId, agentsWrote, onError }: { attempt: Attempt; projectId: string; agentsWrote: boolean; onError: (message: string) => void }) {
+export function Actions({ attempt, projectId, agentsWrote, canSendBack = false, onError }: { attempt: Attempt; projectId: string; agentsWrote: boolean; canSendBack?: boolean; onError: (message: string) => void }) {
   const { t } = useTranslation();
   const navigate = useApp((s) => s.navigate);
   const changes = useCommandChanges(attempt, projectId);
+  // What a person wants changed when they send the work back from a check that failed. Null while closed.
+  const [sendingBack, setSendingBack] = useState<string | null>(null);
   const act = (run: () => Promise<unknown>) => run().catch((e) => onError(errorText(t, e)));
   if (attempt.reason?.code === "reworkLimit") {
     return (
@@ -1217,10 +1220,26 @@ export function Actions({ attempt, projectId, agentsWrote, onError }: { attempt:
           </Button>
         )}
         <Button onClick={() => void act(() => api.attemptRetry(attempt.id, false))}>{t("run.retry")}</Button>
+        {canSendBack && sendingBack === null && <Button onClick={() => setSendingBack("")}>{t("run.sendBackToBuilder")}</Button>}
         <Button variant="ghost" onClick={() => void act(() => api.attemptAbandon(attempt.id))}>
           {t("run.abandon")}
         </Button>
       </div>
+      {canSendBack && sendingBack !== null && (
+        <div className="mt-2.5 rounded-md border border-border bg-inset p-2">
+          <Field label={t("run.sendBackLabel")} hint={t("run.sendBackCheckHint")}>
+            <textarea autoFocus rows={2} value={sendingBack} onChange={(e) => setSendingBack(e.target.value)} className={`${inputClass} resize-y`} />
+          </Field>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button variant="primary" disabled={!sendingBack.trim()} onClick={() => void act(() => api.approvalSendBack(attempt.id, sendingBack.trim()))}>
+              {t("run.sendBackAction")}
+            </Button>
+            <Button variant="ghost" onClick={() => setSendingBack(null)}>
+              {t("run.sendBackCancel")}
+            </Button>
+          </div>
+        </div>
+      )}
     </Card>
   );
 }
@@ -1313,6 +1332,10 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       return line(t("activity.reworkLimit"), "text-warning");
     case "reworkLimitAnswer":
       return line(data.anotherRound ? t("activity.reworkLimitAnswerRound") : t("activity.reworkLimitAnswerApproval"));
+    case "checkSentBack":
+      return line(t("activity.checkSentBack", { round: data.round + 1 }), "text-warning");
+    case "checkNotSentBack":
+      return line(t(data.unchanged ? "activity.checkUnchanged" : "activity.checkNotSentBack"), "text-warning");
     case "questionsAsked":
       return line(t("activity.questionsAsked", { count: (data.questions ?? []).length }), "text-warning");
     case "answers":
@@ -1937,7 +1960,7 @@ export function RunDetail({ runId }: { runId: string }) {
           <QuestionsCard key={latest.id} attempt={latest} attempts={attempts} onError={setError} />
         ) : (
           <>
-            <Actions attempt={latest} projectId={run.projectId} agentsWrote={agentCouldHaveWritten(attempts)} onError={setError} />
+            <Actions key={latest.id} attempt={latest} projectId={run.projectId} agentsWrote={agentCouldHaveWritten(attempts)} canSendBack={latest.kind === "check" && latest.state === "failed" && canSendBackFromCheck(parseSteps(run.workflow) ?? [], latest.stepId)} onError={setError} />
             {!going && outcome}
           </>
         )}

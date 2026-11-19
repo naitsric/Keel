@@ -718,7 +718,7 @@ fn a_check_further_along_has_not_passed_yet_so_the_run_is_not_small() {
 }
 
 #[test]
-fn a_check_that_failed_stops_the_run_and_passing_it_later_is_what_counts() {
+fn a_check_that_keeps_failing_stops_the_run_and_once_it_passes_the_reviews_run() {
     keel_harness::needs!(sandbox);
     let w = world();
     let mut steps = fitting();
@@ -727,7 +727,9 @@ fn a_check_that_failed_stops_the_run_and_passing_it_later_is_what_counts() {
         run: "test -f .git/passing-now".into(),
     };
     let run = w.start(steps);
+    // Once the work has gone back to the builder as often as Keel sends it by itself.
     let failed = w.wait_for(&run, "check", AttemptState::Failed);
+    assert_eq!(failed.round, 2);
     assert!(
         w.all(&run, "security").is_empty(),
         "the failure is what stops it"
@@ -735,8 +737,33 @@ fn a_check_that_failed_stops_the_run_and_passing_it_later_is_what_counts() {
     assert!(w.all(&run, "human").is_empty(), "and nobody is asked yet");
     std::fs::write(Path::new(&failed.workspace).join(".git/passing-now"), "").unwrap();
     w.engine.retry(&failed.id, false).unwrap();
-    w.wait_for(&run, "human", AttemptState::WaitingApproval);
-    w.assert_went_small(&run);
+    w.moved_up(&run, "checkWentBack");
+}
+
+/// A check that failed sends the work back to the builder, and passing afterwards only says the
+/// command passes now. Only the reviews and the approver are told to look for a test weakened to
+/// get past it, so a run that went back for its check is never small.
+#[test]
+fn a_check_that_failed_and_was_fixed_keeps_the_run_from_being_small() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let mut steps = fitting();
+    steps[2] = WorkflowStep::Check {
+        id: "check".into(),
+        run: "test -f fixed.txt".into(),
+    };
+    w.builder_does(2, "echo fixed > fixed.txt");
+    let run = w.start(steps);
+    w.moved_up(&run, "checkWentBack");
+    let checks: Vec<(i64, String)> = w
+        .all(&run, "check")
+        .into_iter()
+        .map(|a| (a.round, a.state))
+        .collect();
+    assert_eq!(checks, [(0, "returned".into()), (1, "succeeded".into())]);
+    // Nothing else stood against it: the check passed on this code, and the change is tiny.
+    assert_eq!(w.why(&run), ["checkWentBack"]);
+    assert_eq!(w.decisions(&run)[0]["round"], 1);
 }
 
 #[test]

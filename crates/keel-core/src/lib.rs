@@ -376,10 +376,18 @@ pub enum Reason {
     AgentLost,
     /// A check command ended with this code. `localhost_refused` when what it printed says the
     /// sandbox refused its tests a server on localhost, which the project's settings can open.
+    /// Keel sends the work back to the builder by itself when a check runs and fails. `failed_times`
+    /// is there when it didn't because the run had already gone back as often as it may: how many
+    /// times this check has failed in the run, this one counted. `unchanged` when it failed again
+    /// after going back and the builder's own work had changed no file, so it didn't go back again.
     CheckFailed {
         exit_code: Option<i32>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         localhost_refused: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failed_times: Option<u32>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        unchanged: bool,
     },
     SetupFailed {
         exit_code: Option<i32>,
@@ -534,6 +542,9 @@ pub enum WhyNotSmall {
     CheckNotPassed,
     /// It passed, but its test tools said they skipped this many tests, which proved nothing.
     CheckSkippedTests { count: u32 },
+    /// It failed earlier in the run and the work went back to the builder, so how it was made to
+    /// pass is something to look at.
+    CheckWentBack,
     /// The run came from an issue this person wrote, who isn't the project's GitHub account.
     IssueFromSomeoneElse { author: String },
     /// The run came from an issue, and it doesn't say who wrote it.
@@ -1063,6 +1074,8 @@ mod tests {
                 Reason::CheckFailed {
                     exit_code: None,
                     localhost_refused: true,
+                    failed_times: None,
+                    unchanged: false,
                 },
                 false,
             ),
@@ -1292,6 +1305,8 @@ mod tests {
         let refused = Reason::CheckFailed {
             exit_code: Some(1),
             localhost_refused: true,
+            failed_times: None,
+            unchanged: false,
         };
         let value = serde_json::to_value(&refused).unwrap();
         assert_eq!(
@@ -1302,6 +1317,8 @@ mod tests {
         let plain = Reason::CheckFailed {
             exit_code: Some(1),
             localhost_refused: false,
+            failed_times: None,
+            unchanged: false,
         };
         assert_eq!(
             serde_json::to_value(&plain).unwrap(),
@@ -1313,8 +1330,42 @@ mod tests {
             Reason::CheckFailed {
                 exit_code: Some(3),
                 localhost_refused: false,
+                failed_times: None,
+                unchanged: false,
             }
         );
+    }
+
+    /// A failed check Keel left to the person says why, and one that says neither reads as before.
+    #[test]
+    fn a_failed_check_keel_left_to_the_person_says_why() {
+        let at_the_limit = Reason::CheckFailed {
+            exit_code: Some(1),
+            localhost_refused: false,
+            failed_times: Some(3),
+            unchanged: false,
+        };
+        let value = serde_json::to_value(&at_the_limit).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "code": "checkFailed", "exitCode": 1, "failedTimes": 3 })
+        );
+        assert_eq!(
+            serde_json::from_value::<Reason>(value).unwrap(),
+            at_the_limit
+        );
+        let unchanged = Reason::CheckFailed {
+            exit_code: Some(1),
+            localhost_refused: false,
+            failed_times: None,
+            unchanged: true,
+        };
+        let value = serde_json::to_value(&unchanged).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({ "code": "checkFailed", "exitCode": 1, "unchanged": true })
+        );
+        assert_eq!(serde_json::from_value::<Reason>(value).unwrap(), unchanged);
     }
 
     /// A reason saved before Keel said who has the turn still reads, so its card says why it waits.

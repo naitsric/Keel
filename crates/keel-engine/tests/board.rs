@@ -3512,6 +3512,8 @@ fn a_failed_check_pauses_nothing_end_to_end() {
     let failed = Some(Reason::CheckFailed {
         exit_code: Some(3),
         localhost_refused: false,
+        failed_times: None,
+        unchanged: false,
     });
     let card = w.wait_column(&first, BoardColumn::HumanReview);
     assert_eq!(card.reason, failed);

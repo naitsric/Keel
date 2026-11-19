@@ -1526,7 +1526,9 @@ fn a_check_that_ended_while_the_app_was_closed_keeps_whether_it_passed_or_failed
         reason(&failed),
         Reason::CheckFailed {
             exit_code: Some(3),
-            localhost_refused: false
+            localhost_refused: false,
+            failed_times: None,
+            unchanged: false,
         }
     );
     assert_eq!(failed.exit_code, Some(3));

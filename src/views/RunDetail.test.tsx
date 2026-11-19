@@ -1707,6 +1707,107 @@ describe("the run summary", () => {
   });
 });
 
+describe("a check that failed after a builder", () => {
+  let root: Root;
+  let sent: unknown[];
+  const page = () => document.body.textContent ?? "";
+  const button = (text: string) => [...document.querySelectorAll("button")].find((b) => b.textContent === text);
+  const settle = () => act(() => Promise.resolve());
+  const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "check", at: "2026-01-01T00:00:00Z", kind, data });
+  const sentBack = attempt({ id: "check-1", stepId: "check", kind: "check", tools: "check", state: "returned", reason: { code: "checkFailed", exitCode: 1 }, prompt: "make test" });
+  const atTheLimit = attempt({ id: "check-3", stepId: "check", kind: "check", tools: "check", state: "failed", round: 2, reason: { code: "checkFailed", exitCode: 1, failedTimes: 3 }, prompt: "make test" });
+  const summary = (attempts: Attempt[], round: number) => {
+    const run = { ...runWith(deliverNext), round, finishedAt: null } as Run;
+    act(() => root.render(<Summary run={run} attempts={attempts} current={attempts[attempts.length - 1]} commands={[]} rawCheck="intact" closedBy={null} onShowChanges={() => {}} />));
+  };
+  const actions = async (shown: Attempt, canSendBack: boolean) => {
+    act(() => root.render(<Actions attempt={shown} projectId="p1" agentsWrote canSendBack={canSendBack} onError={() => {}} />));
+    await settle();
+  };
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    sent = [];
+    mockIPC((command, args) => {
+      if (command === "run_command_changes") return [];
+      if (command === "approval_send_back") sent.push(args);
+      return null;
+    });
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("says in the new round that the check failed and Keel sent the work back, in both languages", async () => {
+    const working = attempt({ id: "builder-2", stepId: "builder", tools: "build", state: "running", round: 1 });
+    summary([builder(["calc.py"]), sentBack, working], 1);
+    expect(page()).toContain("The check failed, so Keel sent the work back to the builder. This is round 2.");
+    await i18next.changeLanguage("es");
+    summary([builder(["calc.py"]), sentBack, working], 1);
+    expect(page()).toContain("La verificación falló, así que Keel le devolvió el trabajo al builder. Esta es la ronda 2.");
+  });
+
+  it("doesn't say so in a round a person asked for, or in the first one", () => {
+    const byPerson = { ...sentBack, output: { instructions: "Use the other parser" } as unknown as Attempt["output"] };
+    summary([builder(["calc.py"]), byPerson, attempt({ id: "builder-2", stepId: "builder", tools: "build", state: "running", round: 1 })], 1);
+    expect(page()).not.toContain("Keel sent the work back");
+    summary([builder(["calc.py"]), attempt({ ...check, state: "running" })], 0);
+    expect(page()).not.toContain("Keel sent the work back");
+  });
+
+  it("leaves nothing to do on the check that went back", async () => {
+    await actions(sentBack, true);
+    expect(document.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("at the limit says how many times it failed, and still lets the person start it over or leave it", async () => {
+    await actions(atTheLimit, true);
+    expect(page()).toContain("The check failed 3 times, the last with code 1. Keel already sent the work back to the builder, and won't again on its own. It's your call now.");
+    expect(button("Start over")).toBeDefined();
+    expect(button("Leave it")).toBeDefined();
+  });
+
+  it("lets the person send it back with their own words, and only with some", async () => {
+    await actions(atTheLimit, true);
+    act(() => button("Send it back to the builder")?.click());
+    expect(page()).toContain("The builder gets your words and what the check printed, and then the check runs again.");
+    expect(button("Send it back")?.disabled).toBe(true);
+    const box = document.querySelector("textarea") as HTMLTextAreaElement;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(box, "  Use the other parser ");
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    act(() => button("Send it back")?.click());
+    await settle();
+    expect(sent).toEqual([{ attemptId: "check-3", instructions: "Use the other parser" }]);
+    // Changing their mind closes it without sending anything.
+    act(() => button("Cancel")?.click());
+    expect(document.querySelector("textarea")).toBeNull();
+    expect(sent).toHaveLength(1);
+  });
+
+  it("doesn't offer it where no builder comes before the check", async () => {
+    await actions(atTheLimit, false);
+    expect(button("Send it back to the builder")).toBeUndefined();
+    expect(button("Start over")).toBeDefined();
+  });
+
+  it("tells it in the check's activity, in both languages", async () => {
+    const events = [event(1, "checkResult", { kind: "check", exitCode: 1, stdout: "", stderr: "" }), event(2, "checkSentBack", { round: 1 }), event(3, "checkNotSentBack", { failedTimes: 3, rounds: 2 }), event(4, "checkNotSentBack", { unchanged: true })];
+    act(() => root.render(<ActivityTab events={events} role="worker" corrected={false} />));
+    expect(page()).toContain("It failed, so Keel sent the work back to the builder for round 2");
+    expect(page()).toContain("Keel had already sent the work back as often as it does on its own");
+    expect(page()).toContain("The builder had changed nothing, so Keel didn't send the work back again");
+    await i18next.changeLanguage("es");
+    act(() => root.render(<ActivityTab events={events} role="worker" corrected={false} />));
+    expect(page()).toContain("Falló, así que Keel le devolvió el trabajo al builder para la ronda 2");
+    expect(page()).toContain("Keel ya había devuelto el trabajo las veces que lo devuelve por su cuenta");
+    expect(page()).toContain("El builder no había cambiado nada, así que Keel no devolvió el trabajo otra vez");
+  });
+});
+
 describe("what a check printed", () => {
   let root: Root;
   const page = () => document.body.textContent ?? "";

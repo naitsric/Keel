@@ -1686,6 +1686,26 @@ async fn a_failed_check_says_why_and_only_the_client_that_started_it_may_act_if_
     let view = settled(&owner, &run).await;
     assert_eq!(view["waitingFor"]["state"], "failed", "{view}");
     assert_eq!(view["waitingFor"]["step"], "tests", "{view}");
+    // Keel had sent the work back to the builder twice by itself, which reads like any rework:
+    // the round went up, and each check that went back says so and why it failed.
+    assert_eq!(view["round"], 2, "{view}");
+    assert_eq!(view["waitingFor"]["reason"]["failedTimes"], 3, "{view}");
+    let checks: Vec<Json> = view["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|step| step["step"] == "tests")
+        .map(|step| json!([step["round"], step["state"], step["reason"]["code"]]))
+        .collect();
+    assert_eq!(
+        json!(checks),
+        json!([
+            [0, "returned", "checkFailed"],
+            [1, "returned", "checkFailed"],
+            [2, "failed", "checkFailed"]
+        ]),
+        "{view}"
+    );
     let check = &view["report"]["check"];
     assert_eq!(check["step"], "tests", "{check}");
     assert_eq!(check["passed"], false, "{check}");
@@ -2850,22 +2870,29 @@ async fn a_client_retries_with_the_project_s_current_commands_only_when_it_asks(
             at(2, "touch installed.txt", "succeeded")
         ]
     );
-    // What ran keeps how it ended. The check put off for the setup says so, and came round again.
+    // What ran keeps how it ended. Keel had sent the work back to the builder twice by itself
+    // before the check waited. The check put off for the setup says so, and came round again.
     assert_eq!(
         ran("check"),
         vec![
-            at(1, "test -f installed.txt", "failed"),
-            at(2, "test -f installed.txt", "failed"),
-            at(3, "test -f installed.txt", "postponed"),
-            at(4, "test -f installed.txt", "succeeded"),
+            at(1, "test -f installed.txt", "returned"),
+            at(2, "test -f installed.txt", "returned"),
+            at(3, "test -f installed.txt", "failed"),
+            at(4, "test -f installed.txt", "failed"),
+            at(5, "test -f installed.txt", "postponed"),
+            at(6, "test -f installed.txt", "succeeded"),
         ]
     );
     let second = attempts
         .iter()
-        .find(|a| a.step_id == "check" && a.number == 2)
+        .find(|a| a.step_id == "check" && a.number == 4)
         .unwrap();
     assert_eq!(second.reason.as_ref().unwrap()["code"], "checkFailed");
-    assert_eq!(ran("builder").len(), 1, "the agent didn't run again");
+    assert_eq!(
+        ran("builder").len(),
+        3,
+        "the agent didn't run again for either retry"
+    );
     client.cancel().await.unwrap();
 }
 

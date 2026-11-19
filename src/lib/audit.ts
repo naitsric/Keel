@@ -253,6 +253,14 @@ export function sentBackByAssistant(attempts: { state: string; round: number; ou
 }
 
 /**
+ * Whether this round began with a check failing and Keel sending the work back to the builder by
+ * itself. When a person or an assistant sent it back from one, their instructions are with it.
+ */
+export function checkSentBackInto(attempts: { kind: string; state: string; round: number; output: unknown }[], round: number): boolean {
+  return attempts.some((a) => a.kind === "check" && a.state === "returned" && a.round === round - 1 && typeof (a.output as { instructions?: unknown } | null | undefined)?.instructions !== "string");
+}
+
+/**
  * The assistant that closed a finished run, if one did. It may have closed another step than the one
  * the page is about, such as the first of two reviews that failed. Of the steps as they stand, the
  * last one closed is what ended the run: one tried again since no longer says anything.

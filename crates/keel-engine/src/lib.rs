@@ -6,6 +6,7 @@ mod brain;
 mod deliver;
 mod detect;
 mod diffs;
+mod failed_checks;
 mod git;
 mod issues;
 mod joint;
@@ -1206,7 +1207,10 @@ impl Engine {
     fn send_back_as(&self, attempt_id: &str, instructions: &str, by: Option<&str>) -> Result<()> {
         let store = &self.inner.store;
         let attempt = store.attempt(attempt_id)?;
-        if attempt.state != AttemptState::WaitingApproval.as_str() {
+        // From a check that failed too, where Keel left it to them: see `failed_checks`.
+        let failed_check =
+            attempt.kind == "check" && attempt.state == AttemptState::Failed.as_str();
+        if !failed_check && attempt.state != AttemptState::WaitingApproval.as_str() {
             return Err(Error::InvalidState);
         }
         let instructions = instructions.trim();
@@ -1215,10 +1219,12 @@ impl Engine {
         }
         let steps: Vec<WorkflowStep> =
             serde_json::from_value(store.run(&attempt.run_id)?.workflow).unwrap_or_default();
-        if !workflows::can_send_back(&steps, &attempt.step_id) {
+        if failed_check {
+            self.inner
+                .person_sends_check_back(&attempt, &steps, instructions, by)?;
+        } else if !workflows::can_send_back(&steps, &attempt.step_id) {
             return Err(Error::Blocked(Reason::NothingToSendBackTo));
-        }
-        if !store.return_attempt(attempt_id, &attempt.run_id, instructions, by)? {
+        } else if !store.return_attempt(attempt_id, &attempt.run_id, instructions, by)? {
             return Err(Error::InvalidState);
         }
         self.inner.advance(&attempt.run_id)?;
@@ -1275,6 +1281,12 @@ impl Engine {
         }
         let pid = {
             let mut controls = locked(&self.inner.controls);
+            // Looked at again with this held. A check that fails sends the work back with it held
+            // too, so a stop either gets there first and wins, or finds the step already over.
+            let now = self.inner.store.attempt(attempt_id)?;
+            if !AttemptState::parse(&now.state).is_some_and(AttemptState::is_active) {
+                return Err(Error::InvalidState);
+            }
             let control = controls.entry(attempt_id.to_owned()).or_default();
             control.stop_requested = true;
             control.pid
@@ -2482,7 +2494,11 @@ impl Inner {
             StepRole::Reviewer | StepRole::Verifier | StepRole::Approver { .. }
         );
         let attempts = self.store.attempts_of_run(&run.id)?;
-        let mut text = self.render_prompt(&spec.prompt, run, &attempts, judging)?;
+        // In a round that began with a failed check. What it printed goes with the rest of what
+        // the step works on, and what Keel says about it after everything else, below.
+        let failed = self.failed_check_text(spec, run, &attempts);
+        let printed = failed.as_ref().map_or("", |failed| &failed.printed);
+        let mut text = self.render_prompt(&spec.prompt, run, &attempts, judging, printed)?;
         // What Keel adds from the request itself, and what it leaves there, the specifier has to
         // know of to leave it out, whatever a saved workflow's prompt says.
         if spec.role == StepRole::Specifier {
@@ -2528,6 +2544,11 @@ impl Inner {
                 text.push_str(&format!("\n\n{account}"));
             }
         }
+        // In a round that began with a failed check: whoever does the work is told to fix it and
+        // not the check, and whoever judges it that it failed. Keel's own words, outside any tag.
+        if let Some(failed) = failed {
+            text.push_str(&format!("\n\n{}", failed.told));
+        }
         // Every approver can say in which round something the change added appeared, so every one
         // is told which round this is, and what the builder said it added, whatever its prompt says.
         if matches!(spec.role, StepRole::Approver { .. }) {
@@ -2562,13 +2583,16 @@ impl Inner {
 
     /// What a step's prompt becomes right now, from the run's `attempts` so far. The answers come
     /// from this run's latest round. `judging` is for an agent that decides on the change, which
-    /// has to read all of it.
+    /// has to read all of it. `printed` is what a failed check printed, already in its tag, or
+    /// empty: material that no prompt asks for by name, so it goes after the rest of it, before the
+    /// line that says what the tags hold.
     fn render_prompt(
         &self,
         template: &str,
         run: &keel_store::Run,
         attempts: &[keel_store::Attempt],
         judging: bool,
+        printed: &str,
     ) -> Result<String> {
         let steps: Vec<WorkflowStep> =
             serde_json::from_value(run.workflow.clone()).unwrap_or_default();
@@ -2592,7 +2616,7 @@ impl Inner {
             }
             with_tags(prompts::fenced(tag, attributes, text, &run.language))
         };
-        let text = prompts::render(template, |name| match name {
+        let fill = |name: &str| match name {
             "request" => Some(fenced("request", "", &run.request)),
             "diff" => {
                 let (diff, head) = match (&git, &base) {
@@ -2659,17 +2683,41 @@ impl Inner {
                     None => output,
                 })
             }
-        });
+        };
+        // Where the prompt says what the tags are, what a failed check printed goes right before
+        // that, so the line is about it too. Where it says so is asked of the prompt as the
+        // workflow has it: a change or an issue can contain the same sentence, and that isn't Keel
+        // saying it.
+        let said_at = prompts::material_line_at(template).filter(|_| !printed.is_empty());
+        let text = match said_at {
+            Some(at) => {
+                let before = prompts::render(&template[..at], fill);
+                let after = prompts::render(&template[at..], fill);
+                [before.trim_end(), printed, &after]
+                    .into_iter()
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n\n")
+            }
+            None => prompts::render(template, fill),
+        };
+        if prompts::says_material_line(template) {
+            return Ok(text);
+        }
         // A prompt that doesn't say what the tags are, such as one a workflow saved before kept,
-        // is told after them. Whether it says so is asked of the prompt as the workflow has it:
-        // a change or an issue can contain the same sentence, and that isn't Keel saying it.
-        if any_fenced.get() && !bare && !prompts::says_material_line(template) {
-            return Ok(format!(
+        // is told after them. What a failed check printed is always in one, also after a prompt
+        // that is only what Keel fills in.
+        match (printed.is_empty(), any_fenced.get() && !bare) {
+            (true, false) => Ok(text),
+            (true, true) => Ok(format!(
                 "{text}\n\n{}",
                 prompts::material_line(&run.language)
-            ));
+            )),
+            (false, _) => Ok(format!(
+                "{text}\n\n{printed}\n\n{}",
+                prompts::material_line(&run.language)
+            )),
         }
-        Ok(text)
     }
 
     /// Moves the run on as far as it can. Anything that isn't a success needs a person, and an

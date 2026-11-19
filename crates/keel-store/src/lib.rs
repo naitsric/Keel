@@ -1151,6 +1151,17 @@ pub struct Event {
     pub data: serde_json::Value,
 }
 
+/// How a failed check goes back to the builder. See `Store::return_failed_check`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SentBack<'a> {
+    /// What a person wants changed. None when Keel sends it back by itself.
+    pub instructions: Option<&'a str>,
+    /// The MCP client that did it for them, if one did.
+    pub by: Option<&'a str>,
+    /// What names the files as the check left them, if Keel could tell.
+    pub left: Option<&'a str>,
+}
+
 /// One row of the home table: a run and its latest attempt.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2278,7 +2289,7 @@ impl Store {
                                   join attempt a on a.id = e.attempt_id
                                   where a.run_id = r.id and e.kind = 'answers')), 0),
                     coalesce(sum((select count(*) from attempt a
-                                  where a.run_id = r.id and a.state = 'returned')), 0),
+                                  where a.run_id = r.id and a.state = 'returned' and a.kind <> 'check')), 0),
                     {},
                     {},
                     {},
@@ -2714,6 +2725,79 @@ impl Store {
         tx.execute(
             "insert into event (attempt_id, at, kind, data) values (?1, ?2, 'returned', ?3)",
             params![id, at, data.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// A check that failed goes back to the builder: its attempt says so, keeping why it failed, and
+    /// the run moves to its next round. With `failed` Keel does it by itself as the check ends, so
+    /// nobody ever sees it waiting. With `instructions` a person does it from one that waits, or the
+    /// MCP client `by` names. `left` is what the files were as the check left them, which is how
+    /// Keel tells later whether the builder changed any. All or nothing, like `return_attempt`.
+    /// False if the attempt was no longer where it had to be.
+    pub fn return_failed_check(
+        &self,
+        id: &str,
+        run_id: &str,
+        failed: Option<&Reason>,
+        sent: SentBack,
+    ) -> Result<bool> {
+        let SentBack {
+            instructions,
+            by,
+            left,
+        } = sent;
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let at = now();
+        let reason = failed.map(|reason| serde_json::to_string(reason).unwrap_or_default());
+        let output = instructions.map(|instructions| {
+            let mut output = serde_json::json!({ "instructions": instructions });
+            if let Some(by) = by {
+                output["by"] = by.into();
+            }
+            output.to_string()
+        });
+        let from = if failed.is_some() {
+            "('queued', 'preparing', 'running', 'stalled')"
+        } else {
+            "('failed')"
+        };
+        let changed = tx.execute(
+            &format!(
+                "update attempt set state = 'returned', reason = coalesce(?2, reason),
+                                    output = coalesce(?3, output)
+                 where id = ?1 and kind = 'check' and state in {from}"
+            ),
+            params![id, reason, output],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "update run set round = round + 1 where id = ?1",
+            params![run_id],
+        )?;
+        let round: i64 = tx.query_row("select round from run where id = ?1", [run_id], |r| {
+            r.get(0)
+        })?;
+        let (kind, mut data) = match instructions {
+            Some(instructions) => {
+                let mut data = serde_json::json!({ "instructions": instructions, "round": round });
+                if let Some(by) = by {
+                    data["by"] = by.into();
+                }
+                ("returned", data)
+            }
+            None => ("checkSentBack", serde_json::json!({ "round": round })),
+        };
+        if let Some(left) = left {
+            data["left"] = left.into();
+        }
+        tx.execute(
+            "insert into event (attempt_id, at, kind, data) values (?1, ?2, ?3, ?4)",
+            params![id, at, kind, data.to_string()],
         )?;
         tx.commit()?;
         Ok(true)
@@ -5274,6 +5358,130 @@ mod tests {
 
         assert!(!store.return_attempt(&id, "r", "Again", None).unwrap());
         assert_eq!(store.run("r").unwrap().round, 1);
+    }
+
+    /// A check in the seeded run, as it stands while it runs.
+    fn running_check(store: &Store) -> String {
+        let mut check = new_attempt("c", "r", "check", AttemptState::Running);
+        check.kind = "check".into();
+        store.add_attempt(&check).unwrap();
+        "c".to_owned()
+    }
+
+    /// A person's send-back from a failed check, or an assistant's.
+    fn words<'a>(instructions: &'a str, by: Option<&'a str>) -> SentBack<'a> {
+        SentBack {
+            instructions: Some(instructions),
+            by,
+            left: None,
+        }
+    }
+
+    #[test]
+    fn a_failed_check_goes_back_with_its_round_as_it_ends_and_keeps_why_it_failed() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let id = running_check(&store);
+        let failed = Reason::CheckFailed {
+            exit_code: Some(2),
+            localhost_refused: false,
+            failed_times: None,
+            unchanged: false,
+        };
+        // Only a check: the builder of the same run stays where it is.
+        assert!(
+            !store
+                .return_failed_check("a", "r", Some(&failed), SentBack::default())
+                .unwrap()
+        );
+        assert_eq!(store.run("r").unwrap().round, 0);
+
+        let left = SentBack {
+            left: Some("tree-1"),
+            ..SentBack::default()
+        };
+        assert!(
+            store
+                .return_failed_check(&id, "r", Some(&failed), left)
+                .unwrap()
+        );
+        let attempt = store.attempt(&id).unwrap();
+        assert_eq!(attempt.state, "returned");
+        assert_eq!(
+            attempt.reason.unwrap(),
+            serde_json::json!({ "code": "checkFailed", "exitCode": 2 })
+        );
+        assert_eq!(attempt.output, None, "nobody wrote instructions");
+        assert_eq!(store.run("r").unwrap().round, 1);
+        let events = store.events(&id, 0).unwrap();
+        assert_eq!(events[0].kind, "checkSentBack");
+        assert_eq!(
+            events[0].data,
+            serde_json::json!({ "round": 1, "left": "tree-1" })
+        );
+
+        // Once, whoever asks.
+        assert!(
+            !store
+                .return_failed_check(&id, "r", Some(&failed), SentBack::default())
+                .unwrap()
+        );
+        assert!(
+            !store
+                .return_failed_check(&id, "r", None, words("Again", None))
+                .unwrap()
+        );
+        assert_eq!(store.run("r").unwrap().round, 1);
+    }
+
+    #[test]
+    fn a_person_sends_a_failed_check_back_with_their_words_only_while_it_waits() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let id = running_check(&store);
+        assert!(
+            !store
+                .return_failed_check(&id, "r", None, words("Use the other parser", None))
+                .unwrap(),
+            "it's still running"
+        );
+        let failed = Reason::CheckFailed {
+            exit_code: Some(1),
+            localhost_refused: false,
+            failed_times: Some(3),
+            unchanged: false,
+        };
+        store
+            .set_state(&id, AttemptState::Failed, Some(&failed))
+            .unwrap();
+        assert!(
+            store
+                .return_failed_check(
+                    &id,
+                    "r",
+                    None,
+                    words("Use the other parser", Some("Claude Code")),
+                )
+                .unwrap()
+        );
+        let attempt = store.attempt(&id).unwrap();
+        assert_eq!(attempt.state, "returned");
+        assert_eq!(
+            attempt.output.unwrap(),
+            serde_json::json!({ "instructions": "Use the other parser", "by": "Claude Code" })
+        );
+        assert_eq!(
+            attempt.reason.unwrap()["failedTimes"],
+            3,
+            "why it failed stays"
+        );
+        assert_eq!(store.run("r").unwrap().round, 1);
+        let events = store.events(&id, 0).unwrap();
+        assert_eq!(events[0].kind, "returned");
+        assert_eq!(
+            events[0].data,
+            serde_json::json!({ "instructions": "Use the other parser", "round": 1, "by": "Claude Code" })
+        );
     }
 
     #[test]

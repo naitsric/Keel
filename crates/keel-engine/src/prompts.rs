@@ -153,7 +153,7 @@ pub fn render(template: &str, lookup: impl Fn(&str) -> Option<String>) -> String
 }
 
 /// The names of the tags Keel puts material in. Text inside one can't use any of them as a tag.
-const FENCES: [&str; 9] = [
+const FENCES: [&str; 10] = [
     "request",
     "spec",
     "review",
@@ -163,6 +163,7 @@ const FENCES: [&str; 9] = [
     "answers",
     "sent-back",
     "builder-message",
+    "check-output",
 ];
 
 /// Whether what follows a `<` makes it a tag with one of Keel's names. One that closes, however
@@ -241,7 +242,16 @@ pub fn material_line(language: &str) -> &'static str {
 /// Whether a step's own prompt already says it, in either language. Asked of the prompt as the
 /// workflow has it, before anything is filled in: what goes into it can say anything, also this.
 pub(crate) fn says_material_line(template: &str) -> bool {
-    template.contains(MATERIAL_EN) || template.contains(MATERIAL_ES)
+    material_line_at(template).is_some()
+}
+
+/// Where it says it, if it does: material Keel adds on its own goes right before that, so the
+/// line is about it too.
+pub(crate) fn material_line_at(template: &str) -> Option<usize> {
+    [MATERIAL_EN, MATERIAL_ES]
+        .iter()
+        .filter_map(|line| template.find(line))
+        .min()
 }
 
 /// Whether a step's prompt, as the workflow has it, uses `{{name}}`.
