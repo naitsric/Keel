@@ -4,6 +4,8 @@
 //! Triggers enforce both, so a bug in the app can't rewrite history. This isn't protection
 //! against someone who owns the machine: the raw stream file and its SHA-256 back it up.
 
+mod migrate;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Mutex;
@@ -11,6 +13,7 @@ use std::sync::Mutex;
 use keel_core::{
     AttemptState, BoardColumn, CardLane, CiState, EnvVar, PrState, Reason, Service, card_column,
 };
+pub use migrate::saved_setting;
 pub use rusqlite::types as rusqlite_value;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
@@ -28,11 +31,25 @@ pub enum Error {
     /// The client that put the card in Todo, by name, may no longer start runs.
     #[error("{0} may no longer start runs")]
     ClientMayNotRun(String),
+    /// The database has run more migrations than this build has. Nothing was changed.
+    #[error(
+        "a newer Keel opened this data, and this one would damage it: it has had {found} changes \
+         to how it's kept and this Keel knows {known}"
+    )]
+    FromNewerKeel { found: i64, known: usize },
+    /// A migration the database ran isn't the one this build has under that number, as when a
+    /// build from another branch opened it. Nothing was changed.
+    #[error(
+        "a different version of Keel opened this data, and this one would damage it: change \
+         {number} to how it's kept isn't the one this Keel has"
+    )]
+    FromAnotherKeel { number: i64 },
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
-/// Applied in order; `PRAGMA user_version` records how many ran. Only ever append.
+/// Applied in order; `PRAGMA user_version` records how many ran. Only ever append: a database
+/// that ran one is refused by a build where it changed (see `migrate`).
 const MIGRATIONS: &[&str] = &[
     r#"
     create table setting (key text primary key, value text not null);
@@ -1596,18 +1613,21 @@ pub fn now() -> String {
 }
 
 impl Store {
+    /// Opens the database, bringing it up to this build first. One that a newer Keel or a build
+    /// from another branch opened is refused, unchanged: see `Error::FromNewerKeel` and
+    /// `Error::FromAnotherKeel`.
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_with(path, MIGRATIONS)
+    }
+
+    fn open_with(path: &Path, migrations: &[&str]) -> Result<Self> {
         let mut conn = Connection::open(path)?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        // Before anything is written to it, how it journals included.
+        let applied = migrate::check(&conn, migrations)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        let version: i64 = conn.query_row("pragma user_version", [], |r| r.get(0))?;
-        let tx = conn.transaction()?;
-        for (index, migration) in MIGRATIONS.iter().enumerate().skip(version as usize) {
-            tx.execute_batch(migration)?;
-            tx.pragma_update(None, "user_version", index as i64 + 1)?;
-        }
-        tx.commit()?;
+        migrate::apply(&mut conn, migrations, applied)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })

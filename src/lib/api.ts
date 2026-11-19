@@ -895,6 +895,7 @@ export const api = {
   languageSet: (language: string) => invoke<void>("language_set", { language }),
   openClaudeLogin: () => invoke<void>("open_claude_login"),
   revealRaw: (attemptId: string) => invoke<void>("reveal_raw", { attemptId }),
+  revealLog: () => invoke<void>("reveal_log"),
   appQuit: (stopRuns: boolean) => invoke<void>("app_quit", { stopRuns }),
   menuSet: (menus: MenuSpec[]) => invoke<void>("menu_set", { menus }),
   /** Null for every project's cards on one board. */

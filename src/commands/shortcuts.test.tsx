@@ -2,6 +2,8 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import i18next from "../i18n";
 import { useApp } from "../lib/store";
+import { buildMenuModel } from "../menu/menuModel";
+import { useCommands } from "./registry";
 import { nextWaitingRun, openRun } from "./runs";
 import { useSearchEverywhere } from "./SearchEverywhere";
 import { button, callsTo, hideApp, note, paletteOpen, paletteRow, paletteRows, pressEnter, pressKey, pressMod, row, settle, showApp, tapShift, type, view } from "./testApp";
@@ -320,6 +322,25 @@ describe("the keys", () => {
       await act(async () => paletteRow("Go to Settings")?.click());
       await settle();
       expect(view()).toEqual({ name: "settings" });
+    });
+
+    it("finds Keel's error log, in the palette and in the menu, and all it does is show the file", async () => {
+      await showApp(RUNS);
+      pressMod("A", "KeyA", { shiftKey: true });
+      type("error log");
+      await settle();
+      expect(paletteRow("Show Keel's error log in Finder")).toBeDefined();
+      pressEnter();
+      await settle();
+      expect(callsTo("reveal_log")).toEqual([{ command: "reveal_log", args: {} }]);
+      expect(view()).toEqual({ name: "home" });
+
+      const menus = buildMenuModel(Object.values(useCommands.getState().commands), (key) => i18next.t(key));
+      const navigate = menus.find((menu) => menu.title === "Navigate");
+      expect(navigate?.items).toContainEqual({ kind: "command", commandId: "app.showLog", title: "Show Keel's error log in Finder", accelerator: null });
+      await i18next.changeLanguage("es");
+      expect(i18next.t("shortcuts.showLog")).toBe("Ver el registro de errores de Keel en Finder");
+      await i18next.changeLanguage("en");
     });
 
     it("shows ⌘N on the row it runs: New task on the board, New run elsewhere", async () => {

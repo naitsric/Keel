@@ -49,6 +49,7 @@
     "back": "Volver",
     "nextWaiting": "Siguiente ejecución que te espera",
     "previousWaiting": "Ejecución anterior que te espera",
+    "showLog": "Ver el registro de errores de Keel en Finder",
     "newRun": "Nueva ejecución",
     "newTask": "Nueva tarea",
     "showChanges": "Ver los cambios de la ejecución",
@@ -687,6 +688,13 @@
     "stay": "Quedarme",
     "leaveRunning": "Salir y dejarlos corriendo",
     "stopAndQuit": "Detenerlos y salir"
+  },
+  "cantOpen": {
+    "title": "Keel no puede abrir sus datos",
+    "newer": "Un Keel más nuevo usó estos datos, y este los dañaría. No se cambió nada. Abre el Keel más nuevo que tengas.",
+    "different": "Otra versión de Keel usó estos datos, y esta los dañaría. No se cambió nada. Abre el Keel que usaste la última vez.",
+    "other": "Algo falló al abrirlos: {{detail}}",
+    "where": "Los datos están en {{folder}}"
   },
   "menu": {
     "about": "Acerca de Keel",

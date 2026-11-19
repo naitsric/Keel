@@ -325,9 +325,7 @@ impl Inner {
                 return true;
             };
             if last_reason.as_ref() != Some(&reason) {
-                let _ = self
-                    .store
-                    .set_state(attempt_id, AttemptState::Queued, Some(&reason));
+                self.keep_state(attempt_id, AttemptState::Queued, Some(&reason));
                 self.changed(run_id);
                 last_reason = Some(reason);
             }
@@ -363,6 +361,34 @@ impl Inner {
         self.slot_freed.notify_all();
     }
 
+    /// Ends a step that couldn't be picked up again as one whose process died ends: interrupted,
+    /// for a person to retry. Nothing watches it, so it mustn't go on showing as running, or keep
+    /// a place among the agents or its project's turn, which picking it up may have taken before
+    /// failing. A process it still has is ended too: nothing would ever read what it did, and a
+    /// retry would work on the same copy beside it. What can't be written here goes to the log.
+    pub(crate) fn end_unrecovered(self: &Arc<Self>, attempt: &Attempt) {
+        if let (Some(pid), Some(started)) = (attempt.pid, &attempt.pid_started)
+            && process::is_same_process(pid as i32, started)
+        {
+            process::signal_group(pid as i32, process::SIGKILL);
+        }
+        {
+            let mut slots = locked(&self.slots);
+            slots.active.remove(&attempt.id);
+            // Without the project's id, which may be what couldn't be read.
+            slots
+                .command_steps
+                .retain(|_, turn| turn.attempt_id != attempt.id);
+        }
+        self.slot_freed.notify_all();
+        self.end_early(
+            &attempt.id,
+            &attempt.run_id,
+            AttemptState::Interrupted,
+            Some(Reason::AgentLost),
+        );
+    }
+
     pub(crate) fn end_early(
         self: &Arc<Self>,
         attempt_id: &str,
@@ -370,11 +396,9 @@ impl Inner {
         state: AttemptState,
         reason: Option<Reason>,
     ) {
-        let _ = self.store.set_state(attempt_id, state, reason.as_ref());
-        let _ = self
-            .store
-            .patch_attempt(attempt_id, &[("finished_at", Value::Text(now()))]);
-        let _ = self.store.append_event(
+        self.keep_state(attempt_id, state, reason.as_ref());
+        self.keep_fields(attempt_id, &[("finished_at", Value::Text(now()))]);
+        self.record_event(
             attempt_id,
             "finished",
             &json!({ "state": state.as_str(), "reason": reason }),
@@ -879,7 +903,7 @@ impl Inner {
                 match self.start_services(attempt, &project, &path_env) {
                     Ok((set, _)) => context.services = set,
                     Err(error) => {
-                        let _ = self.store.append_event(
+                        self.record_event(
                             &attempt.id,
                             "servicesLost",
                             &json!({ "error": error.to_string() }),
@@ -977,12 +1001,8 @@ impl Inner {
         if let Ok(attempt) = self.store.attempt(&m.attempt_id)
             && attempt.state == AttemptState::Stalled.as_str()
         {
-            let _ = self
-                .store
-                .set_state(&m.attempt_id, AttemptState::Running, None);
-            let _ = self
-                .store
-                .append_event(&m.attempt_id, "stallCleared", &json!({}));
+            self.keep_state(&m.attempt_id, AttemptState::Running, None);
+            self.record_event(&m.attempt_id, "stallCleared", &json!({}));
         }
     }
 
@@ -1022,15 +1042,11 @@ impl Inner {
                 return;
             };
             let already = attempt.state == AttemptState::Stalled.as_str();
-            let _ = self
-                .store
-                .set_state(&m.attempt_id, AttemptState::Stalled, Some(&reason));
+            self.keep_state(&m.attempt_id, AttemptState::Stalled, Some(&reason));
             already
         };
         if !already {
-            let _ = self
-                .store
-                .append_event(&m.attempt_id, "stalled", &json!({ "reason": reason }));
+            self.record_event(&m.attempt_id, "stalled", &json!({ "reason": reason }));
         }
         self.changed(&m.run_id);
     }
@@ -1039,7 +1055,6 @@ impl Inner {
     /// arrive every 30 s while a command runs, so they are read and saved but are not progress.
     /// Without this, a hung command could never be reported as a stall.
     fn handle_lines(&self, m: &mut Monitor, lines: &[String]) -> bool {
-        let store = &self.store;
         let mut progressed = m.kind != "agent";
         if m.kind == "agent" {
             for line in lines {
@@ -1058,12 +1073,11 @@ impl Inner {
         if progressed {
             fields.push(("last_activity_at", Value::Text(now())));
         }
-        let _ = store.patch_attempt(&m.attempt_id, &fields);
+        self.keep_fields(&m.attempt_id, &fields);
         progressed
     }
 
     fn handle_parsed(&self, m: &mut Monitor, parsed: Parsed) {
-        let store = &self.store;
         match parsed {
             Parsed::Init {
                 session_id,
@@ -1073,14 +1087,14 @@ impl Inner {
                 permission_mode,
                 cli_version,
             } => {
-                let _ = store.patch_attempt(
+                self.keep_fields(
                     &m.attempt_id,
                     &[
                         ("model_actual", text_value(model.clone())),
                         ("api_key_source", text_value(api_key_source.clone())),
                     ],
                 );
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "init",
                     &json!({ "sessionId": session_id, "model": model, "tools": tools, "apiKeySource": api_key_source, "permissionMode": permission_mode, "cliVersion": cli_version }),
@@ -1109,7 +1123,7 @@ impl Inner {
                 }
             }
             Parsed::AssistantText { text } => {
-                let _ = store.append_event(&m.attempt_id, "text", &json!({ "text": text }));
+                self.record_event(&m.attempt_id, "text", &json!({ "text": text }));
             }
             Parsed::ToolCall {
                 id,
@@ -1117,7 +1131,7 @@ impl Inner {
                 input,
                 parent,
             } => {
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "toolCall",
                     &json!({ "id": id, "name": name, "input": input, "parent": parent }),
@@ -1135,17 +1149,17 @@ impl Inner {
                 } else {
                     text
                 };
-                let _ = store.append_event(&m.attempt_id, "toolResult", &json!({ "id": id, "isError": is_error, "text": kept, "truncated": truncated, "exitCode": exit_code }));
+                self.record_event(&m.attempt_id, "toolResult", &json!({ "id": id, "isError": is_error, "text": kept, "truncated": truncated, "exitCode": exit_code }));
             }
             Parsed::ApiRetry { attempt, error } => {
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "apiRetry",
                     &json!({ "attempt": attempt, "error": error }),
                 );
             }
             Parsed::PermissionDenied { tool, detail } => {
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "permissionDenied",
                     &json!({ "tool": tool, "detail": detail }),
@@ -1159,14 +1173,14 @@ impl Inner {
                 if status.as_deref() == Some("rejected") {
                     m.block = Some(Reason::RateLimited { resets_at });
                 }
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "rateLimit",
                     &json!({ "status": status, "resetsAt": resets_at, "kind": kind }),
                 );
             }
             Parsed::Result(result) => {
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "result",
                     &json!({
@@ -1243,7 +1257,7 @@ impl Inner {
                 }
                 Err(error) => {
                     snapshot_failed = true;
-                    let _ = store.append_event(
+                    self.record_event(
                         &m.attempt_id,
                         "snapshotFailed",
                         &json!({ "error": error.to_string() }),
@@ -1284,7 +1298,7 @@ impl Inner {
                     .into_owned()
             };
             let dirty = git.as_ref().is_some_and(|g| g.is_dirty(&m.workspace));
-            let _ = store.append_event(
+            self.record_event(
                 &m.attempt_id,
                 "checkResult",
                 &json!({ "kind": m.kind, "exitCode": exit_code, "stdout": tail(&output), "stderr": tail(&stderr), "truncated": output.len() > EVENT_TEXT_LIMIT, "leftWorkspaceDirty": dirty }),
@@ -1330,7 +1344,7 @@ impl Inner {
                 fields.push(("model_actual", Value::Text(result.models.join(", "))));
             }
         }
-        let _ = store.patch_attempt(&m.attempt_id, &fields);
+        self.keep_fields(&m.attempt_id, &fields);
 
         let (mut state, mut reason) = classify(&m, exit_code, stop_requested, process_lost);
         if let Some(Reason::CheckFailed {
@@ -1353,7 +1367,7 @@ impl Inner {
                 Ok(Verdict::Ask { output, questions }) => {
                     self.keep_output(&m, &output);
                     state = AttemptState::WaitingAnswers;
-                    let _ = store.append_event(
+                    self.record_event(
                         &m.attempt_id,
                         "questionsAsked",
                         &json!({ "questions": questions }),
@@ -1365,7 +1379,7 @@ impl Inner {
                     rounds,
                 }) => {
                     self.keep_output(&m, &output);
-                    let _ = store.append_event(
+                    self.record_event(
                         &m.attempt_id,
                         "questionsTaken",
                         &json!({ "settled": settled, "rounds": rounds }),
@@ -1407,8 +1421,8 @@ impl Inner {
         if state == AttemptState::Succeeded && m.role == "reviewer" {
             self.correct_review(&m);
         }
-        let _ = store.set_state(&m.attempt_id, state, reason.as_ref());
-        let _ = store.append_event(
+        self.keep_state(&m.attempt_id, state, reason.as_ref());
+        self.record_event(
             &m.attempt_id,
             "finished",
             &json!({ "state": state.as_str(), "reason": reason, "exitCode": exit_code, "rawSha256": raw_sha, "shaAfter": sha_after, "files": files }),
@@ -1429,7 +1443,7 @@ impl Inner {
             && let Ok(attempt) = store.attempt(&m.attempt_id)
             && let Err(error) = self.record_brain_output(&attempt)
         {
-            let _ = store.append_event(
+            self.record_event(
                 &m.attempt_id,
                 "brainFailed",
                 &json!({ "error": error.to_string() }),
@@ -1438,7 +1452,7 @@ impl Inner {
         if let Some(problems) = correction {
             if let Err(error) = self.ask_for_correction(&m.attempt_id, &problems) {
                 // Nobody was told this finished, because the correction was meant to follow it.
-                let _ = store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "correctionFailed",
                     &json!({ "error": error.to_string() }),
@@ -1448,7 +1462,11 @@ impl Inner {
             return;
         }
         if state == AttemptState::Succeeded || m.role == "learner" {
-            let _ = self.advance(&m.run_id);
+            self.noted(
+                "moving a run on to its next step",
+                &m.run_id,
+                self.advance(&m.run_id),
+            );
         }
     }
 
@@ -1461,7 +1479,7 @@ impl Inner {
             Ok(Some(taken)) => (screenshots::EVENT, json!(taken)),
             Err(error) => ("screenshotsFailed", json!({ "error": error.to_string() })),
         };
-        let _ = self.store.append_event(&m.attempt_id, kind, &data);
+        self.record_event(&m.attempt_id, kind, &data);
     }
 
     /// The attempts before this one in its session, nearest first.
@@ -1536,7 +1554,7 @@ impl Inner {
                 )?;
             }
             if !replaced.is_empty() {
-                let _ = self.store.append_event(
+                self.record_event(
                     &m.attempt_id,
                     "contractReplaced",
                     &json!({ "replaced": replaced }),
@@ -1650,7 +1668,7 @@ impl Inner {
     /// What it answered, without anything an agent added beyond the structure. The whole answer as
     /// it came stays on the record, in the `result` event.
     fn keep_output(&self, m: &Monitor, output: &serde_json::Value) {
-        let _ = self.store.patch_attempt(
+        self.keep_fields(
             &m.attempt_id,
             &[("output", Value::Text(output.to_string()))],
         );
@@ -1686,7 +1704,7 @@ impl Inner {
             .filter(|checked| checked.corrected.is_some())
             .collect();
         if !changed.is_empty() || !corrected.dropped.is_empty() {
-            let _ = self.store.append_event(
+            self.record_event(
                 &m.attempt_id,
                 "verificationCorrected",
                 &json!({ "corrected": changed, "dropped": corrected.dropped, "check": check }),
@@ -1714,14 +1732,14 @@ impl Inner {
         };
         self.keep_output(m, &kept);
         if !why.unread.is_empty() {
-            let _ = self.store.append_event(
+            self.record_event(
                 &m.attempt_id,
                 "reviewIncomplete",
                 &json!({ "unread": why.unread }),
             );
         }
         if !why.breaks.is_empty() {
-            let _ = self.store.append_event(
+            self.record_event(
                 &m.attempt_id,
                 "reviewBreaks",
                 &json!({ "breaks": why.breaks }),

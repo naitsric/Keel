@@ -1,3 +1,4 @@
+import { api } from "../lib/api";
 import { useApp, type View } from "../lib/store";
 import { KEYS } from "./keys";
 import { registerCommands, type Command } from "./registry";
@@ -58,6 +59,8 @@ export function registerAppCommands(): () => void {
     { id: "navigate.back", title: "shortcuts.back", category: NAVIGATE, keybinding: KEYS.back, keybindingOutsideFields: KEYS.backOutsideFields, enabled: () => backTarget() !== null, run: goBack },
     { id: "run.nextWaiting", title: "shortcuts.nextWaiting", category: NAVIGATE, keybinding: KEYS.nextWaiting, enabled: () => waitingRun(1) !== null, run: openWaitingRun(1) },
     { id: "run.previousWaiting", title: "shortcuts.previousWaiting", category: NAVIGATE, keybinding: KEYS.previousWaiting, enabled: () => waitingRun(-1) !== null, run: openWaitingRun(-1) },
+    // Where Keel writes what failed with nothing to show it. It only shows that file in Finder.
+    { id: "app.showLog", title: "shortcuts.showLog", category: NAVIGATE, run: () => api.revealLog() },
     // Opens the dialog. Starting takes its own button.
     { id: "run.new", title: "shortcuts.newRun", category: RUN, keybinding: KEYS.newRun, run: () => app().setNewRunOpen(true) },
   ];
