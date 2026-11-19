@@ -700,9 +700,7 @@ impl Inner {
         };
         // A map that can't start now isn't this step's problem: the next run asks again.
         if let Ok(Some(data)) = asked() {
-            let _ = self
-                .store
-                .append_event(attempt_id, "brainMapRefresh", &data);
+            self.record_event(attempt_id, "brainMapRefresh", &data);
         }
     }
 

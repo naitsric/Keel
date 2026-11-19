@@ -19,8 +19,12 @@ use crate::process::{SIGKILL, signal_group};
 const LOOK_LIMIT: Duration = Duration::from_secs(30);
 /// How a `gh` that went past its limit starts saying so.
 const TOOK_TOO_LONG: &str = "gh took longer than";
-/// What Keel reads of a pull request.
-const PR_FIELDS: &str = "state isDraft mergedAt closedAt updatedAt headRefOid";
+/// What Keel reads of a pull request. Its newest commits come oldest first, each with how many
+/// parents it has, so that Keel can tell what was added after it delivered. They're asked under a
+/// name of their own, since the checks ask for the last commit alone.
+const PR_FIELDS: &str = "state isDraft mergedAt closedAt updatedAt headRefOid newest:commits(last:100){nodes{commit{oid parents(first:1){totalCount}}}}";
+/// How many of a pull request's newest commits one answer brings.
+pub const MOST_COMMITS_READ: usize = 100;
 /// Its head commit's CI: GitHub's own word on it, and its checks, each with the workflow and the
 /// event it ran for. The word is asked apart: asked next to the checks, the same field also counts
 /// runs of a check that later ones replaced, and says FAILURE where GitHub's pull request says it
@@ -103,6 +107,35 @@ pub struct PrStatus {
     pub head: Option<String>,
     /// What its CI says about that commit. None when the answer didn't say.
     pub ci: Option<PrChecks>,
+    /// Its newest commits. None when the answer didn't say.
+    pub commits: Option<PrCommits>,
+}
+
+/// The newest commits of a pull request, oldest first, at most `MOST_COMMITS_READ` of them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrCommits(pub Vec<PrCommit>);
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrCommit {
+    pub sha: String,
+    /// It has more than one parent, as a merge of the base branch into it does, and GitHub's
+    /// "Update branch". It brings in work from elsewhere, and isn't a fix to this.
+    pub merge: bool,
+}
+
+impl PrCommits {
+    /// How many commits were added after `delivered`, not counting merges, on a branch that is at
+    /// `head`. None when `delivered` isn't among them, so nothing says where to count from: more
+    /// were added than one answer brings, or the branch was rewritten and that commit is gone.
+    /// None too when they don't end at `head`: GitHub lists only so many commits of a pull
+    /// request, and past that the newest are missing, so the count would come out low.
+    pub fn added_after(&self, delivered: &str, head: &str) -> Option<i64> {
+        if self.0.last()?.sha != head {
+            return None;
+        }
+        let at = self.0.iter().rposition(|commit| commit.sha == delivered)?;
+        Some(self.0[at + 1..].iter().filter(|c| !c.merge).count() as i64)
+    }
 }
 
 /// A repo decides how many checks fail at once, and a person reads their names.
@@ -713,7 +746,26 @@ fn parse_pr_status(value: &serde_json::Value) -> Option<PrStatus> {
         at,
         head,
         ci: value.pointer("/commits/nodes/0/commit").map(parse_checks),
+        commits: value.pointer("/newest/nodes").and_then(parse_commits),
     })
+}
+
+/// None unless every commit says which it is and how many parents it has: a count from half a
+/// list would be a wrong number.
+fn parse_commits(nodes: &serde_json::Value) -> Option<PrCommits> {
+    nodes
+        .as_array()?
+        .iter()
+        .map(|node| {
+            let sha = node.pointer("/commit/oid")?.as_str()?;
+            let parents = node.pointer("/commit/parents/totalCount")?.as_u64()?;
+            Some(PrCommit {
+                sha: sha.to_owned(),
+                merge: parents > 1,
+            })
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(PrCommits)
 }
 
 /// Whether a failed question can be about the checks alone: GitHub saying the token can't reach
@@ -1048,6 +1100,7 @@ mod tests {
                 at: Some(at.to_owned()),
                 head: None,
                 ci: None,
+                commits: None,
             })
         };
         assert_eq!(
@@ -1082,6 +1135,7 @@ mod tests {
                 at: None,
                 head: None,
                 ci: None,
+                commits: None,
             })
         );
         assert_eq!(
@@ -1094,6 +1148,69 @@ mod tests {
             None
         );
         assert_eq!(status(serde_json::json!({})), None);
+    }
+
+    /// A pull request with these commits, oldest first, as the query asks for them. One named
+    /// `merge-…` has two parents.
+    fn with_commits(shas: &[&str]) -> serde_json::Value {
+        let nodes: Vec<serde_json::Value> = shas
+            .iter()
+            .map(|sha| {
+                let parents = if sha.starts_with("merge") { 2 } else { 1 };
+                serde_json::json!({ "commit": { "oid": sha, "parents": { "totalCount": parents } } })
+            })
+            .collect();
+        serde_json::json!({ "state": "MERGED", "newest": { "nodes": nodes } })
+    }
+
+    /// What was added after `delivered` to a branch that is at the last of these commits.
+    fn added_after(delivered: &str, shas: &[&str]) -> Option<i64> {
+        let head = shas.last().copied().unwrap_or_default();
+        parse_pr_status(&with_commits(shas))
+            .and_then(|status| status.commits)
+            .and_then(|commits| commits.added_after(delivered, head))
+    }
+
+    #[test]
+    fn commits_added_after_the_one_delivered_are_counted_and_merges_are_not() {
+        assert_eq!(added_after("b", &["a", "b"]), Some(0), "as delivered");
+        assert_eq!(added_after("b", &["a", "b", "c", "d"]), Some(2));
+        // Bringing the base branch up to date fixes nothing.
+        assert_eq!(added_after("b", &["a", "b", "merge-main"]), Some(0));
+        assert_eq!(
+            added_after("b", &["a", "b", "c", "merge-main", "d", "merge-again"]),
+            Some(2)
+        );
+        // What came before it was Keel's own.
+        assert_eq!(added_after("c", &["a", "merge-main", "c"]), Some(0));
+    }
+
+    #[test]
+    fn with_the_delivered_commit_out_of_sight_the_count_is_not_known_rather_than_wrong() {
+        // The branch was rewritten, so that commit is gone.
+        assert_eq!(added_after("b", &["a", "x", "y"]), None);
+        assert_eq!(added_after("b", &[]), None);
+        // More were added than one answer brings: it has the newest, and the one delivered is
+        // further back.
+        let newest: Vec<String> = (0..MOST_COMMITS_READ).map(|n| format!("c{n}")).collect();
+        let newest: Vec<&str> = newest.iter().map(String::as_str).collect();
+        assert_eq!(added_after("b", &newest), None);
+        assert_eq!(added_after("c0", &newest), Some(99));
+        // GitHub lists only the first 250 commits of a pull request, so on a longer one the list
+        // stops short of where the branch is, and what's missing is the newest.
+        let listed = parse_pr_status(&with_commits(&["a", "b", "c"]))
+            .and_then(|status| status.commits)
+            .unwrap();
+        assert_eq!(listed.added_after("b", "c"), Some(1));
+        assert_eq!(listed.added_after("b", "newer"), None);
+        // An answer that says nothing of its commits, or leaves one of them half said.
+        let silent = serde_json::json!({ "state": "MERGED" });
+        assert_eq!(parse_pr_status(&silent).unwrap().commits, None);
+        let half = serde_json::json!({ "state": "MERGED", "newest": { "nodes": [
+            { "commit": { "oid": "b", "parents": { "totalCount": 1 } } },
+            { "commit": { "oid": "c" } },
+        ]}});
+        assert_eq!(parse_pr_status(&half).unwrap().commits, None);
     }
 
     /// A pull request whose head commit's CI GitHub sums up as `verdict`, with these checks, as the
@@ -1275,6 +1392,14 @@ mod tests {
             calls[0]
         );
         assert!(calls[0].contains("event"), "{}", calls[0]);
+        // Its commits come in the same question, not in one more per pull request.
+        assert!(
+            calls[0].contains(
+                "newest:commits(last:100){nodes{commit{oid parents(first:1){totalCount}}}}"
+            ),
+            "{}",
+            calls[0]
+        );
         assert!(
             calls[0].ends_with(" -f owner=acme -f name=app -F number=12 [token:gho_secret]"),
             "{}",
@@ -1387,6 +1512,7 @@ echo 'gh: Could not resolve to an Issue with the number of 3.' >&2; exit 1"#,
         assert!(calls[0].contains("statusCheckRollup"));
         assert!(!calls[1].contains("statusCheckRollup"), "{}", calls[1]);
         assert!(calls[1].contains("state isDraft"), "{}", calls[1]);
+        assert!(calls[1].contains("newest:commits("), "{}", calls[1]);
     }
 
     #[test]

@@ -2948,6 +2948,7 @@ fn the_board_has_the_shape_the_contract_says() {
             "position",
             "prCi",
             "prCiFailed",
+            "prCommitsAdded",
             "prState",
             "prStateAt",
             "prUrl",

@@ -11,6 +11,7 @@ mod issues;
 mod joint;
 mod limits;
 mod localhost;
+mod log;
 mod notes;
 mod project_commands;
 mod project_proposals;
@@ -1025,7 +1026,9 @@ impl Engine {
             // place on the board, and the next launch would start it after all.
             let store = &self.inner.store;
             if store.attempts_of_run(&run_id).is_ok_and(|a| a.is_empty()) {
-                let _ = store.patch_run(&run_id, &[("finished_at", Value::Text(now()))]);
+                let closed = store.patch_run(&run_id, &[("finished_at", Value::Text(now()))]);
+                self.inner
+                    .noted("closing a run that couldn't start", &run_id, closed);
             }
             return Err(error);
         }
@@ -1586,13 +1589,25 @@ impl Engine {
     /// closes out the rest, and continues any run that stopped between two steps. Approvals and
     /// questions simply keep waiting: nothing is running for them. Ended runs that still hold what
     /// their tools built are freed in the background.
+    ///
+    /// A step or a run that can't be picked up is written to the log, and the rest still are. The
+    /// step ends as interrupted, so nothing is left showing as running with nothing watching it.
     pub fn recover(&self) -> Result<()> {
         self.inner.store.release_claimed_cards()?;
         for attempt in self.inner.store.active_attempts()? {
-            self.inner.recover_attempt(&attempt)?;
+            let recovered = self.inner.recover_attempt(&attempt);
+            if self
+                .inner
+                .noted("picking a step up again", &attempt.id, recovered)
+                .is_none()
+            {
+                self.inner.end_unrecovered(&attempt);
+            }
         }
         for run in self.inner.store.open_runs()? {
-            self.inner.advance(&run.id)?;
+            let advanced = self.inner.advance(&run.id);
+            self.inner
+                .noted("moving a run on to its next step", &run.id, advanced);
         }
         self.inner.free_ended_runs();
         Ok(())
@@ -2036,9 +2051,10 @@ impl Inner {
             return;
         };
         if run.finished_at.is_none() && is_trial(&run) {
-            let _ = self
+            let closed = self
                 .store
                 .patch_run(run_id, &[("finished_at", Value::Text(now()))]);
+            self.noted("closing a trial that failed", run_id, closed);
             self.free_builds(run_id);
         }
     }

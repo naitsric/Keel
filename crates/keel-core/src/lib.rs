@@ -1,12 +1,14 @@
-//! Types shared by the store, the harness, the engine and the UI.
+//! Types shared by the store, the harness, the engine and the UI, and Keel's log.
 //!
 //! Nothing here holds user-facing text. Reasons are codes with data, and the UI translates
 //! them, so the backend stays language-neutral.
 
+mod log;
 mod secrets;
 
 use serde::{Deserialize, Serialize};
 
+pub use log::{Log, log_panics};
 pub use secrets::{MASK, Masked, diff_adds_secret, mask_secrets, mask_value, serialize_masked};
 
 /// What a step may do. Maps to the exact tools Claude Code gets.

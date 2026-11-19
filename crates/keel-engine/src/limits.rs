@@ -99,16 +99,16 @@ impl Inner {
         Ok(started)
     }
 
-    /// A continuation that couldn't start goes on the step's record, and to stderr until Keel
-    /// keeps a log. After as many as Keel continues a step, it stops trying: the step no longer
-    /// says it will go on by itself, and waits for the person.
+    /// A continuation that couldn't start goes on the step's record, and in Keel's log. After as
+    /// many as Keel continues a step, it stops trying: the step no longer says it will go on by
+    /// itself, and waits for the person.
     fn could_not_continue(&self, attempt: &keel_store::Attempt, error: &Error) {
-        eprintln!(
-            "keel: could not continue step {} of run {} after its usage limit: {error}",
-            attempt.step_id, attempt.run_id
-        );
+        self.log().write(&format!(
+            "continuing a step by itself after its usage limit ({}): {error}",
+            attempt.id
+        ));
         let store = &self.store;
-        let _ = store.append_event(
+        self.record_event(
             &attempt.id,
             COULD_NOT_CONTINUE,
             &json!({ "error": error.to_string() }),
@@ -138,7 +138,7 @@ impl Inner {
                 resets_at,
                 continues_at: None,
             };
-            let _ = store.set_state(&attempt.id, AttemptState::Blocked, Some(&waits));
+            self.keep_state(&attempt.id, AttemptState::Blocked, Some(&waits));
             self.changed(&attempt.run_id);
         }
     }
@@ -212,8 +212,19 @@ impl Engine {
         let inner = Arc::downgrade(&self.inner);
         let pause = self.inner.config.limit_look_again;
         std::thread::spawn(move || {
+            // A look that fails the same way as the one before isn't written down again: it comes
+            // round several times a minute.
+            let mut failed: Option<String> = None;
             while let Some(inner) = inner.upgrade() {
-                let _ = Engine { inner }.continue_after_limits();
+                let engine = Engine { inner };
+                let now = engine.continue_after_limits().err().map(|e| e.to_string());
+                if let Some(error) = now.as_ref().filter(|error| failed.as_ref() != Some(*error)) {
+                    engine.inner.log().write(&format!(
+                        "looking for steps to continue after a usage limit: {error}"
+                    ));
+                }
+                failed = now;
+                drop(engine);
                 std::thread::sleep(pause);
             }
         });

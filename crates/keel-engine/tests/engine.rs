@@ -679,6 +679,14 @@ fn a_continuation_that_cannot_start_is_on_the_record_and_keel_gives_up_after_thr
         assert_eq!(failures().len(), time);
         assert!(!failures()[0].is_empty(), "it says why");
     }
+    // And in Keel's log, with the step and why, each time.
+    let log = std::fs::read_to_string(h.dir.path().join("data/keel.log")).unwrap();
+    let said = format!(
+        "continuing a step by itself after its usage limit ({}): {}",
+        blocked.id,
+        failures()[0]
+    );
+    assert_eq!(log.matches(&said).count(), 3, "{log}");
     // It no longer says it will go on by itself, and waits for the person.
     let waits = h.store.attempt(&blocked.id).unwrap();
     assert_eq!(waits.state, "blocked");

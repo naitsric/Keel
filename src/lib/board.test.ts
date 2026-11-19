@@ -25,6 +25,7 @@ const card = (id: string, column: BoardColumn, extra: Partial<BoardCard> = {}): 
   prStateAt: null,
   prCi: null,
   prCiFailed: [],
+  prCommitsAdded: null,
   rejection: null,
   startBlocked: null,
   createdAt: "2026-11-05T00:00:00Z",
@@ -84,6 +85,22 @@ describe("what a done card says about its pull request", () => {
       const label = done(extra);
       expect(label?.state).not.toBe("failed");
       expect(label?.detail ?? "").not.toContain("CI");
+    }
+  });
+
+  it("says how many commits were added after Keel delivered, when some were", () => {
+    const merged = done({ prState: "merged", prStateAt: "2026-11-06T10:00:00Z", prCommitsAdded: 2 });
+    expect(merged?.label).toBe("Merged");
+    expect(merged?.detail).toContain("2026");
+    expect(merged?.detail).toContain("2 commits added after Keel delivered");
+    expect(done({ prState: "open", prCommitsAdded: 1 })?.detail).toBe("1 commit added after Keel delivered");
+    expect(done({ prState: "draft", prCi: "failed", prCiFailed: ["lint"], prCommitsAdded: 3 })?.detail).toBe("CI failed: lint · 3 commits added after Keel delivered");
+    expect(cardLabel(t("es"), card("d", "done", { prState: "open", prCommitsAdded: 2 }))?.detail).toBe("2 commits agregados después de que Keel entregó");
+    expect(cardLabel(t("es"), card("d", "done", { prState: "open", prCommitsAdded: 1 }))?.detail).toBe("1 commit agregado después de que Keel entregó");
+    // Merged as delivered, or Keel doesn't know: nothing about it.
+    for (const prCommitsAdded of [0, null]) {
+      expect(done({ prState: "open", prCommitsAdded })?.detail).toBeNull();
+      expect(done({ prState: "merged", prStateAt: "2026-11-06T10:00:00Z", prCommitsAdded })?.detail ?? "").not.toContain("commit");
     }
   });
 

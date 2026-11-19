@@ -1,7 +1,7 @@
 import { useTranslation } from "react-i18next";
 import type { Workflow, WorkflowResults } from "../lib/api";
 import { formatCost, formatNumber } from "../lib/format";
-import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE, matchedShare, movedUpReasons } from "../lib/results";
+import { averageRounds, comparedResults, costPerMerged, ENOUGH_FOR_AN_AVERAGE, matchedShare, mergedAsDelivered, movedUpReasons } from "../lib/results";
 import { Card } from "../ui/primitives";
 
 /** Workflows side by side, one row per measure, so a new measure is one more line here. */
@@ -9,6 +9,7 @@ export function WorkflowResultsCard({ results, workflows }: { results: WorkflowR
   const { t } = useTranslation();
   const notEnough = t("workflows.results.notEnough");
   const nothingChecked = t("workflows.results.nothingChecked");
+  const notKnown = t("workflows.results.asDeliveredNotKnown");
   // A workflow with no verifier never checks anything, so "not enough yet" would be wrong for it.
   // A workflow with nothing that depends on the change never decides this, so "0" would mislead.
   const depends = t("workflows.results.doesNotDepend");
@@ -17,6 +18,16 @@ export function WorkflowResultsCard({ results, workflows }: { results: WorkflowR
   const rows: { label: string; note?: string; value: (r: WorkflowResults) => string }[] = [
     { label: t("workflows.results.runs"), value: (r) => formatNumber(r.runs) },
     { label: t("workflows.results.merged"), value: (r) => formatNumber(r.merged) },
+    {
+      label: t("workflows.results.asDelivered"),
+      note: t("workflows.results.asDeliveredNote"),
+      value: (r) => {
+        const delivered = mergedAsDelivered(r);
+        // With none merged there's nothing to know yet. With some, Keel doesn't know what was added to them.
+        if (delivered === null) return r.merged === 0 ? notEnough : notKnown;
+        return t("workflows.results.asDeliveredValue", { same: formatNumber(delivered.same), known: formatNumber(delivered.known) });
+      },
+    },
     { label: t("workflows.results.closed"), value: (r) => formatNumber(r.closed) },
     {
       label: t("workflows.results.cost"),
@@ -87,7 +98,7 @@ export function WorkflowResultsCard({ results, workflows }: { results: WorkflowR
                     {compared.map((r) => {
                       const value = row.value(r);
                       return (
-                        <td key={r.workflowId} className={value === notEnough || value === nothingChecked || value === depends ? "px-2 py-1 align-top text-subtle" : "px-2 py-1 align-top"}>
+                        <td key={r.workflowId} className={value === notEnough || value === nothingChecked || value === depends || value === notKnown ? "px-2 py-1 align-top text-subtle" : "px-2 py-1 align-top"}>
                           {value}
                         </td>
                       );
