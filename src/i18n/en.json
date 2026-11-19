@@ -790,7 +790,7 @@
     "whenNotSmall": "Only if the change isn't small",
     "whenHint": "Keel decides that from the real change: what was asked, a check that passed, who wrote the issue, nothing sensitive and under 400 lines. It goes after the first step that builds, and a person still approves.",
     "prompt": "What it does",
-    "promptHint": "You can use {{tokens}}, where spec is a step's name.",
+    "promptHint": "You can use {{tokens}}, where spec is a step's name. Keel puts what comes from the request, the code or another step inside a tag, such as <change>, so the agent can tell it from your instructions.",
     "command": "Command",
     "commandScreenshotsHint": "To show screenshots of the change at the approval, save them in $KEEL_SCREENSHOTS.",
     "moveEarlier": "Move earlier",

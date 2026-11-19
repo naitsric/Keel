@@ -634,7 +634,7 @@ fn what_an_assistant_sends_back_against_the_person_s_decision_does_not_win_over_
     );
     assert!(
         reviewed.contains(
-            "Claude Code, an assistant the person allowed, sent this work back. This is the only thing to change in this round, and it counts as part of the scope:\nAdd a login check."
+            "Claude Code, an assistant the person allowed, sent this work back. This is the only thing to change in this round, and it counts as part of the scope:\n<sent-back>\nAdd a login check.\n</sent-back>"
         ),
         "{reviewed}"
     );
@@ -1620,7 +1620,10 @@ fn a_saved_prompt_that_leaves_out_the_rework_still_gets_what_a_person_asked() {
         prompt.starts_with("BUILD\n\nA person sent this work back."),
         "{prompt}"
     );
-    assert!(prompt.contains(&format!("Return 0{added}")), "{prompt}");
+    assert!(
+        prompt.contains(&format!("<sent-back>\nReturn 0\n</sent-back>{added}")),
+        "{prompt}"
+    );
 }
 
 #[test]
@@ -1879,7 +1882,7 @@ fn a_saved_workflow_with_a_plain_worker_spec_behaves_exactly_as_before() {
     assert!(
         w.step(&run, "builder")
             .prompt
-            .contains("spec=PLAIN-SPEC-TEXT")
+            .contains("spec=<spec>\nPLAIN-SPEC-TEXT\n</spec>")
     );
     // It never gets asked for a structure, so it isn't judged by one.
     assert_eq!(

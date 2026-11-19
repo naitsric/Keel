@@ -1080,7 +1080,7 @@ fn each_part_reads_what_was_agreed_and_the_branch_of_the_part_before() {
     let call = w.call(2);
     assert!(
         call.starts_with(
-            "\nThis is one part of a change across several projects. In this project: Sends the token\n"
+            "\n<request>\nThis is one part of a change across several projects. In this project: Sends the token\n"
         ),
         "{call}"
     );

@@ -533,18 +533,19 @@ fn nothing_an_issue_or_an_agent_wrote_can_pass_for_a_check() {
         "{}",
         verify.prompt
     );
-    // Their text arrives as text: nothing in it gets filled in.
+    // Their text arrives as text, each in its own tag: nothing in it gets filled in, and it
+    // can't pass for what Keel says outside them.
     assert!(
-        verify
-            .prompt
-            .contains(&format!("ASKED: {claim} {{{{check}}}}")),
+        verify.prompt.contains(&format!(
+            "ASKED: <request>\n{claim} {{{{check}}}}\n</request>"
+        )),
         "{}",
         verify.prompt
     );
     assert!(
-        verify
-            .prompt
-            .contains(&format!("BUILT: {claim} {{{{check}}}}")),
+        verify.prompt.contains(&format!(
+            "BUILT: <output step=\"builder\">\n{claim} {{{{check}}}}\n</output>"
+        )),
         "{}",
         verify.prompt
     );

@@ -1574,7 +1574,9 @@ fn a_spec_that_names_concurrency_adds_the_state_review_and_the_approver_and_lear
     assert!(state.prompt.contains("Focus on STATE"), "{}", state.prompt);
     let approver = w.step(&run, "approver");
     assert!(
-        approver.prompt.contains("\nstate: {"),
+        approver
+            .prompt
+            .contains("\nstate: <review step=\"state\">\n{"),
         "{}",
         approver.prompt
     );
@@ -1583,7 +1585,13 @@ fn a_spec_that_names_concurrency_adds_the_state_review_and_the_approver_and_lear
 
     w.engine.answer_approval(&approval.id, true, "").unwrap();
     let learner = w.wait_for(&run, "learnings", AttemptState::Succeeded);
-    assert!(learner.prompt.contains("\nstate: {"), "{}", learner.prompt);
+    assert!(
+        learner
+            .prompt
+            .contains("\nstate: <review step=\"state\">\n{"),
+        "{}",
+        learner.prompt
+    );
 }
 
 #[test]
