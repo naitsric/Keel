@@ -41,9 +41,9 @@ pub const BASE_REF: &str = "keel-base";
 /// home folder, which sandboxed commands can't reach.
 pub const RUN_CACHE: &str = ".keel-cache";
 
-/// What's in a run's copy besides its commits can say they come in another order: a replaced object,
-/// or a file of git's that sums the history up. With these, git reads the commits themselves.
-const REAL_HISTORY: [&str; 3] = ["--no-replace-objects", "-c", "core.commitGraph=false"];
+/// A file of git's that sums the history up, which an agent can write in a run's copy, can say its
+/// commits come in another order. Without it, git reads the commits themselves.
+const REAL_HISTORY: [&str; 2] = ["-c", "core.commitGraph=false"];
 
 /// How long git gets in a workspace. What a step left there could make it hang, and a run must
 /// never sit there saying nothing.
@@ -104,6 +104,9 @@ impl Git {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
+            // `git replace` has git read one object as another, and an agent can run it in a run's
+            // copy. Pushing reads no replacements, so what a person approves can't either.
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
             .args([
                 "-c",
                 "core.hooksPath=/dev/null",
@@ -796,15 +799,14 @@ impl Git {
 
     /// How big the change since `base` really is. What decides whether reviews run comes from here,
     /// so what a step could have left behind must not make it look smaller. A file moved out of a
-    /// folder has to show the folder it left, so moves are read as a removal and an addition. Replaced
-    /// objects could make two commits look the same, and `-z` keeps names as they are, where git would
-    /// otherwise put any with an accent in quotes, and a pattern would no longer match them.
+    /// folder has to show the folder it left, so moves are read as a removal and an addition. And `-z`
+    /// keeps names as they are, where git would otherwise put any with an accent in quotes, and a
+    /// pattern would no longer match them.
     pub fn change_size(&self, workspace: &Path, base: &str) -> Result<ChangeSize, GitError> {
         let range = format!("{base}..HEAD");
         let output = self.run_in_workspace(
             workspace,
             &[
-                "--no-replace-objects",
                 "diff",
                 "--no-ext-diff",
                 "--no-textconv",
@@ -820,7 +822,6 @@ impl Git {
         let raw = self.run_in_workspace(
             workspace,
             &[
-                "--no-replace-objects",
                 "diff",
                 "--no-ext-diff",
                 "--no-renames",
@@ -1237,14 +1238,43 @@ mod tests {
     }
 
     #[test]
-    fn replacing_a_commit_does_not_make_the_change_look_like_nothing() {
+    fn nothing_a_step_replaced_changes_what_keel_reads_of_its_work() {
         keel_harness::needs!(sandbox);
         let p = poisoned("");
-        p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
-        let head = p.git.head(&p.workspace).unwrap();
-        sh(&p.workspace, &format!("git replace {head} {}", p.base));
-        let size = p.git.change_size(&p.workspace, &p.base).unwrap();
-        assert_eq!(size.files, [".gitattributes", "a.txt"]);
+        let built = p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        assert_eq!(built.files, [".gitattributes", "a.txt"]);
+        let (base, head) = (p.base.as_str(), built.sha.as_str());
+        let read = || {
+            (
+                p.git.is_dirty(&p.workspace),
+                p.git.snapshot(&p.workspace, base, "check").unwrap(),
+                p.git.diff_since(&p.workspace, base).unwrap(),
+                p.git.files_since(&p.workspace, base).unwrap(),
+                p.git.change_size(&p.workspace, base).unwrap(),
+                p.git.commits_ahead(&p.workspace, base).unwrap(),
+                p.git.tree_of(&p.workspace, "HEAD").unwrap(),
+                p.git.file_at(&p.workspace, base, "a.txt"),
+                p.git.file_at(&p.workspace, head, "a.txt"),
+                p.git.files_at(&p.workspace, head).unwrap(),
+            )
+        };
+        let as_it_is = read();
+        assert!(as_it_is.2.contains("+two"), "{}", as_it_is.2);
+        for (object, by) in [
+            (head.to_owned(), base.to_owned()),
+            (base.to_owned(), head.to_owned()),
+            (format!("{head}^{{tree}}"), format!("{base}^{{tree}}")),
+            (format!("{base}^{{tree}}"), format!("{head}^{{tree}}")),
+            (format!("{head}:a.txt"), format!("{base}:a.txt")),
+            (format!("{base}:a.txt"), format!("{head}:a.txt")),
+        ] {
+            sh(
+                &p.workspace,
+                &format!("git replace '{object}' '{by}' && test -n \"$(git replace -l)\""),
+            );
+            assert_eq!(read(), as_it_is, "{object} as {by}");
+            sh(&p.workspace, "git replace -d $(git replace -l)");
+        }
     }
 
     #[test]

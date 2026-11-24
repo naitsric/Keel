@@ -1,8 +1,8 @@
 //! Git on the project, run the way Keel runs it on a run's workspace elsewhere (`harden` and
 //! `run_in_workspace` in `keel-engine/src/git.rs`): the git Keel found, in the sandbox of a
-//! `check` step, with nothing from the environment, no hooks, no fsmonitor, no submodules, and no
-//! lock the agent's own git could trip over. The project is the agent's to change, so whatever it
-//! could make git run gets no more than the agent's own commands do.
+//! `check` step, with nothing from the environment, no hooks, no fsmonitor, no submodules, no
+//! replaced objects, and no lock the agent's own git could trip over. The project is the agent's to
+//! change, so whatever it could make git run gets no more than the agent's own commands do.
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
@@ -57,6 +57,7 @@ impl Git<'_> {
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
             // Status would otherwise refresh the index, and its lock could fail the agent's git.
             .env("GIT_OPTIONAL_LOCKS", "0")
             // This project's repository and work tree, whatever a config in it says.
