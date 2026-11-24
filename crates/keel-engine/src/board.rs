@@ -66,6 +66,31 @@ pub(crate) fn stored_max_agents(store: &Store) -> Option<usize> {
         .filter(|n| MAX_AGENTS_RANGE.contains(n))
 }
 
+/// What the scheduler last found out about whether Todo can start cards. `board_paused` is what the
+/// board shows, and a look with no card to start, or no room for one, shows nothing. This keeps what
+/// was known through those looks, since they never asked.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) enum TodoPause {
+    /// The scheduler hasn't looked since Keel opened.
+    #[default]
+    NotLooked,
+    Clear,
+    /// A run's own record says it. Every look reads those, so one that doesn't find it means it's
+    /// over.
+    OnRecord(Reason),
+    /// The session says it. Only a look that asks it again can say it's over.
+    Session(Reason),
+}
+
+impl TodoPause {
+    /// A look that found no record of a pause, and had no reason to ask the session.
+    fn nothing_to_start(&mut self) {
+        if !matches!(self, Self::Session(_)) {
+            *self = Self::Clear;
+        }
+    }
+}
+
 /// What the board says about an issue. The body stays in the copy the run reads.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -650,19 +675,23 @@ impl Engine {
             .into_iter()
             .find(|reason| reason.stops_every_card(now))
         {
+            *locked(&self.inner.todo_pause) = TodoPause::OnRecord(reason.clone());
             self.set_paused(Some(reason));
             return Ok(false);
         }
         // Most ticks come from a stream batch and find nothing to do, so the session is only looked
         // at when a card could actually start.
         if !store.has_todo_cards()? || store.working_runs()? >= self.max_agents() {
+            locked(&self.inner.todo_pause).nothing_to_start();
             self.set_paused(None);
             return Ok(false);
         }
         if let Some(reason) = self.preflight().blocker {
+            *locked(&self.inner.todo_pause) = TodoPause::Session(reason.clone());
             self.set_paused(Some(reason));
             return Ok(true);
         }
+        *locked(&self.inner.todo_pause) = TodoPause::Clear;
         self.set_paused(None);
 
         let stopped = locked(&self.inner.board_stopped);

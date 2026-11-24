@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use keel_core::{AttemptState, Reason, StepRole, StepSpec, ToolProfile, WorkflowStep};
-use keel_engine::{Config, Engine, Error, StartRun};
+use keel_engine::{Config, Engine, Error, NoticeWatch, StartRun};
 use keel_harness::Tools;
 use keel_store::Store;
 
@@ -956,4 +956,46 @@ fn a_map_that_failed_is_not_asked_for_again_until_a_person_does() {
             .iter()
             .all(|n| n.stale)
     );
+}
+
+/// Keel has maps written by itself, and a person finds one on the Brain page.
+#[test]
+fn a_map_that_ends_is_not_noticed_and_one_that_fails_is() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let mut watch = NoticeWatch::default();
+    watch.look(&w.engine, "en").unwrap();
+    w.map_answer(TWO_LINES);
+    w.map();
+    assert_eq!(watch.look(&w.engine, "en").unwrap(), []);
+
+    // Any other run that ends is said, so it's the map and not the watch.
+    w.run(vec![agent("work", StepRole::Worker, "ANYTHING")]);
+    let said = watch.look(&w.engine, "en").unwrap();
+    assert_eq!(said.len(), 1);
+    assert_eq!(said[0].title, "Done");
+
+    // A map that fails stays open until someone does something about it.
+    let failed = w
+        .engine
+        .start_run(StartRun {
+            project_id: w.project_id.clone(),
+            title: None,
+            request: "x".into(),
+            workflow: vec![agent("brain-map", StepRole::Mapper, "FAIL")],
+            language: "en".into(),
+            source_issue: None,
+            saved_workflow: None,
+            started_by: None,
+        })
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while w.store.attempts_of_run(&failed).unwrap()[0].state != AttemptState::Failed.as_str() {
+        assert!(Instant::now() < deadline, "the map never failed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let said = watch.look(&w.engine, "en").unwrap();
+    assert_eq!(said.len(), 1);
+    assert_eq!(said[0].title, "Failed");
+    assert_eq!(said[0].run_id, Some(failed));
 }
