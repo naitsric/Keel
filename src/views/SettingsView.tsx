@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Language } from "../i18n";
-import { api } from "../lib/api";
+import { api, type NoticeSettings } from "../lib/api";
 import { errorText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Card, Segmented } from "../ui/primitives";
@@ -45,6 +45,58 @@ function MaxAgentsCard() {
   );
 }
 
+const NOTICE_KINDS = ["waiting", "finished", "pullRequests", "paused"] as const;
+
+function NoticesCard() {
+  const { t } = useTranslation();
+  const [settings, setSettings] = useState<NoticeSettings | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api
+      .noticesGet()
+      .then(setSettings)
+      .catch((e) => setError(errorText(t, e)));
+  }, [t]);
+
+  const change = (kind: (typeof NOTICE_KINDS)[number], on: boolean) => {
+    if (!settings) return;
+    const previous = settings;
+    const next = { ...settings, [kind]: on };
+    setSettings(next);
+    setError(null);
+    api.noticesSet(next).catch((e) => {
+      setSettings(previous);
+      setError(errorText(t, e));
+    });
+  };
+
+  return (
+    <Card className="p-4">
+      <p className="text-[13px] font-medium">{t("settings.notices.title")}</p>
+      <p className="mt-0.5 mb-3 text-[12px] text-muted">{t("settings.notices.hint")}</p>
+      {settings && (
+        <div className="space-y-2">
+          {NOTICE_KINDS.map((kind) => (
+            <label key={kind} className="flex items-start gap-2">
+              <input type="checkbox" className="mt-0.5" checked={settings[kind]} onChange={(e) => change(kind, e.target.checked)} />
+              <span>
+                <span className="block text-[12.5px]">{t(`settings.notices.${kind}`)}</span>
+                <span className="block text-[11.5px] leading-snug text-subtle">{t(`settings.notices.${kind}Hint`)}</span>
+              </span>
+            </label>
+          ))}
+        </div>
+      )}
+      {error && (
+        <p role="alert" className="mt-2 text-[12px] text-danger">
+          {error}
+        </p>
+      )}
+    </Card>
+  );
+}
+
 export function SettingsView() {
   const { t, i18n } = useTranslation();
   const setLanguage = useApp((s) => s.setLanguage);
@@ -67,6 +119,7 @@ export function SettingsView() {
             />
           </Card>
           <MaxAgentsCard />
+          <NoticesCard />
           <McpCard />
         </div>
       </div>

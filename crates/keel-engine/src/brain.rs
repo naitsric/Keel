@@ -858,13 +858,7 @@ impl Inner {
             .open_runs()?
             .into_iter()
             .filter(|run| run.project_id == project_id)
-            .find(|run| {
-                let steps: Vec<WorkflowStep> =
-                    serde_json::from_value(run.workflow.clone()).unwrap_or_default();
-                steps.iter().any(|step| {
-                    matches!(step, WorkflowStep::Agent(spec) if spec.role == StepRole::Mapper)
-                })
-            })
+            .find(is_map)
             .map(|run| run.id))
     }
 
@@ -876,6 +870,14 @@ impl Inner {
         )?;
         Ok(())
     }
+}
+
+/// A run that writes a project's map.
+pub(crate) fn is_map(run: &keel_store::Run) -> bool {
+    let steps: Vec<WorkflowStep> = serde_json::from_value(run.workflow.clone()).unwrap_or_default();
+    steps
+        .iter()
+        .any(|step| matches!(step, WorkflowStep::Agent(spec) if spec.role == StepRole::Mapper))
 }
 
 impl Engine {

@@ -693,6 +693,18 @@
     "setupCommandPlaceholder": "uv sync --frozen",
     "maxAgents": "Agents at a time",
     "maxAgentsHint": "Applies to the whole app, not to each project. More agents use your Claude plan faster.",
+    "notices": {
+      "title": "Notifications",
+      "hint": "macOS tells you while Keel isn't in front, and a click opens what it's about. The first time, macOS asks whether Keel may send them. If you said no, turn them on in System Settings › Notifications › Keel.",
+      "waiting": "Something waits for you",
+      "waitingHint": "A run needs your approval or your decision, or it's blocked, failed, looks stuck or was interrupted.",
+      "finished": "A run finishes",
+      "finishedHint": "It ended with what it was asked for.",
+      "pullRequests": "A pull request changes",
+      "pullRequestsHint": "It was merged or closed without merging, or its CI failed.",
+      "paused": "Todo pauses",
+      "pausedHint": "Nothing starts, because of your plan's usage limit or something to fix."
+    },
     "defaultWorkflow": "Default workflow",
     "defaultWorkflowHint": "What a card on the board runs when you move it to Todo.",
     "defaultWorkflowGone": "A workflow that no longer exists"

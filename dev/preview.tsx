@@ -873,6 +873,8 @@ function moveBoardCard(cardId: string, lane: "backlog" | "todo", index: number) 
   boardCards = [...rest.filter((c) => !ours(c)), ...inLane];
 }
 
+let notices = { waiting: true, finished: true, pullRequests: true, paused: true };
+
 mockWindows("main");
 mockIPC((command, args) => {
   switch (command) {
@@ -1073,6 +1075,13 @@ mockIPC((command, args) => {
       return maxAgents;
     case "max_agents_set":
       maxAgents = (args as { value: number }).value;
+      return null;
+    case "notice_take":
+      return null;
+    case "notices_get":
+      return notices;
+    case "notices_set":
+      notices = (args as { settings: typeof notices }).settings;
       return null;
     case "project_update": {
       const { projectId, settings } = args as { projectId: string; settings: Partial<Project> & { defaultWorkflow: string | null } };

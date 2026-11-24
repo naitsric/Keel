@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use keel_core::{AttemptState, BoardColumn, CardLane, Reason, StepSpec, ToolProfile, WorkflowStep};
 use keel_engine::{
-    BoardCard, BoardIssue, Config, Engine, Error, StartRun, Workflow, request_from_issue,
-    split_assistant_notes,
+    BoardCard, BoardIssue, Config, Engine, Error, Notice, NoticeSettings, NoticeWatch, StartRun,
+    Workflow, request_from_issue, split_assistant_notes,
 };
 use keel_harness::Tools;
 use keel_store::{McpClient, NewAttempt, NewMcpCall, NewRun, ProjectSettings, Store};
@@ -487,32 +487,68 @@ impl World {
                 &id,
             )
             .unwrap();
-        let workspace = self.dir.path().join("data/runs").join(&run);
         self.store
-            .add_attempt(&NewAttempt {
-                id: format!("attempt-{title}"),
-                run_id: run.clone(),
-                step_id: step.id().to_owned(),
-                kind: step.kind().to_owned(),
-                role: "worker".into(),
-                round: 0,
-                number: 1,
-                state,
-                model_requested: "fake".into(),
-                effort: None,
-                tools: "none".into(),
-                max_turns: None,
-                max_budget_usd: None,
+            .add_attempt(&self.left_attempt(title, &run, &step, state))
+            .unwrap();
+        id
+    }
+
+    fn left_attempt(
+        &self,
+        title: &str,
+        run: &str,
+        step: &WorkflowStep,
+        state: AttemptState,
+    ) -> NewAttempt {
+        let workspace = self.dir.path().join("data/runs").join(run);
+        NewAttempt {
+            id: format!("attempt-{title}"),
+            run_id: run.to_owned(),
+            step_id: step.id().to_owned(),
+            kind: step.kind().to_owned(),
+            role: "worker".into(),
+            round: 0,
+            number: 1,
+            state,
+            model_requested: "fake".into(),
+            effort: None,
+            tools: "none".into(),
+            max_turns: None,
+            max_budget_usd: None,
+            language: "en".into(),
+            prompt: title.into(),
+            system_prompt_sources: "[]".into(),
+            settings: "{}".into(),
+            session_id: format!("session-{title}"),
+            resumed_from: None,
+            workspace: workspace.to_string_lossy().into_owned(),
+            raw_path: workspace.join("raw.log").to_string_lossy().into_owned(),
+            started_at: keel_store::now(),
+        }
+    }
+
+    /// A run with no card and a step that's running, with no process behind it. Returns its attempt.
+    fn by_hand_left_running(&self, title: &str) -> String {
+        let step = agent("work", ToolProfile::ReadOnly);
+        let run = format!("run-{title}");
+        self.store
+            .add_run(&NewRun {
+                id: run.clone(),
+                project_id: self.project_id.clone(),
+                title: title.into(),
+                request: title.into(),
+                workflow: serde_json::to_string(&[&step]).unwrap(),
                 language: "en".into(),
-                prompt: title.into(),
-                system_prompt_sources: "[]".into(),
-                settings: "{}".into(),
-                session_id: format!("session-{title}"),
-                resumed_from: None,
-                workspace: workspace.to_string_lossy().into_owned(),
-                raw_path: workspace.join("raw.log").to_string_lossy().into_owned(),
-                started_at: keel_store::now(),
+                source_issue: None,
+                request_written: None,
+                workflow_id: None,
+                workflow_name: None,
+                started_by: None,
             })
+            .unwrap();
+        let id = format!("attempt-{title}");
+        self.store
+            .add_attempt(&self.left_attempt(title, &run, &step, AttemptState::Running))
             .unwrap();
         id
     }
@@ -3889,4 +3925,113 @@ fn human_review_has_the_card_that_has_waited_longest_on_top() {
         w.titles_in(BoardColumn::HumanReview),
         ["card-1", "card-2", "card-3"]
     );
+}
+
+#[test]
+fn a_run_that_comes_to_wait_for_approval_is_noticed_once_and_only_while_wanted() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default(&answer_step(&w.engine, &w.project_id));
+    let mut watch = NoticeWatch::default();
+    assert!(watch.look(&w.engine, "en").unwrap().is_empty());
+
+    let card = w.queued("card-1");
+    w.engine.start_board();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    let run = w.card(&card).run_id.unwrap();
+    assert_eq!(
+        watch.look(&w.engine, "es").unwrap(),
+        [Notice {
+            run_id: Some(run),
+            title: "Falta tu aprobación".into(),
+            body: "card-1 · app".into(),
+        }]
+    );
+    assert!(watch.look(&w.engine, "es").unwrap().is_empty());
+
+    // What the person turns off stays off, and the rest stays on.
+    let off = NoticeSettings {
+        waiting: false,
+        ..NoticeSettings::default()
+    };
+    w.engine.set_notice_settings(&off).unwrap();
+    assert_eq!(w.engine.notice_settings(), off);
+    let second = w.queued("card-2");
+    w.wait_column(&second, BoardColumn::HumanReview);
+    assert!(watch.look(&w.engine, "en").unwrap().is_empty());
+}
+
+/// How many notices say Todo paused, of what there is to say now.
+fn pauses_said(w: &World, watch: &mut NoticeWatch) -> usize {
+    let said = watch.look(&w.engine, "en").unwrap();
+    said.iter().filter(|n| n.title == "Todo is paused").count()
+}
+
+#[test]
+fn a_pause_that_was_there_when_keel_opened_is_never_noticed() {
+    let w = world();
+    w.use_one_step();
+    w.flag("logged-out");
+    w.queued("card-1");
+    let mut watch = NoticeWatch::default();
+    // The scheduler asks the session, which takes a while, and the notices don't wait for it.
+    assert_eq!(pauses_said(&w, &mut watch), 0);
+    w.engine.board_tick().unwrap();
+    assert_eq!(w.paused(), Some(Reason::ClaudeLoggedOut));
+    assert_eq!(pauses_said(&w, &mut watch), 0);
+}
+
+#[test]
+fn a_pause_is_noticed_once_though_a_full_board_shows_none_meanwhile() {
+    let w = world();
+    w.use_one_step();
+    w.engine.set_max_agents(1).unwrap();
+    let mut watch = NoticeWatch::default();
+    w.engine.board_tick().unwrap();
+    assert_eq!(pauses_said(&w, &mut watch), 0);
+
+    w.flag("logged-out");
+    w.queued("card-1");
+    w.engine.board_tick().unwrap();
+    assert_eq!(w.paused(), Some(Reason::ClaudeLoggedOut));
+    assert_eq!(pauses_said(&w, &mut watch), 1);
+
+    // A run takes the only place, so the scheduler has no reason to ask the session.
+    let busy = w.by_hand_left_running("busy");
+    w.engine.board_tick().unwrap();
+    assert_eq!(w.paused(), None);
+    assert_eq!(pauses_said(&w, &mut watch), 0);
+    w.store
+        .set_state(&busy, AttemptState::Stopped, None)
+        .unwrap();
+    w.engine.board_tick().unwrap();
+    assert_eq!(w.paused(), Some(Reason::ClaudeLoggedOut));
+    assert_eq!(pauses_said(&w, &mut watch), 0, "it never stopped");
+}
+
+#[test]
+fn a_usage_limit_that_lifts_and_comes_back_is_noticed_again() {
+    let w = world();
+    w.use_one_step();
+    let mut watch = NoticeWatch::default();
+    w.engine.board_tick().unwrap();
+    assert_eq!(pauses_said(&w, &mut watch), 0);
+
+    let limit = Reason::RateLimited {
+        resets_at: None,
+        continues_at: None,
+    };
+    let first = blocked_on(&w, "card-1", &limit);
+    w.engine.board_tick().unwrap();
+    assert_eq!(pauses_said(&w, &mut watch), 1);
+    // Nothing is left in Todo, but every look reads the record, so this one knows it's over.
+    let attempt = w.attempt(&first);
+    w.store
+        .set_state(&attempt.id, AttemptState::Stopped, None)
+        .unwrap();
+    w.engine.board_tick().unwrap();
+    assert_eq!(pauses_said(&w, &mut watch), 0);
+    blocked_on(&w, "card-2", &limit);
+    w.engine.board_tick().unwrap();
+    assert_eq!(pauses_said(&w, &mut watch), 1);
 }

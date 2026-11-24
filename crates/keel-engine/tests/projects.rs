@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use keel_core::{BoardColumn, CardLane, Reason, WorkflowStep};
 use keel_engine::{
     AddOutcome, CiLeftOut, CiWhy, Config, Engine, Error, MAX_PROJECT_PROPOSALS, MapStart,
-    ProjectProposal, ProposedProject, StartRun, Workflow,
+    NoticeWatch, ProjectProposal, ProposedProject, StartRun, Workflow,
 };
 use keel_harness::Tools;
 use keel_store::{Attempt, NewBrainNote, ProjectSettings, Store};
@@ -480,6 +480,21 @@ fn keel_finds_where_in_the_home_folder_the_programs_a_project_uses_are() {
         wanted
     );
     assert!(w.store.project(&id).unwrap().allowed_read.is_empty());
+}
+
+/// Whoever tries a check sees what it says, and nothing waits for them.
+#[test]
+fn trying_a_check_is_never_noticed_however_it_ends() {
+    keel_harness::needs!(sandbox);
+    let w = world(true);
+    let id = w.add();
+    let mut watch = NoticeWatch::default();
+    watch.look(&w.engine, "en").unwrap();
+    for check in ["true", "exit 1"] {
+        let run = w.engine.try_check(&id, "true", check, "en").unwrap();
+        w.wait_finished(&run);
+        assert_eq!(watch.look(&w.engine, "en").unwrap(), [], "{check}");
+    }
 }
 
 /// Trying commands with the folders the person is about to let them read, before saving any.

@@ -6,7 +6,7 @@
 
 mod migrate;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -1182,6 +1182,33 @@ pub struct RunRow {
     pub started_at: String,
     pub finished_at: Option<String>,
     pub last_activity_at: Option<String>,
+}
+
+/// What a person may want to hear about a run while they're not looking: what waits for them in
+/// it, whether it ended, and what became of its pull request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunSignal {
+    pub id: String,
+    pub title: String,
+    pub project_name: String,
+    /// The state of the attempt that matters, as in `RunRow`.
+    pub state: Option<AttemptState>,
+    pub finished: bool,
+    /// Every step that needs a person, oldest first. Steps run at once can each need one, and one
+    /// attempt that matters would hide the rest. Empty once the run has ended.
+    pub waiting: Vec<WaitingStep>,
+    pub pr_state: Option<PrState>,
+    pub pr_ci: Option<CiState>,
+    /// The commit `pr_ci` is about.
+    pub pr_head: Option<String>,
+}
+
+/// A step's latest attempt, when it needs a person.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WaitingStep {
+    pub attempt_id: String,
+    pub state: AttemptState,
+    pub reason: Option<Reason>,
 }
 
 /// The numbers on the home cards.
@@ -2924,6 +2951,59 @@ impl Store {
     /// Runs, newest first, each with its latest attempt.
     pub fn runs(&self, limit: i64) -> Result<Vec<RunRow>> {
         self.run_rows("1", params![limit])
+    }
+
+    /// The newest runs, as `RunSignal`s.
+    pub fn run_signals(&self, limit: i64) -> Result<Vec<RunSignal>> {
+        let conn = self.lock();
+        // What needs a person is as in `ATTEMPT_THAT_MATTERS`, for every step and not only one.
+        let mut stmt = conn.prepare(
+            "select a.run_id, a.id, a.state, a.reason from attempt a
+             join run r on r.id = a.run_id
+             where a.state in ('stalled', 'blocked', 'waitingApproval', 'waitingAnswers', 'interrupted', 'failed')
+               and r.finished_at is null
+               and (a.role <> 'learner' or a.state = 'stalled')
+               and not exists (select 1 from attempt later
+                               where later.run_id = a.run_id and later.step_id = a.step_id and later.rowid > a.rowid)
+             order by a.rowid",
+        )?;
+        let mut waiting: HashMap<String, Vec<WaitingStep>> = HashMap::new();
+        let mut rows = stmt.query([])?;
+        while let Some(r) = rows.next()? {
+            let Some(state) = AttemptState::parse(&r.get::<_, String>(2)?) else {
+                continue;
+            };
+            waiting.entry(r.get(0)?).or_default().push(WaitingStep {
+                attempt_id: r.get(1)?,
+                state,
+                reason: r
+                    .get::<_, Option<String>>(3)?
+                    .and_then(|text| serde_json::from_str(&text).ok()),
+            });
+        }
+        let mut stmt = conn.prepare(&format!(
+            "select r.id, r.title, p.name, a.state, r.finished_at is not null, r.pr_state, r.pr_ci, r.pr_head
+             from run r
+             join project p on p.id = r.project_id
+             join attempt a on a.run_id = r.id and a.rowid = ({ATTEMPT_THAT_MATTERS})
+             order by r.created_at desc limit ?1"
+        ))?;
+        let rows = stmt.query_map([limit], |r| {
+            let id: String = r.get(0)?;
+            let state: String = r.get(3)?;
+            Ok(RunSignal {
+                waiting: waiting.remove(&id).unwrap_or_default(),
+                id,
+                title: r.get(1)?,
+                project_name: r.get(2)?,
+                state: AttemptState::parse(&state),
+                finished: r.get(4)?,
+                pr_state: pr_state_from(r.get(5)?),
+                pr_ci: ci_state_from(r.get(6)?),
+                pr_head: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Runs matching a filter on `r`, newest first. `?1` is the limit, and the filter's own
@@ -6263,6 +6343,80 @@ mod tests {
             ids(&store, BoardColumn::Backlog),
             ["a", "b", "rejected", "z-new", "todo"]
         );
+    }
+
+    #[test]
+    fn a_run_signals_every_step_that_needs_a_person_and_none_once_it_ended() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let waiting = || {
+            let signals = store.run_signals(10).unwrap();
+            assert_eq!(signals.len(), 1);
+            signals[0]
+                .waiting
+                .iter()
+                .map(|step| (step.attempt_id.clone(), step.state))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(waiting(), []);
+
+        // Two steps that run at once, and one that's fine.
+        let limit = Reason::RateLimited {
+            resets_at: Some(5),
+            continues_at: Some(65),
+        };
+        for (id, step, state) in [
+            ("b", "review-a", AttemptState::Failed),
+            ("c", "review-b", AttemptState::Running),
+            ("d", "review-c", AttemptState::Succeeded),
+        ] {
+            store
+                .add_attempt(&new_attempt(id, "r", step, state))
+                .unwrap();
+        }
+        store
+            .set_state("c", AttemptState::Blocked, Some(&limit))
+            .unwrap();
+        assert_eq!(
+            waiting(),
+            [
+                ("b".to_owned(), AttemptState::Failed),
+                ("c".to_owned(), AttemptState::Blocked)
+            ]
+        );
+        assert_eq!(
+            store.run_signals(10).unwrap()[0].waiting[1].reason,
+            Some(limit)
+        );
+
+        // Tried again, only what's left waits.
+        store
+            .add_attempt(&new_attempt("e", "r", "review-a", AttemptState::Running))
+            .unwrap();
+        assert_eq!(waiting(), [("c".to_owned(), AttemptState::Blocked)]);
+
+        // A proposal step that failed holds nobody up.
+        store
+            .add_attempt(&NewAttempt {
+                role: "learner".into(),
+                ..new_attempt("l", "r", "learn", AttemptState::Failed)
+            })
+            .unwrap();
+        assert_eq!(waiting(), [("c".to_owned(), AttemptState::Blocked)]);
+
+        store
+            .patch_run(
+                "r",
+                &[
+                    ("finished_at", Value::Text(now())),
+                    ("pr_head", Value::Text("abc".into())),
+                ],
+            )
+            .unwrap();
+        assert_eq!(waiting(), []);
+        let signal = store.run_signals(10).unwrap().remove(0);
+        assert!(signal.finished);
+        assert_eq!(signal.pr_head.as_deref(), Some("abc"));
     }
 
     #[test]

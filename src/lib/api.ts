@@ -825,6 +825,18 @@ export interface Board {
   paused: Reason | null;
 }
 
+/** Which notices macOS shows while Keel isn't in front. */
+export interface NoticeSettings {
+  /** A run waits for an approval or an answer, or is blocked, failed, stuck or interrupted. */
+  waiting: boolean;
+  /** A run ended with what it was asked for. */
+  finished: boolean;
+  /** A run's pull request was merged or closed, or its CI failed. */
+  pullRequests: boolean;
+  /** Todo stopped starting cards. */
+  paused: boolean;
+}
+
 export const api = {
   preflight: () => invoke<Preflight>("preflight"),
   refreshSession: () => invoke<Preflight>("refresh_session"),
@@ -921,6 +933,9 @@ export const api = {
   jointCheckSet: (changeId: string, seq: number, works: boolean) => invoke<void>("joint_check_set", { changeId, seq, works }),
   jointContractSet: (changeId: string, points: ContractEdit[]) => invoke<void>("joint_contract_set", { changeId, points }),
   runJoint: (runId: string) => invoke<RunJoint | null>("run_joint", { runId }),
+  noticeTake: () => invoke<{ runId: string | null } | null>("notice_take"),
+  noticesGet: () => invoke<NoticeSettings>("notices_get"),
+  noticesSet: (settings: NoticeSettings) => invoke<void>("notices_set", { settings }),
   maxAgentsGet: () => invoke<number>("max_agents_get"),
   maxAgentsSet: (value: number) => invoke<void>("max_agents_set", { value }),
 };

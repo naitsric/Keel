@@ -15,6 +15,7 @@ mod limits;
 mod localhost;
 mod log;
 mod notes;
+mod notices;
 mod project_commands;
 mod project_proposals;
 mod prompts;
@@ -57,6 +58,7 @@ use keel_store::{
 };
 pub use limits::MOST_CONTINUED_BY_ITSELF;
 pub use notes::split_assistant_notes;
+pub use notices::{Notice, NoticeSettings, NoticeWatch};
 pub use project_commands::{CommandChange, CommandKind, retry_runs_something_new};
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
 pub use prompts::full_workflow;
@@ -398,6 +400,8 @@ struct Inner {
     board_stopped: Mutex<bool>,
     /// Why cards aren't starting, as of the scheduler's last look.
     board_paused: Mutex<Option<Reason>>,
+    /// What the scheduler last found out about that. See `board::TodoPause`.
+    todo_pause: Mutex<board::TodoPause>,
     max_agents: AtomicUsize,
     slots: Mutex<Slots>,
     slot_freed: Condvar,
@@ -476,6 +480,7 @@ impl Engine {
                 board_wake,
                 board_stopped: Mutex::new(false),
                 board_paused: Mutex::new(None),
+                todo_pause: Mutex::default(),
                 max_agents: AtomicUsize::new(max_agents),
                 slots: Mutex::default(),
                 slot_freed: Condvar::new(),
