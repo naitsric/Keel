@@ -509,6 +509,65 @@ pub fn verify_prompt(language: &str) -> &'static str {
     }
 }
 
+const SHIP_PROMPT_EN: &str = r#"You leave this change ready to be decided on. You didn't write the reviews above, nor what `verify` found, and no review looks at your fixes: after you there's only the project's check, if it has one, and the approver.
+
+Check each finding in the code before believing it. Fix the ones that are real, and anything `unmet` in `verify` that the code really doesn't meet: the cause and not the symptom, with a test that fails without the fix wherever one can prove it. What was sent back above was for whoever built this round, also where it says it's the only thing to change. It's part of the scope, so don't undo it, and what it changed on purpose isn't a finding.
+
+Leave these as they are, and say so:
+- A finding that's false. Say why, with file and line.
+- One that questions what `decided` says, whoever took it, or behavior the change added that nothing asks for: a person settles those. One that says the change doesn't follow a decision is a finding like any other, and so is a defect in what it added, such as a bug or a security hole, or behavior that breaks a limit.
+- What nobody can check by reading the code, such as how it looks on screen.
+
+Do nothing else: no refactor, nothing the specification leaves out, and no test deleted, skipped or watered down. If a fix would need any of that, leave it and say so. If nothing is real, change nothing. Run the tests your fixes touch and leave them in a commit.
+
+In your final message, one line for each finding: fixed, false, or left for the person, with its file and line."#;
+const SHIP_PROMPT_ES: &str = r#"Dejas este cambio listo para que se decida sobre él. No escribiste las revisiones de arriba ni lo que encontró `verify`, y ninguna revisión mira tus correcciones: después de ti solo quedan la verificación del proyecto, si tiene una, y el aprobador.
+
+Comprueba cada hallazgo en el código antes de creerle. Corrige los que sean reales, y lo que esté `unmet` en `verify` y que el código de verdad no cumpla: la causa y no el síntoma, con una prueba que falle sin la corrección donde una pueda demostrarlo. Lo que se devolvió arriba era para quien construyó esta ronda, también donde dice que es lo único que debe cambiar. Es parte del alcance, así que no lo deshagas, y lo que cambió a propósito no es un hallazgo.
+
+Deja esto como está, y dilo:
+- Un hallazgo falso. Di por qué, con archivo y línea.
+- Uno que cuestiona lo que dice `decided`, lo haya tomado quien lo haya tomado, o un comportamiento que agregó el cambio y que nada pide: eso lo decide una persona. Uno que dice que el cambio no cumple una decisión es un hallazgo como cualquier otro, y también lo es un defecto en lo que agregó, como un error o un hueco de seguridad, o un comportamiento que rompe un límite.
+- Lo que nadie puede comprobar leyendo el código, como cómo se ve en pantalla.
+
+No hagas nada más: ningún refactor, nada que la especificación deje fuera, y ninguna prueba borrada, saltada ni aflojada. Si una corrección necesita algo de eso, déjala y dilo. Si nada es real, no cambies nada. Corre las pruebas que tocan tus correcciones y déjalas en un commit.
+
+En tu mensaje final, una línea por hallazgo: corregido, falso, o para la persona, con su archivo y línea."#;
+
+/// What fixes what the reviews and the verifier found, before the approver decides. It's the part
+/// of Claude Code's `/ship` that happens before a pull request: Keel opens that itself, once a
+/// person approves. `judged` are the steps whose output it goes through.
+pub fn ship_prompt(language: &str, judged: &[&str]) -> String {
+    let es = language.starts_with("es");
+    let found: String = judged
+        .iter()
+        .map(|id| format!("{id}: {{{{steps.{id}.output}}}}\n"))
+        .collect();
+    // What it works on goes first, each piece in its tag, and what to do with it after.
+    format!(
+        "{}\n{{{{steps.spec.output}}}}\n\n{{{{answers}}}}\n\n{}\n{found}\n{}\n{{{{rework}}}}\n\n{}\n{{{{diff}}}}\n\n{}\n\n{}\n\n{}",
+        if es {
+            "Especificación:"
+        } else {
+            "Specification:"
+        },
+        if es {
+            "Lo que se encontró en el cambio:"
+        } else {
+            "What was found in the change:"
+        },
+        if es {
+            "Lo que se le devolvió a quien construyó esta ronda, si algo:"
+        } else {
+            "What was sent back to whoever built this round, if anything:"
+        },
+        if es { "Cambio:" } else { "Change:" },
+        material_line(language),
+        if es { SHIP_PROMPT_ES } else { SHIP_PROMPT_EN },
+        added_apart(language),
+    )
+}
+
 /// The heading a builder puts what it added that nothing asks for under, in English and Spanish.
 /// Keel finds the list by it, so an approver gets it wherever it is in the message.
 pub const ADDED_HEADINGS: [&str; 2] = ["Added without being asked", "Agregado sin que se pidiera"];
@@ -595,6 +654,7 @@ pub fn full_workflow(
         steps.push(WorkflowStep::Check {
             id: "check".into(),
             run: run.into(),
+            only_if_changed: false,
         });
     }
     steps.push(WorkflowStep::Approval {

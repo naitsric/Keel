@@ -130,7 +130,12 @@ describe("a step that depends on the change", () => {
 
   it("says so on its node, and a step saved with nothing says nothing", () => {
     const nodes = allNodes(flowOf(steps));
-    expect(nodes.map((node) => [node.id, node.conditional])).toEqual([["builder", false], ["security", true], ["code", false], ["approver", true], ["human", false]]);
+    expect(nodes.map((node) => [node.id, node.condition])).toEqual([["builder", null], ["security", "notSmall"], ["code", null], ["approver", "notSmall"], ["human", null]]);
+  });
+
+  it("says when it only fixes what was found, or repeats a check, each with its own", () => {
+    const nodes = allNodes(flowOf([{ ...agent("ship"), when: "somethingToFix" } as WorkflowStep, { type: "check", id: "check", run: "make test" }, { type: "check", id: "again", run: "make test", onlyIfChanged: true }]));
+    expect(nodes.map((node) => node.condition)).toEqual(["somethingToFix", null, "onlyIfChanged"]);
   });
 
   it("counts as gone past once it's been skipped for being small, and work still goes back to where it says", () => {

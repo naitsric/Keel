@@ -366,6 +366,7 @@ fn reopening_past_a_step_that_cant_be_picked_up_still_gives_a_check_that_was_ove
                 WorkflowStep::Check {
                     id: "check".into(),
                     run: "true".into(),
+                    only_if_changed: false,
                 },
                 WorkflowStep::Approval { id: "human".into() },
             ],

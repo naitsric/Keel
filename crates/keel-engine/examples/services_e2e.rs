@@ -92,6 +92,7 @@ fn main() {
         WorkflowStep::Check {
             id: "check".into(),
             run: format!("{python} db_test.py"),
+            only_if_changed: false,
         },
     ];
     let run = engine

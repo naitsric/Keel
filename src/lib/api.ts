@@ -259,7 +259,7 @@ export interface Decision {
 
 export type StepRole = { kind: "worker" } | { kind: "reviewer" } | { kind: "approver"; reworkTo: string; maxRounds: number } | { kind: "mapper" } | { kind: "learner" } | { kind: "specifier" } | { kind: "verifier" };
 
-export type StepCondition = "notSmall";
+export type StepCondition = "notSmall" | "somethingToFix";
 
 export interface BrainNote {
   seq: number;
@@ -321,7 +321,8 @@ export interface StepSpec {
 export type WorkflowStep =
   | ({ type: "agent" } & StepSpec)
   | { type: "setup"; id: string; run: string }
-  | { type: "check"; id: string; run: string }
+  /** With `onlyIfChanged` it repeats an earlier check, if a step that can change files has run since that passed. */
+  | { type: "check"; id: string; run: string; onlyIfChanged?: boolean }
   | { type: "parallel"; id: string; steps: StepSpec[] }
   | { type: "approval"; id: string }
   | { type: "deliver"; id: string };

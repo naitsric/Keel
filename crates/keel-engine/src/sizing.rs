@@ -7,7 +7,9 @@
 use std::collections::HashSet;
 
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
-use keel_core::{AttemptState, Reason, StepRole, StepSpec, WhyNotSmall, WorkflowStep};
+use keel_core::{
+    AttemptState, Reason, StepCondition, StepRole, StepSpec, ToolProfile, WhyNotSmall, WorkflowStep,
+};
 use keel_store::Attempt;
 use serde_json::{Value, json};
 
@@ -236,6 +238,39 @@ pub fn skipped_for_risks(attempt: &Attempt) -> bool {
     skipped_for(attempt, "noMatchingRisks")
 }
 
+/// Left out because whoever judged the round left nothing to fix.
+pub fn skipped_with_nothing_to_fix(attempt: &Attempt) -> bool {
+    skipped_for(attempt, "nothingToFix")
+}
+
+/// A check left out because the same command passed in this round and nothing could have changed
+/// the code since.
+pub fn skipped_as_unchanged(attempt: &Attempt) -> bool {
+    skipped_for(attempt, "nothingChangedSinceCheck")
+}
+
+/// Whether what a step was left out for no longer holds. A person can ask for the reviews that were
+/// skipped, and what they say comes after the step that fixes it was passed over. The same goes for
+/// a check, once that step has run. Only steps before it in the workflow count: one after it may
+/// still be at work, and it isn't for this one to act on.
+fn no_longer_holds(steps: &[WorkflowStep], attempt: &Attempt, attempts: &[Attempt]) -> bool {
+    let before = workflows::steps_before(steps, &attempt.step_id);
+    let since = || {
+        attempts
+            .iter()
+            .skip_while(|a| a.id != attempt.id)
+            .skip(1)
+            .filter(|a| a.round == attempt.round)
+            .filter(|a| workflows::find_step(before, &a.step_id).is_some())
+    };
+    let ran = |a: &Attempt| a.state != AttemptState::Skipped.as_str();
+    if skipped_with_nothing_to_fix(attempt) {
+        return since().any(|a| matches!(a.role.as_str(), "reviewer" | "verifier") && ran(a));
+    }
+    skipped_as_unchanged(attempt)
+        && since().any(|a| a.kind == "agent" && a.tools == ToolProfile::Build.as_str() && ran(a))
+}
+
 /// Whether this stands for a step that a retry with the project's current commands put off for a
 /// new setup to run first. It never ran, and the step comes round again once the setup is through.
 /// The only other thing put off is an approval, by a person who asked for what was skipped.
@@ -252,12 +287,14 @@ pub fn person_asked(attempts: &[Attempt]) -> bool {
 }
 
 /// What was put off comes round again: an approval a person put off, with what they asked for
-/// before it, and a step put off for a new setup, once that's through. Asking keeps the run from
+/// before it, and a step put off for a new setup, once that's through. So does a step that was left
+/// out, once why it was doesn't hold any more. Asking keeps the run from
 /// counting as small, so nothing gets skipped this way after that, and the attempts alone say
 /// what's due: a restart loses nothing.
-pub fn due_again(attempt: &Attempt, attempts: &[Attempt]) -> bool {
+pub fn due_again(steps: &[WorkflowStep], attempt: &Attempt, attempts: &[Attempt]) -> bool {
     attempt.state == AttemptState::Postponed.as_str()
         || (skipped_as_small(attempt) && person_asked(attempts))
+        || no_longer_holds(steps, attempt, attempts)
 }
 
 /// The steps that stand skipped for being a small change: the ones a person can ask for. Once they've
@@ -286,7 +323,7 @@ fn conditional_step_ids(steps: &[WorkflowStep]) -> HashSet<&str> {
             WorkflowStep::Parallel { steps, .. } => steps.iter().collect(),
             _ => Vec::new(),
         })
-        .filter(|spec: &&StepSpec| spec.when.is_some())
+        .filter(|spec: &&StepSpec| spec.when == Some(StepCondition::NotSmall))
         .map(|spec| spec.id.as_str())
         .collect()
 }
@@ -328,9 +365,18 @@ pub(crate) fn why_from_spec(attempts: &[Attempt]) -> Vec<WhyNotSmall> {
 }
 
 fn why_from_check(steps: &[WorkflowStep], attempts: &[Attempt], round: i64) -> Option<WhyNotSmall> {
+    // One that only repeats another has nothing to say until something changes the code again.
     let wanted = steps
         .iter()
-        .filter(|step| matches!(step, WorkflowStep::Check { .. }))
+        .filter(|step| {
+            matches!(
+                step,
+                WorkflowStep::Check {
+                    only_if_changed: false,
+                    ..
+                }
+            )
+        })
         .count();
     why_from_fact(
         &verification::checks_in_round(steps, attempts, round),

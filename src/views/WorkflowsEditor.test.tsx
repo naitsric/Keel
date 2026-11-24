@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { Project, StepSpec, Workflow, WorkflowDraft, WorkflowResults, WorkflowStep } from "../lib/api";
 import { useApp } from "../lib/store";
-import { WorkflowsView } from "./WorkflowsView";
+import { WorkflowsView, withOnlyIfChanged } from "./WorkflowsView";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -187,6 +187,15 @@ describe("the workflow editor", () => {
       await click(row("Proposed"));
       const review = [...document.querySelectorAll("dt")].find((dt) => dt.textContent === "Skipped for a small change");
       expect(review?.nextElementSibling?.textContent).toBe("look");
+    });
+
+    it("says apart which steps only run to fix what was found", async () => {
+      drafts = [proposal({ steps: [{ type: "agent", ...spec("look", { role: { kind: "reviewer" } }) }, { type: "agent", ...spec("ship", { tools: "build", when: "somethingToFix" }) }, { type: "approval", id: "human" }] })];
+      await open();
+      await click(row("Proposed"));
+      const only = [...document.querySelectorAll("dt")].find((dt) => dt.textContent === "Runs only if there's something to fix");
+      expect(only?.nextElementSibling?.textContent).toBe("ship");
+      expect(page()).not.toContain("Skipped for a small change");
     });
 
     it("doesn't bring it up when a small change would skip nothing", async () => {
@@ -1074,6 +1083,40 @@ describe("the workflow editor", () => {
       expect(node("security").className).toContain("border-dashed");
       expect(node("security").getAttribute("aria-label")).toContain("Only if the change isn't small");
       expect(node("review").getAttribute("aria-label")).not.toContain("Only if");
+    });
+
+    it("can be that there's something to fix, with what that means", async () => {
+      await openFitting();
+      await click(node("review"));
+      expect(page()).not.toContain("a review of the round asked for changes");
+      await click(text("Only if there's something to fix"));
+      expect(page()).toContain("a review of the round asked for changes");
+      await saveNow();
+      expect((lastSaved().steps[2] as StepSpec).when).toBe("somethingToFix");
+    });
+
+    it("can be, for a check, that something changed since the same command passed", async () => {
+      mockIPC((command, args) => {
+        if (command === "workflows_list") return [BUILTIN, { ...FITTING, steps: [...FITTING.steps, { type: "check", id: "again", run: "make test" }] }];
+        if (command === "workflow_save") {
+          saved.push((args as { workflow: Workflow }).workflow);
+          return (args as { workflow: Workflow }).workflow;
+        }
+        return command === "workflow_results" ? [] : command === "workflow_drafts_list" ? [] : null;
+      });
+      await open();
+      await click(text("Fits the change"));
+      await click(node("again"));
+      expect(page()).toContain("if a step that can change files ran between the two");
+      await click(text("Only if something changed since it passed"));
+      await saveNow();
+      expect(lastSaved().steps[3]).toEqual({ type: "check", id: "again", run: "make test", onlyIfChanged: true });
+    });
+
+    it("goes off a check without leaving anything behind", () => {
+      const check = { type: "check", id: "again", run: "make test", onlyIfChanged: true } as const;
+      expect(withOnlyIfChanged(check, false)).toEqual({ type: "check", id: "again", run: "make test" });
+      expect("onlyIfChanged" in withOnlyIfChanged(check, false)).toBe(false);
     });
 
     it("says what the engine refused, on the step", async () => {

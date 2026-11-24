@@ -175,6 +175,29 @@ export function verificationOf(attempt: { role?: string; state?: string; output?
   return { summary: "", ...output, criteria: output.criteria };
 }
 
+/**
+ * The step that changed the code after this attempt looked at it, in the same round, like
+ * `changed_since` in the engine: what it said was about the code before that.
+ */
+export function changedSince(attempts: Pick<Attempt, "id" | "stepId" | "kind" | "tools" | "round" | "shaBefore" | "shaAfter">[], looked: { id: string; round: number; shaBefore: string | null; shaAfter: string | null }): string | null {
+  const seen = looked.shaAfter ?? looked.shaBefore;
+  const at = attempts.findIndex((a) => a.id === looked.id);
+  if (at < 0 || !seen) return null;
+  // However it ended: one that failed after fixing something, and only had to finish when tried again, changed it all the same.
+  const changed = attempts.slice(at + 1).find((a) => a.round === looked.round && a.kind === "agent" && a.tools === "build" && a.shaAfter && a.shaAfter !== seen);
+  return changed?.stepId ?? null;
+}
+
+/**
+ * The checks that say how the code ends. One that only repeats another and was left out says
+ * nothing of its own, and one that ran after the same command in another step stands for it.
+ */
+export function standingChecks<T extends { kind: string; stepId: string; state: string; prompt: string }>(attempts: T[]): T[] {
+  const ran = latestOfEachStep(attempts.filter((a) => a.kind === "check")).filter((a) => a.state !== "skipped");
+  const last = (check: T) => attempts.lastIndexOf(check);
+  return ran.filter((check) => !ran.some((other) => other.stepId !== check.stepId && other.prompt.trim() === check.prompt.trim() && last(other) > last(check)));
+}
+
 /** What a verifier said in this round. What it said in an earlier one is about code that has changed since. */
 export function verificationInRound(attempts: { round: number; role?: string; state?: string; output?: unknown }[], round: number): VerificationOutput | null {
   const found = [...attempts].reverse().find((a) => a.round === round && verificationOf(a));

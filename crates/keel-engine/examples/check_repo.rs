@@ -47,6 +47,7 @@ fn main() {
     let mut workflow = vec![WorkflowStep::Check {
         id: "check".into(),
         run: command.clone(),
+        only_if_changed: false,
     }];
     if let Some(prompt) = settings["agentPrompt"].as_str() {
         workflow.insert(

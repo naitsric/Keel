@@ -3,7 +3,7 @@ import i18next from "../i18n";
 import en from "../i18n/en.json";
 import es from "../i18n/es.json";
 import type { AuditEvent, Reason } from "./api";
-import { latestSizeDecision, skippedAsSmall, skippedForRisks, skippedSteps, whyNotSmallText } from "./size";
+import { latestSizeDecision, skippedAsSmall, skippedAsUnchanged, skippedForRisks, skippedSteps, skippedWithNothingToFix, whyNotSmallText } from "./size";
 
 const small = { code: "treatedAsSmall", lines: 3, files: 1 };
 const step = (stepId: string, state: string, reason: { code: string } | null = null, kind = "agent") => ({ stepId, state, reason, kind });
@@ -24,6 +24,14 @@ describe("what was skipped for being small", () => {
     expect(skippedForRisks(step("a", "skipped", small))).toBe(false);
     expect(skippedForRisks(step("a", "succeeded", risks))).toBe(false);
     expect(skippedSteps([step("a", "skipped", small), step("state", "skipped", risks)]).map((s) => s.stepId)).toEqual(["a"]);
+  });
+
+  it("isn't what had nothing to fix, or a check with nothing to repeat, which a person can't ask for", () => {
+    const fix = step("ship", "skipped", { code: "nothingToFix" });
+    const unchanged = step("check-ship", "skipped", { code: "nothingChangedSinceCheck" });
+    expect([skippedWithNothingToFix(fix), skippedAsUnchanged(fix)]).toEqual([true, false]);
+    expect([skippedWithNothingToFix(unchanged), skippedAsUnchanged(unchanged)]).toEqual([false, true]);
+    expect(skippedSteps([step("a", "skipped", small), fix, unchanged]).map((s) => s.stepId)).toEqual(["a"]);
   });
 
   it("goes by each step's latest attempt, so what a person asked for no longer counts", () => {

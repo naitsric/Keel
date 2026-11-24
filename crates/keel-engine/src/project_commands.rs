@@ -28,8 +28,9 @@ pub struct CommandChange {
 const MARK: &str = "fromProject";
 /// The ids Keel gives the project's setup when it puts it first in a run. See `start_run`.
 const SETUP_IDS: [&str; 2] = ["setup", "project-setup"];
-/// The id of the project's check in the built-in workflows. See `prompts::full_workflow`.
-const CHECK_ID: &str = "check";
+/// The ids of the project's check in the built-in workflows: see `prompts::full_workflow`, and the
+/// one that repeats it, in `workflows::builtin`.
+const CHECK_IDS: [&str; 2] = ["check", "check-ship"];
 
 /// Whether the steps came from one of the workflows Keel ships, which take the project's check.
 fn is_builtin(workflow_id: Option<&str>) -> bool {
@@ -54,7 +55,7 @@ pub fn marked(steps: &[WorkflowStep], setup: Option<&str>, workflow_id: Option<&
         let id = step.get("id").and_then(Value::as_str);
         let from_project = match kind_of(step) {
             Some(CommandKind::Setup) => setup.is_some() && id == setup,
-            Some(CommandKind::Check) => builtin && id == Some(CHECK_ID),
+            Some(CommandKind::Check) => builtin && id.is_some_and(|id| CHECK_IDS.contains(&id)),
             None => false,
         };
         if from_project {
@@ -111,7 +112,7 @@ fn from_project(steps: &[Value], workflow_id: Option<&str>, step: &Value) -> boo
     is_builtin(workflow_id)
         && match kind {
             CommandKind::Setup => SETUP_IDS.contains(&id),
-            CommandKind::Check => id == CHECK_ID,
+            CommandKind::Check => CHECK_IDS.contains(&id),
         }
 }
 
@@ -169,6 +170,7 @@ mod tests {
         WorkflowStep::Check {
             id: id.into(),
             run: run.into(),
+            only_if_changed: false,
         }
     }
 
@@ -342,14 +344,14 @@ mod tests {
         ]);
         assert!(!put_off_for_setup(&put_off[1]));
         assert!(put_off_for_setup(&put_off[2]));
-        assert!(due_again(&put_off[2], &put_off));
+        assert!(due_again(&[], &put_off[2], &put_off));
         // So nothing skipped for being small runs because of it, and the run isn't counted as one
         // where a person asked.
         assert!(!person_asked(&put_off));
         let asked = recorded(&[("approval", "approval", "none", Postponed)]);
         assert!(!put_off_for_setup(&asked[0]));
         assert!(person_asked(&asked));
-        assert!(due_again(&asked[0], &asked));
+        assert!(due_again(&[], &asked[0], &asked));
     }
 
     #[test]

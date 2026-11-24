@@ -312,13 +312,17 @@ impl Inner {
         if builders.is_empty() {
             builders.extend(attempts.iter().rev().find(succeeded));
         }
+        // With more than one step that can change files, whose words they are.
+        let several = builders
+            .iter()
+            .any(|attempt| attempt.step_id != builders[0].step_id);
         for attempt in &builders {
-            if attempt.round > 0 {
-                body.push_str(&format!(
-                    "**{} {}**\n\n",
-                    label("Round", "Ronda"),
-                    attempt.round + 1
-                ));
+            let round = (attempt.round > 0)
+                .then(|| format!("{} {}", label("Round", "Ronda"), attempt.round + 1));
+            let step = several.then(|| format!("`{}`", attempt.step_id));
+            let said: Vec<String> = [round, step].into_iter().flatten().collect();
+            if !said.is_empty() {
+                body.push_str(&format!("**{}**\n\n", said.join(", ")));
             }
             body.push_str(attempt.result_text.as_deref().unwrap_or_default().trim());
             body.push_str("\n\n");
@@ -361,17 +365,41 @@ impl Inner {
             label("How it was checked", "Cómo se comprobó")
         ));
         let mut any_check = false;
-        for step in &steps {
-            if let keel_core::WorkflowStep::Check { id, run: command } = step {
+        // One that repeats another says how the command ended on the code as it's delivered. Left
+        // out, the one it repeats already does.
+        let repeats = |command: &str, after: usize| {
+            steps.iter().skip(after + 1).any(|step| {
+                matches!(step, keel_core::WorkflowStep::Check { id, run, only_if_changed: true }
+                    if run.trim() == command.trim() && latest(id).is_some_and(|a| a.state != AttemptState::Skipped.as_str()))
+            })
+        };
+        for (index, step) in steps.iter().enumerate() {
+            if let keel_core::WorkflowStep::Check {
+                id, run: command, ..
+            } = step
+            {
                 any_check = true;
-                let passed =
-                    latest(id).is_some_and(|a| a.state == AttemptState::Succeeded.as_str());
+                let ended = latest(id);
+                if ended.is_some_and(|a| a.state == AttemptState::Skipped.as_str())
+                    || repeats(command, index)
+                {
+                    continue;
+                }
+                let passed = ended.is_some_and(|a| a.state == AttemptState::Succeeded.as_str());
                 let mark = if passed {
                     label("passed", "pasó")
                 } else {
                     label("did not pass", "no pasó")
                 };
-                body.push_str(&format!("- `{command}`: {mark}\n"));
+                // Passing before the code changed says nothing of what's delivered.
+                let changed = ended
+                    .and_then(|check| crate::verification::changed_since(&attempts, check))
+                    .map(|step| match spanish {
+                        true => format!(", antes de que `{step}` cambiara el código"),
+                        false => format!(", before `{step}` changed the code"),
+                    })
+                    .unwrap_or_default();
+                body.push_str(&format!("- `{command}`: {mark}{changed}\n"));
             }
         }
         if !any_check {
@@ -385,6 +413,15 @@ impl Inner {
         }
         if let Some(verified) = crate::verification::in_round(&attempts, run.round).pop() {
             body.push_str(&verified.pr_section(spanish));
+            // It looked at the code before that, and nobody should read it as if it had seen it.
+            let changed = attempts
+                .iter()
+                .rev()
+                .find(|a| a.round == run.round && crate::verification::of_attempt(a).is_some())
+                .and_then(|looked| crate::verification::changed_since(&attempts, looked));
+            if let Some(step) = changed {
+                body.push_str(&format!("\n{}\n", looked_before(step, spanish)));
+            }
         }
         body.push_str(&format!("\n### {}\n\n", label("Steps", "Pasos")));
         for attempt in attempts
@@ -429,6 +466,12 @@ impl Inner {
                     "omitida: lo pedido no nombra ninguno de los riesgos que revisa",
                 )
                 .to_owned()
+            } else if crate::sizing::skipped_with_nothing_to_fix(attempt) {
+                label(
+                    "skipped: there was nothing to fix",
+                    "omitida: no había nada que corregir",
+                )
+                .to_owned()
             } else if attempt.state == AttemptState::Skipped.as_str() {
                 label(
                     "skipped: nothing it covers changed",
@@ -445,6 +488,18 @@ impl Inner {
                     .to_owned()
             };
             body.push_str(&format!("- `{}`: {line}\n", attempt.step_id));
+        }
+        let fixed_after = attempts
+            .iter()
+            .filter(|a| {
+                a.role == "reviewer"
+                    && a.round == run.round
+                    && current(a)
+                    && a.state == AttemptState::Succeeded.as_str()
+            })
+            .find_map(|review| crate::verification::changed_since(&attempts, review));
+        if let Some(step) = fixed_after {
+            body.push_str(&format!("\n{}\n", looked_before(step, spanish)));
         }
         // Whoever reads the pull request should know what nobody looked at, and that it was on purpose.
         let skipped = crate::sizing::skipped_steps(&attempts);
@@ -490,6 +545,15 @@ impl Inner {
             &mask_secrets(&body),
             spanish,
         ))
+    }
+}
+
+/// What goes under what a verifier or the reviews said, when a step changed the code after them.
+fn looked_before(step: &str, spanish: bool) -> String {
+    if spanish {
+        format!("`{step}` cambió el código después de esto, y estos pasos no lo volvieron a mirar.")
+    } else {
+        format!("`{step}` changed the code after this, and these steps didn't look at it again.")
     }
 }
 

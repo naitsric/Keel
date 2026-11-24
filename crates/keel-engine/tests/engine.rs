@@ -1410,6 +1410,7 @@ fn start_checked(engine: &Engine, project_id: &str, command: &str) -> String {
                 keel_core::WorkflowStep::Check {
                     id: "check".into(),
                     run: command.into(),
+                    only_if_changed: false,
                 },
                 keel_core::WorkflowStep::Approval { id: "human".into() },
             ],

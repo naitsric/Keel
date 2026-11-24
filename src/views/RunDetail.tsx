@@ -4,13 +4,13 @@ import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
 import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CommandChange, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, breakableIds, checkSentBackInto, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, type FindingShown, focusAttempt, gist, latestOfEachStep, notProvenInRound, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf, whyNotProven } from "../lib/audit";
+import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, breakableIds, changedSince, checkSentBackInto, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, type FindingShown, focusAttempt, gist, latestOfEachStep, notProvenInRound, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, standingChecks, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf, whyNotProven } from "../lib/audit";
 import { contractChangedText, partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, canSendBackFromCheck, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
 import { errorText, needsProjectSettings, needsSignIn, reasonText, specProblemText } from "../lib/reason";
 import { allRecommend, answerFrom, differsFromRecommended, isAnswered, needsText, type QuestionPick, recommendedAnswers, recommendedOption, startingPick } from "../lib/questions";
-import { latestSizeDecision, type SizeDecision, skippedAsSmall, skippedForRisks, skippedSteps, whyNotSmallText } from "../lib/size";
+import { latestSizeDecision, type SizeDecision, skippedAsSmall, skippedAsUnchanged, skippedForRisks, skippedSteps, skippedWithNothingToFix, whyNotSmallText } from "../lib/size";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass, Modal, Segmented, StateBadge, VERIFY_TONES } from "../ui/primitives";
 import { ProposalRow } from "./BrainPage";
@@ -94,9 +94,16 @@ function SummaryBlock({ title, note, children }: { title: string; note?: string;
 /** What the agents that explain the run wrote, in full, one round after another. */
 function Explanations({ attempts }: { attempts: Attempt[] }) {
   const { t } = useTranslation();
+  // With more than one step that did the work, whose words they are.
+  const several = attempts.some((attempt) => attempt.stepId !== attempts[0].stepId);
   return attempts.map((attempt) => (
     <div key={attempt.id} className="mb-3 last:mb-0">
-      {attempt.round > 0 && <p className="mb-1 text-[12px] font-medium text-warning">{t("run.round", { number: attempt.round + 1 })}</p>}
+      {(attempt.round > 0 || several) && (
+        <p className="mb-1 flex gap-2 text-[12px] font-medium">
+          {attempt.round > 0 && <span className="text-warning">{t("run.round", { number: attempt.round + 1 })}</span>}
+          {several && <span className="font-mono text-muted">{attempt.stepId}</span>}
+        </p>
+      )}
       <p className="selectable whitespace-pre-wrap">{attempt.resultText}</p>
     </div>
   ));
@@ -115,8 +122,7 @@ export function Summary({ run, attempts, current, commands, rawCheck, closedBy, 
   const navigate = useApp((s) => s.navigate);
   const mapper = attempts.find((a) => a.role === "mapper" && a.output);
   const passed = commands.filter((c) => c.status === "ok").length;
-  const checks = attempts.filter((a) => a.kind === "check");
-  const latestChecks = checks.filter((a, i) => !checks.slice(i + 1).some((b) => b.stepId === a.stepId));
+  const latestChecks = standingChecks(attempts);
   const checksPassed = latestChecks.filter((a) => a.state === "succeeded").length;
   const checksSkipped = latestChecks.reduce((sum, check) => sum + skippedTests(check), 0);
   const anyActive = attempts.some((a) => isActive(a.state));
@@ -280,11 +286,19 @@ function NotProvenByReviews({ unchecked }: { unchecked: { step: string; text: st
   );
 }
 
+/** Says that a step changed the code after someone looked at it, since what they said is about the code before that. */
+function ChangedSince({ attempts, looked }: { attempts: Attempt[]; looked: Attempt }) {
+  const { t } = useTranslation();
+  const step = changedSince(attempts, looked);
+  return step && <span className="block text-warning">{t("run.changedSince", { step })}</span>;
+}
+
 function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { attempts: Attempt[]; round: number; commands: CommandRun[]; rawCheck: RawCheck; reviewed: boolean }) {
   const { t } = useTranslation();
-  const checks = latestOfEachStep(attempts.filter((a) => a.kind === "check"));
+  const checks = standingChecks(attempts);
   const passed = commands.filter((c) => c.status === "ok").length;
   const verification = verificationInRound(attempts, round);
+  const verifier = [...attempts].reverse().find((a) => a.round === round && verificationOf(a));
   // What nobody could check comes first, so a count of what was met can't stand for all of it.
   const unchecked = uncheckedInRound(attempts, round);
   return (
@@ -295,7 +309,9 @@ function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { atte
         return check.state === "succeeded" ? (
           <p key={check.id} className="selectable flex gap-1.5">
             {skipped > 0 ? <AlertTriangle size={13} className="mt-1 shrink-0 text-warning" /> : <Check size={13} className="mt-1 shrink-0 text-success" />}
-            <span className="min-w-0 break-words">{skipped > 0 ? t("run.approvalCheckSkipped", { command: check.prompt, count: skipped }) : t("run.approvalCheckPassed", { command: check.prompt })}</span>
+            <span className="min-w-0 break-words">
+              {skipped > 0 ? t("run.approvalCheckSkipped", { command: check.prompt, count: skipped }) : t("run.approvalCheckPassed", { command: check.prompt })} <ChangedSince attempts={attempts} looked={check} />
+            </span>
           </p>
         ) : (
           <p key={check.id} className="selectable font-medium break-words text-danger">
@@ -310,6 +326,7 @@ function ApprovalProof({ attempts, round, commands, rawCheck, reviewed }: { atte
         </p>
       )}
       {verification && <VerificationProof verification={verification} allProven={unchecked.length === 0} />}
+      {verifier && <ChangedSince attempts={attempts} looked={verifier} />}
       <p className="text-muted">
         {commands.length === 0 ? t("run.noCommands") : t("run.commandsPassed", { passed, total: commands.length })} <span className={cx((rawCheck === "changed" || rawCheck === "missing") && "font-medium text-danger")}>{t(auditKey(rawCheck))}</span>
       </p>
@@ -326,7 +343,7 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
   const ran = latest.filter((review) => review.state !== "skipped");
   // Those it skipped for being small are on a line of their own, with what can be done about it.
   const leftOut = latest.filter((review) => review.state === "skipped" && !skippedAsSmall(review));
-  const skipped = leftOut.filter((review) => !skippedForRisks(review));
+  const skipped = leftOut.filter((review) => !skippedForRisks(review) && !skippedWithNothingToFix(review));
   const forRisks = leftOut.filter(skippedForRisks);
   return (
     <div className="space-y-0.5">
@@ -347,6 +364,7 @@ function ReviewsGlance({ attempts, round }: { attempts: Attempt[]; round: number
             <span className="font-mono text-[12px]">{review.stepId}</span>: {gist(review.output?.summary ?? "", 140).text}
           </p>
         ))}
+      {ran.length > 0 && <ChangedSince attempts={attempts} looked={ran[0]} />}
       {skipped.length > 0 && <p className="text-subtle">{t("run.approvalSkipped", { names: skipped.map((review) => review.stepId).join(", ") })}</p>}
       {forRisks.length > 0 && <p className="text-subtle">{t("run.approvalSkippedRisks", { names: forRisks.map((review) => review.stepId).join(", ") })}</p>}
       {approver?.output && (
@@ -661,8 +679,10 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
   const empty = outcome === "nothingToDeliver";
   const delivers = outcome === "delivers" || outcome === "deliversLater";
   const explaining = explainingAttempts(attempts);
-  // After rework, how it started and how it ended tell the story.
-  const told = explaining.length > 2 ? [explaining[0], explaining[explaining.length - 1]] : explaining;
+  // After rework, how it started and how it ended tell the story: the end is what each step said in the last round.
+  const severalTold = explaining.some((a) => a.stepId !== explaining[0].stepId);
+  const ending = explaining.filter((a) => a.round === explaining[explaining.length - 1].round);
+  const told = explaining.length > 2 ? [...new Set([explaining[0], ...ending])] : explaining;
   const gists = told.map((a) => ({ attempt: a, ...gist(a.resultText ?? "") }));
   const hasMore = explaining.length > told.length || gists.some((g) => g.cut);
   const specifying = specifyingAttempt(attempts);
@@ -791,6 +811,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
               gists.map((g) => (
                 <p key={g.attempt.id} className="selectable mb-1 break-words last:mb-0">
                   {g.attempt.round > 0 && <span className="mr-1.5 font-medium text-warning">{t("run.round", { number: g.attempt.round + 1 })}</span>}
+                  {severalTold && <span className="mr-1.5 font-mono text-[12px] text-muted">{g.attempt.stepId}</span>}
                   {g.text}
                 </p>
               ))
@@ -1309,6 +1330,8 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       return line(t("activity.waiting"), "text-warning");
     case "skipped": {
       const skipped = { state: "skipped", reason: data.reason };
+      if (skippedWithNothingToFix(skipped)) return line(t("flow.skippedNothingToFix"), "text-subtle");
+      if (skippedAsUnchanged(skipped)) return line(t("flow.skippedUnchanged"), "text-subtle");
       return line(skippedAsSmall(skipped) ? t("activity.skippedSmall") : skippedForRisks(skipped) ? t("activity.skippedRisks") : t("activity.skipped"), "text-subtle");
     }
     case "postponed":

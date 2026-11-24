@@ -97,6 +97,9 @@ impl StepRole {
 pub enum StepCondition {
     /// Only if the change isn't small. See `WhyNotSmall` for what small takes.
     NotSmall,
+    /// Only if there's something to fix: in this round a review asked for changes, or a verifier
+    /// found something unmet.
+    SomethingToFix,
 }
 
 /// One agent step as the user defined it, including its own model.
@@ -190,7 +193,14 @@ pub enum WorkflowStep {
     /// published. The one step with network, and still sandboxed.
     Setup { id: String, run: String },
     /// A command Keel runs itself, in a sandbox, with no model involved. Exit 0 passes.
-    Check { id: String, run: String },
+    Check {
+        id: String,
+        run: String,
+        /// It repeats an earlier check: it runs only if a step that can change files has run since
+        /// the same command passed in the round.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        only_if_changed: bool,
+    },
     /// Agents that run at the same time. Only read-only ones, since they share a workspace.
     Parallel { id: String, steps: Vec<StepSpec> },
     /// Waits for a person, for as long as it takes.
@@ -414,6 +424,12 @@ pub enum Reason {
     NoMatchingRisks {
         risks: Vec<String>,
     },
+    /// No review of the round asked for changes and no verifier found anything unmet, and the step
+    /// only runs to fix what they found.
+    NothingToFix,
+    /// The same command passed in this round and no step that can change files has run since, and
+    /// the check only runs again if one has.
+    NothingChangedSinceCheck,
     /// The engine found the change small, going by what it could see for itself, and the step only
     /// runs for one that isn't. `lines` and `files` are the size of the change at that moment.
     TreatedAsSmall {
@@ -771,6 +787,8 @@ impl Reason {
             | Self::ReworkLimit { .. }
             | Self::NoMatchingPaths { .. }
             | Self::NoMatchingRisks { .. }
+            | Self::NothingToFix
+            | Self::NothingChangedSinceCheck
             | Self::NothingToDeliver
             | Self::RejectionNeedsReason
             | Self::UnsafeBranch { .. }
@@ -1164,6 +1182,8 @@ mod tests {
             (Reason::RerunWorkflowMissing { workflow: text() }, false),
             (Reason::ContractNotValid { problems: vec![] }, false),
             (Reason::CopyFreed, false),
+            (Reason::NothingToFix, false),
+            (Reason::NothingChangedSinceCheck, false),
         ]
     }
 
@@ -1224,6 +1244,8 @@ mod tests {
             Reason::NoMatchingRisks { .. } => 51,
             Reason::ContractNotValid { .. } => 52,
             Reason::CopyFreed => 53,
+            Reason::NothingToFix => 54,
+            Reason::NothingChangedSinceCheck => 55,
         }
     }
 
@@ -1237,7 +1259,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=53).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=55).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]

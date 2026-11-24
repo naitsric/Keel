@@ -710,7 +710,8 @@ fn a_retry_takes_the_project_s_fixed_check_only_when_asked_to() {
         serde_json::from_value(w.store.run(&run).unwrap().workflow).unwrap();
     assert!(steps.contains(&WorkflowStep::Check {
         id: "check".into(),
-        run: "echo fixed".into()
+        run: "echo fixed".into(),
+        only_if_changed: false,
     }));
     assert_eq!(w.engine.command_changes(&run).unwrap(), vec![]);
     // Where the person sees it, on the attempt that was retried.

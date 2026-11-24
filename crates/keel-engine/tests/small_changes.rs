@@ -245,6 +245,7 @@ fn check() -> WorkflowStep {
     WorkflowStep::Check {
         id: "check".into(),
         run: "test -f built.txt".into(),
+        only_if_changed: false,
     }
 }
 
@@ -676,6 +677,7 @@ fn a_check_that_passed_skipping_tests_is_not_enough_to_be_small() {
     steps[2] = WorkflowStep::Check {
         id: "check".into(),
         run: "test -f built.txt && echo '1 passed, 2 skipped in 0.01s'".into(),
+        only_if_changed: false,
     };
     let run = w.start(steps);
     w.moved_up(&run, "checkSkippedTests");
@@ -704,6 +706,7 @@ fn a_check_further_along_has_not_passed_yet_so_the_run_is_not_small() {
         WorkflowStep::Check {
             id: "later".into(),
             run: "test -f built.txt".into(),
+            only_if_changed: false,
         },
         verifier(),
         reviews(),
@@ -725,6 +728,7 @@ fn a_check_that_keeps_failing_stops_the_run_and_once_it_passes_the_reviews_run()
     steps[2] = WorkflowStep::Check {
         id: "check".into(),
         run: "test -f .git/passing-now".into(),
+        only_if_changed: false,
     };
     let run = w.start(steps);
     // Once the work has gone back to the builder as often as Keel sends it by itself.
@@ -751,6 +755,7 @@ fn a_check_that_failed_and_was_fixed_keeps_the_run_from_being_small() {
     steps[2] = WorkflowStep::Check {
         id: "check".into(),
         run: "test -f fixed.txt".into(),
+        only_if_changed: false,
     };
     w.builder_does(2, "echo fixed > fixed.txt");
     let run = w.start(steps);
@@ -1081,6 +1086,7 @@ fn a_diff_that_can_not_be_read_moves_the_run_up() {
     steps[2] = WorkflowStep::Check {
         id: "check".into(),
         run: "rm -rf .git/objects/*".into(),
+        only_if_changed: false,
     };
     let run = w.start(steps);
     w.wait_until(&run, "the reviews being let through", || {

@@ -470,6 +470,20 @@ describe("a step that depends on the change, on the flow diagram", () => {
     expect(node("ux").textContent).not.toContain("Small change");
   });
 
+  it("says in words what each condition is, and why a step was left out for its own", () => {
+    const fixer = { ...spec("ship"), when: "somethingToFix" as const, tools: "build" as const };
+    const steps: WorkflowStep[] = [{ type: "check", id: "check", run: "make test" }, { type: "agent", ...fixer }, { type: "check", id: "check-ship", run: "make test", onlyIfChanged: true }];
+    const label = (id: string) => node(id).getAttribute("aria-label");
+    show(flowOf(steps, []));
+    expect(label("ship")).toContain("Only if there's something to fix");
+    expect(label("check-ship")).toContain("Only if something changed since it passed");
+    expect(label("check")).not.toContain("Only if");
+    show(flowOf(steps, [attempt("check", "succeeded", { kind: "check" }), attempt("ship", "skipped", { reason: { code: "nothingToFix" } }), attempt("check-ship", "skipped", { kind: "check", reason: { code: "nothingChangedSinceCheck" } })]));
+    expect(label("ship")).toContain("Skipped: there was nothing to fix");
+    expect(label("ship")).not.toContain("Only if");
+    expect(label("check-ship")).toContain("Skipped: nothing changed since it passed");
+  });
+
   it("says in words that it depends on it until it has been skipped", () => {
     shown([attempt("builder", "running")]);
     expect(node("security").getAttribute("aria-label")).toContain("Only if the change isn't small");
