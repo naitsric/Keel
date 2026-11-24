@@ -839,6 +839,12 @@ fn attempt_abandon(state: State<'_, AppState>, attempt_id: String) -> CommandRes
     Ok(state.engine.abandon(&attempt_id)?)
 }
 
+/// What a click on a notice asked to see, if the window hasn't shown it yet.
+#[tauri::command]
+fn notice_take(clicked: State<'_, notices::Clicked>) -> Option<notices::Open> {
+    clicked.take()
+}
+
 #[tauri::command(async)]
 fn notices_get(state: State<'_, AppState>) -> NoticeSettings {
     state.engine.notice_settings()
@@ -1040,7 +1046,9 @@ pub fn run() {
                 let _ = window.emit(QUIT_EVENT, ());
             }
         })
+        .manage(notices::Clicked::default())
         .setup(|app| {
+            notices::listen(app.handle());
             let data_dir = app.path().app_data_dir()?;
             let log = Log::in_dir(&data_dir);
             keel_core::log_panics(log.clone());
@@ -1211,6 +1219,7 @@ pub fn run() {
             attempt_retry,
             run_command_changes,
             attempt_abandon,
+            notice_take,
             notices_get,
             notices_set,
             language_get,

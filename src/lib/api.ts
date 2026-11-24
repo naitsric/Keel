@@ -933,6 +933,7 @@ export const api = {
   jointCheckSet: (changeId: string, seq: number, works: boolean) => invoke<void>("joint_check_set", { changeId, seq, works }),
   jointContractSet: (changeId: string, points: ContractEdit[]) => invoke<void>("joint_contract_set", { changeId, points }),
   runJoint: (runId: string) => invoke<RunJoint | null>("run_joint", { runId }),
+  noticeTake: () => invoke<{ runId: string | null } | null>("notice_take"),
   noticesGet: () => invoke<NoticeSettings>("notices_get"),
   noticesSet: (settings: NoticeSettings) => invoke<void>("notices_set", { settings }),
   maxAgentsGet: () => invoke<number>("max_agents_get"),

@@ -11,7 +11,7 @@ use keel_store::Store;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 
-/// What a click on a notice opens, for the window to show.
+/// Tells the window that a click on a notice left something to open: see `Clicked`.
 pub const OPEN_EVENT: &str = "keel://open";
 /// A pause or a pull request can change without a run saying so, so Keel looks now and then too.
 const LOOK_AGAIN: Duration = Duration::from_secs(30);
@@ -41,11 +41,37 @@ impl Poke {
     }
 }
 
-#[derive(Clone, Serialize)]
+/// What a clicked notice opens.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Open {
+pub struct Open {
     /// None for the board.
-    run_id: Option<String>,
+    pub run_id: Option<String>,
+}
+
+/// What the last click asked to see, until the window takes it. A click can be what opens Keel, and
+/// then it comes before there's a window that listens.
+#[derive(Default)]
+pub struct Clicked(Mutex<Option<Open>>);
+
+impl Clicked {
+    fn set(&self, open: Open) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(open);
+    }
+
+    /// Only once, so a window that loads again doesn't go back to it.
+    pub fn take(&self) -> Option<Open> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).take()
+    }
+}
+
+/// Listens for clicks. Call it from `setup`, on the main thread: macOS hands over the click that
+/// opened Keel as it finishes launching, and only to who's already there.
+pub fn listen(app: &AppHandle) {
+    if mac::available() {
+        let app = app.clone();
+        mac::listen(move |run_id| open(&app, run_id));
+    }
 }
 
 /// Starts watching. Call it once runs left from the last session are back, or what they became
@@ -54,8 +80,7 @@ pub fn start(app: AppHandle, engine: Engine, store: Arc<Store>, poke: Arc<Poke>)
     if !mac::available() {
         return;
     }
-    let opener = app.clone();
-    mac::init(move |run_id| open(&opener, run_id));
+    mac::ask();
     std::thread::spawn(move || {
         let mut watch = NoticeWatch::default();
         loop {
@@ -80,12 +105,13 @@ fn in_front(app: &AppHandle) -> bool {
 }
 
 fn open(app: &AppHandle, run_id: Option<String>) {
+    app.state::<Clicked>().set(Open { run_id });
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
     }
-    let _ = app.emit(OPEN_EVENT, Open { run_id });
+    let _ = app.emit(OPEN_EVENT, ());
 }
 
 /// The one the person chose in Keel, or else the system's, as the window picks it.
@@ -125,9 +151,9 @@ mod mac {
     use objc2::{AllocAnyThread, define_class, msg_send};
     use objc2_foundation::{NSBundle, NSError, NSLocale, NSString};
     use objc2_user_notifications::{
-        UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
-        UNNotificationResponse, UNNotificationSound, UNUserNotificationCenter,
-        UNUserNotificationCenterDelegate,
+        UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+        UNNotificationPresentationOptions, UNNotificationRequest, UNNotificationResponse,
+        UNNotificationSound, UNUserNotificationCenter, UNUserNotificationCenterDelegate,
     };
 
     use super::{Notice, identifier, opens};
@@ -145,8 +171,22 @@ mod mac {
         // SAFETY: NSObjectProtocol has no safety requirements.
         unsafe impl NSObjectProtocol for Delegate {}
 
-        // SAFETY: the signature is the protocol's.
+        // SAFETY: the signatures are the protocol's.
         unsafe impl UNUserNotificationCenterDelegate for Delegate {
+            /// Keel only sends what its window isn't showing. Without this, macOS would still show
+            /// nothing while Keel is the active app, as it is with its window minimized.
+            #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+            fn will_present(
+                &self,
+                _center: &UNUserNotificationCenter,
+                _notification: &UNNotification,
+                completion_handler: &block2::DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
+            ) {
+                completion_handler.call((UNNotificationPresentationOptions::Banner
+                    | UNNotificationPresentationOptions::List
+                    | UNNotificationPresentationOptions::Sound,));
+            }
+
             #[unsafe(method(userNotificationCenter:didReceiveNotificationResponse:withCompletionHandler:))]
             fn did_receive(
                 &self,
@@ -183,8 +223,7 @@ mod mac {
             .map(|language| language.to_string())
     }
 
-    /// Asks the person once whether Keel may send notices, and listens for clicks.
-    pub fn init(open: impl Fn(Option<String>) + Send + Sync + 'static) {
+    pub fn listen(open: impl Fn(Option<String>) + Send + Sync + 'static) {
         if OPENER.set(Box::new(open)).is_err() {
             return;
         }
@@ -193,11 +232,16 @@ mod mac {
         let delegate = Delegate::new();
         center.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
         std::mem::forget(delegate);
+    }
+
+    /// Asks the person whether Keel may send notices. macOS only asks them the first time.
+    pub fn ask() {
         let answered = RcBlock::new(|_granted: Bool, _error: *mut NSError| {});
-        center.requestAuthorizationWithOptions_completionHandler(
-            UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
-            &answered,
-        );
+        UNUserNotificationCenter::currentNotificationCenter()
+            .requestAuthorizationWithOptions_completionHandler(
+                UNAuthorizationOptions::Alert | UNAuthorizationOptions::Sound,
+                &answered,
+            );
     }
 
     /// Without leave from the person, macOS drops it, and there's nothing more to do.
@@ -233,7 +277,9 @@ mod mac {
         None
     }
 
-    pub fn init(_open: impl Fn(Option<String>) + Send + Sync + 'static) {}
+    pub fn listen(_open: impl Fn(Option<String>) + Send + Sync + 'static) {}
+
+    pub fn ask() {}
 
     pub fn send(_notice: &Notice) {}
 }
@@ -253,5 +299,25 @@ mod tests {
         assert_eq!(opens(&run).as_deref(), Some("5e88-0d0f"));
         assert_eq!(opens(&identifier(&about(None), 4)), None);
         assert_eq!(opens("something else"), None);
+    }
+
+    #[test]
+    fn what_a_click_asked_for_waits_for_the_window_and_is_taken_once() {
+        let clicked = Clicked::default();
+        assert_eq!(clicked.take(), None);
+        let run = |id: &str| Open {
+            run_id: Some(id.into()),
+        };
+        // Two clicks before the window is there: it opens the last one.
+        clicked.set(run("r1"));
+        clicked.set(run("r2"));
+        assert_eq!(clicked.take(), Some(run("r2")));
+        assert_eq!(clicked.take(), None);
+        clicked.set(Open { run_id: None });
+        assert_eq!(clicked.take(), Some(Open { run_id: None }));
+        assert_eq!(
+            serde_json::to_value(run("r1")).unwrap(),
+            serde_json::json!({ "runId": "r1" })
+        );
     }
 }

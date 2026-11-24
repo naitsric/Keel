@@ -4,7 +4,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { NoticeSettings } from "../lib/api";
-import { openNotice, useApp } from "../lib/store";
+import { holdKeymap } from "../commands/keymapHold";
+import { openClicked, openNotice, useApp } from "../lib/store";
 import { SettingsView } from "./SettingsView";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -73,6 +74,73 @@ describe("a click on a notice", () => {
     expect(useApp.getState().view).toEqual({ name: "run", runId: "r2", backTo: { name: "board", projectId: "p1" } });
     openNotice("r2");
     expect(useApp.getState().view).toEqual({ name: "run", runId: "r2", backTo: { name: "board", projectId: "p1" } });
+  });
+
+  const tick = () => new Promise((resolve) => setTimeout(resolve));
+
+  it("waits for an open dialog, so nothing written in it is lost", async () => {
+    const board = { name: "board", projectId: "p1" } as const;
+    useApp.setState({ view: board });
+    const close = holdKeymap();
+    openNotice("r1");
+    await tick();
+    expect(useApp.getState().view).toBe(board);
+    close();
+    await tick();
+    expect(useApp.getState().view).toEqual({ name: "run", runId: "r1", backTo: board });
+    // Once: another dialog that closes later opens nothing.
+    useApp.setState({ view: board });
+    holdKeymap()();
+    await tick();
+    expect(useApp.getState().view).toBe(board);
+  });
+
+  it("waits for the dialog that one opens as it closes", async () => {
+    const board = { name: "board" } as const;
+    useApp.setState({ view: board });
+    const closeFirst = holdKeymap();
+    openNotice("r1");
+    closeFirst();
+    const closeSecond = holdKeymap();
+    await tick();
+    expect(useApp.getState().view).toBe(board);
+    closeSecond();
+    await tick();
+    expect(useApp.getState().view).toMatchObject({ name: "run", runId: "r1" });
+  });
+
+  it("opens the last one clicked, and none if the person went somewhere else from the dialog", async () => {
+    useApp.setState({ view: { name: "home" } });
+    let close = holdKeymap();
+    openNotice("r1");
+    openNotice("r2");
+    close();
+    await tick();
+    expect(useApp.getState().view).toMatchObject({ name: "run", runId: "r2" });
+
+    useApp.setState({ view: { name: "home" } });
+    close = holdKeymap();
+    openNotice("r1");
+    useApp.getState().navigate({ name: "workflows" });
+    close();
+    await tick();
+    expect(useApp.getState().view).toEqual({ name: "workflows" });
+  });
+
+  it("that opened Keel is asked for, since nothing was listening when it came", async () => {
+    useApp.setState({ view: { name: "home" } });
+    let left: { runId: string | null } | null = { runId: "r1" };
+    mockIPC((command) => {
+      if (command !== "notice_take") return null;
+      const taken = left;
+      left = null;
+      return taken;
+    });
+    await openClicked();
+    expect(useApp.getState().view).toMatchObject({ name: "run", runId: "r1" });
+    useApp.setState({ view: { name: "home" } });
+    await openClicked();
+    expect(useApp.getState().view).toEqual({ name: "home" });
   });
 
   it("about Todo pausing, opens the board", () => {

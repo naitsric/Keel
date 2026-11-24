@@ -1076,6 +1076,8 @@ mockIPC((command, args) => {
     case "max_agents_set":
       maxAgents = (args as { value: number }).value;
       return null;
+    case "notice_take":
+      return null;
     case "notices_get":
       return notices;
     case "notices_set":

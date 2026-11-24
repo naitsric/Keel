@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { create } from "zustand";
+import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import i18next, { type Language, systemLanguage } from "../i18n";
 import { api, type McpOverview, type Overview, type Preflight, type ProjectAdded } from "./api";
 import type { QuestionPick } from "./questions";
@@ -95,11 +96,39 @@ export const useApp = create<AppState>((set, get) => ({
   },
 }));
 
-/** A click on a notice: the run it's about, opened as from a list so Back goes where the person was, or the board for a pause. */
+/** Stops waiting for a dialog to close. Set while a click on a notice does. */
+let stopWaiting: (() => void) | null = null;
+
+/**
+ * A click on a notice: the run it's about, opened as from a list so Back goes where the person was, or the board for a pause.
+ *
+ * Not behind an open dialog, which may belong to the page and go with it, along with what the person was writing in it. It waits for the dialog to close, unless the person went somewhere else from it.
+ */
 export function openNotice(runId: string | null) {
+  stopWaiting?.();
+  stopWaiting = null;
   const { view, navigate } = useApp.getState();
+  if (keymapHeld()) {
+    const unwatch = watchKeymapHold(() =>
+      // A dialog can open another as it closes.
+      setTimeout(() => {
+        if (keymapHeld() || stopWaiting !== unwatch) return;
+        unwatch();
+        stopWaiting = null;
+        if (useApp.getState().view === view) openNotice(runId);
+      }),
+    );
+    stopWaiting = unwatch;
+    return;
+  }
   if (!runId) navigate({ name: "board" });
   else if (view.name !== "run" || view.runId !== runId) navigate({ name: "run", runId, backTo: view.name === "run" ? view.backTo : view });
+}
+
+/** Opens what a click on a notice left to open, if there's anything. */
+export async function openClicked() {
+  const clicked = await api.noticeTake();
+  if (clicked) openNotice(clicked.runId);
 }
 
 /** Loads what the app needs and starts listening to the backend. */
@@ -125,5 +154,7 @@ export async function startApp() {
   });
   await listen("keel://mcp-changed", () => void refreshMcp().catch(() => undefined));
   await listen("keel://quit-requested", () => useApp.setState({ quitOpen: true }));
-  await listen<{ runId: string | null }>("keel://open", ({ payload }) => openNotice(payload.runId));
+  await listen("keel://open", () => void openClicked().catch(() => undefined));
+  // A click can be what opened Keel, before anything here listened.
+  await openClicked().catch(() => undefined);
 }
