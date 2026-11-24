@@ -693,6 +693,18 @@
     "setupCommandPlaceholder": "uv sync --frozen",
     "maxAgents": "Agentes a la vez",
     "maxAgentsHint": "Aplica a toda la app, no a cada proyecto. Con más agentes, tu plan de Claude se gasta más rápido.",
+    "notices": {
+      "title": "Notificaciones",
+      "hint": "macOS te avisa mientras Keel no está al frente, y al hacer clic se abre lo que dice. La primera vez, macOS pregunta si Keel puede enviarlas. Si dijiste que no, actívalas en Ajustes del Sistema › Notificaciones › Keel.",
+      "waiting": "Algo te espera",
+      "waitingHint": "Una ejecución necesita tu aprobación o tu decisión, o quedó bloqueada, falló, parece atascada o se interrumpió.",
+      "finished": "Una ejecución termina",
+      "finishedHint": "Terminó con lo que se le pidió.",
+      "pullRequests": "Cambia un pull request",
+      "pullRequestsHint": "Se mergeó o se cerró sin mergear, o su CI quedó en rojo.",
+      "paused": "Por hacer se pausa",
+      "pausedHint": "Nada empieza, por el límite de uso de tu plan o por algo que hay que resolver."
+    },
     "defaultWorkflow": "Workflow por defecto",
     "defaultWorkflowHint": "Lo que ejecuta una tarjeta del tablero cuando la mueves a Por hacer.",
     "defaultWorkflowGone": "Un workflow que ya no existe"

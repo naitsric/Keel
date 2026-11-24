@@ -3,6 +3,7 @@
 mod launch;
 mod mcp;
 mod menu;
+mod notices;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +15,7 @@ use keel_core::{
 };
 use keel_engine::{
     AddedProject, Answer, Board, BrainView, CiGap, CommandChange, Config, ContractEdit, Engine,
-    Error as EngineError, GithubStatus, IssueWatch, JointChangeView, Preflight,
+    Error as EngineError, GithubStatus, IssueWatch, JointChangeView, NoticeSettings, Preflight,
     ProjectProposalReview, ProjectSetup, RawCheck, RetryOptions, RunJoint, StartRun, Workflow,
     WorkflowDraft, request_from_issue, title_from_issue,
 };
@@ -839,6 +840,16 @@ fn attempt_abandon(state: State<'_, AppState>, attempt_id: String) -> CommandRes
 }
 
 #[tauri::command(async)]
+fn notices_get(state: State<'_, AppState>) -> NoticeSettings {
+    state.engine.notice_settings()
+}
+
+#[tauri::command(async)]
+fn notices_set(state: State<'_, AppState>, settings: NoticeSettings) -> CommandResult<()> {
+    Ok(state.engine.set_notice_settings(&settings)?)
+}
+
+#[tauri::command(async)]
 fn language_get(state: State<'_, AppState>) -> CommandResult<Option<String>> {
     Ok(state.store.setting(LANGUAGE_KEY)?)
 }
@@ -1073,9 +1084,14 @@ pub fn run() {
                     std::thread::spawn(move || keel_harness::hook::warm_up(&hook));
                 }
             }
-            let engine = Engine::new(store.clone(), config, Tools::default(), move |run_id| {
-                let _ = handle.emit(CHANGED_EVENT, run_id);
-            });
+            let poke = Arc::new(notices::Poke::default());
+            let engine = {
+                let poke = poke.clone();
+                Engine::new(store.clone(), config, Tools::default(), move |run_id| {
+                    let _ = handle.emit(CHANGED_EVENT, run_id);
+                    poke.notify();
+                })
+            };
             let ready = Arc::new(Ready::default());
             let tools_shared = Arc::new(Mutex::new(Tools::default()));
             let mcp_server = keel_mcp::McpServer::new(engine.clone(), store.clone());
@@ -1085,6 +1101,7 @@ pub fn run() {
                 let ready = ready.clone();
                 let tools_shared = tools_shared.clone();
                 let handle = app.handle().clone();
+                let store = store.clone();
                 std::thread::spawn(move || {
                     let tools = Tools::detect();
                     *tools_shared.lock().unwrap_or_else(|e| e.into_inner()) = tools.clone();
@@ -1102,6 +1119,7 @@ pub fn run() {
                     });
                     ready.set();
                     let _ = handle.emit(CHANGED_EVENT, "");
+                    notices::start(handle.clone(), engine.clone(), store, poke);
                     // After the tools are known, so no client ever finds Keel half ready.
                     mcp::start_if_enabled(mcp_server, handle, &log);
                 });
@@ -1193,6 +1211,8 @@ pub fn run() {
             attempt_retry,
             run_command_changes,
             attempt_abandon,
+            notices_get,
+            notices_set,
             language_get,
             language_set,
             open_claude_login,

@@ -15,6 +15,7 @@ mod limits;
 mod localhost;
 mod log;
 mod notes;
+mod notices;
 mod project_commands;
 mod project_proposals;
 mod prompts;
@@ -57,6 +58,7 @@ use keel_store::{
 };
 pub use limits::MOST_CONTINUED_BY_ITSELF;
 pub use notes::split_assistant_notes;
+pub use notices::{Notice, NoticeSettings, NoticeWatch};
 pub use project_commands::{CommandChange, CommandKind, retry_runs_something_new};
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
 pub use prompts::full_workflow;

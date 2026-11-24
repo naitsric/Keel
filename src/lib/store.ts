@@ -95,6 +95,13 @@ export const useApp = create<AppState>((set, get) => ({
   },
 }));
 
+/** A click on a notice: the run it's about, opened as from a list so Back goes where the person was, or the board for a pause. */
+export function openNotice(runId: string | null) {
+  const { view, navigate } = useApp.getState();
+  if (!runId) navigate({ name: "board" });
+  else if (view.name !== "run" || view.runId !== runId) navigate({ name: "run", runId, backTo: view.name === "run" ? view.backTo : view });
+}
+
 /** Loads what the app needs and starts listening to the backend. */
 export async function startApp() {
   const saved = await api.languageGet().catch(() => null);
@@ -118,4 +125,5 @@ export async function startApp() {
   });
   await listen("keel://mcp-changed", () => void refreshMcp().catch(() => undefined));
   await listen("keel://quit-requested", () => useApp.setState({ quitOpen: true }));
+  await listen<{ runId: string | null }>("keel://open", ({ payload }) => openNotice(payload.runId));
 }

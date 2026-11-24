@@ -1184,6 +1184,21 @@ pub struct RunRow {
     pub last_activity_at: Option<String>,
 }
 
+/// What a person may want to hear about a run while they're not looking: where it stands, whether
+/// it ended, and what became of its pull request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunSignal {
+    pub id: String,
+    pub title: String,
+    pub project_name: String,
+    /// The attempt that matters, as in `RunRow`.
+    pub attempt_id: String,
+    pub state: Option<AttemptState>,
+    pub finished: bool,
+    pub pr_state: Option<PrState>,
+    pub pr_ci: Option<CiState>,
+}
+
 /// The numbers on the home cards.
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -2924,6 +2939,32 @@ impl Store {
     /// Runs, newest first, each with its latest attempt.
     pub fn runs(&self, limit: i64) -> Result<Vec<RunRow>> {
         self.run_rows("1", params![limit])
+    }
+
+    /// The newest runs, as `RunSignal`s.
+    pub fn run_signals(&self, limit: i64) -> Result<Vec<RunSignal>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(&format!(
+            "select r.id, r.title, p.name, a.id, a.state, r.finished_at is not null, r.pr_state, r.pr_ci
+             from run r
+             join project p on p.id = r.project_id
+             join attempt a on a.run_id = r.id and a.rowid = ({ATTEMPT_THAT_MATTERS})
+             order by r.created_at desc limit ?1"
+        ))?;
+        let rows = stmt.query_map([limit], |r| {
+            let state: String = r.get(4)?;
+            Ok(RunSignal {
+                id: r.get(0)?,
+                title: r.get(1)?,
+                project_name: r.get(2)?,
+                attempt_id: r.get(3)?,
+                state: AttemptState::parse(&state),
+                finished: r.get(5)?,
+                pr_state: pr_state_from(r.get(6)?),
+                pr_ci: ci_state_from(r.get(7)?),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Runs matching a filter on `r`, newest first. `?1` is the limit, and the filter's own

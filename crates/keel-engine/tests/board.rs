@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use keel_core::{AttemptState, BoardColumn, CardLane, Reason, StepSpec, ToolProfile, WorkflowStep};
 use keel_engine::{
-    BoardCard, BoardIssue, Config, Engine, Error, StartRun, Workflow, request_from_issue,
-    split_assistant_notes,
+    BoardCard, BoardIssue, Config, Engine, Error, Notice, NoticeSettings, NoticeWatch, StartRun,
+    Workflow, request_from_issue, split_assistant_notes,
 };
 use keel_harness::Tools;
 use keel_store::{McpClient, NewAttempt, NewMcpCall, NewRun, ProjectSettings, Store};
@@ -3889,4 +3889,38 @@ fn human_review_has_the_card_that_has_waited_longest_on_top() {
         w.titles_in(BoardColumn::HumanReview),
         ["card-1", "card-2", "card-3"]
     );
+}
+
+#[test]
+fn a_run_that_comes_to_wait_for_approval_is_noticed_once_and_only_while_wanted() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    w.set_default(&answer_step(&w.engine, &w.project_id));
+    let mut watch = NoticeWatch::default();
+    assert!(watch.look(&w.engine, "en").unwrap().is_empty());
+
+    let card = w.queued("card-1");
+    w.engine.start_board();
+    w.wait_column(&card, BoardColumn::HumanReview);
+    let run = w.card(&card).run_id.unwrap();
+    assert_eq!(
+        watch.look(&w.engine, "es").unwrap(),
+        [Notice {
+            run_id: Some(run),
+            title: "Falta tu aprobación".into(),
+            body: "card-1 · app".into(),
+        }]
+    );
+    assert!(watch.look(&w.engine, "es").unwrap().is_empty());
+
+    // What the person turns off stays off, and the rest stays on.
+    let off = NoticeSettings {
+        waiting: false,
+        ..NoticeSettings::default()
+    };
+    w.engine.set_notice_settings(&off).unwrap();
+    assert_eq!(w.engine.notice_settings(), off);
+    let second = w.queued("card-2");
+    w.wait_column(&second, BoardColumn::HumanReview);
+    assert!(watch.look(&w.engine, "en").unwrap().is_empty());
 }
