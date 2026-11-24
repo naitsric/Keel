@@ -585,6 +585,7 @@ async fn it_tells_a_model_how_to_write_a_draft() {
         "notSmall",
         "somethingToFix",
         "onlyIfChanged",
+        "watch",
     ] {
         assert!(schema.contains(word), "{word}: {schema}");
     }
@@ -687,6 +688,40 @@ async fn a_draft_can_ask_for_a_step_that_fixes_what_was_found_and_the_check_agai
     let refusal = call(&client, "draft_workflow", args(true)).await;
     assert!(
         refused(&refusal).contains("fixBeforeReview"),
+        "{}",
+        refused(&refusal)
+    );
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_draft_can_follow_its_pull_request_if_a_person_approves_every_round_of_it() {
+    keel_harness::needs!(sockets);
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let args = |approval_first: bool| {
+        let builder = json!({ "type": "agent", "id": "builder", "model": "sonnet", "tools": "build", "prompt": "{{request}}" });
+        let human = json!({ "type": "approval", "id": "human" });
+        let (first, second) = if approval_first {
+            (human, builder)
+        } else {
+            (builder, human)
+        };
+        json!({ "project": "app", "name": "Follows", "steps": [
+            first,
+            second,
+            { "type": "deliver", "id": "pr" },
+            { "type": "watch", "id": "watch", "maxRounds": 2 },
+        ] })
+    };
+    let draft = ok(&call(&client, "draft_workflow", args(false)).await);
+    assert_eq!(
+        draft["steps"][3],
+        json!({ "type": "watch", "id": "watch", "maxRounds": 2 })
+    );
+    let refusal = call(&client, "draft_workflow", args(true)).await;
+    assert!(
+        refused(&refusal).contains("watchNeedsBuilder"),
         "{}",
         refused(&refusal)
     );

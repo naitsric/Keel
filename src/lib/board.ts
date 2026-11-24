@@ -25,7 +25,8 @@ export function groupCards(cards: BoardCard[]): Groups {
 
 export const canDrag = (card: BoardCard) => isLane(card.column);
 export const canEdit = (card: BoardCard) => isLane(card.column);
-export const canDelete = (card: BoardCard) => isLane(card.column) || card.column === "done";
+/** One that Keel still follows can come back, and its card is where it's answered. */
+export const canDelete = (card: BoardCard) => isLane(card.column) || (card.column === "done" && card.runState !== "watching");
 
 /** What a click on a card does: a card with a run opens it, any other opens for editing. */
 export function clickAction(card: BoardCard): "run" | "edit" | null {
@@ -171,9 +172,10 @@ export function cardLabel(t: TFunction, card: BoardCard): CardLabel | null {
 
 /** What a done card says under its pull request, and after it how many commits were added once Keel delivered, when some were. */
 function withCommitsAdded(t: TFunction, card: BoardCard, detail: string | null): string | null {
-  if (!card.prCommitsAdded) return detail;
-  const added = t("board.commitsAdded", { count: card.prCommitsAdded });
-  return detail ? `${detail} · ${added}` : added;
+  const added = card.prCommitsAdded ? t("board.commitsAdded", { count: card.prCommitsAdded }) : null;
+  // One that Keel still follows can come back for what its pull request asks.
+  const followed = card.runState === "watching" ? t("board.following") : null;
+  return [detail, added, followed].filter(Boolean).join(" · ") || null;
 }
 
 export const partText = (t: TFunction, part: PartOf) => t("board.joint.part", { position: part.position, total: part.total });

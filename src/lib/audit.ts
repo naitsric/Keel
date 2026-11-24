@@ -1,5 +1,5 @@
 import type { TFunction } from "i18next";
-import type { Attempt, AuditEvent, CheckedCriterion, GivenAnswer, ShownState, SpecOutput, VerificationOutput } from "./api";
+import type { Attempt, AuditEvent, CheckedCriterion, GivenAnswer, PullRequestAsked, ShownState, SpecOutput, VerificationOutput } from "./api";
 
 export interface CommandEnd {
   /** `unclear` is a command that finished with code 0, but where that 0 may hide a failure. */
@@ -393,12 +393,25 @@ export function latestOfEachStep<T extends { stepId: string }>(attempts: T[]): T
 const NEEDS_A_PERSON = ["waitingApproval", "waitingAnswers", "stalled", "blocked", "interrupted", "failed", "stopped", "rejected"];
 const WORKING = ["running", "preparing", "queued"];
 
+/** Whether all that's left of a run is following its pull request: it was delivered, and nothing works. */
+export const followsPullRequest = (attempts: { state: string }[]) => attempts.at(-1)?.state === "watching";
+
+/**
+ * What the run's pull request last sent the work back for, while nothing has been delivered since: it's
+ * what every round until then is about, also one that began because a check failed on the way.
+ */
+export function pullRequestAsked(attempts: Pick<Attempt, "kind" | "state" | "output">[]): PullRequestAsked | null {
+  const at = attempts.map((a) => (a.kind === "watch" || a.kind === "deliver") && a.state === "returned").lastIndexOf(true);
+  if (at < 0 || attempts.slice(at + 1).some((a) => a.kind === "deliver" && a.state === "succeeded")) return null;
+  return attempts[at].output?.pullRequest ?? null;
+}
+
 /**
  * Still moving on its own: nothing ended it and nothing holds it until a person answers.
  * Between two steps nothing is working yet, and a stalled step can wake up by itself: neither should rearrange a page.
  */
 export function stillGoing(run: { finishedAt: string | null }, attempts: { stepId: string; state: string; role?: string }[]): boolean {
-  if (run.finishedAt) return false;
+  if (run.finishedAt || followsPullRequest(attempts)) return false;
   return !latestOfEachStep(attempts).some((a) => a.state !== "stalled" && a.role !== "learner" && NEEDS_A_PERSON.includes(a.state));
 }
 

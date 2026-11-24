@@ -1,4 +1,4 @@
-import { AlertTriangle, Bot, CheckCircle2, Eye, FileText, GitPullRequest, Layers, Lightbulb, ListChecks, Map as MapIcon, Plus, ShieldCheck, UserCheck, Wrench } from "lucide-react";
+import { AlertTriangle, Bot, CheckCircle2, Eye, FileText, GitPullRequest, Layers, Lightbulb, ListChecks, Map as MapIcon, Plus, Radar, ShieldCheck, UserCheck, Wrench } from "lucide-react";
 import type { TFunction } from "i18next";
 import { type FocusEvent, Fragment, type KeyboardEvent, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -14,6 +14,7 @@ const KIND_LABELS: Record<FlowNode["kind"], string> = {
   check: "workflows.stepCheck",
   approval: "workflows.stepApproval",
   deliver: "workflows.stepDeliver",
+  watch: "workflows.stepWatch",
 };
 const ROLE_LABELS: Record<StepRole["kind"], string> = {
   worker: "workflows.roleWorker",
@@ -32,6 +33,7 @@ const NODE_TONES: Partial<Record<AttemptState | "pending", string>> = {
   // Whatever waits for the person stands out from the rest.
   waitingApproval: "border-warning/70 bg-warning/10",
   waitingAnswers: "border-warning/70 bg-warning/10",
+  watching: "border-accent/60",
   stalled: "border-warning/70 bg-warning/10",
   blocked: "border-warning/70 bg-warning/10",
   interrupted: "border-warning/70 bg-warning/10",
@@ -52,6 +54,7 @@ function StepIcon({ node }: { node: FlowNode<FlowAttempt> }) {
     if (node.kind === "check") return <CheckCircle2 size={12} />;
     if (node.kind === "approval") return <UserCheck size={12} />;
     if (node.kind === "deliver") return <GitPullRequest size={12} />;
+    if (node.kind === "watch") return <Radar size={12} />;
     if (node.role === "reviewer") return <Eye size={12} />;
     if (node.role === "approver") return <ShieldCheck size={12} />;
     if (node.role === "learner") return <Lightbulb size={12} />;

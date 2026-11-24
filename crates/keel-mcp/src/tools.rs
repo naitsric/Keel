@@ -373,6 +373,11 @@ pub enum DraftStep {
     Approval { id: String },
     /// Keel pushes a branch and opens a draft pull request. Needs an `approval` earlier.
     Deliver { id: String },
+    /// Keel follows the pull request until it's merged or closed. When its CI fails, it conflicts or
+    /// a collaborator asks for changes, the work goes back as a new round, which the person approves
+    /// before anything is pushed. Needs a `deliver` earlier, and a worker that builds before the
+    /// approval. `maxRounds` is how many times in a row it does that with nobody asking, 5 at most.
+    Watch { id: String, max_rounds: u32 },
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -1949,8 +1954,16 @@ fn run_state<'a>(run: &Run, attempts: &'a [Attempt]) -> (&'static str, Option<&'
     }
     match needs_person(attempts) {
         Some(attempt) => ("waitingForPerson", Some(attempt)),
+        None if follows_pull_request(attempts) => ("followingPullRequest", None),
         None => ("working", None),
     }
+}
+
+/// Whether what's left of a run is following its pull request: it was delivered, and nothing works.
+fn follows_pull_request(attempts: &[Attempt]) -> bool {
+    attempts
+        .last()
+        .is_some_and(|attempt| attempt.state == AttemptState::Watching.as_str())
 }
 
 fn working(attempt: &Attempt) -> bool {
@@ -2088,6 +2101,11 @@ fn close_target<'a>(run: &Run, attempts: &'a [Attempt]) -> Result<&'a Attempt, T
     if attempts.iter().any(working) {
         return Err(ToolError::new(
             "Something in this run is still working. Stop it with stop_run first, then close it.",
+        ));
+    }
+    if attempts.iter().any(|a| a.kind == "watch") {
+        return Err(ToolError::new(
+            "This run was delivered, and Keel follows its pull request. Only the person stops that, in Keel.",
         ));
     }
     needs_person(attempts)
@@ -2839,6 +2857,9 @@ fn step_summary(step: &WorkflowStep) -> Json {
         }),
         WorkflowStep::Approval { id } => json!({ "type": "approval", "id": id }),
         WorkflowStep::Deliver { id } => json!({ "type": "deliver", "id": id }),
+        WorkflowStep::Watch { id, max_rounds } => {
+            json!({ "type": "watch", "id": id, "maxRounds": max_rounds })
+        }
     }
 }
 
@@ -2864,6 +2885,7 @@ impl DraftStep {
             },
             Self::Approval { id } => WorkflowStep::Approval { id },
             Self::Deliver { id } => WorkflowStep::Deliver { id },
+            Self::Watch { id, max_rounds } => WorkflowStep::Watch { id, max_rounds },
         })
     }
 }
@@ -3325,6 +3347,95 @@ mod tests {
             result_text: None,
             ..attempt(step, 1)
         }
+    }
+
+    fn run() -> Run {
+        Run {
+            id: "run".into(),
+            project_id: "p".into(),
+            title: "Fix it".into(),
+            base_ref: None,
+            request: String::new(),
+            workflow: Json::Null,
+            language: "en".into(),
+            source_issue: None,
+            branch: None,
+            pr_url: None,
+            pr_number: None,
+            round: 0,
+            created_at: String::new(),
+            finished_at: None,
+            started_by: None,
+            workflow_id: None,
+            workflow_name: None,
+            pr_state: None,
+            pr_state_at: None,
+            pr_checked_at: None,
+            pr_head: None,
+            extra_read: vec![],
+            pr_ci: None,
+            pr_ci_failed: vec![],
+            extra_localhost: false,
+            pr_delivered: None,
+            pr_commits_added: None,
+            pr_counted_at: None,
+        }
+    }
+
+    /// A client waiting on a run that was delivered would wait for as long as its pull request stays
+    /// open, with nothing to do about it.
+    #[test]
+    fn a_followed_run_isnt_working_and_only_the_person_ends_it() {
+        let watch = |state: &str| Attempt {
+            kind: "watch".into(),
+            role: "worker".into(),
+            tools: "none".into(),
+            state: state.into(),
+            output: None,
+            result_text: None,
+            ..attempt("watch", 1)
+        };
+        let delivered = builder("builder", 1, "Built.");
+        let state = |attempts: &[Attempt]| run_state(&run(), attempts).0;
+        assert_eq!(
+            state(&[delivered.clone(), watch("watching")]),
+            "followingPullRequest"
+        );
+        assert_eq!(
+            state(&[delivered.clone(), watch("blocked")]),
+            "waitingForPerson"
+        );
+        // Its pull request sent it back, so it works again.
+        let again = builder("builder", 2, "");
+        let mut running = again.clone();
+        running.state = "running".into();
+        assert_eq!(
+            state(&[delivered.clone(), watch("returned"), running]),
+            "working"
+        );
+        let ended = Run {
+            finished_at: Some("now".into()),
+            ..run()
+        };
+        assert_eq!(run_state(&ended, &[watch("watching")]).0, "finished");
+
+        let waits = Attempt {
+            kind: "approval".into(),
+            state: "waitingApproval".into(),
+            ..builder("human", 2, "")
+        };
+        for attempts in [
+            vec![delivered.clone(), watch("watching")],
+            vec![delivered.clone(), watch("blocked")],
+            vec![delivered.clone(), watch("returned"), waits.clone()],
+        ] {
+            let refused = close_target(&run(), &attempts).unwrap_err().0;
+            assert!(refused.contains("Only the person stops that"), "{refused}");
+        }
+        assert!(
+            close_target(&run(), &[delivered, waits]).is_ok(),
+            "before it was delivered"
+        );
     }
 
     #[test]

@@ -6,6 +6,8 @@ export interface DraftFacts {
   /** Agents that can change files and run commands. Groups can't have any. */
   builders: string[];
   delivers: boolean;
+  /** It follows the pull request, so it can start rounds after it's delivered. */
+  follows: boolean;
   /** Steps that act between the person's approval and the pull request, so the person never sees what they do. */
   afterApproval: string[];
   /** Agents that don't run for a change the engine finds small, in a group or not. */
@@ -23,5 +25,5 @@ export function draftFacts(steps: WorkflowStep[]): DraftFacts {
   const afterApproval = between.flatMap((step) => ((step.type === "agent" && step.tools === "build") || step.type === "check" || step.type === "setup" ? [step.id] : []));
   const agents = steps.flatMap((step) => (step.type === "parallel" ? step.steps : step.type === "agent" ? [step] : []));
   const only = (when: StepCondition) => agents.flatMap((spec) => (spec.when === when ? [spec.id] : []));
-  return { commands, builders, delivers: deliver >= 0, afterApproval, conditional: only("notSmall"), onlyToFix: only("somethingToFix") };
+  return { commands, builders, delivers: deliver >= 0, follows: steps.some((step) => step.type === "watch"), afterApproval, conditional: only("notSmall"), onlyToFix: only("somethingToFix") };
 }

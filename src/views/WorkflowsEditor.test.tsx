@@ -512,6 +512,20 @@ describe("the workflow editor", () => {
       expect(ids()).toContain("reviewer");
     });
 
+    it("adds one that follows the pull request, saying what that means, with how many rounds it takes", async () => {
+      await open();
+      await addHere("Add a step before human", "Follow the pull request");
+      expect(selected()).toEqual(["watch"]);
+      expect(page()).toContain("you approve before anything is pushed");
+      const rounds = [...document.querySelectorAll<HTMLInputElement>('input[inputmode="numeric"]')].find((input) => input.value === "3") as HTMLInputElement;
+      act(() => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(rounds, "5x");
+        rounds.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await saveNow();
+      expect(lastSaved().steps.find((step) => step.type === "watch")).toEqual({ type: "watch", id: "watch", maxRounds: 5 });
+    });
+
     it("gives new steps the same shape they always had", async () => {
       await open();
       await addHere("Add a step before spec", "Agent");

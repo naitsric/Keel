@@ -13,6 +13,7 @@ export type AttemptState =
   | "blocked"
   | "waitingApproval"
   | "waitingAnswers"
+  | "watching"
   | "rejected"
   | "returned"
   | "postponed"
@@ -325,7 +326,9 @@ export type WorkflowStep =
   | { type: "check"; id: string; run: string; onlyIfChanged?: boolean }
   | { type: "parallel"; id: string; steps: StepSpec[] }
   | { type: "approval"; id: string }
-  | { type: "deliver"; id: string };
+  | { type: "deliver"; id: string }
+  /** Keel follows the pull request, and sends the work back at most `maxRounds` times in a row with nobody asking. */
+  | { type: "watch"; id: string; maxRounds: number };
 
 export interface Workflow {
   id: string;
@@ -472,6 +475,17 @@ export interface Decision_ {
   overriddenByPerson?: boolean;
 }
 
+/** What a pull request asked for, as the step that follows it keeps it. */
+export interface PullRequestAsked {
+  head: string;
+  /** The branch it conflicted with, if it did. */
+  conflict?: string;
+  /** Its branch had commits the run's copy didn't. */
+  ahead?: boolean;
+  checks?: { name: string; log: string }[];
+  comments?: { ids: string[]; authors: string[]; file: string | null; line: number | null; text: string }[];
+}
+
 export interface Run {
   id: string;
   projectId: string;
@@ -497,6 +511,8 @@ export interface Run {
   /** When that happened, going by GitHub. */
   prStateAt: string | null;
   prCheckedAt: string | null;
+  /** The commit its branch was at when Keel last looked. */
+  prHead?: string | null;
   /** Null until Keel knows. */
   prCi: CiState | null;
   /** The checks that failed, by name. */
@@ -596,11 +612,11 @@ export interface Attempt {
   id: string;
   runId: string;
   stepId: string;
-  kind: "agent" | "setup" | "check" | "approval" | "deliver";
+  kind: "agent" | "setup" | "check" | "approval" | "deliver" | "watch";
   role: "worker" | "reviewer" | "approver" | "mapper" | "learner" | "specifier" | "verifier";
   round: number;
   /** A returned approval has the `instructions` it went back with, and `by` if an assistant sent it. */
-  output: (Verdict & Decision_ & { lines?: unknown[]; by?: string }) | null;
+  output: (Verdict & Decision_ & { lines?: unknown[]; by?: string; pullRequest?: PullRequestAsked; ended?: string }) | null;
   runFiles: string[] | null;
   exitCode: number | null;
   number: number;
@@ -898,6 +914,8 @@ export const api = {
   approvalAnswer: (attemptId: string, approve: boolean, text: string) => invoke<void>("approval_answer", { attemptId, approve, text }),
   approvalSendBack: (attemptId: string, instructions: string) => invoke<void>("approval_send_back", { attemptId, instructions }),
   /** Runs what was skipped for being a small change. The approval comes round again afterwards. */
+  watchCatchUp: (attemptId: string) => invoke<void>("watch_catch_up", { attemptId }),
+  watchStop: (attemptId: string) => invoke<void>("watch_stop", { attemptId }),
   approvalRunSkipped: (attemptId: string) => invoke<void>("approval_run_skipped", { attemptId }),
   questionsAnswer: (attemptId: string, answers: QuestionAnswer[]) => invoke<void>("questions_answer", { attemptId, answers }),
   openGithubUrl: (url: string) => invoke<void>("open_github_url", { url }),

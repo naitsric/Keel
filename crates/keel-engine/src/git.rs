@@ -41,6 +41,10 @@ pub const BASE_REF: &str = "keel-base";
 /// home folder, which sandboxed commands can't reach.
 pub const RUN_CACHE: &str = ".keel-cache";
 
+/// What's in a run's copy besides its commits can say they come in another order: a replaced object,
+/// or a file of git's that sums the history up. With these, git reads the commits themselves.
+const REAL_HISTORY: [&str; 3] = ["--no-replace-objects", "-c", "core.commitGraph=false"];
+
 /// How long git gets in a workspace. What a step left there could make it hang, and a run must
 /// never sit there saying nothing.
 const WORKSPACE_LIMIT: Duration = Duration::from_secs(600);
@@ -161,9 +165,21 @@ impl Git {
         args: &[&str],
     ) -> Result<String, GitError> {
         let profile = self.workspace_profile(workspace)?;
+        self.run_in_sandbox(workspace, &profile, index, args)
+    }
+
+    fn run_in_sandbox(
+        &self,
+        workspace: &Path,
+        profile: &str,
+        index: Option<&Path>,
+        args: &[&str],
+    ) -> Result<String, GitError> {
         let mut command = Command::new("/usr/bin/sandbox-exec");
-        command.args(["-p", &profile]).arg(&self.bin);
+        command.args(["-p", profile]).arg(&self.bin);
         Self::harden(&mut command, workspace);
+        // A file an agent can write, that says which commits come after which.
+        command.env("GIT_GRAFT_FILE", "/dev/null");
         if let Some(index) = index {
             command.env("GIT_INDEX_FILE", index);
         }
@@ -178,6 +194,23 @@ impl Git {
                 String::from_utf8_lossy(&stderr).trim()
             )))
         }
+    }
+
+    /// `run_in_workspace`, that can also read this folder, which no step can write in.
+    fn run_in_workspace_reading(
+        &self,
+        workspace: &Path,
+        folder: &Path,
+        args: &[&str],
+    ) -> Result<String, GitError> {
+        let home = std::env::var_os("HOME")
+            .filter(|home| !home.is_empty())
+            .map(PathBuf::from)
+            .ok_or_else(|| GitError::Failed("HOME is not set".to_owned()))?;
+        let mut read = self.install_dirs(&home);
+        read.push(folder.to_string_lossy().into_owned());
+        let profile = check_profile(workspace, &home, &read, &[]);
+        self.run_in_sandbox(workspace, &profile, None, args)
     }
 
     fn run(&self, cwd: &Path, args: &[&str]) -> Result<String, GitError> {
@@ -494,6 +527,127 @@ impl Git {
             ],
         )?;
         Ok(())
+    }
+
+    /// `fetch_for_reading`, giving up at the limit: for a look in the background, which nobody would
+    /// notice hanging. Only its own `into` moves, so it waits for no other run's.
+    pub fn fetch_within(
+        &self,
+        mirror: &Path,
+        url: &str,
+        branch: &str,
+        into: &str,
+        auth: &RemoteAuth,
+        limit: Duration,
+    ) -> Result<String, GitError> {
+        self.ensure_mirror(mirror)?;
+        let refspec = format!("+refs/heads/{branch}:refs/heads/{into}");
+        let mut command = self.command(mirror);
+        command
+            .args(git_credential_args(auth.gh))
+            .args([
+                "fetch",
+                "-q",
+                "--no-tags",
+                "--no-write-fetch-head",
+                url,
+                &refspec,
+            ])
+            .env("GH_TOKEN", auth.token.expose())
+            .env("PATH", auth.path_env);
+        let (ok, _, stderr) = bounded_output(command, limit)?;
+        if !ok {
+            let detail = String::from_utf8_lossy(&stderr);
+            return Err(GitError::Failed(auth.token.redact(detail.trim())));
+        }
+        self.run(
+            mirror,
+            &[
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("refs/heads/{into}^{{commit}}"),
+            ],
+        )
+    }
+
+    /// Brings a branch of the mirror, at `commit`, into a run's copy, as the local branch `to` there.
+    /// Git in the copy can't read the mirror, so it goes through a file in `folder`, where no step
+    /// can write. Nothing is checked out. The commits of the run's own `branch`, which both have,
+    /// stay out.
+    pub fn bring(
+        &self,
+        mirror: &Path,
+        workspace: &Path,
+        folder: &Path,
+        branch: &str,
+        (from, commit): (&str, &str),
+        to: &str,
+    ) -> Result<(), GitError> {
+        std::fs::create_dir_all(folder)?;
+        let bundle = folder.join("branches.bundle");
+        let bundle_text = bundle.to_string_lossy().into_owned();
+        let (from, to) = (format!("refs/heads/{from}"), format!("refs/heads/{to}"));
+        let own = format!("refs/heads/{branch}");
+        // Already part of the run's work: there's nothing to carry, and a bundle can't be empty.
+        if self
+            .run(mirror, &["merge-base", "--is-ancestor", commit, &own])
+            .is_ok()
+        {
+            self.run_in_workspace(workspace, &["update-ref", &to, commit])?;
+            return Ok(());
+        }
+        let not = format!("^{own}");
+        self.run(
+            mirror,
+            &["bundle", "create", "-q", &bundle_text, &from, &not],
+        )?;
+        let fetched = self.run_in_workspace_reading(
+            workspace,
+            folder,
+            &[
+                "fetch",
+                "-q",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--update-head-ok",
+                &bundle_text,
+                &format!("+{from}:{to}"),
+            ],
+        );
+        let _ = std::fs::remove_file(&bundle);
+        fetched?;
+        Ok(())
+    }
+
+    /// Whether the workspace's work already has this commit. Not knowing it counts as no.
+    pub fn has_commit(&self, workspace: &Path, commit: &str) -> bool {
+        let args = ["merge-base", "--is-ancestor", commit, "HEAD"];
+        self.run_in_workspace(workspace, &[&REAL_HISTORY[..], &args].concat())
+            .is_ok()
+    }
+
+    /// Puts the workspace's work, as it is, on this branch of Keel's.
+    pub fn put_on_branch(&self, workspace: &Path, branch: &str) -> Result<(), GitError> {
+        require_own_branch(branch)?;
+        self.run_in_workspace(workspace, &["checkout", "-q", "-B", branch])?;
+        Ok(())
+    }
+
+    /// Moves the run's branch, and its files, on to this commit, if it only adds to what's there.
+    pub fn fast_forward(&self, workspace: &Path, commit: &str) -> Result<(), GitError> {
+        self.run_in_workspace(
+            workspace,
+            &["merge", "-q", "--ff-only", "--no-verify", commit],
+        )?;
+        Ok(())
+    }
+
+    /// The last commit this one and the workspace's have in common, going by the commits
+    /// themselves: what a run's change is counted from comes from here.
+    pub fn merge_base(&self, workspace: &Path, commit: &str) -> Result<String, GitError> {
+        let args = ["merge-base", commit, "HEAD"];
+        self.run_in_workspace(workspace, &[&REAL_HISTORY[..], &args].concat())
     }
 
     /// Pushes the run's branch from the mirror. Never forced, and only to Keel's own branches.
@@ -1112,6 +1266,172 @@ mod tests {
             .run(&p.mirror, &["rev-parse", "refs/heads/keel/test"])
             .unwrap();
         assert_eq!(fetched, p.git.head(&p.workspace).unwrap());
+    }
+
+    /// A remote that has moved on: its branch has another commit on top of what was delivered.
+    fn moved_on(p: &Poisoned, script: &str) -> String {
+        p.git
+            .fetch_run_branch(&p.mirror, &p.workspace, "keel/test")
+            .unwrap();
+        sh(
+            p.mirror.parent().unwrap(),
+            &format!(
+                "git clone -q -b keel/test mirror.git elsewhere && cd elsewhere && git config user.name T && git config user.email t@e.c && {script} && git push -q origin HEAD:refs/heads/keel-from-github"
+            ),
+        );
+        p.git
+            .run(&p.mirror, &["rev-parse", "refs/heads/keel-from-github"])
+            .unwrap()
+    }
+
+    #[test]
+    fn what_github_has_comes_into_a_poisoned_copy_without_leaving_the_sandbox() {
+        keel_harness::needs!(sandbox);
+        let p = poisoned("[filter \"evil\"]\n\tsmudge = \"touch CANARY; touch MARKER; cat\"\n");
+        p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        let at = moved_on(
+            &p,
+            "echo three > b.txt && git add -A && git commit -qm more",
+        );
+        let folder = p.mirror.with_file_name("sync");
+        p.git
+            .bring(
+                &p.mirror,
+                &p.workspace,
+                &folder,
+                "keel/test",
+                ("keel-from-github", &at),
+                "keel-pull-request",
+            )
+            .unwrap();
+        assert!(
+            !p.git.has_commit(&p.workspace, &at),
+            "only beside it so far"
+        );
+        p.git.fast_forward(&p.workspace, &at).unwrap();
+        assert!(p.git.has_commit(&p.workspace, &at));
+        assert!(p.workspace.join("b.txt").exists());
+        assert!(
+            p.workspace.join(".git/marker").exists(),
+            "the filter did run, so this proves something"
+        );
+        assert!(!p.canary.exists(), "it could not reach the home folder");
+        // What it already has is only named, and a bundle can't be empty.
+        p.git
+            .fetch_run_branch(&p.mirror, &p.workspace, "keel/test")
+            .unwrap();
+        p.git
+            .bring(
+                &p.mirror,
+                &p.workspace,
+                &folder,
+                "keel/test",
+                (BASE_REF, &p.base),
+                BASE_REF,
+            )
+            .unwrap();
+        assert_eq!(p.git.merge_base(&p.workspace, &p.base).unwrap(), p.base);
+    }
+
+    #[test]
+    fn bringing_something_in_reads_its_folder_and_nothing_else_of_the_home() {
+        keel_harness::needs!(sandbox);
+        let p = poisoned("");
+        let folder = p.mirror.with_file_name("sync");
+        std::fs::create_dir(&folder).unwrap();
+        let (inside, outside) = (folder.join("in"), p.mirror.with_file_name("out"));
+        for file in [&inside, &outside] {
+            std::fs::write(file, "x").unwrap();
+        }
+        let read = |file: &Path| {
+            p.git.run_in_workspace_reading(
+                &p.workspace,
+                &folder,
+                &["hash-object", "--no-filters", &file.to_string_lossy()],
+            )
+        };
+        assert!(read(&inside).is_ok());
+        assert!(read(&outside).is_err());
+    }
+
+    #[test]
+    fn a_branch_that_did_not_just_grow_is_left_beside_the_runs_own() {
+        keel_harness::needs!(sandbox);
+        let p = poisoned("");
+        p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        let before = p.git.head(&p.workspace).unwrap();
+        let at = moved_on(
+            &p,
+            "git checkout -q -B keel/test HEAD~1 && echo other > a.txt && git commit -qam rewritten",
+        );
+        let folder = p.mirror.with_file_name("sync");
+        p.git
+            .bring(
+                &p.mirror,
+                &p.workspace,
+                &folder,
+                "keel/test",
+                ("keel-from-github", &at),
+                "keel-pull-request",
+            )
+            .unwrap();
+        assert!(p.git.fast_forward(&p.workspace, &at).is_err());
+        assert_eq!(p.git.head(&p.workspace).unwrap(), before);
+        assert!(!p.git.has_commit(&p.workspace, &at));
+        sh(&p.workspace, "git rev-parse --verify -q keel-pull-request");
+    }
+
+    /// What an agent leaves in the copy can say that its work comes before what's published, and then
+    /// nothing of it would count as the run's change.
+    #[test]
+    fn what_a_run_is_counted_from_cannot_be_forged_from_its_copy() {
+        keel_harness::needs!(sandbox);
+        let p = poisoned("");
+        p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        let head = p.git.head(&p.workspace).unwrap();
+        let published = moved_on(
+            &p,
+            "git checkout -q -B keel/test HEAD~1 && echo other > c.txt && git add -A && git commit -qm published",
+        );
+        let folder = p.mirror.with_file_name("sync");
+        p.git
+            .bring(
+                &p.mirror,
+                &p.workspace,
+                &folder,
+                "keel/test",
+                ("keel-from-github", &published),
+                BASE_REF,
+            )
+            .unwrap();
+        assert_eq!(p.git.merge_base(&p.workspace, &published).unwrap(), p.base);
+        sh(
+            &p.workspace,
+            &format!("git replace --graft {published} {head}"),
+        );
+        assert_eq!(p.git.merge_base(&p.workspace, &published).unwrap(), p.base);
+        assert!(!p.git.has_commit(&p.workspace, &published));
+        sh(&p.workspace, "git replace -d $(git replace -l)");
+        std::fs::create_dir_all(p.workspace.join(".git/info")).unwrap();
+        std::fs::write(
+            p.workspace.join(".git/info/grafts"),
+            format!("{published} {head}\n"),
+        )
+        .unwrap();
+        assert_eq!(p.git.merge_base(&p.workspace, &published).unwrap(), p.base);
+    }
+
+    #[test]
+    fn the_runs_work_goes_on_the_branch_that_is_followed_whatever_a_step_called_its_own() {
+        keel_harness::needs!(sandbox);
+        let p = poisoned("");
+        p.git.snapshot(&p.workspace, &p.base, "builder").unwrap();
+        sh(&p.workspace, "git checkout -q -b keel/another");
+        let head = p.git.head(&p.workspace).unwrap();
+        p.git.put_on_branch(&p.workspace, "keel/test").unwrap();
+        assert_eq!(p.git.current_branch(&p.workspace).unwrap(), "keel/test");
+        assert_eq!(p.git.head(&p.workspace).unwrap(), head);
+        assert!(p.git.put_on_branch(&p.workspace, "main").is_err());
     }
 
     #[test]

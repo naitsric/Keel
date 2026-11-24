@@ -67,7 +67,7 @@ const SETTLED: NodeState[] = ["succeeded", "skipped", "returned", "postponed"];
 const settledAttempt = (attempt: FlowAttempt) => SETTLED.includes(attempt.state) && !putOffForSetup(attempt);
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null;
-const SINGLE_KINDS = ["agent", "setup", "check", "approval", "deliver"];
+const SINGLE_KINDS = ["agent", "setup", "check", "approval", "deliver", "watch"];
 
 /** A run's copy of its workflow, or null if it isn't one. It comes from a column that can hold anything old. */
 export function parseSteps(workflow: unknown): WorkflowStep[] | null {

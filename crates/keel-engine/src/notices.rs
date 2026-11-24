@@ -98,11 +98,16 @@ impl Seen {
                 .filter(|step| needs_the_person(step))
                 .map(|step| (step.attempt_id.clone(), step.state))
                 .collect(),
-            done: run.finished
-                && matches!(
-                    run.state,
-                    Some(AttemptState::Succeeded | AttemptState::Skipped)
-                ),
+            // One that only follows its pull request has done what it was asked for. Ending later, as
+            // its pull request is merged, is the pull request's news.
+            done: run.state == Some(AttemptState::Watching)
+                || (matches!(run.pr_state, Some(PrState::Merged | PrState::Closed))
+                    && before.is_some_and(|b| b.done))
+                || (run.finished
+                    && matches!(
+                        run.state,
+                        Some(AttemptState::Succeeded | AttemptState::Skipped)
+                    )),
             pr_state: run.pr_state,
             ci: match run.pr_ci {
                 Some(ci) => Some((ci, run.pr_head.clone())),
@@ -646,5 +651,53 @@ mod tests {
                 ..NoticeSettings::default()
             }
         );
+    }
+
+    /// Delivered, with its pull request open, and Keel following it.
+    fn followed(pr: PrState) -> RunSignal {
+        RunSignal {
+            pr_state: Some(pr),
+            pr_head: Some("abc".into()),
+            ..run("r1", "w1", AttemptState::Watching)
+        }
+    }
+
+    #[test]
+    fn a_run_that_only_follows_its_pull_request_is_done_and_says_so_once() {
+        let mut watch = Watch::primed(&[run("r1", "a1", AttemptState::Running)]);
+        assert_eq!(watch.runs(&[followed(PrState::Draft)]), ["Done"]);
+        assert_eq!(watch.runs(&[followed(PrState::Open)]), [""; 0]);
+        // Merged, it goes on to what comes after and ends, which is the pull request's news.
+        assert_eq!(
+            watch.runs(&[followed(PrState::Merged)]),
+            ["Pull request merged"]
+        );
+        let learning = RunSignal {
+            pr_state: Some(PrState::Merged),
+            ..run("r1", "l1", AttemptState::Running)
+        };
+        assert_eq!(watch.runs(&[learning]), [""; 0]);
+        let ended = RunSignal {
+            finished: true,
+            pr_state: Some(PrState::Merged),
+            ..run("r1", "l1", AttemptState::Succeeded)
+        };
+        assert_eq!(watch.runs(&[ended]), [""; 0]);
+    }
+
+    #[test]
+    fn a_round_its_pull_request_asked_for_is_news_again_once_it_is_delivered() {
+        let mut watch = Watch::primed(&[followed(PrState::Open)]);
+        let working = RunSignal {
+            pr_state: Some(PrState::Open),
+            ..run("r1", "b2", AttemptState::Running)
+        };
+        assert_eq!(watch.runs(&[working]), [""; 0]);
+        let asks = RunSignal {
+            pr_state: Some(PrState::Open),
+            ..run("r1", "h2", AttemptState::WaitingApproval)
+        };
+        assert_eq!(watch.runs(&[asks]), ["Needs your approval"]);
+        assert_eq!(watch.runs(&[followed(PrState::Open)]), ["Done"]);
     }
 }

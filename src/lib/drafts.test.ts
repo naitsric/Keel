@@ -17,7 +17,7 @@ describe("what a proposed workflow would do", () => {
   });
 
   it("says when there's nothing to worry about", () => {
-    expect(draftFacts([agent("reader", "readOnly")])).toEqual({ commands: [], builders: [], delivers: false, afterApproval: [], conditional: [], onlyToFix: [] });
+    expect(draftFacts([agent("reader", "readOnly")])).toEqual({ commands: [], builders: [], delivers: false, follows: false, afterApproval: [], conditional: [], onlyToFix: [] });
   });
 
   it("catches what would change the work once the person has approved it", () => {
@@ -47,6 +47,11 @@ describe("what a proposed workflow would do", () => {
     expect(facts.conditional).toEqual([]);
     expect(facts.builders).toEqual(["builder", "ship"]);
     expect(facts.commands).toEqual([{ id: "again", run: "make test" }]);
+  });
+
+  it("says when it follows the pull request, which can start more rounds", () => {
+    expect(draftFacts([agent("builder", "build"), human, pr, { type: "watch", id: "watch", maxRounds: 3 }]).follows).toBe(true);
+    expect(draftFacts([agent("builder", "build"), human, pr]).follows).toBe(false);
   });
 
   it("doesn't call it after an approval when nothing delivers", () => {

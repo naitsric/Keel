@@ -498,6 +498,27 @@ const ATTEMPT_THAT_MATTERS: &str = "select b.rowid from attempt b where b.run_id
              b.rowid desc
     limit 1";
 
+/// Whether the run a query calls `r` only follows its pull request, or left it to the person. It has
+/// done its work: it holds no place, and nothing of it is open as far as its project or a client
+/// goes.
+const WATCHING: &str = "exists (select 1 from attempt w where w.run_id = r.id
+    and w.kind = 'watch' and w.state in ('watching', 'blocked')
+    and not exists (select 1 from attempt later where later.run_id = w.run_id and later.rowid > w.rowid))";
+/// Whether an attempt is the latest of its step, in a run that hasn't ended.
+const LATEST_OF_OPEN: &str =
+    "not exists (select 1 from attempt later where later.run_id = attempt.run_id
+        and later.step_id = attempt.step_id and later.rowid > attempt.rowid)
+    and exists (select 1 from run where run.id = attempt.run_id and run.finished_at is null)";
+/// Whether an attempt follows its pull request now, or left it to the person.
+const FOLLOWING: &str = "(kind = 'watch' and state in ('watching', 'blocked')
+    and not exists (select 1 from attempt later where later.run_id = attempt.run_id
+        and later.step_id = attempt.step_id and later.rowid > attempt.rowid)
+    and exists (select 1 from run where run.id = attempt.run_id and run.finished_at is null))";
+/// Whether the run a query calls `r` follows a pull request it already delivered to, in a round of it
+/// or not.
+const FOLLOWED: &str = "(r.finished_at is null
+    and exists (select 1 from attempt w where w.run_id = r.id and w.kind = 'watch'))";
+
 /// Whether the card a query calls `card` never started, so Keel may take it off the board when its
 /// issue closes: an issue's card in the Backlog or Todo, not taken, on no change across projects,
 /// and no run of its project ever came from that issue. Moving a card to Todo again forgets its
@@ -717,10 +738,10 @@ fn room_for(card: &str) -> String {
           or ({may_run}
               and (select count(distinct r.id) from run r join mcp_call c on c.run_id = r.id
                    where c.client_id = {client} and c.tool in {MCP_STARTS_A_RUN}
-                     and c.ok = 1 and r.finished_at is null)
+                     and c.ok = 1 and r.finished_at is null and not {WATCHING})
                 + (select count(*) from card k left join run r on r.id = k.run_id
                    where k.queued_by_client = {client} and k.lane = 'started'
-                     and r.finished_at is null)
+                     and r.finished_at is null and not {WATCHING})
                 < (select max(1, min(m.max_open_runs, {MAX_OPEN_RUNS_CEILING})) from mcp_client m
                    where m.id = {client})))",
         may_run = client_may_run(&client)
@@ -1342,7 +1363,18 @@ pub struct Card {
 
 impl Card {
     pub fn column(&self) -> BoardColumn {
-        card_column(self.lane, self.run_finished_at.is_some(), self.run_state)
+        card_column(
+            self.lane,
+            self.run_finished_at.is_some(),
+            self.run_state,
+            self.pr_url.is_some(),
+        )
+    }
+
+    /// Whether a run of it hasn't ended, also one that shows as done because it only follows its
+    /// pull request. Its card is where it's answered if it comes back.
+    fn has_open_run(&self) -> bool {
+        self.lane == CardLane::Started && self.run_id.is_some() && self.run_finished_at.is_none()
     }
 
     /// Whether a person can still move or change it. Once Keel has it, it's out of their hands.
@@ -1498,7 +1530,9 @@ fn board_order(a: &Card, b: &Card) -> std::cmp::Ordering {
     a.column().cmp(&b.column()).then_with(|| match a.column() {
         BoardColumn::Backlog | BoardColumn::Todo => std::cmp::Ordering::Equal,
         BoardColumn::InProgress | BoardColumn::HumanReview => started(a).cmp(&started(b)),
-        BoardColumn::Done => b.run_finished_at.cmp(&a.run_finished_at),
+        // One still following its pull request can still move, so it goes on top.
+        BoardColumn::Done => (b.run_finished_at.is_none(), &b.run_finished_at)
+            .cmp(&(a.run_finished_at.is_none(), &a.run_finished_at)),
     })
 }
 
@@ -1892,11 +1926,12 @@ impl Store {
                      select r.id from run r
                      join mcp_call c on c.run_id = r.id
                      where c.client_id = ?1 and c.tool in {MCP_STARTS_A_RUN} and c.ok = 1
-                       and r.finished_at is null
+                       and r.finished_at is null and not {WATCHING}
                      union
                      select coalesce(k.run_id, k.id) from card k
                      left join run r on r.id = k.run_id
                      where k.queued_by_client = ?1 and k.lane <> 'backlog' and r.finished_at is null
+                       and not {WATCHING}
                        and (k.lane = 'started'
                             or ({} and k.project_id in (select id from project where removed_at is null))))",
                 ready("k")
@@ -2071,12 +2106,16 @@ impl Store {
     }
 
     /// Hides a project, unless a run of its hasn't finished or a card of its is being started, which
-    /// is a run about to exist. False if it changed nothing.
+    /// is a run about to exist. One that only follows its pull request doesn't hold it. False if it
+    /// changed nothing.
     pub fn remove_project(&self, id: &str) -> Result<bool> {
         let changed = self.lock().execute(
-            "update project set removed_at = ?2 where id = ?1 and removed_at is null
-             and not exists (select 1 from run where project_id = ?1 and finished_at is null)
-             and not exists (select 1 from card where project_id = ?1 and lane = 'started' and run_id is null)",
+            &format!(
+                "update project set removed_at = ?2 where id = ?1 and removed_at is null
+                 and not exists (select 1 from run r where r.project_id = ?1 and r.finished_at is null
+                                 and not {WATCHING})
+                 and not exists (select 1 from card where project_id = ?1 and lane = 'started' and run_id is null)"
+            ),
             params![id, now()],
         )?;
         Ok(changed > 0)
@@ -2104,11 +2143,13 @@ impl Store {
         Ok(())
     }
 
-    /// Runs of this project that still have steps ahead, oldest first.
+    /// Runs of this project that still have steps ahead, oldest first. Not one that only follows its
+    /// pull request.
     pub fn open_runs_of_project(&self, project_id: &str) -> Result<Vec<Run>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(&format!(
-            "select {RUN_COLUMNS} from run where project_id = ?1 and finished_at is null order by created_at"
+            "select {RUN_COLUMNS} from run r where project_id = ?1 and finished_at is null
+             and not {WATCHING} order by created_at"
         ))?;
         let rows = stmt.query_map([project_id], run_from)?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -2259,10 +2300,12 @@ impl Store {
     /// one closed before `closed_before` is left alone: it could still be reopened, but asking about
     /// it forever would crowd out the ones that are moving. Either is still owed a look while Keel
     /// knows which commit it delivered and no answer has said what was added since, as with one
-    /// from before Keel counted that. Those come after the ones that can still change.
+    /// from before Keel counted that. Those come after the ones that can still change. One a run
+    /// follows is due sooner, by `followed_before`, and also once it's merged, until the run hears.
     pub fn runs_with_pr_due(
         &self,
         before: &str,
+        followed_before: &str,
         closed_before: &str,
         limit: i64,
     ) -> Result<Vec<Run>> {
@@ -2270,16 +2313,20 @@ impl Store {
         let settled = "(coalesce(pr_state, '') = 'merged'
                         or (coalesce(pr_state, '') = 'closed' and pr_state_at is not null and pr_state_at < ?2))";
         let mut stmt = conn.prepare(&format!(
-            "select {RUN_COLUMNS} from run
+            "select {RUN_COLUMNS} from run r
              where pr_url is not null
-               and (not {settled}
+               and (not {settled} or {FOLLOWED}
                     or (pr_delivered is not null and pr_commits_added is null and pr_counted_at is null))
-               and (pr_checked_at is null or pr_checked_at < ?1)
+               and (pr_checked_at is null or pr_checked_at < ?1
+                    or (pr_checked_at < ?4 and {FOLLOWED}))
                and project_id in (select id from project where removed_at is null)
              order by {settled}, pr_checked_at is not null, pr_checked_at, created_at
              limit ?3"
         ))?;
-        let rows = stmt.query_map(params![before, closed_before, limit], run_from)?;
+        let rows = stmt.query_map(
+            params![before, closed_before, limit, followed_before],
+            run_from,
+        )?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -2316,7 +2363,9 @@ impl Store {
                                   join attempt a on a.id = e.attempt_id
                                   where a.run_id = r.id and e.kind = 'answers')), 0),
                     coalesce(sum((select count(*) from attempt a
-                                  where a.run_id = r.id and a.state = 'returned' and a.kind <> 'check')), 0),
+                                  where a.run_id = r.id and a.state = 'returned'
+                                    and (a.kind not in ('check', 'watch', 'deliver')
+                                         or (a.kind <> 'check' and json_extract(a.output, '$.instructions') is not null)))), 0),
                     {},
                     {},
                     {},
@@ -2757,6 +2806,99 @@ impl Store {
         Ok(true)
     }
 
+    /// The work goes back from the step that follows the pull request, or from a delivery that
+    /// couldn't go on top of its branch, with what it `output`s, and the run moves to its next round.
+    /// `kind` and `data` are its event's, which also says the round. All or nothing, like
+    /// `return_attempt`. False if it wasn't there any more, or the run moved on.
+    pub fn return_from_watch(
+        &self,
+        id: &str,
+        run_id: &str,
+        output: &serde_json::Value,
+        kind: &str,
+        data: serde_json::Value,
+    ) -> Result<bool> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let at = now();
+        let changed = tx.execute(
+            &format!(
+                "update attempt set state = 'returned', reason = null, output = ?2, finished_at = ?3
+                 where id = ?1 and ({FOLLOWING} or (kind = 'deliver' and state = 'blocked' and {LATEST_OF_OPEN}))"
+            ),
+            params![id, output.to_string(), at],
+        )?;
+        if changed == 0 {
+            return Ok(false);
+        }
+        tx.execute(
+            "update run set round = round + 1 where id = ?1",
+            params![run_id],
+        )?;
+        let round: i64 = tx.query_row("select round from run where id = ?1", [run_id], |r| {
+            r.get(0)
+        })?;
+        let mut data = data;
+        data["round"] = round.into();
+        tx.execute(
+            "insert into event (attempt_id, at, kind, data) values (?1, ?2, ?3, ?4)",
+            params![id, at, kind, data.to_string()],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// The step that follows the pull request ends, with what became of it. False if it wasn't
+    /// following it any more.
+    pub fn end_watch(&self, id: &str, ended: &str) -> Result<bool> {
+        let changed = self.lock().execute(
+            &format!(
+                "update attempt set state = 'succeeded', reason = null, finished_at = ?2,
+                                    output = json_set(coalesce(output, '{{}}'), '$.ended', ?3)
+                 where id = ?1 and {FOLLOWING}"
+            ),
+            params![id, now(), ended],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// What's to say about a pull request while it's followed, or nothing. False if it isn't any
+    /// more: a step the person ended or sent back meanwhile stays as they left it.
+    pub fn say_of_watch(&self, id: &str, reason: Option<&Reason>) -> Result<bool> {
+        let reason = reason.map(|r| serde_json::to_string(r).unwrap_or_default());
+        let changed = self.lock().execute(
+            &format!(
+                "update attempt set reason = ?2
+                 where id = ?1 and state = 'watching' and {FOLLOWING}"
+            ),
+            params![id, reason],
+        )?;
+        Ok(changed > 0)
+    }
+
+    /// Keel leaves a pull request it followed to the person, with why, and what it asked for if it
+    /// says. All at once, so nothing is settled that nobody was told. False if it wasn't followed
+    /// any more.
+    pub fn leave_watch(
+        &self,
+        id: &str,
+        output: Option<&serde_json::Value>,
+        reason: &Reason,
+    ) -> Result<bool> {
+        let changed = self.lock().execute(
+            &format!(
+                "update attempt set state = 'blocked', reason = ?2, output = coalesce(?3, output)
+                 where id = ?1 and state = 'watching' and {FOLLOWING}"
+            ),
+            params![
+                id,
+                serde_json::to_string(reason).unwrap_or_default(),
+                output.map(serde_json::Value::to_string)
+            ],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// A check that failed goes back to the builder: its attempt says so, keeping why it failed, and
     /// the run moves to its next round. With `failed` Keel does it by itself as the check ends, so
     /// nobody ever sees it waiting. With `instructions` a person does it from one that waits, or the
@@ -3144,7 +3286,8 @@ impl Store {
         if matches!(
             card.column(),
             BoardColumn::InProgress | BoardColumn::HumanReview
-        ) {
+        ) || card.has_open_run()
+        {
             return Ok(false);
         }
         tx.execute(
@@ -3525,10 +3668,11 @@ impl Store {
                 return Err(Error::AcrossProjects);
             }
             Some(existing)
-                if matches!(
-                    existing.column(),
-                    BoardColumn::InProgress | BoardColumn::HumanReview
-                ) =>
+                if existing.has_open_run()
+                    || matches!(
+                        existing.column(),
+                        BoardColumn::InProgress | BoardColumn::HumanReview
+                    ) =>
             {
                 return Ok(None);
             }
@@ -4652,7 +4796,7 @@ mod tests {
             "it doesn't say which workflow it used, so it counts for none"
         );
         // It can still find out what became of its pull request.
-        let due = store.runs_with_pr_due(&now(), "0", 10).unwrap();
+        let due = store.runs_with_pr_due(&now(), "0", "0", 10).unwrap();
         assert_eq!(due.len(), 1);
     }
 
@@ -4749,7 +4893,7 @@ mod tests {
         let closed_before = "2026-05-01T00:00:00.000Z";
         let due = |limit| -> Vec<String> {
             store
-                .runs_with_pr_due(before, closed_before, limit)
+                .runs_with_pr_due(before, "0", closed_before, limit)
                 .unwrap()
                 .into_iter()
                 .map(|run| run.id)
@@ -4867,7 +5011,7 @@ mod tests {
         // Only GitHub can say what was added, so the ones Keel had stopped looking at are owed a
         // look. The one that can still change goes first, though they have waited longer.
         let due = |before: &str| -> Vec<String> {
-            let due = store.runs_with_pr_due(before, "2026-06-01T00:00:00.000Z", 10);
+            let due = store.runs_with_pr_due(before, "0", "2026-06-01T00:00:00.000Z", 10);
             due.unwrap().into_iter().map(|run| run.id).collect()
         };
         let (later, much_later) = ("2026-07-01T00:00:00.000Z", "2026-09-01T00:00:00.000Z");
@@ -5778,6 +5922,280 @@ mod tests {
             assert_eq!(after.run_id.as_deref(), Some("r"));
             assert_eq!(after.title, "c");
         }
+    }
+
+    /// Run `r` delivered to its pull request, and the step that follows it is in `state`.
+    fn followed(store: &Store, state: AttemptState) {
+        store.set_state("a", AttemptState::Succeeded, None).unwrap();
+        store
+            .add_attempt(&NewAttempt {
+                kind: "watch".into(),
+                tools: "none".into(),
+                ..new_attempt("w", "r", "watch", state)
+            })
+            .unwrap();
+        let url = "https://github.com/acme/app/pull/1";
+        store
+            .patch_run("r", &[("pr_url", Value::Text(url.into()))])
+            .unwrap();
+    }
+
+    #[test]
+    fn a_card_whose_run_follows_its_pull_request_shows_as_done_and_stays_its_runs() {
+        let (_dir, store) = store();
+        seeded(&store);
+        started(&store, "c", AttemptState::Running, false);
+        store
+            .lock()
+            .execute("update card set issue_number = 7", [])
+            .unwrap();
+        followed(&store, AttemptState::Watching);
+        assert_eq!(store.card("c").unwrap().column(), BoardColumn::Done);
+        // Its card is where it's answered if it comes back.
+        assert!(!store.delete_card("c").unwrap());
+        let again = NewCard {
+            id: "again".into(),
+            project_id: "p".into(),
+            title: "Log in".into(),
+            body: String::new(),
+            issue: None,
+            issue_number: Some(7),
+            body_by: None,
+        };
+        assert_eq!(store.add_started_card(&again, "en", &[]).unwrap(), None);
+        assert_eq!(store.card("c").unwrap().run_id.as_deref(), Some("r"));
+        // Once it ends it's a done card like any other, also when a later round was rejected.
+        store.set_state("w", AttemptState::Rejected, None).unwrap();
+        store
+            .patch_run("r", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        assert_eq!(store.card("c").unwrap().column(), BoardColumn::Done);
+        assert!(store.delete_card("c").unwrap());
+    }
+
+    #[test]
+    fn what_is_followed_goes_on_top_of_done() {
+        let (_dir, store) = store();
+        seeded(&store);
+        card(&store, "ended");
+        ran(&store, "ended", "e", Some(Some("merged")));
+        started(&store, "c", AttemptState::Running, false);
+        followed(&store, AttemptState::Watching);
+        store
+            .lock()
+            .execute("update card set lane = 'started' where id = 'ended'", [])
+            .unwrap();
+        assert_eq!(ids(&store, BoardColumn::Done), ["c", "ended"]);
+    }
+
+    #[test]
+    fn a_followed_run_holds_no_place_and_keeps_no_project() {
+        for (state, holds) in [
+            (AttemptState::Watching, false),
+            (AttemptState::Blocked, false),
+            // Its pull request sent it back, so it works again.
+            (AttemptState::Returned, true),
+        ] {
+            let (_dir, store) = store();
+            seeded(&store);
+            two_clients(&store);
+            mcp_call(&store, "c1", "start_run", "r");
+            assert_eq!(store.open_runs_of_mcp_client("c1").unwrap(), 1);
+            followed(&store, state);
+            let open = i64::from(holds);
+            assert_eq!(
+                store.open_runs_of_mcp_client("c1").unwrap(),
+                open,
+                "{state:?}"
+            );
+            assert_eq!(
+                store.open_runs_of_project("p").unwrap().len() as i64,
+                open,
+                "{state:?}"
+            );
+            if state == AttemptState::Watching {
+                assert_eq!(store.working_runs().unwrap(), 0);
+            }
+            // A card of the client's starts in the place it left.
+            store.set_mcp_client_max_open_runs("c1", 1).unwrap();
+            card(&store, "next");
+            closed_by_c1(&store, "next", "n");
+            assert!(
+                store
+                    .move_card_as("next", CardLane::Todo, 0, "en", Some("c1"))
+                    .unwrap()
+            );
+            assert_eq!(claim(&store).is_some(), !holds, "{state:?}");
+            store
+                .lock()
+                .execute("delete from card where id = 'next'", [])
+                .unwrap();
+            assert_eq!(store.remove_project("p").unwrap(), !holds, "{state:?}");
+        }
+    }
+
+    #[test]
+    fn a_followed_pull_request_is_looked_at_sooner_and_until_its_run_hears_it_is_over() {
+        let (_dir, store) = store();
+        seeded(&store);
+        followed(&store, AttemptState::Watching);
+        let at = |text: &str| Value::Text(text.into());
+        store
+            .patch_run("r", &[("pr_checked_at", at("2026-01-01T00:10:00.000Z"))])
+            .unwrap();
+        // The second is for what's followed, which is due sooner.
+        let due = |before: &str, followed_before: &str| {
+            !store
+                .runs_with_pr_due(before, followed_before, "0", 10)
+                .unwrap()
+                .is_empty()
+        };
+        assert!(!due("2026-01-01T00:05:00.000Z", "2026-01-01T00:05:00.000Z"));
+        assert!(due("2026-01-01T00:05:00.000Z", "2026-01-01T00:15:00.000Z"));
+        // Merged, until the run hears: also in a round of it, or left to the person.
+        store
+            .patch_run(
+                "r",
+                &[("pr_state", at("merged")), ("pr_delivered", Value::Null)],
+            )
+            .unwrap();
+        for state in [
+            AttemptState::Watching,
+            AttemptState::Blocked,
+            AttemptState::Returned,
+        ] {
+            store.set_state("w", state, None).unwrap();
+            assert!(
+                due("2026-01-01T00:05:00.000Z", "2026-01-01T00:15:00.000Z"),
+                "{state:?}"
+            );
+        }
+        store
+            .patch_run("r", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        assert!(!due("2026-01-01T00:15:00.000Z", "2026-01-01T00:15:00.000Z"));
+    }
+
+    #[test]
+    fn only_what_is_still_followed_can_be_said_ended_left_or_sent_back() {
+        let (_dir, store) = store();
+        seeded(&store);
+        followed(&store, AttemptState::Watching);
+        let moved = Reason::PullRequestMoved;
+        let asked = serde_json::json!({ "pullRequest": { "head": "abc" } });
+        assert!(store.say_of_watch("w", Some(&moved)).unwrap());
+        assert_eq!(
+            store.attempt("w").unwrap().reason.unwrap()["code"],
+            "pullRequestMoved"
+        );
+        assert!(store.say_of_watch("w", None).unwrap());
+        assert!(store.attempt("w").unwrap().reason.is_none());
+        assert!(store.leave_watch("w", Some(&asked), &moved).unwrap());
+        let left = store.attempt("w").unwrap();
+        assert_eq!(
+            (left.state.as_str(), left.output),
+            ("blocked", Some(asked.clone()))
+        );
+        // Left to the person, Keel has nothing more to say of it.
+        assert!(!store.say_of_watch("w", None).unwrap());
+        assert!(!store.leave_watch("w", None, &moved).unwrap());
+
+        let send = |id: &str| {
+            store
+                .return_from_watch(
+                    id,
+                    "r",
+                    &asked,
+                    "pullRequestSentBack",
+                    serde_json::json!({}),
+                )
+                .unwrap()
+        };
+        assert!(send("w"));
+        assert_eq!(store.run("r").unwrap().round, 1);
+        assert_eq!(
+            store.events("w", 0).unwrap().last().unwrap().data["round"],
+            1
+        );
+        // The person, or another look, got there first.
+        assert!(!send("w"));
+        assert!(!store.end_watch("w", "stopped").unwrap());
+        assert!(!store.say_of_watch("w", None).unwrap());
+        assert_eq!(store.run("r").unwrap().round, 1);
+
+        // Not from one that was tried again since, nor once the run has ended.
+        let next = |id: &str, number: i64| NewAttempt {
+            kind: "watch".into(),
+            number,
+            ..new_attempt(id, "r", "watch", AttemptState::Blocked)
+        };
+        store.add_attempt(&next("w2", 2)).unwrap();
+        store.add_attempt(&next("w3", 3)).unwrap();
+        assert!(!store.end_watch("w2", "stopped").unwrap() && !send("w2"));
+        assert!(store.end_watch("w3", "merged").unwrap());
+        let ended = store.attempt("w3").unwrap();
+        assert_eq!((ended.state.as_str(), ended.reason), ("succeeded", None));
+        assert_eq!(ended.output.unwrap()["ended"], "merged");
+        store.add_attempt(&next("w4", 4)).unwrap();
+        store
+            .patch_run("r", &[("finished_at", Value::Text(now()))])
+            .unwrap();
+        assert!(!store.end_watch("w4", "stopped").unwrap() && !send("w4"));
+    }
+
+    #[test]
+    fn a_delivery_that_could_not_go_on_top_sends_the_work_back_and_one_that_did_never_does() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let deliver = |id: &str, number: i64, state| NewAttempt {
+            kind: "deliver".into(),
+            number,
+            ..new_attempt(id, "r", "pr", state)
+        };
+        let send = |id: &str| {
+            store
+                .return_from_watch(
+                    id,
+                    "r",
+                    &serde_json::json!({}),
+                    "returned",
+                    serde_json::json!({}),
+                )
+                .unwrap()
+        };
+        store
+            .add_attempt(&deliver("d1", 1, AttemptState::Succeeded))
+            .unwrap();
+        assert!(!send("d1"));
+        store
+            .add_attempt(&deliver("d2", 2, AttemptState::Blocked))
+            .unwrap();
+        assert!(send("d2"));
+        assert_eq!(store.run("r").unwrap().round, 1);
+    }
+
+    #[test]
+    fn what_a_pull_request_sent_back_is_not_counted_as_the_person_changing_it() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .lock()
+            .execute(
+                "update run set workflow_id = 'full', workflow_name = 'Full'",
+                [],
+            )
+            .unwrap();
+        followed(&store, AttemptState::Returned);
+        let changed = || {
+            let result = store.workflow_results("p").unwrap().remove(0);
+            result.sent_back
+        };
+        let before = changed();
+        let output = |text: &str| store.patch_attempt("w", &[("output", Value::Text(text.into()))]);
+        output(r#"{"pullRequest":{"head":"abc"}}"#).unwrap();
+        assert_eq!(changed(), before);
+        output(r#"{"instructions":"Pin it"}"#).unwrap();
+        assert_eq!(changed(), before + 1);
     }
 
     #[test]

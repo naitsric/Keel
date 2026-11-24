@@ -452,7 +452,9 @@ impl Inner {
                 self.deliver(&attempt);
                 return;
             }
-            WorkflowStep::Approval { .. } | WorkflowStep::Parallel { .. } => Ok(None),
+            WorkflowStep::Approval { .. }
+            | WorkflowStep::Watch { .. }
+            | WorkflowStep::Parallel { .. } => Ok(None),
         };
         match started {
             Ok(Some(monitor)) => {
@@ -1277,7 +1279,7 @@ impl Inner {
                     let base = store
                         .attempts_of_run(&m.run_id)
                         .ok()
-                        .and_then(|all| all.iter().find_map(|a| a.sha_before.clone()));
+                        .and_then(|all| self.base_of(&m.run_id, &all));
                     if let Some(net) = base.and_then(|b| git.files_since(&m.workspace, &b).ok()) {
                         fields.push(("run_files", Value::Text(json!(net).to_string())));
                     }

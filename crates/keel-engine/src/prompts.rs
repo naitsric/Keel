@@ -153,7 +153,7 @@ pub fn render(template: &str, lookup: impl Fn(&str) -> Option<String>) -> String
 }
 
 /// The names of the tags Keel puts material in. Text inside one can't use any of them as a tag.
-const FENCES: [&str; 10] = [
+const FENCES: [&str; 12] = [
     "request",
     "spec",
     "review",
@@ -164,6 +164,8 @@ const FENCES: [&str; 10] = [
     "sent-back",
     "builder-message",
     "check-output",
+    "ci-output",
+    "pr-comment",
 ];
 
 /// Whether what follows a `<` makes it a tag with one of Keel's names. One that closes, however

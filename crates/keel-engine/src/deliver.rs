@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use keel_core::{AttemptState, PrState, Reason, mask_secrets};
-use keel_harness::github::{Gh, GhError, Token};
+use keel_harness::github::{self, Gh, GhError, PrStatus, Token};
 use keel_store::rusqlite_value::Value;
 use keel_store::{Attempt, Project, Run, now};
 use serde_json::json;
@@ -154,12 +154,17 @@ impl Inner {
 
         let workspace = PathBuf::from(&attempt.workspace);
         let mirror = self.mirror(&project.id);
-        let branch = git.current_branch(&workspace).map_err(git_failed)?;
-        // Counted from the commit the run started at. With none, no step ever worked on it.
-        let base = store
-            .attempts_of_run(&run.id)?
-            .into_iter()
-            .find_map(|a| a.sha_before)
+        let attempts = store.attempts_of_run(&run.id)?;
+        let steps: Vec<keel_core::WorkflowStep> =
+            serde_json::from_value(run.workflow.clone()).unwrap_or_default();
+        // It only gets here once a person approved this round. Looked at again, since nothing that
+        // comes after this can be taken back.
+        if !crate::workflows::approved_in_round(&steps, &attempts, run.round, &attempt.step_id) {
+            return Err(Error::InvalidState);
+        }
+        // Counted from where the run's change is. With none, no step ever worked on it.
+        let base = self
+            .base_of(&run.id, &attempts)
             .ok_or(Error::Blocked(Reason::NothingToDeliver))?;
         if git.commits_ahead(&workspace, &base).map_err(git_failed)? == 0 {
             return Err(Error::Blocked(Reason::NothingToDeliver));
@@ -167,8 +172,22 @@ impl Inner {
 
         let token = gh.token(&account).map_err(delivery_failed)?;
         let info = gh.repo_info(&token, &repo).map_err(delivery_failed)?;
+        // A pull request the run already follows gets this on its own branch, and no other is opened.
+        let followed = match run.pr_url.as_deref() {
+            Some(url) if crate::watch::follows(&attempts) => {
+                Some(self.still_fits(&gh, &token, &git, &workspace, &run, url)?)
+            }
+            _ => None,
+        };
+        let branch = match &run.branch {
+            Some(branch) if followed.is_some() => branch.clone(),
+            _ => git.current_branch(&workspace).map_err(git_failed)?,
+        };
         if branch == info.default_branch {
             return Err(Error::Blocked(Reason::UnsafeBranch { branch }));
+        }
+        if followed.is_some() {
+            git.put_on_branch(&workspace, &branch).map_err(git_failed)?;
         }
 
         git.fetch_run_branch(&mirror, &workspace, &branch)
@@ -201,6 +220,10 @@ impl Inner {
                 ("pr_counted_at", Value::Null),
             ],
         )?;
+
+        if let Some((url, status)) = followed {
+            return self.delivered_again(attempt, &run, &repo, &account, &url, &status, head);
+        }
 
         // A pull request is read by people who never saw the run, and what it says stays on GitHub.
         let body = mask_secrets(&self.pull_request_body(&run, &project)?);
@@ -258,6 +281,76 @@ impl Inner {
             &json!({ "url": url, "repo": repo, "account": account, "head": branch, "base": info.default_branch, "draft": true }),
         )?;
         Ok(url)
+    }
+
+    /// Whether what a person approved can go on top of the pull request the run follows: it's still
+    /// open, and the run's copy has everything on its branch. Anything else would need a push that's
+    /// forced, or a second pull request. Its URL, and where it stands.
+    fn still_fits(
+        &self,
+        gh: &Gh,
+        token: &Token,
+        git: &Git,
+        workspace: &Path,
+        run: &Run,
+        url: &str,
+    ) -> Result<(String, PrStatus)> {
+        let (repo, number) = github::pull_request_of(url).ok_or(Error::InvalidState)?;
+        let status = gh
+            .pr_status(token, &repo, number)
+            .map_err(delivery_failed)?;
+        if matches!(status.state, PrState::Merged | PrState::Closed) {
+            self.store.patch_run(
+                &run.id,
+                &[("pr_state", Value::Text(status.state.as_str().to_owned()))],
+            )?;
+            return Err(Error::Blocked(Reason::PullRequestOver));
+        }
+        if let Some(theirs) = &status.head
+            && !git.has_commit(workspace, theirs)
+        {
+            return Err(Error::Blocked(Reason::PullRequestAhead));
+        }
+        Ok((url.to_owned(), status))
+    }
+
+    /// What was approved is on the pull request's branch. Its description stays as it is, since a
+    /// person may have written in it.
+    #[allow(clippy::too_many_arguments)]
+    fn delivered_again(
+        &self,
+        attempt: &Attempt,
+        run: &Run,
+        repo: &str,
+        account: &str,
+        url: &str,
+        status: &PrStatus,
+        head: Option<String>,
+    ) -> Result<String> {
+        self.store.patch_run(
+            &run.id,
+            &[
+                ("pr_state", Value::Text(status.state.as_str().to_owned())),
+                (
+                    "pr_state_at",
+                    status.at.clone().map_or(Value::Null, Value::Text),
+                ),
+                // So that it's looked at again soon: what its CI said was about another commit.
+                ("pr_checked_at", Value::Null),
+                ("pr_head", head.map_or(Value::Null, Value::Text)),
+                ("pr_ci", Value::Null),
+                ("pr_ci_failed", Value::Null),
+                ("pr_commits_added", Value::Integer(0)),
+            ],
+        )?;
+        self.store
+            .patch_attempt(&attempt.id, &[("account", Value::Text(account.to_owned()))])?;
+        self.store.append_event(
+            &attempt.id,
+            "deliveredAgain",
+            &json!({ "url": url, "repo": repo, "account": account, "head": run.branch }),
+        )?;
+        Ok(url.to_owned())
     }
 
     /// The pull request's URL, and whether this call is what opened it.

@@ -148,7 +148,7 @@ fn next_for(steps: &[WorkflowStep], attempts: &[Attempt], round: i64, check: &At
         return Next::Leave;
     }
     // As the approver's rework counts them: a round a person asked for isn't one of these.
-    let used = round - workflows::rounds_asked_by_a_person(attempts);
+    let used = workflows::rounds_on_its_own(attempts, round);
     if used < i64::from(rounds_allowed(steps)) {
         return Next::SendBack;
     }

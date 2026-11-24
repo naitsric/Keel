@@ -394,6 +394,15 @@ fn why_from_earlier_check(attempts: &[Attempt]) -> Option<WhyNotSmall> {
         .then_some(WhyNotSmall::CheckWentBack)
 }
 
+/// Its pull request sent the work back: what looked at the change before, the short route included,
+/// let something past.
+fn why_from_pull_request(attempts: &[Attempt]) -> Option<WhyNotSmall> {
+    attempts
+        .iter()
+        .any(crate::watch::went_back)
+        .then_some(WhyNotSmall::PullRequestWentBack)
+}
+
 /// What the round's checks say against it being small, when the workflow has `wanted` of them.
 fn why_from_fact(fact: &CheckFact, wanted: usize) -> Option<WhyNotSmall> {
     match fact {
@@ -559,6 +568,7 @@ pub fn decide(facts: &Facts) -> Decision {
     let mut why = why_from_spec(facts.attempts);
     why.extend(why_from_check(facts.steps, facts.attempts, facts.round));
     why.extend(why_from_earlier_check(facts.attempts));
+    why.extend(why_from_pull_request(facts.attempts));
     why.extend(why_from_issue(facts.issue, facts.account));
     why.extend(
         facts

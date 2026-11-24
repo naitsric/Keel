@@ -18,9 +18,16 @@ and Keel opens a draft pull request. At that approval you can also change anythi
 its own, which sends the work back without starting over. You can edit each project's workflows in
 the app. See the [M0 report](docs/m0-report.md) for what's behind the isolation.
 
-Keel looks up what became of each pull request it opened, and never writes to one again. The
-**Workflows** page compares workflows with that: what got merged, at what cost, how often work went
-back, and how often a run stopped to ask. It also says how many were merged as Keel delivered
+Keel looks up what became of each pull request it opened, and the built-in workflows with reviews
+also follow it until it's merged or closed. If its CI fails, it conflicts with the branch it goes
+to, or someone who can write to the repo asks for changes, the work goes back as another round with
+that. **You approve what comes of it before anything is pushed**, and Keel never forces a push,
+comments on the pull request or merges it. It leaves alone a failed check with no log, such as a
+job that never ran, and a pull request someone else has added commits to. After three rounds in a
+row that nobody asked for, it waits for you. You can stop following one at any time.
+
+The **Workflows** page compares workflows with that: what got merged, at what cost, how often work
+went back, and how often a run stopped to ask. It also says how many were merged as Keel delivered
 them, with no commit added afterwards, and a merge of the base branch doesn't count as one.
 
 ## A workflow that fits the change
