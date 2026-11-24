@@ -1,6 +1,7 @@
 //! Finds out what became of the pull requests Keel opened, and what their CI says. It only reads:
-//! after opening one, Keel writes nothing to it. It runs outside any sandbox with the person's token,
-//! like delivering does, and no agent gets anywhere near it.
+//! after opening one, Keel writes to it only by delivering again, once a person approves it. It runs
+//! outside any sandbox with the person's token, like delivering does, and no agent gets anywhere
+//! near it. What a look means for a run that follows its pull request is in `watch`.
 //!
 //! Nothing here is worth stopping for. If GitHub can't be asked, what Keel last knew stays, nobody
 //! is told, and it asks again when its turn comes round.
@@ -13,7 +14,7 @@ use keel_harness::github;
 use keel_store::rusqlite_value::Value;
 use keel_store::{Run, now};
 
-use crate::{Engine, Inner};
+use crate::{Engine, Inner, watch};
 
 /// How long what Keel knows about a pull request is good for, in the background.
 pub(crate) const LOOK_AGAIN: Duration = Duration::from_secs(30 * 60);
@@ -85,12 +86,13 @@ impl Inner {
         std::thread::spawn(move || inner.look_at_pr(&run));
     }
 
-    fn look_at_due_prs(&self) {
+    fn look_at_due_prs(self: &Arc<Self>) {
         let before = time_ago(self.config.pr_look_again);
+        let followed_before = time_ago(self.config.pr_look_again.min(watch::LOOK_AGAIN));
         let closed_before = time_ago(CLOSED_LOOK_FOR);
-        let Ok(runs) = self
-            .store
-            .runs_with_pr_due(&before, &closed_before, AT_ONCE)
+        let Ok(runs) =
+            self.store
+                .runs_with_pr_due(&before, &followed_before, &closed_before, AT_ONCE)
         else {
             return;
         };
@@ -101,7 +103,11 @@ impl Inner {
 
     /// Whatever the answer, it counts as having looked. Marked before asking, so that a `gh` taking
     /// its time isn't asked again meanwhile, and one that fails waits its turn like any other.
-    fn look_at_pr(&self, run: &Run) {
+    fn look_at_pr(self: &Arc<Self>, run: &Run) {
+        // As it is now: it may have been delivered again since it was listed.
+        let Ok(run) = &self.store.run(&run.id) else {
+            return;
+        };
         let marked = self
             .store
             .patch_run(&run.id, &[("pr_checked_at", Value::Text(now()))]);
@@ -122,18 +128,35 @@ impl Inner {
         let Ok(gh) = self.gh() else {
             return;
         };
-        let Ok(status) = gh
-            .token(&account)
-            .and_then(|token| gh.pr_status(&token, &repo, number))
-        else {
+        let Ok(token) = gh.token(&account) else {
             return;
         };
-        let (added, counted_at) = commits_added(run, &status);
+        let asked_at = now();
+        let Ok(status) = gh.pr_status(&token, &repo, number) else {
+            return;
+        };
+        self.keep_status(run, &status);
+        self.follow(
+            &run.id,
+            &watch::Look {
+                gh: &gh,
+                token: &token,
+                repo: &repo,
+                number,
+                status: &status,
+                asked_at: &asked_at,
+            },
+        );
+    }
+
+    /// What GitHub answered, on the run, if it's anything new.
+    fn keep_status(&self, run: &Run, status: &github::PrStatus) {
+        let (added, counted_at) = commits_added(run, status);
         // An answer that doesn't say which commit leaves what Keel knew of it. One that doesn't say
         // what the CI says leaves that unknown: what Keel knew may be about another commit by now.
-        let head = status.head.or_else(|| run.pr_head.clone());
-        let (ci, failed) = match status.ci {
-            Some(checks) => (Some(checks.state), checks.failed),
+        let head = status.head.clone().or_else(|| run.pr_head.clone());
+        let (ci, failed) = match &status.ci {
+            Some(checks) => (Some(checks.state), checks.failed.clone()),
             None => (None, Vec::new()),
         };
         if run.pr_state == Some(status.state)
@@ -153,7 +176,10 @@ impl Inner {
             &run.id,
             &[
                 ("pr_state", Value::Text(status.state.as_str().to_owned())),
-                ("pr_state_at", status.at.map_or(Value::Null, Value::Text)),
+                (
+                    "pr_state_at",
+                    status.at.clone().map_or(Value::Null, Value::Text),
+                ),
                 ("pr_head", head.map_or(Value::Null, Value::Text)),
                 (
                     "pr_ci",

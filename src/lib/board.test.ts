@@ -94,6 +94,11 @@ describe("what a done card says about its pull request", () => {
     expect(merged?.detail).toContain("2026");
     expect(merged?.detail).toContain("2 commits added after Keel delivered");
     expect(done({ prState: "open", prCommitsAdded: 1 })?.detail).toBe("1 commit added after Keel delivered");
+    // While Keel follows it, it can still come back, and its card is where it's answered.
+    expect(canDelete(card("a", "done", { runState: "watching" }))).toBe(false);
+    expect(canDelete(card("a", "done", { runState: "succeeded" }))).toBe(true);
+    expect(done({ prState: "draft", runState: "watching" })?.detail).toBe("Keel follows it");
+    expect(done({ prState: "draft", prCi: "failed", prCiFailed: ["lint"], runState: "watching" })?.detail).toBe("CI failed: lint · Keel follows it");
     expect(done({ prState: "draft", prCi: "failed", prCiFailed: ["lint"], prCommitsAdded: 3 })?.detail).toBe("CI failed: lint · 3 commits added after Keel delivered");
     expect(cardLabel(t("es"), card("d", "done", { prState: "open", prCommitsAdded: 2 }))?.detail).toBe("2 commits agregados después de que Keel entregó");
     expect(cardLabel(t("es"), card("d", "done", { prState: "open", prCommitsAdded: 1 }))?.detail).toBe("1 commit agregado después de que Keel entregó");

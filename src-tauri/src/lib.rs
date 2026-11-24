@@ -745,6 +745,18 @@ fn approval_send_back(
     Ok(state.engine.send_back(&attempt_id, &instructions)?)
 }
 
+/// Stops following a run's pull request.
+#[tauri::command(async)]
+fn watch_stop(state: State<'_, AppState>, attempt_id: String) -> CommandResult<()> {
+    Ok(state.engine.stop_watching(&attempt_id)?)
+}
+
+/// Has the work go back because the pull request's branch has commits the run's copy doesn't.
+#[tauri::command(async)]
+fn watch_catch_up(state: State<'_, AppState>, attempt_id: String) -> CommandResult<()> {
+    Ok(state.engine.catch_up(&attempt_id)?)
+}
+
 #[tauri::command(async)]
 fn approval_run_skipped(state: State<'_, AppState>, attempt_id: String) -> CommandResult<()> {
     Ok(state.engine.run_skipped(&attempt_id)?)
@@ -1209,6 +1221,8 @@ pub fn run() {
             questions_answer,
             approval_send_back,
             approval_run_skipped,
+            watch_stop,
+            watch_catch_up,
             open_github_url,
             attempt_events,
             attempt_diff,

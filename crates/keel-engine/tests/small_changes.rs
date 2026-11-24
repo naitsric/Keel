@@ -493,6 +493,12 @@ impl World {
         engine
     }
 
+    /// A person stops following the run's pull request, so it goes on to what comes after.
+    fn stop_following(&self, run: &str) {
+        let watch = self.wait_for(run, "watch", AttemptState::Watching);
+        self.engine.stop_watching(&watch.id).unwrap();
+    }
+
     fn body(&self) -> String {
         std::fs::read_to_string(self.log.join("pr-body.md")).unwrap()
     }
@@ -566,6 +572,7 @@ fn a_small_change_with_a_check_that_passed_skips_the_reviews_and_still_stops_for
 
     w.engine.answer_approval(&approval.id, true, "").unwrap();
     w.wait_for(&run, "pull-request", AttemptState::Succeeded);
+    w.stop_following(&run);
     w.wait_until(&run, "the run finishing", || {
         w.store.run(&run).unwrap().finished_at.is_some()
     });
@@ -1617,6 +1624,7 @@ fn a_spec_that_names_concurrency_adds_the_state_review_and_the_approver_and_lear
     assert_eq!(w.step(&run, "code").model_requested, "sonnet");
 
     w.engine.answer_approval(&approval.id, true, "").unwrap();
+    w.stop_following(&run);
     let learner = w.wait_for(&run, "learnings", AttemptState::Succeeded);
     assert!(
         learner

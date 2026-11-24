@@ -1788,6 +1788,159 @@ describe("a run whose fix had nothing to fix", () => {
   });
 });
 
+describe("a run that follows its pull request", () => {
+  let root: Root;
+  let calls: [string, unknown][];
+  const page = () => document.body.textContent ?? "";
+  const button = (text: string) => [...document.querySelectorAll("button")].find((b) => b.textContent === text);
+  const settle = () => act(() => Promise.resolve());
+  const asked = { head: "abc", conflict: "main", checks: [{ name: "tests", log: "boom" }], comments: [{ ids: ["c"], authors: ["ana"], file: "src/a.rs", line: 7, text: "Use the helper" }] };
+  const watch = (fields: Partial<Attempt>) => attempt({ id: "watch", stepId: "watch", kind: "watch", tools: "none", ...fields });
+  const watching = watch({ state: "watching" });
+  const left = watch({ state: "blocked", reason: { code: "pullRequestLimit", rounds: 3 }, output: { pullRequest: asked } as unknown as Attempt["output"] });
+  const actions = async (shown: Attempt) => {
+    act(() => root.render(<Actions attempt={shown} projectId="p1" agentsWrote onError={() => {}} />));
+    await settle();
+  };
+  const write = (text: string) => {
+    const textarea = document.querySelector("textarea") as HTMLTextAreaElement;
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set?.call(textarea, text);
+      textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+  };
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    calls = [];
+    mockIPC((command, args) => {
+      if (command === "run_command_changes") return [];
+      calls.push([command, args]);
+      return null;
+    });
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("says what Keel does with it, and that nothing goes out without the person, in both languages", async () => {
+    await actions(watching);
+    expect(page()).toContain("Keel is following the pull request");
+    expect(page()).toContain("Nothing is pushed until you approve it.");
+    expect(button("Leave it")).toBeUndefined();
+    expect(button("Keep watching")).toBeUndefined();
+    await i18next.changeLanguage("es");
+    await actions(watching);
+    expect(page()).toContain("Keel sigue el pull request");
+    expect(page()).toContain("Nada se sube sin que lo apruebes.");
+  });
+
+  it("can be stopped, or sent back with what the person wants", async () => {
+    await actions(watching);
+    act(() => button("Stop following it")?.click());
+    expect(calls).toEqual([["watch_stop", { attemptId: "watch" }]]);
+    await settle();
+    act(() => button("Ask for a change")?.click());
+    expect(button("Send it back")?.disabled).toBe(true);
+    write("Pin the version");
+    act(() => button("Send it back")?.click());
+    expect(calls.at(-1)).toEqual(["approval_send_back", { attemptId: "watch", instructions: "Pin the version" }]);
+  });
+
+  it("says what it asked for where Keel left it to the person, and can go on watching", async () => {
+    await actions(left);
+    for (const text of ["The pull request is waiting for you", "after 3 rounds in a row", "It conflicts with main", "Its CI failed: tests", "ana", "src/a.rs:7", "Use the helper"]) expect(page()).toContain(text);
+    expect(page()).not.toContain("boom");
+    act(() => button("Keep watching")?.click());
+    expect(calls).toEqual([["attempt_retry", { attemptId: "watch", resume: false, currentCommands: false }]]);
+  });
+
+  it("can't be pressed again while it asks GitHub", async () => {
+    let done = () => {};
+    mockIPC((command, args) => {
+      if (command === "run_command_changes") return [];
+      calls.push([command, args]);
+      return new Promise<void>((resolve) => (done = resolve));
+    });
+    await actions(watching);
+    act(() => button("Stop following it")?.click());
+    for (const name of ["Stop following it", "Ask for a change"]) expect(button(name)?.disabled).toBe(true);
+    act(() => button("Stop following it")?.click());
+    expect(calls).toHaveLength(1);
+    await act(async () => done());
+    expect(button("Stop following it")?.disabled).toBe(false);
+  });
+
+  it("when what was approved can't go on top, offers to bring the branch in, and says why", async () => {
+    await actions(attempt({ id: "pr", stepId: "pr", kind: "deliver", tools: "none", state: "blocked", reason: { code: "pullRequestAhead" } }));
+    expect(page()).toContain("The pull request changed meanwhile");
+    expect(page()).toContain("can't be pushed on top of it");
+    expect(button("Stop following it")).toBeUndefined();
+    act(() => button("Bring its branch in and ask you again")?.click());
+    expect(calls).toEqual([["watch_catch_up", { attemptId: "pr" }]]);
+  });
+
+  it("leaves a delivery blocked on anything else as it was", async () => {
+    await actions(attempt({ id: "pr", stepId: "pr", kind: "deliver", tools: "none", state: "blocked", reason: { code: "pullRequestOver" } }));
+    expect(button("Bring its branch in and ask you again")).toBeUndefined();
+    expect(page()).toContain("already merged or closed");
+  });
+
+  it("says when someone else is working on it, with nothing to decide", async () => {
+    await actions(watch({ state: "watching", reason: { code: "pullRequestMoved" } }));
+    expect(page()).toContain("Someone added commits to the pull request");
+    expect(document.querySelector('[role="alert"]')).toBeNull();
+  });
+
+  it("leaves nothing to do once the pull request sent the work back", async () => {
+    await actions(watch({ state: "returned", output: { pullRequest: asked } as unknown as Attempt["output"] }));
+    expect(document.querySelectorAll("button")).toHaveLength(0);
+  });
+
+  const card = (round: number, prUrl: string | null, attempts: Attempt[]) =>
+    act(() => root.render(<ApprovalCard attempt={{ ...human, round }} run={{ ...runWith(deliverNext), round, prUrl } as Run} attempts={attempts} files={["calc.py"]} commands={[]} rawCheck="intact" sizeDecision={null} onShowChanges={() => {}} onError={() => {}} />));
+
+  it("at the approval says what the pull request asked and that this goes up to it", () => {
+    card(1, "https://github.com/acme/app/pull/12", [builder(["calc.py"]), watch({ state: "returned", output: { pullRequest: asked } as unknown as Attempt["output"] })]);
+    for (const text of ["Should this go up to the pull request?", "The pull request doesn't change until you approve.", "What the pull request asked", "Its CI failed: tests", "Use the helper", "Approve and push to the pull request", "Pushes these commits to the pull request's branch."]) expect(page()).toContain(text);
+    expect(page()).not.toContain("Nothing has left your Mac yet.");
+    expect(page()).not.toContain("opens a draft pull request");
+  });
+
+  it("says when the branch changed since the round began, as of the last look", () => {
+    const back = watch({ state: "returned", output: { pullRequest: asked } as unknown as Attempt["output"] });
+    const at = (prHead: string | null) =>
+      act(() => root.render(<ApprovalCard attempt={{ ...human, round: 1 }} run={{ ...runWith(deliverNext), round: 1, prUrl: "https://github.com/acme/app/pull/12", prHead } as Run} attempts={[builder(["calc.py"]), back]} files={["calc.py"]} commands={[]} rawCheck="intact" sizeDecision={null} onShowChanges={() => {}} onError={() => {}} />));
+    for (const head of [null, "abc"]) {
+      at(head);
+      expect(page()).not.toContain("changed since this round began");
+    }
+    at("def");
+    expect(page()).toContain("The pull request's branch changed since this round began.");
+  });
+
+  it("says what there is to decide of the round, and of the pull request once that's all that's left", () => {
+    const summary = (attempts: Attempt[], finishedAt: string | null = null) =>
+      act(() => root.render(<Summary run={{ ...runWith(deliverNext), prUrl: "https://github.com/acme/app/pull/12", prState: "draft", finishedAt } as Run} attempts={attempts} current={attempts[attempts.length - 1]} commands={[]} rawCheck="intact" closedBy={null} onShowChanges={() => {}} />));
+    const merge = i18next.t("run.decideDelivered");
+    summary([builder(["calc.py"]), watching]);
+    expect(page()).toContain(merge);
+    summary([builder(["calc.py"]), watch({ state: "returned" }), attempt({ id: "b2", stepId: "builder", tools: "build", state: "failed", round: 1 })]);
+    expect(page()).not.toContain(merge);
+    expect(page()).toContain(i18next.t("run.decideFailed"));
+    summary([builder(["calc.py"]), watch({ state: "succeeded" })], "2026-01-01T00:00:00Z");
+    expect(page()).toContain(merge);
+  });
+
+  it("says none of that at the first approval", () => {
+    card(0, null, [builder(["calc.py"])]);
+    expect(page()).toContain("Should this become a pull request?");
+    expect(page()).not.toContain("What the pull request asked");
+  });
+});
+
 describe("a check that failed after a builder", () => {
   let root: Root;
   let sent: unknown[];

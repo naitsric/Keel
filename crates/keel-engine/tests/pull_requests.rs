@@ -919,7 +919,10 @@ fn a_pull_request_that_was_already_there_is_unknown_until_keel_looks() {
         found.pr_checked_at, None,
         "so it's the first to be looked at"
     );
-    assert_eq!(w.store.runs_with_pr_due("0", "0", 10).unwrap().len(), 1);
+    assert_eq!(
+        w.store.runs_with_pr_due("0", "0", "0", 10).unwrap().len(),
+        1
+    );
 
     w.set_pr_view("OPEN", false, "2026-11-06T09:00:00Z");
     w.engine.look_at_pr(&run);

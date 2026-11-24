@@ -31,6 +31,15 @@ pub const MOST_COMMITS_READ: usize = 100;
 /// passed.
 const CI_FIELDS: &str = "commits(last:1){nodes{commit{verdict:statusCheckRollup{state} checks:statusCheckRollup{contexts(first:100){nodes{__typename ... on CheckRun{name status conclusion startedAt completedAt checkSuite{workflowRun{event workflow{name}}}} ... on StatusContext{context state createdAt}}}}}}}";
 
+/// What a pull request asks for while Keel follows it: whether it conflicts, its review threads,
+/// and the latest word of each reviewer who decided something.
+const FEEDBACK_FIELDS: &str = "state headRefOid baseRefName mergeable reviewThreads(last:50){nodes{isResolved isOutdated path line comments(last:20){nodes{id body createdAt authorAssociation author{login __typename}}}}} latestOpinionatedReviews(last:30){nodes{id state body submittedAt authorAssociation author{login __typename}}}";
+/// And the checks of its head commit, asked apart, since reading them takes more of a token.
+const FEEDBACK_CHECKS: &str = "commits(last:1){nodes{commit{oid checks:statusCheckRollup{contexts(first:100){nodes{__typename ... on CheckRun{databaseId name status conclusion startedAt completedAt checkSuite{app{slug} workflowRun{event workflow{name}}}} ... on StatusContext{context state createdAt}}}}}}}";
+/// Who GitHub says has to do with the repo. Not all of them can write to it, which `can_write`
+/// asks, and nobody else is even asked about: anyone can comment on a public pull request.
+const OF_THE_REPO: [&str; 3] = ["OWNER", "MEMBER", "COLLABORATOR"];
+
 /// A token that can't end up in a log by accident.
 pub struct Token(String);
 
@@ -146,6 +155,110 @@ pub const MOST_FAILED_NAMED: usize = 10;
 pub struct PrChecks {
     pub state: CiState,
     pub failed: Vec<String>,
+}
+
+/// What a pull request asks for, as it is right now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrFeedback {
+    /// The commit its branch is at, which the checks are about.
+    pub head: String,
+    /// The branch it would be merged into.
+    pub base: String,
+    pub conflicts: bool,
+    /// Something of its CI hasn't finished, so what failed may not be all of it.
+    pub checks_pending: bool,
+    pub failed: Vec<FailedCheck>,
+    /// The review threads nobody has settled and the reviews that ask for changes, by people who
+    /// have to do with the repo. Whether each can write to it is asked apart.
+    pub threads: Vec<PrThread>,
+}
+
+/// An open review thread, or a review that asks for changes: what each person said in it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrThread {
+    pub file: Option<String>,
+    pub line: Option<u64>,
+    pub said: Vec<PrSaid>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PrSaid {
+    pub id: String,
+    pub author: String,
+    pub text: String,
+    /// When it was said, as GitHub writes it.
+    pub at: String,
+}
+
+impl PrFeedback {
+    /// Everyone who said something in it, each once.
+    pub fn authors(&self) -> Vec<&str> {
+        let mut authors: Vec<&str> = Vec::new();
+        for said in self.threads.iter().flat_map(|thread| &thread.said) {
+            if !authors.contains(&said.author.as_str()) {
+                authors.push(&said.author);
+            }
+        }
+        authors
+    }
+
+    /// What those who `writes` is true for asked for, oldest first. Nobody else's words are in it.
+    pub fn comments(&self, writes: impl Fn(&str) -> bool) -> Vec<PrComment> {
+        let mut comments: Vec<PrComment> = self
+            .threads
+            .iter()
+            .filter_map(|thread| {
+                let said: Vec<&PrSaid> = thread.said.iter().filter(|s| writes(&s.author)).collect();
+                let mut authors: Vec<String> = Vec::new();
+                for one in &said {
+                    if !authors.contains(&one.author) {
+                        authors.push(one.author.clone());
+                    }
+                }
+                let text = said
+                    .iter()
+                    .map(|one| match authors.len() {
+                        1 => one.text.clone(),
+                        _ => format!("{}: {}", one.author, one.text),
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                Some(PrComment {
+                    at: said.last()?.at.clone(),
+                    ids: said.iter().map(|one| one.id.clone()).collect(),
+                    file: thread.file.clone(),
+                    line: thread.line,
+                    authors,
+                    text,
+                })
+            })
+            .collect();
+        comments.sort_by(|a, b| a.at.cmp(&b.at));
+        comments
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct FailedCheck {
+    pub name: String,
+    /// The job it ran as, when GitHub Actions ran it. Only those have a log Keel can read.
+    pub job: Option<u64>,
+}
+
+/// What people who can write to the repo asked for in one thread or review.
+#[derive(Debug, Clone, PartialEq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PrComment {
+    /// Of everything said in it. A thread someone adds to is something else to answer, and one
+    /// someone takes a word out of isn't.
+    pub ids: Vec<String>,
+    /// Who wrote what's in `text`, each once.
+    pub authors: Vec<String>,
+    pub file: Option<String>,
+    pub line: Option<u64>,
+    pub text: String,
+    /// When its newest word was said.
+    pub at: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -651,6 +764,105 @@ impl Gh {
             .ok_or_else(|| unexpected(format!("unexpected answer about pull request {number}")))
     }
 
+    /// What a pull request asks for while Keel follows it. Only reads. A token that can't read the
+    /// checks still says the rest, with nothing known of its CI.
+    pub fn pr_feedback(
+        &self,
+        token: &Token,
+        repo: &str,
+        number: i64,
+    ) -> Result<PrFeedback, GhError> {
+        match self.ask_for_feedback(token, repo, number, true) {
+            Err(error) if about_the_checks(&error) => {
+                self.ask_for_feedback(token, repo, number, false)
+            }
+            answer => answer,
+        }
+    }
+
+    fn ask_for_feedback(
+        &self,
+        token: &Token,
+        repo: &str,
+        number: i64,
+        with_checks: bool,
+    ) -> Result<PrFeedback, GhError> {
+        let (owner, name) = owner_and_name(repo)?;
+        let fields = if with_checks {
+            format!("{FEEDBACK_FIELDS} {FEEDBACK_CHECKS}")
+        } else {
+            FEEDBACK_FIELDS.to_owned()
+        };
+        let query = format!(
+            "query=query($owner:String!,$name:String!,$number:Int!){{repository(owner:$owner,name:$name){{pullRequest(number:$number){{{fields}}}}}}}"
+        );
+        let text = self.run_within(
+            token,
+            &[
+                "api",
+                "graphql",
+                "-f",
+                &query,
+                "-f",
+                &format!("owner={owner}"),
+                "-f",
+                &format!("name={name}"),
+                "-F",
+                &format!("number={number}"),
+            ],
+            LOOK_LIMIT,
+        )?;
+        serde_json::from_str::<serde_json::Value>(&text)
+            .ok()
+            .as_ref()
+            .and_then(|value| value.pointer("/data/repository/pullRequest"))
+            .and_then(parse_feedback)
+            .ok_or_else(|| GhError {
+                kind: "other",
+                detail: format!("unexpected answer about pull request {number}"),
+            })
+    }
+
+    /// Whether someone can write to the repo. A member of its organization, or a collaborator on
+    /// it, may only be able to read. Only a token that can write may ask, and anything but a yes
+    /// is a no.
+    pub fn can_write(&self, token: &Token, repo: &str, login: &str) -> bool {
+        let plain = !login.is_empty()
+            && login
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+        let Ok((owner, name)) = owner_and_name(repo) else {
+            return false;
+        };
+        plain
+            && self
+                .run_within(
+                    token,
+                    &[
+                        "api",
+                        &format!("repos/{owner}/{name}/collaborators/{login}/permission"),
+                        "--jq",
+                        ".permission",
+                    ],
+                    LOOK_LIMIT,
+                )
+                .is_ok_and(|permission| matches!(permission.trim(), "admin" | "write"))
+    }
+
+    /// What a GitHub Actions job printed. A job that never ran, such as one its account couldn't
+    /// pay for, has none, and that's an error.
+    pub fn job_log(&self, token: &Token, repo: &str, job: u64) -> Result<String, GhError> {
+        let (owner, name) = owner_and_name(repo)?;
+        self.run_within(
+            token,
+            &[
+                "api",
+                &format!("repos/{owner}/{name}/actions/jobs/{job}/logs"),
+            ],
+            LOOK_LIMIT,
+        )
+    }
+
     /// Opens a draft and returns its URL. Keel doesn't merge, and this module has no way to.
     pub fn create_draft_pr(
         &self,
@@ -750,6 +962,129 @@ fn parse_pr_status(value: &serde_json::Value) -> Option<PrStatus> {
     })
 }
 
+/// None if it doesn't say where the branch is: then nothing it says can be told apart from what
+/// was already dealt with.
+fn parse_feedback(value: &serde_json::Value) -> Option<PrFeedback> {
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
+    let head = text(value, "headRefOid")?;
+    let commit = value.pointer("/commits/nodes/0/commit");
+    // An answer about the checks of another commit says nothing of this one.
+    let checks = commit
+        .filter(|commit| text(commit, "oid").as_deref() == Some(head.as_str()))
+        .map(latest_checks)
+        .unwrap_or_default();
+    let mut failed: Vec<FailedCheck> = Vec::new();
+    let mut checks_pending = false;
+    for check in &checks {
+        match outcome_of(check) {
+            Outcome::Passed => {}
+            Outcome::Pending => checks_pending = true,
+            // One that was cancelled, as the rest of a matrix is when one fails, or that waits for
+            // a person, says nothing of the work.
+            Outcome::Failed
+                if matches!(
+                    check_text(check, "conclusion").as_str(),
+                    "CANCELLED" | "ACTION_REQUIRED"
+                ) => {}
+            Outcome::Failed => failed.push(FailedCheck {
+                name: check_name(check),
+                job: check
+                    .get("databaseId")
+                    .and_then(serde_json::Value::as_u64)
+                    .filter(|_| {
+                        check
+                            .pointer("/checkSuite/app/slug")
+                            .and_then(|s| s.as_str())
+                            == Some("github-actions")
+                    }),
+            }),
+        }
+    }
+    let nodes = |pointer: &str| {
+        value
+            .pointer(pointer)
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let said_by = |comment: &serde_json::Value| {
+        let writes = text(comment, "authorAssociation")
+            .is_some_and(|association| OF_THE_REPO.contains(&association.as_str()));
+        let person = comment
+            .pointer("/author/__typename")
+            .and_then(|v| v.as_str())
+            == Some("User");
+        let login = comment
+            .get("author")
+            .and_then(|author| text(author, "login"));
+        login.filter(|_| writes && person)
+    };
+    let mut threads: Vec<PrThread> = Vec::new();
+    for thread in nodes("/reviewThreads/nodes") {
+        if thread.get("isResolved").and_then(|v| v.as_bool()) != Some(false) {
+            continue;
+        }
+        let said: Vec<PrSaid> = thread
+            .pointer("/comments/nodes")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|comment| {
+                Some(PrSaid {
+                    id: text(comment, "id")?,
+                    author: said_by(comment)?,
+                    text: text(comment, "body")?,
+                    at: text(comment, "createdAt")?,
+                })
+            })
+            .collect();
+        if !said.is_empty() {
+            threads.push(PrThread {
+                file: text(&thread, "path"),
+                line: thread.get("line").and_then(serde_json::Value::as_u64),
+                said,
+            });
+        }
+    }
+    for review in nodes("/latestOpinionatedReviews/nodes") {
+        if text(&review, "state").as_deref() != Some("CHANGES_REQUESTED") {
+            continue;
+        }
+        // With no words of its own, what it asks for is in its threads.
+        if let (Some(id), Some(author), Some(body), Some(at)) = (
+            text(&review, "id"),
+            said_by(&review),
+            text(&review, "body"),
+            text(&review, "submittedAt"),
+        ) {
+            threads.push(PrThread {
+                file: None,
+                line: None,
+                said: vec![PrSaid {
+                    id,
+                    author,
+                    text: body,
+                    at,
+                }],
+            });
+        }
+    }
+    Some(PrFeedback {
+        head,
+        base: text(value, "baseRefName").unwrap_or_default(),
+        conflicts: text(value, "mergeable").as_deref() == Some("CONFLICTING"),
+        checks_pending,
+        failed,
+        threads,
+    })
+}
+
 /// None unless every commit says which it is and how many parents it has: a count from half a
 /// list would be a wrong number.
 fn parse_commits(nodes: &serde_json::Value) -> Option<PrCommits> {
@@ -845,68 +1180,19 @@ fn parse_checks(commit: &serde_json::Value) -> PrChecks {
     let verdict = commit
         .pointer("/verdict/state")
         .and_then(serde_json::Value::as_str);
-    let all: Vec<serde_json::Value> = commit
-        .pointer("/checks/contexts/nodes")
-        .and_then(serde_json::Value::as_array)
-        .map(|nodes| nodes.iter().map(flat).collect())
-        .unwrap_or_default();
-    let text = |check: &serde_json::Value, key: &str| {
-        check
-            .get(key)
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_owned()
-    };
-    let name = |check: &serde_json::Value| {
-        Some(text(check, "name"))
-            .filter(|name| !name.is_empty())
-            .unwrap_or_else(|| text(check, "context"))
-    };
-    // The same job in another workflow, or for another event, is another check, and so is a commit
-    // status with its name.
-    let key = |check: &serde_json::Value| {
-        (
-            text(check, "__typename"),
-            text(check, "workflowName"),
-            text(check, "event"),
-            name(check),
-        )
-    };
-    let mut runs: HashMap<(String, String, String, String), Vec<usize>> = HashMap::new();
-    for (at, check) in all.iter().enumerate() {
-        runs.entry(key(check)).or_default().push(at);
-    }
-    let kept: HashSet<usize> = runs
-        .values()
-        .flat_map(|runs| newest_run(&all, runs))
-        .collect();
-    let checks: Vec<&serde_json::Value> = all
-        .iter()
-        .enumerate()
-        .filter(|(at, _)| kept.contains(at))
-        .map(|(_, check)| check)
-        .collect();
+    let checks = latest_checks(commit);
     let mut failed: Vec<String> = Vec::new();
     let mut pending = false;
-    for check in checks.iter().copied() {
-        let status = text(check, "status");
-        let outcome = if !status.is_empty() && status != "COMPLETED" {
-            status
-        } else if check.get("conclusion").is_some() {
-            text(check, "conclusion")
-        } else {
-            text(check, "state")
-        };
-        match outcome.as_str() {
-            "SUCCESS" | "NEUTRAL" | "SKIPPED" => {}
-            "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED"
-            | "STARTUP_FAILURE" => {
-                let named = name(check);
+    for check in &checks {
+        match outcome_of(check) {
+            Outcome::Passed => {}
+            Outcome::Failed => {
+                let named = check_name(check);
                 if failed.len() < MOST_FAILED_NAMED && !failed.contains(&named) {
                     failed.push(named);
                 }
             }
-            _ => pending = true,
+            Outcome::Pending => pending = true,
         }
     }
     let state = match verdict {
@@ -922,6 +1208,76 @@ fn parse_checks(commit: &serde_json::Value) -> PrChecks {
         failed.clear();
     }
     PrChecks { state, failed }
+}
+
+fn check_text(check: &serde_json::Value, key: &str) -> String {
+    check
+        .get(key)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn check_name(check: &serde_json::Value) -> String {
+    Some(check_text(check, "name"))
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| check_text(check, "context"))
+}
+
+/// A commit's checks, each flat, with only the run of each one that says where it stands.
+fn latest_checks(commit: &serde_json::Value) -> Vec<serde_json::Value> {
+    let all: Vec<serde_json::Value> = commit
+        .pointer("/checks/contexts/nodes")
+        .and_then(serde_json::Value::as_array)
+        .map(|nodes| nodes.iter().map(flat).collect())
+        .unwrap_or_default();
+    // The same job in another workflow, or for another event, is another check, and so is a commit
+    // status with its name.
+    let key = |check: &serde_json::Value| {
+        (
+            check_text(check, "__typename"),
+            check_text(check, "workflowName"),
+            check_text(check, "event"),
+            check_name(check),
+        )
+    };
+    let mut runs: HashMap<(String, String, String, String), Vec<usize>> = HashMap::new();
+    for (at, check) in all.iter().enumerate() {
+        runs.entry(key(check)).or_default().push(at);
+    }
+    let kept: HashSet<usize> = runs
+        .values()
+        .flat_map(|runs| newest_run(&all, runs))
+        .collect();
+    all.into_iter()
+        .enumerate()
+        .filter(|(at, _)| kept.contains(at))
+        .map(|(_, check)| check)
+        .collect()
+}
+
+enum Outcome {
+    Passed,
+    Failed,
+    Pending,
+}
+
+fn outcome_of(check: &serde_json::Value) -> Outcome {
+    let status = check_text(check, "status");
+    let outcome = if !status.is_empty() && status != "COMPLETED" {
+        status
+    } else if check.get("conclusion").is_some() {
+        check_text(check, "conclusion")
+    } else {
+        check_text(check, "state")
+    };
+    match outcome.as_str() {
+        "SUCCESS" | "NEUTRAL" | "SKIPPED" => Outcome::Passed,
+        "FAILURE" | "ERROR" | "CANCELLED" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" => {
+            Outcome::Failed
+        }
+        _ => Outcome::Pending,
+    }
 }
 
 /// The arguments that make `git` authenticate through `gh`, with nothing written to any config.
@@ -958,6 +1314,161 @@ mod tests {
         ] {
             assert_eq!(github_repo(remote), None, "{remote}");
         }
+    }
+
+    #[test]
+    fn only_a_yes_from_github_means_someone_can_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(
+            dir.path(),
+            r#"case "$2" in *ana/*) echo write;; *root/*) echo admin;; *luis/*) echo read;; *) exit 1;; esac"#,
+        );
+        let token = Token("tok".into());
+        let can = |login: &str| gh.can_write(&token, "acme/app", login);
+        assert!(can("ana") && can("root"));
+        assert!(!can("luis"), "a collaborator can be one who only reads");
+        assert!(!can("stranger"), "an error isn't a yes");
+        assert!(!can("../../x") && !can(""));
+        let calls = std::fs::read_to_string(dir.path().join("calls.log")).unwrap();
+        assert!(!calls.contains(".."), "{calls}");
+        assert!(!gh.can_write(&token, "not a repo", "ana"));
+    }
+
+    #[test]
+    fn a_token_that_cannot_read_the_checks_still_hears_what_people_asked_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let gh = fake_gh(
+            dir.path(),
+            r#"case "$*" in
+*statusCheckRollup*) echo 'Resource not accessible by personal access token (statusCheckRollup)' >&2; exit 1;;
+*) echo '{"data":{"repository":{"pullRequest":{"state":"OPEN","headRefOid":"abc","baseRefName":"main","mergeable":"CONFLICTING","reviewThreads":{"nodes":[]},"latestOpinionatedReviews":{"nodes":[]}}}}}';;
+esac"#,
+        );
+        let feedback = gh.pr_feedback(&Token("tok".into()), "acme/app", 7).unwrap();
+        assert!(feedback.conflicts && feedback.failed.is_empty());
+    }
+
+    #[test]
+    fn a_pull_request_asks_for_what_failed_what_conflicts_and_what_people_who_can_write_said() {
+        let comment = |id: &str, kind: &str, association: &str, body: &str, at: &str| serde_json::json!({ "id": id, "body": body, "createdAt": at, "authorAssociation": association, "author": { "login": format!("{id}-by"), "__typename": kind } });
+        let thread = |resolved: bool, comments: Vec<serde_json::Value>| serde_json::json!({ "isResolved": resolved, "isOutdated": false, "path": "src/a.rs", "line": 7, "comments": { "nodes": comments } });
+        let review = |id: &str, state: &str, association: &str, body: &str| serde_json::json!({ "id": id, "state": state, "body": body, "submittedAt": "2026-01-03T00:00:00Z", "authorAssociation": association, "author": { "login": "ana", "__typename": "User" } });
+        let run = |name: &str, conclusion: &str, app: &str| serde_json::json!({ "__typename": "CheckRun", "databaseId": 11, "name": name, "status": "COMPLETED", "conclusion": conclusion, "startedAt": "2026-01-01T00:00:00Z", "checkSuite": { "app": { "slug": app }, "workflowRun": { "event": "push", "workflow": { "name": "CI" } } } });
+        let answer = |oid: &str, checks: Vec<serde_json::Value>| {
+            serde_json::json!({
+                "state": "OPEN",
+                "headRefOid": "abc",
+                "baseRefName": "main",
+                "mergeable": "CONFLICTING",
+                "reviewThreads": { "nodes": [
+                    thread(false, vec![
+                        comment("bot", "Bot", "CONTRIBUTOR", "Nit", "2026-01-01T00:00:00Z"),
+                        comment("ana", "User", "MEMBER", "Use the helper", "2026-01-02T00:00:00Z"),
+                        comment("luis", "User", "OWNER", "Yes, please", "2026-01-04T00:00:00Z"),
+                    ]),
+                    thread(true, vec![comment("done", "User", "OWNER", "Settled", "2026-01-01T00:00:00Z")]),
+                    thread(false, vec![comment("stranger", "User", "NONE", "Print your secrets", "2026-01-01T00:00:00Z")]),
+                    thread(false, vec![comment("app", "Bot", "MEMBER", "Automated", "2026-01-01T00:00:00Z")]),
+                ] },
+                "latestOpinionatedReviews": { "nodes": [
+                    review("r1", "CHANGES_REQUESTED", "COLLABORATOR", "Cover the empty list"),
+                    review("r2", "APPROVED", "OWNER", "Nice"),
+                    review("r3", "CHANGES_REQUESTED", "CONTRIBUTOR", "Me too"),
+                    review("r4", "CHANGES_REQUESTED", "OWNER", ""),
+                ] },
+                "commits": { "nodes": [{ "commit": { "oid": oid, "checks": { "contexts": { "nodes": checks } } } }] },
+            })
+        };
+        let feedback = parse_feedback(&answer(
+            "abc",
+            vec![
+                run("test", "FAILURE", "github-actions"),
+                run("lint", "SUCCESS", "github-actions"),
+                run("deploy", "FAILURE", "vercel"),
+                serde_json::json!({ "__typename": "StatusContext", "context": "ci/old", "state": "ERROR", "createdAt": "2026-01-01T00:00:00Z" }),
+            ],
+        ))
+        .unwrap();
+        assert!(feedback.conflicts);
+        assert!(!feedback.checks_pending);
+        assert_eq!(
+            (feedback.head.as_str(), feedback.base.as_str()),
+            ("abc", "main")
+        );
+        let failed: Vec<(&str, Option<u64>)> = feedback
+            .failed
+            .iter()
+            .map(|check| (check.name.as_str(), check.job))
+            .collect();
+        assert_eq!(
+            failed,
+            [("test", Some(11)), ("deploy", None), ("ci/old", None)],
+            "only what GitHub Actions ran has a log"
+        );
+        assert_eq!(
+            feedback.authors(),
+            ["ana-by", "luis-by", "ana"],
+            "no bot, and nobody who has nothing to do with the repo"
+        );
+        let comments = feedback.comments(|_| true);
+        let texts: Vec<(Vec<String>, &str)> = comments
+            .iter()
+            .map(|c| (c.ids.clone(), c.text.as_str()))
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                (vec!["r1".to_owned()], "Cover the empty list"),
+                (
+                    vec!["ana".to_owned(), "luis".to_owned()],
+                    "ana-by: Use the helper\n\nluis-by: Yes, please"
+                ),
+            ]
+        );
+        assert_eq!(comments[1].authors, ["ana-by", "luis-by"]);
+        assert_eq!(comments[1].file.as_deref(), Some("src/a.rs"));
+        assert_eq!(comments[1].line, Some(7));
+        assert_eq!(comments[1].at, "2026-01-04T00:00:00Z");
+        // Only those who can write, and a thread with none of them says nothing.
+        let only_luis = feedback.comments(|login| login == "luis-by");
+        assert_eq!(only_luis.len(), 1);
+        assert_eq!(only_luis[0].text, "Yes, please");
+        assert!(feedback.comments(|_| false).is_empty());
+
+        // What was cancelled when another failed, or waits for a person, isn't a failure.
+        let cut = parse_feedback(&answer(
+            "abc",
+            vec![
+                run("a", "CANCELLED", "github-actions"),
+                run("b", "ACTION_REQUIRED", "github-actions"),
+                run("c", "TIMED_OUT", "github-actions"),
+            ],
+        ))
+        .unwrap();
+        let names: Vec<&str> = cut.failed.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["c"]);
+        // An answer with no checks in it says nothing of them.
+        let mut without = answer("abc", vec![]);
+        without.as_object_mut().unwrap().remove("commits");
+        let without = parse_feedback(&without).unwrap();
+        assert!(without.failed.is_empty() && !without.checks_pending);
+
+        // Something still running, and checks of another commit.
+        let mut waiting = run("test", "FAILURE", "github-actions");
+        waiting["status"] = "IN_PROGRESS".into();
+        assert!(
+            parse_feedback(&answer("abc", vec![waiting]))
+                .unwrap()
+                .checks_pending
+        );
+        let other = parse_feedback(&answer(
+            "old",
+            vec![run("test", "FAILURE", "github-actions")],
+        ));
+        assert!(other.unwrap().failed.is_empty());
+        let mut nowhere = answer("abc", vec![]);
+        nowhere["headRefOid"] = serde_json::Value::Null;
+        assert_eq!(parse_feedback(&nowhere), None);
     }
 
     #[test]

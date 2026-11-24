@@ -491,6 +491,31 @@ const FLOW_SCENES: Record<string, { steps: WorkflowStep[] | null; attempts: Atte
   risks: { steps: withShippedReviews(fullWorkflow), round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "succeeded", verdict("approved")), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "succeeded", { ...verdict("approved"), modelRequested: "opus", modelActual: "claude-opus-5-5" }), reviewRan("state", "skipped", { reason: skippedForRisks }), decided("approve"), humanWaits] },
   sentBack: { steps: fullWorkflow, round: 1, attempts: [setupRan, specRan, builderRan(), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), returnedApproval, ...[builderRan({ resultText: "I made add return 0 for an empty list." }), checkRan(), reviewRan("security", "skipped"), reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("code", "skipped"), decided("approve"), humanWaits].map(nextRound)] },
 };
+// flow=ship is an approval after a step fixed what the reviews found, and flow=nothingToFix one where
+// there was nothing to. flow=watching follows the pull request, with moved=1 for one someone else added
+// commits to, flow=watchLeft leaves it to the person, and flow=watchRound is the approval of the round
+// its pull request asked for.
+const afterReviews = (steps: WorkflowStep[]): WorkflowStep[] =>
+  steps.flatMap((step) => {
+    if (step.id === "reviews") return [step, { ...agentStep("ship", "sonnet", "build"), when: "somethingToFix" } as WorkflowStep, { type: "check", id: "check-ship", run: "make test", onlyIfChanged: true } as WorkflowStep];
+    return step.type === "deliver" ? [step, { type: "watch", id: "watch", maxRounds: 3 } as WorkflowStep] : [step];
+  });
+const followedSteps = afterReviews(fullWorkflow);
+const sha = (shaBefore: string, shaAfter = shaBefore) => ({ shaBefore, shaAfter });
+const shipRan = (fields: Partial<Attempt> = {}) => builderRan({ id: "ship-0-1", stepId: "ship", resultText: "code, calc.py:2: fixed, add no longer skips the role check.\nsecurity, calc.py:9: false, the caller already checks it.", ...sha("a", "b"), ...fields });
+const shipCheckRan = (s: AttemptState, fields: Partial<Attempt> = {}) => checkRan(s, { id: "check-ship-0-1", stepId: "check-ship", ...fields });
+const otherReviews = (fields: Partial<Attempt> = {}) => [reviewRan("ux", "skipped"), reviewRan("ui", "skipped"), reviewRan("security", "succeeded", { ...verdict("approved"), ...sha("a"), ...fields })];
+const fixedRound = [setupRan, specRan, builderRan(sha("0", "a")), checkRan("succeeded", sha("a", "")), ...otherReviews(), reviewRan("code", "succeeded", { ...verdict("changes"), ...sha("a") }), shipRan(), shipCheckRan("succeeded", sha("b", "")), decided("approve")];
+const deliveredRan = ran("pull-request", "succeeded", { kind: "deliver", tools: "none", modelRequested: "", modelActual: null, resultText: "https://github.com/acme/app/pull/12" });
+const askedByPr = { head: "b", conflict: "main", checks: [{ name: "tests", log: "FAILED tests/test_calc.py" }], comments: [{ ids: ["c1"], authors: ["ana"], file: "calc.py", line: 2, text: "Could this use the helper we already have in money.py?" }] };
+const watchRan = (s: AttemptState, fields: Partial<Attempt> = {}) => ran("watch", s, { kind: "watch", tools: "none", modelRequested: "", modelActual: null, finishedAt: null, ...fields });
+const askedOutput = { output: { pullRequest: askedByPr } as unknown as Attempt["output"] };
+FLOW_SCENES.ship = { steps: followedSteps, round: 0, attempts: [...fixedRound, humanWaits] };
+FLOW_SCENES.nothingToFix = { steps: followedSteps, round: 0, attempts: [setupRan, specRan, builderRan(), checkRan(), ...otherReviews(), reviewRan("code", "succeeded", verdict("approved")), ran("ship", "skipped", { tools: "build", reason: { code: "nothingToFix" }, shaBefore: null, shaAfter: null }), shipCheckRan("skipped", { reason: { code: "nothingChangedSinceCheck" } }), decided("approve"), humanWaits] };
+FLOW_SCENES.watching = { steps: followedSteps, round: 0, attempts: [...fixedRound, { ...humanWaits, state: "succeeded" }, deliveredRan, watchRan("watching", params.get("moved") === "1" ? { reason: { code: "pullRequestMoved" } } : {})] };
+FLOW_SCENES.watchLeft = { steps: followedSteps, round: 0, attempts: [...fixedRound, { ...humanWaits, state: "succeeded" }, deliveredRan, watchRan("blocked", { reason: { code: "pullRequestLimit", rounds: 3 }, ...askedOutput })] };
+FLOW_SCENES.watchRound = { steps: followedSteps, round: 1, attempts: [...fixedRound, { ...humanWaits, state: "succeeded" }, deliveredRan, watchRan("returned", askedOutput), ...[builderRan({ resultText: "I used the helper from money.py and fixed the test.", ...sha("b", "c") }), checkRan("succeeded", sha("c", "")), ...otherReviews(sha("c")), reviewRan("code", "succeeded", { ...verdict("approved"), ...sha("c") }), ran("ship", "skipped", { tools: "build", reason: { code: "nothingToFix" }, shaBefore: null, shaAfter: null }), shipCheckRan("skipped", { reason: { code: "nothingChangedSinceCheck" } }), decided("approve"), humanWaits].map(nextRound)] };
+const following = ["watching", "watchLeft", "watchRound"].includes(params.get("flow") ?? "");
 const flowScene = FLOW_SCENES[params.get("flow") ?? ""];
 const note = (seq: number, text: string, paths: string[]): BrainNote => ({ seq, projectId: "p1", kind: "map", state: "active", text, evidence: null, paths, commitSha: "4f4c706aa11", runId: "r1", attemptId: "a1", createdAt: at(4000), decidedAt: null });
 const mapNotes = [
@@ -500,7 +525,7 @@ const mapNotes = [
 ];
 const proposals: BrainNote[] = [{ ...note(7, "Migrations must be added in order: the app refuses to start if one is missing.", ["db/migrations"]), kind: "learning", state: "proposed", evidence: "The check failed with 'migration 12 missing' until the builder renamed the file." }];
 const prShown = params.get("pr") ?? "draft";
-const prState: PrState | null = delivered && prShown !== "unknown" ? (prShown as PrState) : null;
+const prState: PrState | null = (delivered || following) && prShown !== "unknown" ? (prShown as PrState) : null;
 const prCi = prState ? ((params.get("ci") as CiState | null) ?? null) : null;
 // added=2 is how many commits the pull request got after Keel delivered. Without it Keel doesn't know.
 const prCommitsAdded = prState && params.has("added") ? Number(params.get("added")) : null;
@@ -515,8 +540,8 @@ const run: Run = {
   language: "en",
   sourceIssue: waiting ? { number: 7, title: "add is wrong", author: "someone", url: "https://github.com/acme/app/issues/7" } : null,
   branch: "keel/5e882d0f",
-  prUrl: delivered ? "https://github.com/acme/app/pull/12" : null,
-  prNumber: delivered ? 12 : null,
+  prUrl: delivered || following ? "https://github.com/acme/app/pull/12" : null,
+  prNumber: delivered || following ? 12 : null,
   workflowId: params.get("task") === "1" ? null : "builtin:full",
   workflowName: params.get("task") === "1" ? null : "Full, with reviews",
   prState,
@@ -946,8 +971,8 @@ mockIPC((command, args) => {
     case "workflows_list":
       return [
         ...(params.get("flow") === "many" ? [{ id: "many", name: i18next.language === "es" ? "Muchos pasos" : "Many steps", builtin: false, steps: manySteps }] : []),
-        { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: withShippedReviews([...workflow, learnerStep]) },
-        { id: "builtin:organic", name: i18next.language === "es" ? "Se adapta al cambio" : "Fits the change", builtin: true, steps: [...fittingSteps, learnerStep] },
+        { id: "builtin:full", name: i18next.language === "es" ? "Completo, con revisiones" : "Full, with reviews", builtin: true, steps: afterReviews(withShippedReviews([...workflow, learnerStep])) },
+        { id: "builtin:organic", name: i18next.language === "es" ? "Se adapta al cambio" : "Fits the change", builtin: true, steps: afterReviews([...fittingSteps, learnerStep]) },
         { id: "mine", name: i18next.language === "es" ? "Solo revisiones" : "Reviews only", builtin: false, steps: workflow.slice(3) },
       ];
     case "workflow_results":

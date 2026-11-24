@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Bot, CheckCircle2, GitPullRequest, Layers, Plus, Trash2, TriangleAlert, UserCheck, Wrench } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Bot, CheckCircle2, GitPullRequest, Layers, Plus, Radar, Trash2, TriangleAlert, UserCheck, Wrench } from "lucide-react";
 import { type KeyboardEvent, type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type CommandError, type StepCondition, type StepRole, type StepSpec, type ToolProfile, type Workflow, type WorkflowDraft, type WorkflowResults, type WorkflowStep } from "../lib/api";
@@ -379,11 +379,25 @@ function StepEditor({ step, formKey, earlier, onChange, onEarlier, onLater, onRe
           <p className="text-[12px] text-muted">{t("workflows.deliverHint")}</p>
         </StepCard>
       );
+    case "watch":
+      return (
+        <StepCard icon={<Radar size={14} />} title={t("workflows.stepWatch")} {...common}>
+          <p className="mb-2.5 text-[12px] text-muted">{t("workflows.watchHint")}</p>
+          <div className="w-40">
+            <Field label={t("workflows.watchRounds")}>
+              <input inputMode="numeric" value={step.maxRounds} onChange={(e) => onChange({ ...step, maxRounds: Number(e.target.value.replace(/\D/g, "")) || 0 })} className={inputClass} />
+            </Field>
+          </div>
+          <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t("workflows.watchRoundsHint")}</p>
+        </StepCard>
+      );
   }
 }
 
 /** What a + opens: the same kinds of step as always, right below the diagram. */
-function AddBar({ onPick, onCancel }: { onPick: (kind: "agent" | "parallel" | "check" | "approval" | "deliver") => void; onCancel: () => void }) {
+type AddedKind = "agent" | "parallel" | "check" | "approval" | "deliver" | "watch";
+
+function AddBar({ onPick, onCancel }: { onPick: (kind: AddedKind) => void; onCancel: () => void }) {
   const { t } = useTranslation();
   const escape = (e: KeyboardEvent) => {
     if (e.key === "Escape") onCancel();
@@ -398,6 +412,7 @@ function AddBar({ onPick, onCancel }: { onPick: (kind: "agent" | "parallel" | "c
       <Button onClick={() => onPick("check")}>{t("workflows.addCheck")}</Button>
       <Button onClick={() => onPick("approval")}>{t("workflows.addApproval")}</Button>
       <Button onClick={() => onPick("deliver")}>{t("workflows.addDeliver")}</Button>
+      <Button onClick={() => onPick("watch")}>{t("workflows.addWatch")}</Button>
       <Button variant="ghost" onClick={onCancel}>
         {t("newRun.cancel")}
       </Button>
@@ -433,6 +448,7 @@ function DraftReview({ draft, steps, project }: { draft: WorkflowDraft; steps: W
         <div>
           <dt className={label}>{t("workflows.draftDelivery")}</dt>
           <dd>{facts.delivers ? t("workflows.draftDelivers") : t("workflows.draftNoDelivery")}</dd>
+          {facts.follows && <dd>{t("workflows.draftFollows")}</dd>}
         </div>
         {facts.conditional.length > 0 && (
           <div>
@@ -613,7 +629,7 @@ export function WorkflowsView() {
   };
   const taken = allIds(steps);
 
-  const newStep = (kind: "agent" | "parallel" | "check" | "approval" | "deliver"): WorkflowStep => {
+  const newStep = (kind: AddedKind): WorkflowStep => {
     switch (kind) {
       case "agent":
         return { type: "agent", ...newAgent(freshId("agent", taken), { kind: "worker" }, "build") };
@@ -625,6 +641,8 @@ export function WorkflowsView() {
         return { type: "approval", id: freshId("approval", taken) };
       case "deliver":
         return { type: "deliver", id: freshId("pull-request", taken) };
+      case "watch":
+        return { type: "watch", id: freshId("watch", taken), maxRounds: 3 };
     }
   };
   const addMember = (stage: number) => focusAfter(memberAdded(steps, stage, newAgent(freshId("reviewer", taken), { kind: "reviewer" }, "readOnly")));

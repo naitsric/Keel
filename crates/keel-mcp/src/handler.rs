@@ -44,7 +44,8 @@ const LIST_ISSUES: &str = "List the open GitHub issues of a project's repo: numb
 const LIST_RUNS: &str = "List the latest runs, newest first, optionally of one project: title, current step, \
                          state, model, who started it and its pull request. `mine` lists only the runs this \
                          client started, to find them again.";
-const GET_RUN: &str = "Get a run: its overall state (working, waitingForPerson or finished), whether this client \
+const GET_RUN: &str = "Get a run: its overall state (working, waitingForPerson, followingPullRequest, which was \
+                       delivered and needs nothing from you, or finished), whether this client \
                        started it (startedByYou), and `report`, what it did in short: the last worker's \
                        `answer`, filesChanged (up to 100, and moreFilesChanged says how many more), whether \
                        the `check` passed and what it printed if not, what no test proves in this round \

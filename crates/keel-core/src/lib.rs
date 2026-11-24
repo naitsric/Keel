@@ -207,6 +207,11 @@ pub enum WorkflowStep {
     Approval { id: String },
     /// Keel, not an agent, pushes the branch and opens a draft pull request.
     Deliver { id: String },
+    /// Keel follows the pull request until it's merged or closed. When its CI fails, it conflicts
+    /// or a collaborator asks for changes, the work goes back as a new round, and a person approves
+    /// what comes of it before anything is pushed. `max_rounds` is how many times in a row it does
+    /// that with nobody asking.
+    Watch { id: String, max_rounds: u32 },
 }
 
 impl WorkflowStep {
@@ -217,7 +222,8 @@ impl WorkflowStep {
             | Self::Check { id, .. }
             | Self::Parallel { id, .. }
             | Self::Approval { id }
-            | Self::Deliver { id } => id,
+            | Self::Deliver { id }
+            | Self::Watch { id, .. } => id,
         }
     }
 
@@ -229,6 +235,7 @@ impl WorkflowStep {
             Self::Parallel { .. } => "parallel",
             Self::Approval { .. } => "approval",
             Self::Deliver { .. } => "deliver",
+            Self::Watch { .. } => "watch",
         }
     }
 }
@@ -253,6 +260,8 @@ pub enum AttemptState {
     WaitingApproval,
     /// A step that asked a person something and waits for what they say. Nothing is running.
     WaitingAnswers,
+    /// A step that follows the run's pull request. Nothing is running, and nobody has to act.
+    Watching,
     /// A person rejected it at an approval step. The run ends here.
     Rejected,
     /// A person sent the work back at an approval step, with what to change. The run goes on.
@@ -281,6 +290,7 @@ impl AttemptState {
             Self::Blocked => "blocked",
             Self::WaitingApproval => "waitingApproval",
             Self::WaitingAnswers => "waitingAnswers",
+            Self::Watching => "watching",
             Self::Rejected => "rejected",
             Self::Returned => "returned",
             Self::Postponed => "postponed",
@@ -302,6 +312,7 @@ impl AttemptState {
             "blocked" => Self::Blocked,
             "waitingApproval" => Self::WaitingApproval,
             "waitingAnswers" => Self::WaitingAnswers,
+            "watching" => Self::Watching,
             "rejected" => Self::Rejected,
             "returned" => Self::Returned,
             "postponed" => Self::Postponed,
@@ -430,6 +441,25 @@ pub enum Reason {
     /// The same command passed in this round and no step that can change files has run since, and
     /// the check only runs again if one has.
     NothingChangedSinceCheck,
+    /// The pull request keeps asking for something after Keel took the work back this many times
+    /// in a row with nobody asking. A person decides now.
+    PullRequestLimit {
+        rounds: u32,
+    },
+    /// Someone added commits to the pull request, so Keel leaves it to them.
+    PullRequestMoved,
+    /// The pull request's branch no longer has what Keel delivered, so Keel leaves it to whoever
+    /// rewrote it.
+    PullRequestRewritten,
+    /// The pull request's branch has commits the run's copy doesn't, so what was approved can't be
+    /// pushed on top of it.
+    PullRequestAhead,
+    /// The pull request was merged or closed, so there's nothing left to push to it.
+    PullRequestOver,
+    /// What the pull request's branch has now couldn't be brought into the run's copy.
+    PullRequestNotSynced {
+        detail: String,
+    },
     /// The engine found the change small, going by what it could see for itself, and the step only
     /// runs for one that isn't. `lines` and `files` are the size of the change at that moment.
     TreatedAsSmall {
@@ -564,6 +594,8 @@ pub enum WhyNotSmall {
     /// It failed earlier in the run and the work went back to the builder, so how it was made to
     /// pass is something to look at.
     CheckWentBack,
+    /// Its pull request sent it back, so something got past what looked at it before.
+    PullRequestWentBack,
     /// The run came from an issue this person wrote, who isn't the project's GitHub account.
     IssueFromSomeoneElse { author: String },
     /// The run came from an issue, and it doesn't say who wrote it.
@@ -789,6 +821,12 @@ impl Reason {
             | Self::NoMatchingRisks { .. }
             | Self::NothingToFix
             | Self::NothingChangedSinceCheck
+            | Self::PullRequestLimit { .. }
+            | Self::PullRequestMoved
+            | Self::PullRequestRewritten
+            | Self::PullRequestAhead
+            | Self::PullRequestOver
+            | Self::PullRequestNotSynced { .. }
             | Self::NothingToDeliver
             | Self::RejectionNeedsReason
             | Self::UnsafeBranch { .. }
@@ -915,21 +953,27 @@ pub enum BoardColumn {
 }
 
 /// The column a card shows in. `state` is where its run stands, and is `None` until the run has
-/// an attempt. A card that has just been taken from Todo has no run yet, and is already working.
+/// an attempt. A run that only follows its pull request has done its work, and so has one that was
+/// `delivered`, whatever became of a later round of it. A card that has just been taken from Todo has no run yet, and is already working.
 ///
 /// A run left open at a rejected or abandoned attempt won't move again: `advance` waits at anything
 /// that didn't succeed. That takes a sibling's retry, or the app dying in the middle of ending the
 /// run. A person has to look at it, and it mustn't hold a place in the queue forever.
-pub fn card_column(lane: CardLane, run_finished: bool, state: Option<AttemptState>) -> BoardColumn {
+pub fn card_column(
+    lane: CardLane,
+    run_finished: bool,
+    state: Option<AttemptState>,
+    delivered: bool,
+) -> BoardColumn {
     use AttemptState::{
         Abandoned, Blocked, Failed, Interrupted, Rejected, Stalled, Stopped, WaitingAnswers,
-        WaitingApproval,
+        WaitingApproval, Watching,
     };
     match lane {
         CardLane::Backlog => BoardColumn::Backlog,
         CardLane::Todo => BoardColumn::Todo,
         CardLane::Started => match (run_finished, state) {
-            (true, Some(Rejected | Abandoned)) => BoardColumn::Backlog,
+            (true, Some(Rejected | Abandoned)) if !delivered => BoardColumn::Backlog,
             (true, _) => BoardColumn::Done,
             (
                 false,
@@ -938,6 +982,7 @@ pub fn card_column(lane: CardLane, run_finished: bool, state: Option<AttemptStat
                     | Interrupted | Rejected | Abandoned,
                 ),
             ) => BoardColumn::HumanReview,
+            (false, Some(Watching)) => BoardColumn::Done,
             (false, _) => BoardColumn::InProgress,
         },
     }
@@ -950,7 +995,7 @@ mod tests {
     use BoardColumn::{Backlog as InBacklog, Done, HumanReview, InProgress, Todo as InTodo};
 
     /// Every state, with the run open and then finished.
-    const STARTED: [(AttemptState, BoardColumn, BoardColumn); 16] = [
+    const STARTED: [(AttemptState, BoardColumn, BoardColumn); 17] = [
         (Queued, InProgress, Done),
         (Preparing, InProgress, Done),
         (Running, InProgress, Done),
@@ -962,6 +1007,7 @@ mod tests {
         (Blocked, HumanReview, Done),
         (WaitingApproval, HumanReview, Done),
         (WaitingAnswers, HumanReview, Done),
+        (Watching, Done, Done),
         (Rejected, HumanReview, InBacklog),
         // The work went back, and the next step is on its way.
         (Returned, InProgress, Done),
@@ -975,15 +1021,25 @@ mod tests {
     fn a_started_card_follows_its_run() {
         for (state, open, finished) in STARTED {
             assert_eq!(
-                card_column(CardLane::Started, false, Some(state)),
+                card_column(CardLane::Started, false, Some(state), false),
                 open,
                 "{state:?} with the run open"
             );
             assert_eq!(
-                card_column(CardLane::Started, true, Some(state)),
+                card_column(CardLane::Started, true, Some(state), false),
                 finished,
                 "{state:?} with the run finished"
             );
+        }
+    }
+
+    /// What was delivered doesn't go back to the Backlog because a later round of it was rejected.
+    #[test]
+    fn a_delivered_card_stays_done_once_its_run_ends() {
+        for (state, open, _) in STARTED {
+            let column = |finished| card_column(CardLane::Started, finished, Some(state), true);
+            assert_eq!(column(true), Done, "{state:?}");
+            assert_eq!(column(false), open, "{state:?}");
         }
     }
 
@@ -995,8 +1051,8 @@ mod tests {
             // Adding a state stops this compiling until it's in the table.
             match parsed {
                 Queued | Preparing | Running | Stalled | Succeeded | Failed | Stopped
-                | Interrupted | Blocked | WaitingApproval | WaitingAnswers | Rejected
-                | Returned | Postponed | Skipped | Abandoned => {}
+                | Interrupted | Blocked | WaitingApproval | WaitingAnswers | Watching
+                | Rejected | Returned | Postponed | Skipped | Abandoned => {}
             }
         }
         let mut unique = states.clone();
@@ -1007,16 +1063,22 @@ mod tests {
 
     #[test]
     fn a_started_card_without_a_run_or_an_attempt_is_working() {
-        assert_eq!(card_column(CardLane::Started, false, None), InProgress);
-        assert_eq!(card_column(CardLane::Started, true, None), Done);
+        assert_eq!(
+            card_column(CardLane::Started, false, None, false),
+            InProgress
+        );
+        assert_eq!(card_column(CardLane::Started, true, None, false), Done);
     }
 
     #[test]
     fn a_card_that_has_not_started_ignores_any_old_run() {
         for state in [None, Some(Running), Some(Failed), Some(Rejected)] {
             for finished in [false, true] {
-                assert_eq!(card_column(CardLane::Backlog, finished, state), InBacklog);
-                assert_eq!(card_column(CardLane::Todo, finished, state), InTodo);
+                assert_eq!(
+                    card_column(CardLane::Backlog, finished, state, false),
+                    InBacklog
+                );
+                assert_eq!(card_column(CardLane::Todo, finished, state, false), InTodo);
             }
         }
     }
@@ -1184,6 +1246,12 @@ mod tests {
             (Reason::CopyFreed, false),
             (Reason::NothingToFix, false),
             (Reason::NothingChangedSinceCheck, false),
+            (Reason::PullRequestLimit { rounds: 3 }, false),
+            (Reason::PullRequestMoved, false),
+            (Reason::PullRequestRewritten, false),
+            (Reason::PullRequestAhead, false),
+            (Reason::PullRequestOver, false),
+            (Reason::PullRequestNotSynced { detail: text() }, false),
         ]
     }
 
@@ -1246,6 +1314,12 @@ mod tests {
             Reason::CopyFreed => 53,
             Reason::NothingToFix => 54,
             Reason::NothingChangedSinceCheck => 55,
+            Reason::PullRequestLimit { .. } => 56,
+            Reason::PullRequestMoved => 57,
+            Reason::PullRequestNotSynced { .. } => 58,
+            Reason::PullRequestRewritten => 59,
+            Reason::PullRequestAhead => 60,
+            Reason::PullRequestOver => 61,
         }
     }
 
@@ -1259,7 +1333,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=55).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=61).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]

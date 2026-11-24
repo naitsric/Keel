@@ -13,7 +13,7 @@ use keel_store::Attempt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{brain, prompts, sizing, specs, verification};
+use crate::{brain, prompts, sizing, specs, verification, watch};
 
 const MAX_ROUNDS: u32 = 5;
 
@@ -289,6 +289,7 @@ pub fn validate(steps: &[WorkflowStep]) -> Result<(), Reason> {
         Ok(())
     };
     let mut approval_seen = false;
+    let mut delivered = false;
     let mut specifier_seen = false;
     let mut built = false;
     let mut judged = false;
@@ -395,6 +396,25 @@ pub fn validate(steps: &[WorkflowStep]) -> Result<(), Reason> {
                 if !approval_seen {
                     return Err(problem("deliverNeedsApproval", id));
                 }
+                delivered = true;
+            }
+            WorkflowStep::Watch { id, max_rounds } => {
+                if !delivered {
+                    return Err(problem("watchNeedsDelivery", id));
+                }
+                // What the pull request asks for has to have somewhere to go, and what comes of it
+                // a person to approve it before it's delivered again.
+                let delivers = steps[..index]
+                    .iter()
+                    .rposition(|step| matches!(step, WorkflowStep::Deliver { .. }));
+                let approved_again = matches!((rework_index(steps), delivers), (Some(from), Some(to))
+                    if from < to && steps[from..to].iter().any(|step| matches!(step, WorkflowStep::Approval { .. })));
+                if !approved_again {
+                    return Err(problem("watchNeedsBuilder", id));
+                }
+                if *max_rounds > MAX_ROUNDS {
+                    return Err(problem("tooManyRounds", id));
+                }
             }
         }
         earlier.push(step.id());
@@ -457,6 +477,23 @@ pub fn rounds_asked_by_a_person(attempts: &[Attempt]) -> i64 {
         .filter(|a| a.state == AttemptState::Returned.as_str())
         .filter(|a| !crate::failed_checks::sent_back_by_keel(a))
         .count() as i64
+}
+
+/// Rounds the run went back on its own for, by its approver or a failed check, since its pull
+/// request last sent the work back, or since it started. One a person or the pull request asked for
+/// isn't one of these, and what the pull request asks for gets as many as the request did.
+pub fn rounds_on_its_own(attempts: &[Attempt], round: i64) -> i64 {
+    let from = attempts
+        .iter()
+        .rev()
+        .find(|a| watch::went_back(a))
+        .map_or(0, |a| a.round + 1);
+    let since: Vec<Attempt> = attempts
+        .iter()
+        .filter(|a| a.round >= from)
+        .cloned()
+        .collect();
+    round - from - rounds_asked_by_a_person(&since)
 }
 
 pub fn next_number(attempts: &[Attempt], step_id: &str) -> i64 {
@@ -527,6 +564,31 @@ fn asks_for_changes(attempt: &Attempt) -> bool {
             .is_some_and(|verification| verification.counts().unmet > 0),
         _ => false,
     }
+}
+
+/// Whether a person approved what a delivery would deliver: the last approval before it succeeded, in
+/// this round if it's one of those that run again each round.
+pub fn approved_in_round(
+    steps: &[WorkflowStep],
+    attempts: &[Attempt],
+    round: i64,
+    delivery: &str,
+) -> bool {
+    let before = steps_before(steps, delivery);
+    let Some(at) = before
+        .iter()
+        .rposition(|step| matches!(step, WorkflowStep::Approval { .. }))
+    else {
+        return false;
+    };
+    let again = rework_index(steps).is_some_and(|from| at >= from);
+    attempts
+        .iter()
+        .rev()
+        .find(|a| a.kind == "approval" && a.step_id == before[at].id())
+        .is_some_and(|a| {
+            a.state == AttemptState::Succeeded.as_str() && (!again || a.round == round)
+        })
 }
 
 /// Whether a pull request is what comes right after a step. The step that proposes notes runs after
@@ -808,6 +870,7 @@ pub fn rework_text(attempts: &[Attempt], round: i64, language: &str) -> String {
             };
             format!("{intro}\n{}", sent_back(&text, language))
         });
+    let from_pull_request = watch::text(attempts, round, language);
     // The spec doesn't run again, so nothing else remembers this. Without it, a later round reads a
     // person's change as a failure, and an approver can ask for it to be undone.
     let returned: Vec<&Attempt> = attempts
@@ -844,9 +907,12 @@ pub fn rework_text(attempts: &[Attempt], round: i64, language: &str) -> String {
         };
         format!("{intro}\n{}", earlier.join("\n"))
     });
+    let pull_request_stands = watch::earlier_text(attempts, round, language);
     [
         still_stands,
+        pull_request_stands,
         approver_still_stands,
+        from_pull_request,
         from_person,
         from_approver,
     ]
@@ -1393,6 +1459,10 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
     full.push(WorkflowStep::Deliver {
         id: "pull-request".into(),
     });
+    full.push(WorkflowStep::Watch {
+        id: text("watch", "vigilar").into(),
+        max_rounds: 3,
+    });
 
     let learnings = if es { "aprendizajes" } else { "learnings" };
     let learner = |reviewers: &[&str]| {
@@ -1721,6 +1791,7 @@ mod tests {
                 "aprobador",
                 "humano",
                 "pull-request",
+                "vigilar",
                 "aprendizajes"
             ]
         );
@@ -3393,6 +3464,148 @@ mod tests {
             ..worker("ship", ToolProfile::ReadOnly)
         };
         assert_eq!(validate(&[group(vec![reviewer(), inside])]), invalid);
+    }
+
+    #[test]
+    fn following_a_pull_request_needs_one_and_somewhere_for_the_work_to_go_back_to() {
+        let watch = |max_rounds| WorkflowStep::Watch {
+            id: "watch".into(),
+            max_rounds,
+        };
+        let builder = || step_of(worker("builder", ToolProfile::Build));
+        let approval = || WorkflowStep::Approval { id: "human".into() };
+        let deliver = || WorkflowStep::Deliver { id: "pr".into() };
+        let refused = |code: &str| Err(problem(code, "watch"));
+        assert_eq!(
+            validate(&[builder(), approval(), watch(3), deliver()]),
+            refused("watchNeedsDelivery")
+        );
+        assert_eq!(
+            validate(&[
+                step_of(worker("reader", ToolProfile::ReadOnly)),
+                approval(),
+                deliver(),
+                watch(3)
+            ]),
+            refused("watchNeedsBuilder")
+        );
+        // A builder after the approval would put its work on GitHub with nobody looking.
+        assert_eq!(
+            validate(&[approval(), builder(), deliver(), watch(3)]),
+            refused("watchNeedsBuilder")
+        );
+        assert_eq!(
+            validate(&[builder(), approval(), deliver(), watch(MAX_ROUNDS + 1)]),
+            refused("tooManyRounds")
+        );
+        // Nor one that an approver sends the work back to there.
+        let polish = || step_of(worker("polish", ToolProfile::Build));
+        let approver_to = |to: &str| step_of(approver(to));
+        assert_eq!(
+            validate(&[
+                builder(),
+                approval(),
+                polish(),
+                approver_to("polish"),
+                deliver(),
+                watch(3)
+            ]),
+            refused("watchNeedsBuilder")
+        );
+        assert_eq!(
+            validate(&[
+                builder(),
+                approval(),
+                polish(),
+                approver_to("builder"),
+                deliver(),
+                watch(3)
+            ]),
+            Ok(()),
+            "the person is asked again on the way"
+        );
+        for rounds in [0, MAX_ROUNDS] {
+            let steps = [builder(), approval(), deliver(), watch(rounds)];
+            assert_eq!(validate(&steps), Ok(()));
+        }
+        let saved = serde_json::to_value(watch(3)).unwrap();
+        assert_eq!(
+            saved,
+            serde_json::json!({ "type": "watch", "id": "watch", "maxRounds": 3 })
+        );
+    }
+
+    #[test]
+    fn a_delivery_needs_a_person_to_have_approved_it_in_its_round() {
+        let steps = vec![
+            step_of(worker("builder", ToolProfile::Build)),
+            WorkflowStep::Approval { id: "human".into() },
+            WorkflowStep::Deliver { id: "pr".into() },
+        ];
+        let human = |state: AttemptState, round: i64| {
+            let mut attempt = recorded(&[("human", "approval", "worker", state, "")]).remove(0);
+            attempt.round = round;
+            attempt
+        };
+        let approved =
+            |attempts: &[Attempt], round| approved_in_round(&steps, attempts, round, "pr");
+        assert!(!approved(&[], 0));
+        assert!(approved(&[human(Succeeded, 0)], 0));
+        assert!(
+            !approved(&[human(Succeeded, 0)], 1),
+            "that was another round's"
+        );
+        for state in [
+            AttemptState::WaitingApproval,
+            AttemptState::Skipped,
+            AttemptState::Rejected,
+            Returned,
+        ] {
+            assert!(
+                !approved(&[human(Succeeded, 0), human(state, 1)], 1),
+                "{state:?}"
+            );
+        }
+        assert!(!approved_in_round(
+            &steps[1..2],
+            &[human(Succeeded, 0)],
+            0,
+            "pr"
+        ));
+        // An approval before where rework starts is asked once.
+        let first = vec![
+            WorkflowStep::Approval { id: "human".into() },
+            step_of(worker("builder", ToolProfile::Build)),
+            step_of(approver("builder")),
+            WorkflowStep::Deliver { id: "pr".into() },
+        ];
+        assert!(approved_in_round(&first, &[human(Succeeded, 0)], 1, "pr"));
+    }
+
+    #[test]
+    fn what_the_pull_request_asks_for_gets_as_many_rounds_as_the_request_did() {
+        let mut attempts = recorded(&[
+            ("approver", "agent", "approver", Succeeded, ""),
+            ("approver", "agent", "approver", Succeeded, ""),
+            ("watch", "watch", "worker", Returned, ""),
+            ("human", "approval", "worker", Returned, ""),
+        ]);
+        for (index, round) in [(0, 0), (1, 1), (2, 2), (3, 3)] {
+            attempts[index].round = round;
+        }
+        assert_eq!(rounds_on_its_own(&attempts[..2], 2), 2, "both used");
+        assert_eq!(
+            rounds_on_its_own(&attempts[..3], 3),
+            0,
+            "and here it starts again"
+        );
+        assert_eq!(
+            rounds_on_its_own(&attempts, 4),
+            0,
+            "a person asked for that one"
+        );
+        assert_eq!(rounds_on_its_own(&attempts, 5), 1);
+        assert_eq!(rounds_on_its_own(&[], 2), 2, "without one it's as it was");
     }
 
     #[test]

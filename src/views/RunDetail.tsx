@@ -1,10 +1,10 @@
-import { AlertTriangle, Check, CircleQuestionMark, ExternalLink, FileDiff, GitPullRequest, Layers, Loader2, X } from "lucide-react";
+import { AlertTriangle, Check, CircleQuestionMark, ExternalLink, FileDiff, GitPullRequest, Layers, Loader2, Radar, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CommandChange, isActive, type PrState, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
-import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, breakableIds, changedSince, checkSentBackInto, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, type FindingShown, focusAttempt, gist, latestOfEachStep, notProvenInRound, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, standingChecks, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf, whyNotProven } from "../lib/audit";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CommandChange, isActive, type PrState, type PullRequestAsked, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
+import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, breakableIds, changedSince, checkSentBackInto, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, type FindingShown, focusAttempt, gist, latestOfEachStep, notProvenInRound, pullRequestAsked, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, standingChecks, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf, whyNotProven } from "../lib/audit";
 import { contractChangedText, partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, canSendBackFromCheck, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
 import { formatCost, formatDateTime, formatDuration, formatNumber } from "../lib/format";
@@ -33,6 +33,7 @@ const DECISIONS: Record<AttemptState, string> = {
   blocked: "run.decideBlocked",
   waitingApproval: "run.decideApproval",
   waitingAnswers: "run.decideAnswers",
+  watching: "run.decideDelivered",
   rejected: "run.decideRejected",
   returned: "run.decideActive",
   postponed: "run.decideActive",
@@ -136,9 +137,11 @@ export function Summary({ run, attempts, current, commands, rawCheck, closedBy, 
   const skipped = skippedSteps(attempts);
   // A step that's done says nothing about the run while others are still to come.
   const between = !run?.finishedAt && (current.state === "succeeded" || current.state === "skipped");
+  // In a round its pull request asked for, what there is to decide is the round's, as in any other.
+  const followed = attempts.some((a) => a.kind === "watch");
   // A run that only had to work out what's asked has that to say for itself, and no worker to say it.
   const onlyUnderstood = !mapper && explaining.length === 0 && current.state === "succeeded" ? specOf(current) : null;
-  const decision = mapper && current.state === "succeeded" ? "run.decideMap" : run?.prUrl ? PR_DECISIONS[run.prState ?? "draft"] : current.reason?.code === "reworkLimit" ? "run.decideReworkLimit" : between ? "run.decideActive" : DECISIONS[current.state];
+  const decision = mapper && current.state === "succeeded" ? "run.decideMap" : run?.prUrl && (run.finishedAt || current.state === "watching" || !followed) ? PR_DECISIONS[run.prState ?? "draft"] : current.reason?.code === "reworkLimit" ? "run.decideReworkLimit" : between ? "run.decideActive" : DECISIONS[current.state];
   return (
     <Card className={cx("grid gap-5 p-4 md:grid-cols-2", going && "mt-6 border-l-2 border-l-accent")}>
       <h2 className="text-[13px] font-semibold md:col-span-2">{t(going ? "run.summaryTitle" : "run.summaryTitleDone")}</h2>
@@ -677,6 +680,9 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
 
   const outcome = approvalOutcome(run.workflow, attempt.stepId, files);
   const empty = outcome === "nothingToDeliver";
+  const askedByPullRequest = pullRequestAsked(attempts);
+  // As of the last look, which is every few minutes. Approving checks it again before anything is pushed.
+  const branchMoved = askedByPullRequest !== null && Boolean(run.prHead) && Boolean(askedByPullRequest.head) && run.prHead !== askedByPullRequest.head;
   const delivers = outcome === "delivers" || outcome === "deliversLater";
   const explaining = explainingAttempts(attempts);
   // After rework, how it started and how it ended tell the story: the end is what each step said in the last round.
@@ -724,8 +730,8 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
     // Short enough for its buttons to show without scrolling: the window less the top bar (38), the
     // status bar (24), and the run's title and the page's padding above and below (102).
     <Card role="alert" className="flex max-h-[calc(100vh-164px)] flex-col overflow-y-auto border-warning/40 p-4">
-      <p className="text-[14px] font-semibold">{t(agreeing ? "run.agreementTitle" : empty ? "run.approvalEmptyTitle" : outcome === "delivers" ? "run.approvalTitle" : "run.approvalContinueTitle")}</p>
-      <p className="mt-1 mb-3 text-[12.5px] text-muted">{t(agreeing ? "run.agreementBody" : empty ? "run.approvalEmptyBody" : "run.approvalBody")}</p>
+      <p className="text-[14px] font-semibold">{t(agreeing ? "run.agreementTitle" : empty ? "run.approvalEmptyTitle" : outcome !== "delivers" ? "run.approvalContinueTitle" : run.prUrl ? "run.approvalPrTitle" : "run.approvalTitle")}</p>
+      <p className="mt-1 mb-3 text-[12.5px] text-muted">{t(agreeing ? "run.agreementBody" : empty ? "run.approvalEmptyBody" : run.prUrl ? "run.approvalPrBody" : "run.approvalBody")}</p>
       {/* What's being approved never shrinks away: in a short window the card scrolls instead. */}
       <dl className="max-h-[50vh] min-h-24 shrink-0 overflow-y-auto">
         {agreeing && (
@@ -818,6 +824,11 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
             )}
           </ApprovalRow>
         )}
+        {askedByPullRequest && (
+          <ApprovalRow label={t("run.askedByPullRequest")} note={t("run.round", { number: run.round + 1 })}>
+            <AskedByPullRequest asked={askedByPullRequest} />
+          </ApprovalRow>
+        )}
         {!empty && (
           <ApprovalRow
             label={t("run.whatChanged")}
@@ -890,6 +901,12 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
         </p>
       )}
       <LocalhostNote attempts={attempts} />
+      {branchMoved && (
+        <p className="mt-2 flex gap-1.5 rounded-md border border-warning/40 bg-inset p-2 text-[12.5px] font-medium text-warning">
+          <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+          {t("run.branchMoved")}
+        </p>
+      )}
       {/* Right above the note and the buttons: the focus starts there, so this is in view with them. */}
       {notProven > 0 && (
         <div className="mt-2 flex items-start gap-2 rounded-md border border-border-strong bg-inset py-1 pr-1 pl-2 text-[12.5px]">
@@ -926,7 +943,7 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
               <Button disabled={busy || !note.trim()} onKeyDown={ignoreEnter} onClick={() => answer(false)}>
                 {t("run.reject")}
               </Button>
-              <p className="mt-1 text-[11.5px] text-muted">{t("run.approvalRejectHint")}</p>
+              <p className="mt-1 text-[11.5px] text-muted">{t(run.prUrl ? "run.approvalPrRejectHint" : "run.approvalRejectHint")}</p>
               {!note.trim() && <p className="mt-0.5 text-[11.5px] text-muted">{t("run.approvalRejectNeedsReason")}</p>}
             </div>
             <div>
@@ -937,9 +954,9 @@ export function ApprovalCard({ attempt, run, attempts, files, commands, rawCheck
                 onClick={() => answer(true)}
               >
                 {outcome === "delivers" && <GitPullRequest size={14} />}
-                {t(agreeing ? "run.agreementApprove" : outcome === "delivers" ? "run.approve" : "run.approveContinue")}
+                {t(agreeing ? "run.agreementApprove" : outcome !== "delivers" ? "run.approveContinue" : run.prUrl ? "run.approvePr" : "run.approve")}
               </Button>
-              <p className="mt-1 text-[11.5px] text-muted">{t(agreeing ? "run.agreementApproveHint" : outcome === "delivers" ? "run.approvalApproveHint" : outcome === "deliversLater" ? "run.approvalLaterHint" : "run.approvalNoPushHint")}</p>
+              <p className="mt-1 text-[11.5px] text-muted">{t(agreeing ? "run.agreementApproveHint" : outcome === "delivers" ? (run.prUrl ? "run.approvalPrApproveHint" : "run.approvalApproveHint") : outcome === "deliversLater" ? "run.approvalLaterHint" : "run.approvalNoPushHint")}</p>
               {delivers && (
                 <p className="selectable mt-0.5 flex flex-wrap gap-x-2 text-[11.5px] text-muted">
                   {t("run.approvalWhere")}
@@ -1162,6 +1179,97 @@ function CommandChanges({ changes, setupFirst, limited }: { changes: CommandChan
   );
 }
 
+/** What a pull request asked for, in a few lines: what failed, what it conflicts with, and what people said. */
+function AskedByPullRequest({ asked }: { asked: PullRequestAsked }) {
+  const { t } = useTranslation();
+  return (
+    <ul className="selectable space-y-0.5 break-words">
+      {asked.ahead && <li>{t("run.askedAhead")}</li>}
+      {asked.conflict && <li>{t("run.askedConflict", { branch: asked.conflict })}</li>}
+      {(asked.checks ?? []).length > 0 && <li>{t("run.askedChecks", { names: (asked.checks ?? []).map((check) => check.name).join(", ") })}</li>}
+      {(asked.comments ?? []).map((comment) => (
+        <li key={comment.ids.join()}>
+          <span className="font-medium">{comment.authors.join(", ")}</span>
+          {comment.file && <span className="ml-1 font-mono text-[11.5px] text-muted">{comment.line ? `${comment.file}:${comment.line}` : comment.file}</span>}: {gist(comment.text, 160).text}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/**
+ * A run that follows its pull request, that left it to the person, or that couldn't deliver to it.
+ * Each of these asks GitHub first, so nothing can be pressed again meanwhile.
+ */
+function WatchActions({ attempt, act: run }: { attempt: Attempt; act: (run: () => Promise<unknown>) => Promise<unknown> }) {
+  const { t } = useTranslation();
+  // What the person wants changed. Null while closed.
+  const [sendingBack, setSendingBack] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const act = (call: () => Promise<unknown>) => {
+    setBusy(true);
+    return run(call).finally(() => setBusy(false));
+  };
+  const left = attempt.state === "blocked";
+  const delivering = attempt.kind === "deliver";
+  const asked = left ? attempt.output?.pullRequest : undefined;
+  return (
+    <Card role={left ? "alert" : undefined} className={cx("p-4", left && "border-warning/40")}>
+      <p className="flex items-center gap-2 text-[13px] font-semibold">
+        <Radar size={15} className={left ? "text-warning" : "text-accent"} />
+        {t(delivering ? "run.aheadTitle" : left ? "run.watchLeftTitle" : "run.watchTitle")}
+      </p>
+      {attempt.reason ? <p className="selectable mt-1.5 text-[12.5px] text-warning">{reasonText(t, attempt.reason)}</p> : <p className="mt-1.5 text-[12.5px] text-muted">{t("run.watchNote")}</p>}
+      {asked && (
+        <div className="mt-2 text-[12.5px]">
+          <AskedByPullRequest asked={asked} />
+        </div>
+      )}
+      <div className="mt-2.5 flex flex-wrap gap-2">
+        {delivering && (
+          <Button variant="primary" disabled={busy} onClick={() => void act(() => api.watchCatchUp(attempt.id))}>
+            {t("run.aheadCatchUp")}
+          </Button>
+        )}
+        {sendingBack === null && (
+          <Button disabled={busy} onClick={() => setSendingBack("")}>
+            {t("run.watchSendBack")}
+          </Button>
+        )}
+        {left && (
+          <Button disabled={busy} onClick={() => void act(() => api.attemptRetry(attempt.id, false))}>
+            {t(delivering ? "run.retry" : "run.watchGoOn")}
+          </Button>
+        )}
+        {delivering ? (
+          <Button variant="ghost" disabled={busy} onClick={() => void act(() => api.attemptAbandon(attempt.id))}>
+            {t("run.abandon")}
+          </Button>
+        ) : (
+          <Button variant="ghost" disabled={busy} onClick={() => void act(() => api.watchStop(attempt.id))}>
+            {t("run.watchStop")}
+          </Button>
+        )}
+      </div>
+      {sendingBack !== null && (
+        <div className="mt-2.5 rounded-md border border-border bg-inset p-2">
+          <Field label={t("run.sendBackLabel")} hint={t("run.watchSendBackHint")}>
+            <textarea autoFocus rows={2} value={sendingBack} onChange={(e) => setSendingBack(e.target.value)} className={`${inputClass} resize-y`} />
+          </Field>
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button variant="primary" disabled={busy || !sendingBack.trim()} onClick={() => void act(() => api.approvalSendBack(attempt.id, sendingBack.trim()))}>
+              {t("run.sendBackAction")}
+            </Button>
+            <Button variant="ghost" onClick={() => setSendingBack(null)}>
+              {t("run.sendBackCancel")}
+            </Button>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 /**
  * What can be done with a step that stopped. `agentsWrote` says whether an agent that can change files
  * has had the run's copy: a setup started then gets no more than the agents do, and the person is told
@@ -1190,6 +1298,8 @@ export function Actions({ attempt, projectId, agentsWrote, canSendBack = false, 
       </Card>
     );
   }
+  if (attempt.kind === "watch" && (attempt.state === "watching" || attempt.state === "blocked")) return <WatchActions attempt={attempt} act={act} />;
+  if (attempt.kind === "deliver" && attempt.state === "blocked" && attempt.reason?.code === "pullRequestAhead") return <WatchActions attempt={attempt} act={act} />;
   if (attempt.state === "stalled") {
     return (
       <Card role="alert" className="border-warning/40 p-4">
@@ -1334,6 +1444,30 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       if (skippedAsUnchanged(skipped)) return line(t("flow.skippedUnchanged"), "text-subtle");
       return line(skippedAsSmall(skipped) ? t("activity.skippedSmall") : skippedForRisks(skipped) ? t("activity.skippedRisks") : t("activity.skipped"), "text-subtle");
     }
+    case "watching":
+      return line(t("activity.watching"), "text-subtle");
+    case "watchEnded":
+      return line(t(`activity.watchEnded.${data.ended}`));
+    case "pullRequestSentBack":
+    case "pullRequestLeft": {
+      const asked = item.kind === "pullRequestLeft" ? (data.asked ?? {}) : data;
+      const what = [
+        (asked.checks ?? []).length > 0 && t("run.askedChecks", { names: asked.checks.join(", ") }),
+        asked.ahead && t("run.askedAhead"),
+        asked.conflict && t("run.askedConflict", { branch: asked.conflict }),
+        asked.comments > 0 && t("activity.askedComments", { count: asked.comments }),
+      ].filter(Boolean);
+      return (
+        <div>
+          {line(item.kind === "pullRequestLeft" ? t("activity.pullRequestLeft") : t("activity.pullRequestSentBack", { round: data.round + 1 }), "text-warning")}
+          <ul className="selectable mt-0.5 list-disc space-y-0.5 pl-4 text-[12.5px] break-words text-muted">
+            {what.map((text) => (
+              <li key={text}>{text}</li>
+            ))}
+          </ul>
+        </div>
+      );
+    }
     case "postponed":
       return line(t("activity.postponed", { names: (data.steps ?? []).join(", ") }), "font-medium");
     case "sizeDecided":
@@ -1434,6 +1568,10 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
           {data.leftWorkspaceDirty && line(t("activity.dirty"), "text-warning")}
         </div>
       );
+    case "deliveredAgain":
+      return line(t("activity.deliveredAgain", { account: data.account, url: data.url }), "font-medium");
+    case "pullRequestNotSynced":
+      return line(reasonText(t, data.reason), "text-warning");
     case "delivered":
       return line(t("activity.delivered", { account: data.account, url: data.url }), "font-medium");
     case "init":

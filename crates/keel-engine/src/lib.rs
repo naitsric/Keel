@@ -29,6 +29,7 @@ mod specs;
 #[cfg(test)]
 mod testing;
 mod verification;
+mod watch;
 mod workflows;
 
 use std::collections::{HashMap, HashSet};
@@ -410,6 +411,8 @@ struct Inner {
     /// Starting a step reads what ran and then adds to it. One at a time, or a step could start twice.
     advancing: Mutex<()>,
     creating_workspace: Mutex<()>,
+    /// The runs whose pull request a look is dealing with right now. See `watch`.
+    followed: Mutex<HashSet<String>>,
     /// One lock for each project being fetched to read and each run making its copies. See
     /// `joint::prepare_read_copies`.
     read_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
@@ -488,6 +491,7 @@ impl Engine {
                 controls: Mutex::default(),
                 advancing: Mutex::new(()),
                 creating_workspace: Mutex::new(()),
+                followed: Mutex::new(HashSet::new()),
                 read_locks: Mutex::default(),
                 starting_map: Mutex::default(),
                 issue_looks: Mutex::default(),
@@ -1219,7 +1223,16 @@ impl Engine {
         // From a check that failed too, where Keel left it to them: see `failed_checks`.
         let failed_check =
             attempt.kind == "check" && attempt.state == AttemptState::Failed.as_str();
-        if !failed_check && attempt.state != AttemptState::WaitingApproval.as_str() {
+        // And from the step that follows the pull request, or a delivery that couldn't go on top of
+        // it, which no assistant can.
+        let followed = by.is_none()
+            && (attempt.kind == "watch"
+                || (attempt.kind == "deliver"
+                    && attempt
+                        .reason
+                        .as_ref()
+                        .is_some_and(|reason| reason["code"] == "pullRequestAhead")));
+        if !failed_check && !followed && attempt.state != AttemptState::WaitingApproval.as_str() {
             return Err(Error::InvalidState);
         }
         let instructions = instructions.trim();
@@ -1231,6 +1244,9 @@ impl Engine {
         if failed_check {
             self.inner
                 .person_sends_check_back(&attempt, &steps, instructions, by)?;
+        } else if followed {
+            self.inner
+                .send_back_to_follow(&attempt, Some(instructions))?;
         } else if !workflows::can_send_back(&steps, &attempt.step_id) {
             return Err(Error::Blocked(Reason::NothingToSendBackTo));
         } else if !store.return_attempt(attempt_id, &attempt.run_id, instructions, by)? {
@@ -1434,6 +1450,7 @@ impl Engine {
                 state,
                 AttemptState::WaitingApproval
                     | AttemptState::WaitingAnswers
+                    | AttemptState::Watching
                     | AttemptState::Returned
                     | AttemptState::Postponed
             )
@@ -1560,8 +1577,10 @@ impl Engine {
         let guard = locked(&self.inner.advancing);
         let attempt = self.inner.store.attempt(attempt_id)?;
         let state = AttemptState::parse(&attempt.state).ok_or(Error::InvalidState)?;
-        // What worked has moved on, and leaving it would close the run under whatever came next.
-        if state.is_active()
+        // What worked has moved on, and leaving it would close the run under whatever came next. A
+        // pull request that's followed was delivered: it stops being followed instead.
+        if attempt.kind == "watch"
+            || state.is_active()
             || matches!(
                 state,
                 AttemptState::Succeeded | AttemptState::Returned | AttemptState::Postponed
@@ -1580,6 +1599,8 @@ impl Engine {
                 .any(|a| AttemptState::parse(&a.state).is_some_and(AttemptState::is_active));
             if run.finished_at.is_some()
                 || state == AttemptState::Skipped
+                // It was delivered, and only the person stops following that.
+                || watch::follows(&attempts)
                 || working
                 || !workflows::is_latest_of_its_step(&attempts, &attempt)
             {
@@ -1654,7 +1675,7 @@ impl Engine {
     /// Everything the run has changed so far, for the person deciding whether it goes out.
     pub fn run_diff(&self, run_id: &str) -> Result<String> {
         let attempts = self.inner.store.attempts_of_run(run_id)?;
-        let Some(base) = attempts.iter().find_map(|a| a.sha_before.clone()) else {
+        let Some(base) = self.inner.base_of(run_id, &attempts) else {
             return Ok(String::new());
         };
         let workspace = self.inner.workspace(run_id);
@@ -2156,7 +2177,13 @@ impl Inner {
             return false;
         };
         if run.finished_at.is_none() {
-            return false;
+            // Setup doesn't run again if the pull request sends the work back.
+            return !SETUP_INSTALLS.contains(&name)
+                && self.store.attempts_of_run(run_id).is_ok_and(|attempts| {
+                    attempts
+                        .last()
+                        .is_some_and(|a| a.state == AttemptState::Watching.as_str())
+                });
         }
         if !SETUP_INSTALLS.contains(&name) || !is_trial(&run) {
             return true;
@@ -2440,7 +2467,8 @@ impl Inner {
             }
             WorkflowStep::Parallel { .. }
             | WorkflowStep::Approval { .. }
-            | WorkflowStep::Deliver { .. } => (
+            | WorkflowStep::Deliver { .. }
+            | WorkflowStep::Watch { .. } => (
                 String::new(),
                 None,
                 "none".to_owned(),
@@ -2463,10 +2491,10 @@ impl Inner {
             },
             round: run.round,
             number,
-            state: if matches!(step, WorkflowStep::Approval { .. }) {
-                AttemptState::WaitingApproval
-            } else {
-                AttemptState::Queued
+            state: match step {
+                WorkflowStep::Approval { .. } => AttemptState::WaitingApproval,
+                WorkflowStep::Watch { .. } => AttemptState::Watching,
+                _ => AttemptState::Queued,
             },
             model_requested: model,
             effort,
@@ -2491,6 +2519,13 @@ impl Inner {
         if matches!(step, WorkflowStep::Approval { .. }) {
             self.store.append_event(&id, "waiting", &json!({}))?;
             self.look_at_earlier_parts(run_id);
+            return Ok(id);
+        }
+        // Nothing runs while it's followed: what its steps built can go, and is built again if the
+        // work comes back.
+        if matches!(step, WorkflowStep::Watch { .. }) {
+            self.store.append_event(&id, "watching", &json!({}))?;
+            self.free_builds(run_id);
             return Ok(id);
         }
         locked(&self.controls).insert(id.clone(), Control::default());
@@ -2618,7 +2653,7 @@ impl Inner {
         let steps: Vec<WorkflowStep> =
             serde_json::from_value(run.workflow.clone()).unwrap_or_default();
         let workspace = self.workspace(&run.id);
-        let base = attempts.iter().find_map(|a| a.sha_before.clone());
+        let base = self.base_of(&run.id, attempts);
         let git = locked(&self.tools).git.clone().map(Git::new);
         // What comes from the request, the repo or another agent goes in a tag of its own, where
         // the prompt has it: a saved workflow's prompt gets it too, in the order the person wrote.
@@ -2880,7 +2915,7 @@ impl Inner {
                     && workflows::wants_rework(attempt)
                 {
                     // A round a person asked for isn't the approver's to count.
-                    let its_rounds = run.round - workflows::rounds_asked_by_a_person(&attempts);
+                    let its_rounds = workflows::rounds_on_its_own(&attempts, run.round);
                     if its_rounds < i64::from(*max_rounds) {
                         self.store
                             .patch_run(run_id, &[("round", Value::Integer(run.round + 1))])?;
@@ -3024,7 +3059,7 @@ impl Inner {
         run_id: &str,
         attempts: &[keel_store::Attempt],
     ) -> Option<git::ChangeSize> {
-        let base = attempts.iter().find_map(|a| a.sha_before.clone())?;
+        let base = self.base_of(run_id, attempts)?;
         let workspace = self.workspace(run_id);
         if !workspace.join(".git").exists() {
             return None;
@@ -3144,6 +3179,46 @@ impl Inner {
             started_at: now(),
         })?;
         self.end_skipped(run_id, &id, &reason, &json!({ "reason": reason }))
+    }
+
+    /// The same for any step of a round whose pull request is over.
+    fn leave_out(
+        &self,
+        run: &keel_store::Run,
+        step: &WorkflowStep,
+        attempts: &[keel_store::Attempt],
+    ) -> Result<()> {
+        let reason = Reason::PullRequestOver;
+        if let WorkflowStep::Agent(spec) = step {
+            self.record_skipped(&run.id, spec, attempts, reason)?;
+            return Ok(());
+        }
+        let id = new_id();
+        self.store.add_attempt(&NewAttempt {
+            id: id.clone(),
+            run_id: run.id.clone(),
+            step_id: step.id().to_owned(),
+            kind: step.kind().to_owned(),
+            role: "worker".to_owned(),
+            round: run.round,
+            number: workflows::next_number(attempts, step.id()),
+            state: AttemptState::Skipped,
+            model_requested: String::new(),
+            effort: None,
+            tools: "none".to_owned(),
+            max_turns: None,
+            max_budget_usd: None,
+            language: run.language.clone(),
+            prompt: String::new(),
+            system_prompt_sources: "[]".to_owned(),
+            settings: "{}".to_owned(),
+            session_id: new_id(),
+            resumed_from: None,
+            workspace: self.workspace(&run.id).to_string_lossy().into_owned(),
+            raw_path: String::new(),
+            started_at: now(),
+        })?;
+        self.end_skipped(&run.id, &id, &reason, &json!({ "reason": reason }))
     }
 
     fn end_skipped(

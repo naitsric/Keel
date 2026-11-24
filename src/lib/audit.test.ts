@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { Attempt, AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, agentCouldHaveWritten, answersIn, approvalOutcome, askedText, breakableIds, changedSince, checkSentBackInto, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, findingsOf, focusAttempt, gist, latestOfEachStep, localhostOpenIn, notProvenInRound, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, standingChecks, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows, whyNotProven } from "./audit";
+import { accountsOf, activityFrom, agentCouldHaveWritten, answersIn, approvalOutcome, askedText, breakableIds, changedSince, checkSentBackInto, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, findingsOf, focusAttempt, followsPullRequest, gist, latestOfEachStep, localhostOpenIn, notProvenInRound, pipeHidesExitCode, pullRequestAsked, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, standingChecks, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows, whyNotProven } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -19,6 +19,44 @@ describe("whether a run had localhost open", () => {
     expect(localhostOpenIn([builder(), check()])).toBe(false);
     expect(localhostOpenIn([builder(false), check(false), { settings: {} }, { settings: null }])).toBe(false);
     expect(localhostOpenIn([])).toBe(false);
+  });
+});
+
+describe("a run that follows its pull request", () => {
+  const of = (stepId: string, state: Attempt["state"], fields: Partial<Attempt> = {}) => ({ id: stepId, stepId, kind: "agent", role: "worker", state, round: 0, output: null, ...fields }) as Attempt;
+  const watch = (state: Attempt["state"], fields: Partial<Attempt> = {}) => of("watch", state, { kind: "watch", ...fields });
+
+  it("has done its work, so it isn't going on, and it's what the page is about", () => {
+    const attempts = [of("builder", "succeeded"), watch("watching")];
+    expect(followsPullRequest(attempts)).toBe(true);
+    expect(stillGoing({ finishedAt: null }, attempts)).toBe(false);
+    expect(focusAttempt(attempts)?.stepId).toBe("watch");
+  });
+
+  it("goes on again once the pull request sends it back, and waits when it's left to the person", () => {
+    const back = [of("builder", "succeeded"), watch("returned"), of("builder", "running", { id: "b2", round: 1 })];
+    expect(followsPullRequest(back)).toBe(false);
+    expect(stillGoing({ finishedAt: null }, back)).toBe(true);
+    const left = [of("builder", "succeeded"), watch("blocked")];
+    expect(stillGoing({ finishedAt: null }, left)).toBe(false);
+    expect(focusAttempt(left)?.state).toBe("blocked");
+  });
+
+  it("knows what the pull request asked for until what comes of it is delivered", () => {
+    const asked = { head: "abc", checks: [{ name: "tests", log: "boom" }] };
+    const output = (pullRequest: unknown) => ({ pullRequest }) as unknown as Attempt["output"];
+    const back = watch("returned", { output: output(asked) });
+    expect(pullRequestAsked([])).toBeNull();
+    expect(pullRequestAsked([back])).toEqual(asked);
+    // A check failed on the way, so it's another round of the same.
+    expect(pullRequestAsked([back, of("check", "returned", { kind: "check", round: 1 }), of("human", "waitingApproval", { kind: "approval", round: 2 })])).toEqual(asked);
+    const delivered = of("pr", "succeeded", { kind: "deliver", round: 1 });
+    expect(pullRequestAsked([back, delivered, watch("watching", { round: 1 })])).toBeNull();
+    expect(pullRequestAsked([watch("blocked", { output: output(asked) })])).toBeNull();
+    // One sent back by a person, and then by a delivery that couldn't go on top of it.
+    expect(pullRequestAsked([watch("returned", { output: { instructions: "Again" } as unknown as Attempt["output"] })])).toBeNull();
+    const ahead = { head: "def", ahead: true };
+    expect(pullRequestAsked([back, of("pr", "returned", { kind: "deliver", output: output(ahead) })])).toEqual(ahead);
   });
 });
 

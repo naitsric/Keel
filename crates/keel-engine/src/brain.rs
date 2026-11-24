@@ -125,6 +125,8 @@ pub enum Happened {
     ApproverSentBack,
     /// A person sent the work back, or the assistant they allowed to, named here.
     SentBack { by: Option<String> },
+    /// Its pull request sent the work back: what failed in its CI, and what people commented.
+    PullRequestSentBack,
 }
 
 /// The tail of `text`, at most `limit` bytes, on a character boundary.
@@ -201,6 +203,13 @@ pub fn trail_entries(attempts: &[Attempt], check_results: &[Event]) -> Vec<Trail
         } else if attempt.role == "approver" && workflows::wants_rework(attempt) {
             entries.extend(sent_back(Happened::ApproverSentBack));
         } else if attempt.state == AttemptState::Returned.as_str() {
+            if let Some(text) = crate::watch::trail(attempt) {
+                entries.push(TrailEntry {
+                    what: Happened::PullRequestSentBack,
+                    round: attempt.round,
+                    text: mask_secrets(&text),
+                });
+            }
             entries.extend(sent_back(Happened::SentBack {
                 by: workflows::sent_back_by(attempt).map(str::to_owned),
             }));
@@ -230,6 +239,12 @@ fn entry_text(entry: &TrailEntry, language: &str) -> String {
         }
         (Happened::ApproverSentBack, true) => format!("Ronda {round}, el aprobador:\n{text}\n"),
         (Happened::ApproverSentBack, false) => format!("Round {round}, the approver:\n{text}\n"),
+        (Happened::PullRequestSentBack, true) => {
+            format!("Ronda {round}, el pull request:\n{text}\n")
+        }
+        (Happened::PullRequestSentBack, false) => {
+            format!("Round {round}, the pull request:\n{text}\n")
+        }
         (Happened::SentBack { by: None }, true) => format!("Ronda {round}, una persona:\n{text}\n"),
         (Happened::SentBack { by: None }, false) => format!("Round {round}, a person:\n{text}\n"),
         (Happened::SentBack { by: Some(by) }, true) => {
@@ -288,7 +303,14 @@ pub fn trail_text(entries: &[TrailEntry], language: &str, limit: usize) -> Strin
             "Checks que fallaron en el camino:\n",
         ),
         (
-            |what| matches!(what, Happened::ApproverSentBack | Happened::SentBack { .. }),
+            |what| {
+                matches!(
+                    what,
+                    Happened::ApproverSentBack
+                        | Happened::SentBack { .. }
+                        | Happened::PullRequestSentBack
+                )
+            },
             "Work that was sent back, and what was asked for:\n",
             "Trabajo que se devolvió, y lo que se pidió:\n",
         ),
