@@ -5,7 +5,7 @@ import { useTranslation } from "react-i18next";
 import type { AttemptState, StepRole } from "../lib/api";
 import { type Flow, type FlowAttempt, type FlowNode, layoutFlow, nextItem, type PlacedNode, scrollToShow } from "../lib/flow";
 import { putOffForSetup } from "../lib/audit";
-import { skippedAsSmall } from "../lib/size";
+import { skippedAsSmall, skippedAsUnchanged, skippedWithNothingToFix } from "../lib/size";
 import { cx, StateBadge } from "../ui/primitives";
 
 const KIND_LABELS: Record<FlowNode["kind"], string> = {
@@ -72,11 +72,28 @@ function roundText(t: TFunction, node: FlowNode<FlowAttempt>): string | null {
 
 const skippedForBeingSmall = (node: FlowNode<FlowAttempt>) => node.attempt !== null && skippedAsSmall(node.attempt);
 
+const CONDITION_LABELS: Record<NonNullable<FlowNode["condition"]>, string> = {
+  notSmall: "flow.onlyIfNotSmall",
+  somethingToFix: "flow.onlyIfSomethingToFix",
+  onlyIfChanged: "flow.onlyIfChanged",
+};
+
+/** Why it was left out, in a few words, when that was its condition. Then the condition says nothing more. */
+function conditionSkip(node: FlowNode<FlowAttempt>): string | null {
+  if (node.attempt === null) return null;
+  if (skippedAsSmall(node.attempt)) return "flow.skippedSmallWhy";
+  if (skippedWithNothingToFix(node.attempt)) return "flow.skippedNothingToFix";
+  return skippedAsUnchanged(node.attempt) ? "flow.skippedUnchanged" : null;
+}
+
+const skippedForItsCondition = (node: FlowNode<FlowAttempt>) => conditionSkip(node) !== null;
+
 /** A node's state in a word or two. A step put off for a new setup isn't a person asking for more. */
 const stateLabel = (t: TFunction, node: FlowNode<FlowAttempt>) => (node.attempt && putOffForSetup(node.attempt) ? t("states.afterSetup") : t(`states.${node.state}`));
 
 function stateText(t: TFunction, node: FlowNode<FlowAttempt>): string {
-  if (skippedForBeingSmall(node)) return t("flow.skippedSmallWhy");
+  const left = conditionSkip(node);
+  if (left) return t(left);
   return node.state === "pending" ? t("run.pending") : stateLabel(t, node);
 }
 
@@ -89,7 +106,7 @@ function describeNode(t: TFunction, node: FlowNode<FlowAttempt>, live: boolean, 
     live && stateText(t, node),
     live && node.outdated && t("flow.lastRan", { number: node.round + 1 }),
     live && roundText(t, node),
-    node.conditional && !skippedForBeingSmall(node) && t("flow.onlyIfNotSmall"),
+    node.condition && !skippedForItsCondition(node) && t(CONDITION_LABELS[node.condition]),
     problem,
   ]
     .filter(Boolean)
@@ -121,7 +138,7 @@ function NodeButton<T extends FlowAttempt>({ placed, live, selected, tabbable, p
         live && !node.minor && node.outdated && "border-dashed opacity-70",
         node.minor && "border-dashed border-border bg-transparent",
         // The diagram of a workflow that's being edited has nothing else to tell these apart by.
-        !live && node.conditional && "border-dashed",
+        !live && node.condition && "border-dashed",
         problem && "border-danger bg-danger/10",
         selected && "opacity-100 ring-2 ring-accent",
       )}

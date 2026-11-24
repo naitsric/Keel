@@ -71,6 +71,7 @@ pub use specs::of_attempt as spec_of_attempt;
 pub use specs::{Answer, AnswerChoice, Spec};
 pub use verification::in_round as verifications_in_round;
 pub use verification::{Outcome, Verification, WhyNotProven};
+pub use verification::{after_last_build, changed_since};
 pub use workflows::{
     Finding, Workflow, WorkflowDraft, breakable_ids, can_send_back, files_changed, findings_of,
     limits_with_ids,
@@ -765,6 +766,7 @@ impl Engine {
         workflow.push(WorkflowStep::Check {
             id: TRY_CHECK_STEP.to_owned(),
             run: check.to_owned(),
+            only_if_changed: false,
         });
         let what = if language.starts_with("es") {
             format!("Probar la verificación: {check}")
@@ -2554,7 +2556,9 @@ impl Inner {
         // Whoever judges the round reads what the builder said it assumed or couldn't test, whatever
         // a saved workflow's prompt leaves out. An approver gets the builder's list instead, below.
         if matches!(spec.role, StepRole::Reviewer | StepRole::Verifier) {
-            let account = workflows::builder_account(&attempts, &run.language);
+            let steps: Vec<WorkflowStep> =
+                serde_json::from_value(run.workflow.clone()).unwrap_or_default();
+            let account = workflows::builder_account(&attempts, &steps, run.round, &run.language);
             if !account.is_empty() && !prompts::uses(&spec.prompt, "builder") {
                 text.push_str(&format!("\n\n{account}"));
             }
@@ -2567,7 +2571,9 @@ impl Inner {
         // Every approver can say in which round something the change added appeared, so every one
         // is told which round this is, and what the builder said it added, whatever its prompt says.
         if matches!(spec.role, StepRole::Approver { .. }) {
-            let builder = workflows::builder_text(&attempts, &run.language);
+            let steps: Vec<WorkflowStep> =
+                serde_json::from_value(run.workflow.clone()).unwrap_or_default();
+            let builder = workflows::builder_text(&attempts, &steps, run.round, &run.language);
             let rounds = workflows::round_text(&attempts, run.round, &run.language);
             for part in [builder, rounds].iter().filter(|part| !part.is_empty()) {
                 text.push_str(&format!("\n\n{part}"));
@@ -2663,6 +2669,8 @@ impl Inner {
             "answers" => Some(with_tags(workflows::answers_text(attempts, &run.language))),
             "builder" => Some(with_tags(workflows::builder_account(
                 attempts,
+                &steps,
+                run.round,
                 &run.language,
             ))),
             "projects" => self
@@ -2759,7 +2767,7 @@ impl Inner {
                     .iter()
                     .rev()
                     .find(|a| a.step_id == id && a.round >= round)
-                    .filter(|a| !sizing::due_again(a, &attempts))
+                    .filter(|a| !sizing::due_again(&steps, a, &attempts))
             };
             let mut size = SizeThisPass::default();
             for (index, step) in steps.iter().enumerate() {
@@ -2778,7 +2786,7 @@ impl Inner {
                                     };
                                     self.record_skipped(run_id, spec, &attempts, reason)?
                                 } else if let Some(reason) =
-                                    self.treated_as_small(&run, &steps, &attempts, spec, &mut size)?
+                                    self.condition_fails(&run, &steps, &attempts, spec, &mut size)?
                                 {
                                     self.record_skipped(run_id, spec, &attempts, reason)?
                                 } else if !workflows::paths_match(&spec.paths, &changed) {
@@ -2828,10 +2836,21 @@ impl Inner {
                     }
                     if let Some(spec) = conditional
                         && let Some(reason) =
-                            self.treated_as_small(&run, &steps, &attempts, spec, &mut size)?
+                            self.condition_fails(&run, &steps, &attempts, spec, &mut size)?
                     {
                         let id = self.record_skipped(run_id, spec, &attempts, reason)?;
                         self.say_size(spec, &id, &run, &attempts, &mut size)?;
+                        continue 'round;
+                    }
+                    // What it would repeat passed, on this very code.
+                    if let WorkflowStep::Check {
+                        id,
+                        run: command,
+                        only_if_changed: true,
+                    } = step
+                        && verification::passed_on_this_code(&attempts, run.round, command)
+                    {
+                        self.record_check_skipped(run_id, id, command, &attempts)?;
                         continue 'round;
                     }
                     let number = workflows::next_number(&attempts, step.id());
@@ -2901,6 +2920,27 @@ impl Inner {
     }
 
     /// Whether a step's condition says to skip it, and why, for the record.
+    fn condition_fails(
+        &self,
+        run: &keel_store::Run,
+        steps: &[WorkflowStep],
+        attempts: &[keel_store::Attempt],
+        spec: &StepSpec,
+        size: &mut SizeThisPass,
+    ) -> Result<Option<Reason>> {
+        match spec.when {
+            None => Ok(None),
+            Some(StepCondition::NotSmall) => {
+                self.treated_as_small(run, steps, attempts, spec, size)
+            }
+            Some(StepCondition::SomethingToFix) => {
+                let judged = workflows::steps_before(steps, &spec.id);
+                let nothing = !workflows::something_to_fix(judged, attempts, run.round);
+                Ok(nothing.then_some(Reason::NothingToFix))
+            }
+        }
+    }
+
     fn treated_as_small(
         &self,
         run: &keel_store::Run,
@@ -3007,7 +3047,7 @@ impl Inner {
         let Some(decision) = &size.decision else {
             return Ok(());
         };
-        if spec.when.is_none() || size.said {
+        if spec.when != Some(StepCondition::NotSmall) || size.said {
             return Ok(());
         }
         size.said = true;
@@ -3059,17 +3099,67 @@ impl Inner {
             raw_path: String::new(),
             started_at: now(),
         })?;
-        self.store
-            .set_state(&id, AttemptState::Skipped, Some(&reason))?;
-        self.store
-            .patch_attempt(&id, &[("finished_at", Value::Text(now()))])?;
-        self.store.append_event(
+        self.end_skipped(
+            run_id,
             &id,
-            "skipped",
+            &reason,
             &json!({ "paths": spec.paths, "reason": reason }),
         )?;
-        self.changed(run_id);
         Ok(id)
+    }
+
+    /// The same for a check that would only repeat one that passed on this very code.
+    fn record_check_skipped(
+        &self,
+        run_id: &str,
+        step_id: &str,
+        command: &str,
+        attempts: &[keel_store::Attempt],
+    ) -> Result<()> {
+        let run = self.store.run(run_id)?;
+        let reason = Reason::NothingChangedSinceCheck;
+        let id = new_id();
+        self.store.add_attempt(&NewAttempt {
+            id: id.clone(),
+            run_id: run_id.to_owned(),
+            step_id: step_id.to_owned(),
+            kind: "check".to_owned(),
+            role: "worker".to_owned(),
+            round: run.round,
+            number: workflows::next_number(attempts, step_id),
+            state: AttemptState::Skipped,
+            model_requested: String::new(),
+            effort: None,
+            tools: "check".to_owned(),
+            max_turns: None,
+            max_budget_usd: None,
+            language: run.language.clone(),
+            prompt: command.to_owned(),
+            system_prompt_sources: "[]".to_owned(),
+            settings: "{}".to_owned(),
+            session_id: new_id(),
+            resumed_from: None,
+            workspace: self.workspace(run_id).to_string_lossy().into_owned(),
+            raw_path: String::new(),
+            started_at: now(),
+        })?;
+        self.end_skipped(run_id, &id, &reason, &json!({ "reason": reason }))
+    }
+
+    fn end_skipped(
+        &self,
+        run_id: &str,
+        id: &str,
+        reason: &Reason,
+        data: &serde_json::Value,
+    ) -> Result<()> {
+        self.store
+            .set_state(id, AttemptState::Skipped, Some(reason))?;
+        self.store
+            .patch_attempt(id, &[("finished_at", Value::Text(now()))])?;
+        self.store.append_event(id, "skipped", data)?;
+        self.changed(run_id);
+        Ok(())
     }
 }
 
@@ -3112,6 +3202,7 @@ mod tests {
         let step = WorkflowStep::Check {
             id: "ci".into(),
             run: "make test".into(),
+            only_if_changed: false,
         };
         let value = serde_json::to_value(&step).unwrap();
         assert_eq!(

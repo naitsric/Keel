@@ -1,4 +1,4 @@
-import type { Attempt, AttemptState, StepRole, WorkflowStep } from "./api";
+import type { Attempt, AttemptState, StepCondition, StepRole, WorkflowStep } from "./api";
 import { putOffForSetup } from "./audit";
 
 export type NodeState = AttemptState | "pending";
@@ -27,8 +27,8 @@ export interface FlowNode<T extends FlowAttempt = Attempt> {
   model: string | null;
   /** Shown small: the learner runs after everything else, and its failing holds nothing back. */
   minor: boolean;
-  /** Only runs if the change isn't small. */
-  conditional: boolean;
+  /** What has to hold for it to run, if anything: its condition, or a check's, that something changed. */
+  condition: StepCondition | "onlyIfChanged" | null;
   state: NodeState;
   /** Every attempt of this step, oldest first. */
   attempts: T[];
@@ -96,7 +96,8 @@ export function reworkIndex(steps: WorkflowStep[]): number | null {
   const before = lastApproval < 0 ? steps : steps.slice(0, lastApproval);
   for (let at = before.length - 1; at >= 0; at--) {
     const step = before[at];
-    if (step.type === "agent" && (step.role?.kind ?? "worker") === "worker" && step.tools === "build") return at;
+    // One that only fixes what was found can't be where work goes back to: the reviews before it don't run again.
+    if (step.type === "agent" && (step.role?.kind ?? "worker") === "worker" && step.tools === "build" && step.when !== "somethingToFix") return at;
   }
   return null;
 }
@@ -154,7 +155,7 @@ export function flowOf<T extends FlowAttempt = Attempt>(steps: WorkflowStep[], a
   const reworks = reworksOf(steps, given, round);
   const reruns = reworks[0]?.to ?? reworkIndex(steps) ?? Number.POSITIVE_INFINITY;
 
-  const nodeOf = (key: string, id: string, kind: Attempt["kind"], role: StepRole["kind"] | null, model: string | null | undefined, stage: number, conditional = false): FlowNode<T> => {
+  const nodeOf = (key: string, id: string, kind: Attempt["kind"], role: StepRole["kind"] | null, model: string | null | undefined, stage: number, condition: FlowNode["condition"] = null): FlowNode<T> => {
     const found = unclaimed.get(id) ?? [];
     unclaimed.delete(id);
     const attempt = found.at(-1) ?? null;
@@ -165,7 +166,7 @@ export function flowOf<T extends FlowAttempt = Attempt>(steps: WorkflowStep[], a
       role,
       model: (kind === "agent" && (attempt?.modelActual || attempt?.modelRequested || model)) || null,
       minor: role === "learner",
-      conditional,
+      condition,
       state: attempt?.state ?? "pending",
       attempts: found,
       attempt,
@@ -177,8 +178,8 @@ export function flowOf<T extends FlowAttempt = Attempt>(steps: WorkflowStep[], a
 
   const stages = steps.map((step, index): FlowStage<T> => {
     const key = String(index);
-    if (step.type === "parallel") return { type: "parallel", key, id: step.id, nodes: step.steps.map((spec, member) => nodeOf(`${index}.${member}`, spec.id, "agent", spec.role?.kind ?? "worker", spec.model, index, Boolean(spec.when))) };
-    const node = step.type === "agent" ? nodeOf(key, step.id, "agent", step.role?.kind ?? "worker", step.model, index, Boolean(step.when)) : nodeOf(key, step.id, step.type, null, null, index);
+    if (step.type === "parallel") return { type: "parallel", key, id: step.id, nodes: step.steps.map((spec, member) => nodeOf(`${index}.${member}`, spec.id, "agent", spec.role?.kind ?? "worker", spec.model, index, spec.when ?? null)) };
+    const node = step.type === "agent" ? nodeOf(key, step.id, "agent", step.role?.kind ?? "worker", step.model, index, step.when ?? null) : nodeOf(key, step.id, step.type, null, null, index, step.type === "check" && step.onlyIfChanged ? "onlyIfChanged" : null);
     return { type: "step", key, node };
   });
   const extras = [...unclaimed.entries()].map(([id, found], index) => {

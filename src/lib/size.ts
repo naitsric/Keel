@@ -24,6 +24,12 @@ export const skippedAsSmall = skippedFor("treatedAsSmall");
 /** Left out because what was asked names none of the risks it looks at. That's settled before the size, so it says nothing about it. */
 export const skippedForRisks = skippedFor("noMatchingRisks");
 
+/** Left out because no review asked for changes and nothing was found unmet. */
+export const skippedWithNothingToFix = skippedFor("nothingToFix");
+
+/** A check left out because the same command passed and nothing could have changed the code since. */
+export const skippedAsUnchanged = skippedFor("nothingChangedSinceCheck");
+
 /**
  * Whether a person asked for what was skipped to run, as `sizing::person_asked` says: that puts off
  * their approval. A step put off for a new setup to run first is something else.

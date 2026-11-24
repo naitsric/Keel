@@ -165,6 +165,8 @@
     "noMatchingPaths": "No cambió nada de lo que cubre ({{paths}}).",
     "noMatchingRisks": "Lo pedido no nombra ninguno de los riesgos que revisa ({{risks}}).",
     "treatedAsSmall": "Keel lo trató como un cambio pequeño, así que no corrió.",
+    "nothingToFix": "Ninguna revisión pidió cambios y no se encontró nada sin cumplir, así que no corrió.",
+    "nothingChangedSinceCheck": "El mismo comando ya pasó en esta ronda y nada cambió el código desde entonces, así que no volvió a correr.",
     "invalidWorkflow": "Este workflow no puede correr.",
     "snapshotFailed": "El paso terminó, pero Keel no pudo leer lo que cambió, así que no cuenta como hecho.",
     "brainFull": "Ya no cabe nada más en Aprendido y Decisiones. Retira algo de ahí primero, y luego acepta esto.",
@@ -355,6 +357,7 @@
     "screenshotsLeftOut": "Sin mostrar: {{names}}. Keel muestra hasta 8 imágenes PNG, JPEG, GIF o WebP de 4 MB o menos, guardadas en esta ronda.",
     "screenshotsLeftOutMore": "Sin mostrar: {{names}} y {{count}} más. Keel muestra hasta 8 imágenes PNG, JPEG, GIF o WebP de 4 MB o menos, guardadas en esta ronda.",
     "approvalCheckPassed": "Keel corrió `{{command}}` y pasó.",
+    "changedSince": "{{step}} cambió el código después de esto.",
     "approvalCheckFailed": "Keel corrió `{{command}}` y no pasó.",
     "approvalCheckSkipped_one": "Keel corrió `{{command}}` y pasó, pero se saltó 1 prueba.",
     "approvalCheckSkipped_other": "Keel corrió `{{command}}` y pasó, pero se saltaron {{count}} pruebas.",
@@ -779,7 +782,10 @@
     "groupRole": "«{{step}}» no puede ir en un grupo. Solo pueden los pasos que hacen o revisan el trabajo.",
     "verifierNeedsSpecifier": "«{{step}}» repasa lo que tiene que cumplirse, así que antes tiene que haber un paso que defina el cambio.",
     "risksNeedSpecifier": "«{{step}}» se guía por los riesgos de lo pedido, así que antes tiene que haber un paso que defina el cambio.",
-    "whenBeforeBuild": "«{{step}}» depende de qué tan grande es el cambio, así que tiene que ir después del primer paso que construye. Antes no hay ningún cambio que mirar."
+    "whenBeforeBuild": "«{{step}}» depende de qué tan grande es el cambio, así que tiene que ir después del primer paso que construye. Antes no hay ningún cambio que mirar.",
+    "fixBeforeReview": "«{{step}}» corrige lo que se encontró, así que antes tiene que ir una revisión o el paso que comprueba lo pedido.",
+    "reworkToFixer": "«{{step}}» no puede devolver el trabajo a un paso que solo corrige lo que se encontró, porque en la otra ronda no tendría nada que corregir.",
+    "nothingToRepeat": "«{{step}}» repite una verificación, así que antes tiene que haber una con el mismo comando."
   },
   "workflows": {
     "title": "Workflows",
@@ -823,6 +829,10 @@
     "when": "Cuándo corre",
     "whenAlways": "Siempre",
     "whenNotSmall": "Solo si el cambio no es pequeño",
+    "whenSomethingToFix": "Solo si hay algo que corregir",
+    "whenSomethingToFixHint": "Corre si una revisión de la ronda pidió cambios, o si el paso que comprueba lo pedido encontró algo que no se cumple. Va después de uno de los dos.",
+    "checkOnlyIfChanged": "Solo si algo cambió desde que pasó",
+    "checkOnlyIfChangedHint": "Repite una verificación anterior con el mismo comando, si entre las dos corrió un paso que puede cambiar archivos.",
     "whenHint": "Keel lo decide con el cambio real: lo que se pidió, una verificación que pasó, quién escribió el issue, nada sensible y menos de 400 líneas. Va después del primer paso que construye, y una persona sigue aprobando.",
     "prompt": "Qué hace",
     "promptHint": "Puedes usar {{tokens}}, donde spec es el nombre de un paso. Keel pone lo que viene del pedido, del código o de otro paso dentro de una etiqueta, como <change>, para que el agente lo distinga de tus instrucciones.",
@@ -886,7 +896,8 @@
       "movedUpWhyNote": "Una ejecución puede tener varias razones.",
       "doesNotDepend": "No depende del cambio"
     },
-    "draftConditional": "Se omite en un cambio pequeño"
+    "draftConditional": "Se omite en un cambio pequeño",
+    "draftOnlyToFix": "Corre solo si hay algo que corregir"
   },
   "flow": {
     "groupLabel": "{{step}}, a la vez",
@@ -911,7 +922,11 @@
     "memberOf": "Agente en {{group}}",
     "skippedSmall": "Cambio pequeño",
     "skippedSmallWhy": "Omitido: Keel lo trató como un cambio pequeño",
-    "onlyIfNotSmall": "Solo si el cambio no es pequeño"
+    "onlyIfNotSmall": "Solo si el cambio no es pequeño",
+    "onlyIfSomethingToFix": "Solo si hay algo que corregir",
+    "onlyIfChanged": "Solo si algo cambió desde que pasó",
+    "skippedNothingToFix": "Omitido: no había nada que corregir",
+    "skippedUnchanged": "Omitido: nada cambió desde que pasó"
   },
   "brain": {
     "title": "Brain",

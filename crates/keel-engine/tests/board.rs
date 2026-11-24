@@ -2204,6 +2204,7 @@ fn every_step_left_unfinished_comes_back_interrupted_and_in_human_review() {
     let check = || WorkflowStep::Check {
         id: "check".into(),
         run: "true".into(),
+        only_if_changed: false,
     };
     let setup = || WorkflowStep::Setup {
         id: "setup".into(),
@@ -3539,6 +3540,7 @@ fn a_failed_check_pauses_nothing_end_to_end() {
             WorkflowStep::Check {
                 id: "check".into(),
                 run: "exit 3".into(),
+                only_if_changed: false,
             },
         ],
     ));

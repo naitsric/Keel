@@ -52,7 +52,9 @@ const GET_RUN: &str = "Get a run: its overall state (working, waitingForPerson o
                        but didn't run here, and `seeEvidence` that its `evidence` may say), how many things \
                        weren't proven in this round by why (`notProvenWhy`, with `byReviews` for what the \
                        reviews couldn't check by reading the code, as Keel counts them), the \
-                       `reviews`, steps `skipped` for being a small change, and its pull request with what \
+                       `reviews`, steps `skipped` for being a small change, `changedAfterReview`, the step that \
+                       changed the code after the reviews or the verifier looked at it, such as one that fixed \
+                       what they found, so what they said may be settled, and its pull request with what \
                        its CI says: `prCi` is pending, passed, failed or noCi, and `prCiFailed` names the \
                        checks that failed. `prCommitsAdded` is how many commits it got after Keel \
                        delivered, not counting merges, and is absent when Keel doesn't know. Asking \

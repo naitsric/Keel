@@ -583,6 +583,8 @@ async fn it_tells_a_model_how_to_write_a_draft() {
         "verifier",
         "when",
         "notSmall",
+        "somethingToFix",
+        "onlyIfChanged",
     ] {
         assert!(schema.contains(word), "{word}: {schema}");
     }
@@ -640,6 +642,54 @@ async fn a_draft_can_ask_for_a_step_to_depend_on_the_change_and_it_is_kept_and_s
     )
     .await;
     assert!(refused(&refusal).contains("when"), "{}", refused(&refusal));
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_draft_can_ask_for_a_step_that_fixes_what_was_found_and_the_check_again() {
+    keel_harness::needs!(sockets);
+    let w = world().await;
+    let client = w.client(&w.token(true)).await;
+    let steps = |fix_first: bool| {
+        let review = json!({ "type": "agent", "id": "security", "model": "haiku", "prompt": "Review", "role": { "kind": "reviewer" } });
+        let ship = json!({ "type": "agent", "id": "ship", "model": "sonnet", "tools": "build", "prompt": "Fix", "when": "somethingToFix" });
+        let (second, third) = if fix_first {
+            (ship, review)
+        } else {
+            (review, ship)
+        };
+        json!([
+            { "type": "agent", "id": "builder", "model": "sonnet", "tools": "build", "prompt": "{{request}}" },
+            { "type": "check", "id": "check", "run": "make test" },
+            second,
+            third,
+            { "type": "check", "id": "check-ship", "run": "make test", "onlyIfChanged": true },
+            { "type": "approval", "id": "human" },
+        ])
+    };
+    let args = |fix_first| json!({ "project": "app", "name": "Ships", "steps": steps(fix_first) });
+    let draft = ok(&call(&client, "draft_workflow", args(false)).await);
+    assert_eq!(draft["steps"][3]["when"], "somethingToFix");
+    assert_eq!(draft["steps"][4]["onlyIfChanged"], true);
+    assert_eq!(draft["steps"][1].get("onlyIfChanged"), None);
+    let kept = w.engine.workflow_drafts().unwrap().remove(0);
+    let WorkflowStep::Agent(ship) = &kept.steps[3] else {
+        panic!()
+    };
+    assert_eq!(ship.when, Some(keel_core::StepCondition::SomethingToFix));
+    assert!(matches!(
+        &kept.steps[4],
+        WorkflowStep::Check {
+            only_if_changed: true,
+            ..
+        }
+    ));
+    let refusal = call(&client, "draft_workflow", args(true)).await;
+    assert!(
+        refused(&refusal).contains("fixBeforeReview"),
+        "{}",
+        refused(&refusal)
+    );
     client.cancel().await.unwrap();
 }
 
@@ -1515,6 +1565,7 @@ fn reporting_steps() -> Vec<WorkflowStep> {
         WorkflowStep::Check {
             id: "tests".into(),
             run: "true".into(),
+            only_if_changed: false,
         },
         WorkflowStep::Parallel {
             id: "reviews".into(),
@@ -1672,6 +1723,7 @@ async fn a_failed_check_says_why_and_only_the_client_that_started_it_may_act_if_
             WorkflowStep::Check {
                 id: "tests".into(),
                 run: "echo '3 failed' >&2; exit 1".into(),
+                only_if_changed: false,
             },
             WorkflowStep::Approval { id: "human".into() },
         ],
@@ -1945,6 +1997,7 @@ impl World {
                 WorkflowStep::Check {
                     id: "tests".into(),
                     run: "echo '3 failed' >&2; exit 1".into(),
+                    only_if_changed: false,
                 },
                 WorkflowStep::Approval { id: "human".into() },
             ],
@@ -2707,6 +2760,7 @@ async fn a_check_that_printed_a_lot_shows_how_it_ended_and_reads_whole_in_pieces
                 run: "i=0; while [ $i -lt 4000 ]; do echo \"test $i of the suite: ok\"; \
                       i=$((i+1)); done; echo 'error: 3 failed' >&2; exit 1"
                     .into(),
+                only_if_changed: false,
             },
             WorkflowStep::Approval { id: "human".into() },
         ],
@@ -2865,6 +2919,7 @@ async fn a_client_retries_with_the_project_s_current_commands_only_when_it_asks(
             WorkflowStep::Check {
                 id: "check".into(),
                 run: "test -f installed.txt".into(),
+                only_if_changed: false,
             },
             WorkflowStep::Approval { id: "human".into() },
         ],
@@ -2960,6 +3015,7 @@ async fn a_client_asking_for_new_commands_when_there_are_none_is_told_so() {
             WorkflowStep::Check {
                 id: "check".into(),
                 run: "exit 3".into(),
+                only_if_changed: false,
             },
             WorkflowStep::Approval { id: "human".into() },
         ],

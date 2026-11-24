@@ -1,4 +1,4 @@
-import type { WorkflowStep } from "./api";
+import type { StepCondition, WorkflowStep } from "./api";
 
 /** What saving a proposed workflow would let happen, whatever the prompts say. */
 export interface DraftFacts {
@@ -10,6 +10,8 @@ export interface DraftFacts {
   afterApproval: string[];
   /** Agents that don't run for a change the engine finds small, in a group or not. */
   conditional: string[];
+  /** Agents that only run if whoever judged the change left something to fix. */
+  onlyToFix: string[];
 }
 
 export function draftFacts(steps: WorkflowStep[]): DraftFacts {
@@ -19,6 +21,7 @@ export function draftFacts(steps: WorkflowStep[]): DraftFacts {
   const approval = deliver < 0 ? -1 : steps.slice(0, deliver).map((step) => step.type).lastIndexOf("approval");
   const between = approval < 0 ? [] : steps.slice(approval + 1, deliver);
   const afterApproval = between.flatMap((step) => ((step.type === "agent" && step.tools === "build") || step.type === "check" || step.type === "setup" ? [step.id] : []));
-  const conditional = steps.flatMap((step) => (step.type === "parallel" ? step.steps : step.type === "agent" ? [step] : [])).flatMap((spec) => (spec.when ? [spec.id] : []));
-  return { commands, builders, delivers: deliver >= 0, afterApproval, conditional };
+  const agents = steps.flatMap((step) => (step.type === "parallel" ? step.steps : step.type === "agent" ? [step] : []));
+  const only = (when: StepCondition) => agents.flatMap((spec) => (spec.when === when ? [spec.id] : []));
+  return { commands, builders, delivers: deliver >= 0, afterApproval, conditional: only("notSmall"), onlyToFix: only("somethingToFix") };
 }

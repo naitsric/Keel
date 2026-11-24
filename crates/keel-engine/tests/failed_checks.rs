@@ -144,6 +144,7 @@ fn check(command: &str) -> WorkflowStep {
     WorkflowStep::Check {
         id: "check".into(),
         run: command.into(),
+        only_if_changed: false,
     }
 }
 

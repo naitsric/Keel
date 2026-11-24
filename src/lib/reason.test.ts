@@ -93,6 +93,24 @@ describe("a step skipped for the risks of what was asked", () => {
   });
 });
 
+describe("a step that fixes what was found, and the check that runs again", () => {
+  it("says why it was left out, in both languages", () => {
+    expect(reasonText(t("en"), { code: "nothingToFix" })).toBe("No review asked for changes and nothing was found unmet, so it didn't run.");
+    expect(reasonText(t("es"), { code: "nothingToFix" })).toBe("Ninguna revisión pidió cambios y no se encontró nada sin cumplir, así que no corrió.");
+    expect(reasonText(t("en"), { code: "nothingChangedSinceCheck" })).toBe("The same command already passed in this round and nothing has changed the code since, so it didn't run again.");
+    expect(reasonText(t("es"), { code: "nothingChangedSinceCheck" })).toBe("El mismo comando ya pasó en esta ronda y nada cambió el código desde entonces, así que no volvió a correr.");
+  });
+
+  it("says what each one needs before it, in both languages", () => {
+    const fix = { code: "invalidWorkflow", problem: "fixBeforeReview", step: "ship" };
+    expect(reasonText(t("en"), fix)).toBe("“ship” fixes what was found, so a review or the step that checks what was asked has to come before it.");
+    expect(reasonText(t("es"), fix)).toBe("«ship» corrige lo que se encontró, así que antes tiene que ir una revisión o el paso que comprueba lo pedido.");
+    const repeat = { code: "invalidWorkflow", problem: "nothingToRepeat", step: "again" };
+    expect(reasonText(t("en"), repeat)).toBe("“again” repeats a check, so one with the same command has to come before it.");
+    expect(reasonText(t("es"), repeat)).toBe("«again» repite una verificación, así que antes tiene que haber una con el mismo comando.");
+  });
+});
+
 describe("a step waiting for its project's turn", () => {
   it("names the step and the run that have the turn, and that it's about running commands", () => {
     const reason = { code: "waitingForProject", step: "builder", runId: "r44", title: "The runs' folders" };

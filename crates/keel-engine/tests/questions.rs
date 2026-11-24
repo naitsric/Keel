@@ -196,6 +196,7 @@ fn check() -> WorkflowStep {
     WorkflowStep::Check {
         id: "check".into(),
         run: "test -f built.txt".into(),
+        only_if_changed: false,
     }
 }
 

@@ -474,6 +474,7 @@ fn delivered_with_verifier(w: &World, verifier_says: &str, language: &str) -> St
         WorkflowStep::Check {
             id: "check".into(),
             run: "test -f fixed.txt".into(),
+            only_if_changed: false,
         },
         verifier,
         WorkflowStep::Approval { id: "human".into() },

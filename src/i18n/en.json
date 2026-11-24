@@ -165,6 +165,8 @@
     "noMatchingPaths": "Nothing it covers changed ({{paths}}).",
     "noMatchingRisks": "What was asked names none of the risks it looks at ({{risks}}).",
     "treatedAsSmall": "Keel treated this as a small change, so it didn't run.",
+    "nothingToFix": "No review asked for changes and nothing was found unmet, so it didn't run.",
+    "nothingChangedSinceCheck": "The same command already passed in this round and nothing has changed the code since, so it didn't run again.",
     "invalidWorkflow": "This workflow can't run.",
     "snapshotFailed": "The step ended, but Keel couldn't read what it changed, so it doesn't count as done.",
     "brainFull": "Nothing more fits in Learned and Decisions. Retire something from there first, and then accept this.",
@@ -355,6 +357,7 @@
     "screenshotsLeftOut": "Not shown: {{names}}. Keel shows up to 8 PNG, JPEG, GIF or WebP pictures of 4 MB or less, saved in this round.",
     "screenshotsLeftOutMore": "Not shown: {{names}} and {{count}} more. Keel shows up to 8 PNG, JPEG, GIF or WebP pictures of 4 MB or less, saved in this round.",
     "approvalCheckPassed": "Keel ran `{{command}}` and it passed.",
+    "changedSince": "{{step}} changed the code after this.",
     "approvalCheckFailed": "Keel ran `{{command}}` and it didn't pass.",
     "approvalCheckSkipped_one": "Keel ran `{{command}}` and it passed, but 1 test was skipped.",
     "approvalCheckSkipped_other": "Keel ran `{{command}}` and it passed, but {{count}} tests were skipped.",
@@ -779,7 +782,10 @@
     "groupRole": "“{{step}}” can't run in a group. Only steps that do the work or review it can.",
     "verifierNeedsSpecifier": "“{{step}}” goes through what has to be true, so a step that works out the change has to come before it.",
     "risksNeedSpecifier": "“{{step}}” goes by the risks of what was asked, so a step that works out the change has to come before it.",
-    "whenBeforeBuild": "“{{step}}” depends on how big the change is, so it has to come after the first step that builds. Before that there's no change to look at."
+    "whenBeforeBuild": "“{{step}}” depends on how big the change is, so it has to come after the first step that builds. Before that there's no change to look at.",
+    "fixBeforeReview": "“{{step}}” fixes what was found, so a review or the step that checks what was asked has to come before it.",
+    "reworkToFixer": "“{{step}}” can't send work back to a step that only fixes what was found, since in the next round it would have nothing to fix.",
+    "nothingToRepeat": "“{{step}}” repeats a check, so one with the same command has to come before it."
   },
   "workflows": {
     "title": "Workflows",
@@ -823,6 +829,10 @@
     "when": "When it runs",
     "whenAlways": "Always",
     "whenNotSmall": "Only if the change isn't small",
+    "whenSomethingToFix": "Only if there's something to fix",
+    "whenSomethingToFixHint": "It runs if a review of the round asked for changes, or if the step that checks what was asked found something not met. It goes after one of them.",
+    "checkOnlyIfChanged": "Only if something changed since it passed",
+    "checkOnlyIfChangedHint": "It repeats an earlier check with the same command, if a step that can change files ran between the two.",
     "whenHint": "Keel decides that from the real change: what was asked, a check that passed, who wrote the issue, nothing sensitive and under 400 lines. It goes after the first step that builds, and a person still approves.",
     "prompt": "What it does",
     "promptHint": "You can use {{tokens}}, where spec is a step's name. Keel puts what comes from the request, the code or another step inside a tag, such as <change>, so the agent can tell it from your instructions.",
@@ -886,7 +896,8 @@
       "movedUpWhyNote": "A run can have several reasons.",
       "doesNotDepend": "Doesn't depend on the change"
     },
-    "draftConditional": "Skipped for a small change"
+    "draftConditional": "Skipped for a small change",
+    "draftOnlyToFix": "Runs only if there's something to fix"
   },
   "flow": {
     "groupLabel": "{{step}}, at once",
@@ -911,7 +922,11 @@
     "memberOf": "Agent in {{group}}",
     "skippedSmall": "Small change",
     "skippedSmallWhy": "Skipped: Keel treated this as a small change",
-    "onlyIfNotSmall": "Only if the change isn't small"
+    "onlyIfNotSmall": "Only if the change isn't small",
+    "onlyIfSomethingToFix": "Only if there's something to fix",
+    "onlyIfChanged": "Only if something changed since it passed",
+    "skippedNothingToFix": "Skipped: there was nothing to fix",
+    "skippedUnchanged": "Skipped: nothing changed since it passed"
   },
   "brain": {
     "title": "Brain",

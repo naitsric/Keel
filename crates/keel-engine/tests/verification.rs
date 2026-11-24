@@ -176,6 +176,7 @@ fn check() -> WorkflowStep {
     WorkflowStep::Check {
         id: "check".into(),
         run: "test -f built.txt".into(),
+        only_if_changed: false,
     }
 }
 
@@ -479,6 +480,7 @@ fn a_check_that_passed_skipping_tests_says_how_many_and_that_they_prove_nothing(
     let skipping = WorkflowStep::Check {
         id: "check".into(),
         run: "echo 'test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.01s'; echo 'skipped tests::a_socket: it opens local sockets' >&2".into(),
+        only_if_changed: false,
     };
     let run = w.start(vec![specifier(), builder(), skipping, verifier(), human()]);
     w.wait_for(&run, "human", AttemptState::WaitingApproval);
@@ -502,6 +504,7 @@ fn a_check_that_fails_stops_the_run_before_anything_is_verified() {
         WorkflowStep::Check {
             id: "check".into(),
             run: "false".into(),
+            only_if_changed: false,
         },
         verifier(),
         human(),

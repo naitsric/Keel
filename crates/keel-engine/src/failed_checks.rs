@@ -152,13 +152,19 @@ fn next_for(steps: &[WorkflowStep], attempts: &[Attempt], round: i64, check: &At
     if used < i64::from(rounds_allowed(steps)) {
         return Next::SendBack;
     }
+    // The same command in another step is the same check.
     let failed_times = attempts
         .iter()
-        .filter(|a| a.step_id == check.step_id && a.exit_code.is_some_and(|code| code != 0))
+        .filter(|a| runs_the_same(a, check) && a.exit_code.is_some_and(|code| code != 0))
         .count();
     Next::Limit {
         failed_times: u32::try_from(failed_times).unwrap_or(u32::MAX),
     }
+}
+
+/// Whether two checks run the same command, such as one that repeats another.
+fn runs_the_same(a: &Attempt, b: &Attempt) -> bool {
+    a.kind == "check" && b.kind == "check" && a.prompt.trim() == b.prompt.trim()
 }
 
 /// The check this round is there to fix, if it began with one going back.
@@ -414,7 +420,7 @@ impl Inner {
     /// rounds still holds.
     fn builder_changed_nothing(&self, run: &Run, attempts: &[Attempt], check: &Attempt) -> bool {
         let Some(before) =
-            check_behind_round(attempts, run.round).filter(|a| a.step_id == check.step_id)
+            check_behind_round(attempts, run.round).filter(|a| runs_the_same(a, check))
         else {
             return false;
         };
@@ -487,7 +493,13 @@ impl Inner {
             StepRole::Worker if spec.tools == ToolProfile::Build => {
                 let steps: Vec<WorkflowStep> =
                     serde_json::from_value(run.workflow.clone()).unwrap_or_default();
-                if !works_before(&steps, &spec.id, &check.step_id) {
+                // By the time a step after the builder runs, the command may have passed again.
+                let passed_again = attempts.iter().any(|a| {
+                    a.round == run.round
+                        && runs_the_same(a, check)
+                        && a.state == AttemptState::Succeeded.as_str()
+                });
+                if passed_again || !works_before(&steps, &spec.id, &check.step_id) {
                     return None;
                 }
                 let result = events.iter().rev().find(|e| e.kind == "checkResult");
@@ -539,6 +551,7 @@ mod tests {
         WorkflowStep::Check {
             id: "check".into(),
             run: "make test".into(),
+            only_if_changed: false,
         }
     }
 

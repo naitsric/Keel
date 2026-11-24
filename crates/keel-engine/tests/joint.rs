@@ -405,6 +405,7 @@ impl World {
                             WorkflowStep::Check {
                                 id: "check".into(),
                                 run: "true".into(),
+                                only_if_changed: false,
                             },
                             agent(
                                 "verify",

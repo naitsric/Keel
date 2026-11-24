@@ -751,6 +751,7 @@ fn neither_a_send_back_from_a_failed_check_nor_a_usage_limit_starts_a_step_in_a_
         WorkflowStep::Check {
             id: "check".into(),
             run: "false".into(),
+            only_if_changed: false,
         },
         WorkflowStep::Approval { id: "human".into() },
     ];

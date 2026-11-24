@@ -17,7 +17,7 @@ describe("what a proposed workflow would do", () => {
   });
 
   it("says when there's nothing to worry about", () => {
-    expect(draftFacts([agent("reader", "readOnly")])).toEqual({ commands: [], builders: [], delivers: false, afterApproval: [], conditional: [] });
+    expect(draftFacts([agent("reader", "readOnly")])).toEqual({ commands: [], builders: [], delivers: false, afterApproval: [], conditional: [], onlyToFix: [] });
   });
 
   it("catches what would change the work once the person has approved it", () => {
@@ -38,6 +38,15 @@ describe("what a proposed workflow would do", () => {
     const skippable = (id: string): StepSpec => ({ id, model: "opus", effort: null, tools: "readOnly", prompt: "p", maxTurns: null, maxBudgetUsd: null, when: "notSmall" });
     const facts = draftFacts([agent("builder", "build"), { type: "parallel", id: "reviews", steps: [skippable("security"), { ...skippable("always"), when: undefined }] }, { type: "agent", ...skippable("approver") }, human, pr]);
     expect(facts.conditional).toEqual(["security", "approver"]);
+  });
+
+  it("says apart which agents only run to fix what was found", () => {
+    const fixer: WorkflowStep = { ...(agent("ship", "build") as Extract<WorkflowStep, { type: "agent" }>), when: "somethingToFix" };
+    const facts = draftFacts([agent("builder", "build"), fixer, { ...check("again", "make test"), onlyIfChanged: true } as WorkflowStep, human, pr]);
+    expect(facts.onlyToFix).toEqual(["ship"]);
+    expect(facts.conditional).toEqual([]);
+    expect(facts.builders).toEqual(["builder", "ship"]);
+    expect(facts.commands).toEqual([{ id: "again", run: "make test" }]);
   });
 
   it("doesn't call it after an approval when nothing delivers", () => {

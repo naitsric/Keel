@@ -101,6 +101,7 @@ fn check(id: &str, run: &str) -> WorkflowStep {
     WorkflowStep::Check {
         id: id.into(),
         run: run.into(),
+        only_if_changed: false,
     }
 }
 

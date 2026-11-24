@@ -7,15 +7,16 @@ what each step did, and keeps an audit record you can check. A person always dec
 **Status: early, macOS only.** Keel takes a request from the app or a GitHub issue and works out
 what it will change. If something can only be decided by you, the run stops and asks. It recommends
 an option only when the code or the request backs one up, and taking it costs nothing. When nothing
-does, such as an amount or a business rule, it recommends none and you choose. A builder does the work and a check runs.
-If the check fails, the work goes back to the builder with what it printed. Then
-an agent goes through what was asked and says what a test really proves and what nothing does.
-Reviewers look at the change at the same time, and an approver can send the work back too, and
-every review runs again. A run goes back at most twice on its own, counting both, and after that
-you decide. Then a person approves, and Keel opens a draft pull request. At
-that approval you can also change anything it decided on its own, which sends the work back without
-starting over. You can edit each project's workflows in the app. See the
-[M0 report](docs/m0-report.md) for what's behind the isolation.
+does, such as an amount or a business rule, it recommends none and you choose. A builder does the
+work and a check runs. If the check fails, the work goes back to the builder with what it printed.
+Then an agent goes through what was asked and says what a test really proves and what nothing does.
+Reviewers look at the change at the same time. If one asks for changes, or something asked for
+isn't met, **ship** checks each finding in the code, fixes the real ones and runs the check again.
+Then an approver decides, and can send the work back too, and every review runs again. A run goes
+back at most twice on its own, counting both, and after that you decide. Then a person approves,
+and Keel opens a draft pull request. At that approval you can also change anything it decided on
+its own, which sends the work back without starting over. You can edit each project's workflows in
+the app. See the [M0 report](docs/m0-report.md) for what's behind the isolation.
 
 Keel looks up what became of each pull request it opened, and never writes to one again. The
 **Workflows** page compares workflows with that: what got merged, at what cost, how often work went
@@ -39,9 +40,10 @@ decides that itself from what it can see, and an agent or an issue saying so doe
 - The change is under 400 lines.
 - The check against what was asked found nothing missing.
 
-Your approval, the sandbox and the check are never skipped. The approval says what didn't run and
-why, with a button to run it now. Once a change gets the full review, it keeps getting it for the rest
-of the run. This workflow isn't the default: you choose it.
+Your approval, the sandbox and the check are never skipped. The check after **ship** runs only if
+**ship** did: otherwise it's the same code that already passed. The approval says what didn't run
+and why, with a button to run it now. Once a change gets the full review, it keeps getting it for
+the rest of the run. This workflow isn't the default: you choose it.
 
 ## The Brain
 

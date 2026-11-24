@@ -93,6 +93,12 @@ export function withWhen(spec: StepSpec, when: StepCondition | typeof ALWAYS): S
   return when === ALWAYS ? rest : { ...rest, when };
 }
 
+/** A check that repeats an earlier one, or not. One that doesn't says nothing about it, like one saved before there were any. */
+export function withOnlyIfChanged(step: Extract<WorkflowStep, { type: "check" }>, onlyIfChanged: boolean): WorkflowStep {
+  const { onlyIfChanged: _, ...rest } = step;
+  return onlyIfChanged ? { ...rest, onlyIfChanged } : rest;
+}
+
 /** A step that goes by these risks. With none it says nothing about them, like one saved before there were any. */
 export function withRisks(spec: StepSpec, risks: string[]): StepSpec {
   const { risks: _, ...rest } = spec;
@@ -224,9 +230,10 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
           options={[
             { value: ALWAYS, label: t("workflows.whenAlways") },
             { value: "notSmall", label: t("workflows.whenNotSmall") },
+            { value: "somethingToFix", label: t("workflows.whenSomethingToFix") },
           ]}
         />
-        <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t("workflows.whenHint")}</p>
+        <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t(spec.when === "somethingToFix" ? "workflows.whenSomethingToFixHint" : "workflows.whenHint")}</p>
       </div>
       {role.kind !== "specifier" && <RiskFields spec={spec} onChange={onChange} />}
       <Field label={t("workflows.paths")} hint={t("workflows.pathsHint")}>
@@ -309,6 +316,21 @@ function StepEditor({ step, formKey, earlier, onChange, onEarlier, onLater, onRe
               <input value={step.run} onChange={(e) => onChange({ ...step, run: e.target.value })} className={`${inputClass} font-mono`} />
             </Field>
           </div>
+          {step.type === "check" && (
+            <div className="mt-2.5">
+              <span className="mb-1 block text-[12px] font-medium text-muted">{t("workflows.when")}</span>
+              <Segmented<"always" | "changed">
+                label={t("workflows.when")}
+                value={step.onlyIfChanged ? "changed" : "always"}
+                onChange={(when) => onChange(withOnlyIfChanged(step, when === "changed"))}
+                options={[
+                  { value: "always", label: t("workflows.whenAlways") },
+                  { value: "changed", label: t("workflows.checkOnlyIfChanged") },
+                ]}
+              />
+              <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t("workflows.checkOnlyIfChangedHint")}</p>
+            </div>
+          )}
         </StepCard>
       );
     case "parallel":
@@ -416,6 +438,12 @@ function DraftReview({ draft, steps, project }: { draft: WorkflowDraft; steps: W
           <div>
             <dt className={label}>{t("workflows.draftConditional")}</dt>
             <dd className="font-mono text-[11.5px] break-words">{facts.conditional.join(", ")}</dd>
+          </div>
+        )}
+        {facts.onlyToFix.length > 0 && (
+          <div>
+            <dt className={label}>{t("workflows.draftOnlyToFix")}</dt>
+            <dd className="font-mono text-[11.5px] break-words">{facts.onlyToFix.join(", ")}</dd>
           </div>
         )}
       </dl>

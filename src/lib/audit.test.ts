@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import i18next from "../i18n";
 import type { Attempt, AuditEvent, CheckedCriterion, VerificationOutput } from "./api";
-import { accountsOf, activityFrom, agentCouldHaveWritten, answersIn, approvalOutcome, askedText, breakableIds, checkSentBackInto, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, findingsOf, focusAttempt, gist, latestOfEachStep, localhostOpenIn, notProvenInRound, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows, whyNotProven } from "./audit";
+import { accountsOf, activityFrom, agentCouldHaveWritten, answersIn, approvalOutcome, askedText, breakableIds, changedSince, checkSentBackInto, closedByAssistant, commandEnd, commandsFrom, explainingAttempts, failureMarkIn, filesChangedBy, findingsOf, focusAttempt, gist, latestOfEachStep, localhostOpenIn, notProvenInRound, pipeHidesExitCode, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, standingChecks, stillGoing, toolSummary, uncheckedInRound, verificationCounts, verificationInRound, verificationLine, verificationOf, touchesWorkflows, whyNotProven } from "./audit";
 
 const event = (seq: number, kind: string, data: Record<string, unknown>): AuditEvent => ({ seq, attemptId: "a", at: "2026-01-01T00:00:00Z", kind, data });
 
@@ -19,6 +19,44 @@ describe("whether a run had localhost open", () => {
     expect(localhostOpenIn([builder(), check()])).toBe(false);
     expect(localhostOpenIn([builder(false), check(false), { settings: {} }, { settings: null }])).toBe(false);
     expect(localhostOpenIn([])).toBe(false);
+  });
+});
+
+describe("a change made after someone looked at the code", () => {
+  const of = (id: string, fields: Partial<Attempt> = {}) => ({ id, stepId: id, kind: "agent", tools: "readOnly", state: "succeeded", round: 0, shaBefore: "a", shaAfter: "a", prompt: "", ...fields }) as Attempt;
+  const ship = (fields: Partial<Attempt> = {}) => of("ship", { tools: "build", shaAfter: "b", ...fields });
+
+  it("names the step that changed it, only if it did, after it, in the same round", () => {
+    const looked = of("verify");
+    expect(changedSince([looked, ship()], looked)).toBe("ship");
+    expect(changedSince([ship(), looked], looked)).toBeNull();
+    expect(changedSince([looked, ship({ shaAfter: "a" })], looked)).toBeNull();
+    expect(changedSince([looked, ship({ shaAfter: null })], looked)).toBeNull();
+    expect(changedSince([looked, ship({ state: "skipped", shaBefore: null, shaAfter: null })], looked)).toBeNull();
+    // It failed after fixing something, and only had to finish when it was tried again.
+    expect(changedSince([looked, ship({ state: "failed" }), ship({ id: "again", shaBefore: "b" })], looked)).toBe("ship");
+    expect(changedSince([looked, ship({ round: 1 })], looked)).toBeNull();
+    expect(changedSince([looked, of("look", { shaAfter: "b" })], looked)).toBeNull();
+    expect(changedSince([ship()], looked)).toBeNull();
+  });
+
+  const check = (id: string, state: Attempt["state"], prompt = "make test") => of(id, { kind: "check", tools: "check", state, prompt });
+  const standing = (attempts: Attempt[]) => standingChecks(attempts).map((a) => [a.stepId, a.state]);
+
+  it("leaves a check that had nothing to repeat out, and the one before it stands", () => {
+    expect(standing([check("check", "succeeded"), check("check-ship", "skipped")])).toEqual([["check", "succeeded"]]);
+  });
+
+  it("goes by the one that ran last when two steps run the same command", () => {
+    expect(standing([check("check", "succeeded"), check("check-ship", "failed")])).toEqual([["check-ship", "failed"]]);
+    expect(standing([check("check", "succeeded"), check("lint", "succeeded", "make lint"), check("check-ship", "succeeded")])).toEqual([
+      ["lint", "succeeded"],
+      ["check-ship", "succeeded"],
+    ]);
+    // The next round: it hasn't run in it yet, and then it has nothing to repeat.
+    const before = [check("check", "succeeded"), check("check-ship", "returned")];
+    expect(standing([...before, { ...check("check", "succeeded"), id: "c2" }])).toEqual([["check", "succeeded"]]);
+    expect(standing([...before, { ...check("check", "succeeded"), id: "c2" }, { ...check("check-ship", "skipped"), id: "s2" }])).toEqual([["check", "succeeded"]]);
   });
 });
 

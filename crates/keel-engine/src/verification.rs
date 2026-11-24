@@ -416,7 +416,7 @@ pub fn checks_in_round(steps: &[WorkflowStep], attempts: &[Attempt], round: i64)
     let mut latest: Vec<&Attempt> = Vec::new();
     for attempt in in_round[after_last_build..]
         .iter()
-        .filter(|a| a.kind == "check")
+        .filter(|a| a.kind == "check" && a.state != AttemptState::Skipped.as_str())
     {
         latest.retain(|earlier| earlier.step_id != attempt.step_id);
         latest.push(attempt);
@@ -443,6 +443,35 @@ pub fn checks_in_round(steps: &[WorkflowStep], attempts: &[Attempt], round: i64)
     } else {
         CheckFact::NoCheckInWorkflow
     }
+}
+
+/// Whether this command already passed on the code as it is in this round.
+pub fn passed_on_this_code(attempts: &[Attempt], round: i64, command: &str) -> bool {
+    let in_round: Vec<&Attempt> = attempts.iter().filter(|a| a.round == round).collect();
+    in_round[after_last_build(&in_round)..]
+        .iter()
+        .rev()
+        .find(|a| {
+            a.kind == "check"
+                && a.prompt.trim() == command.trim()
+                && a.state != AttemptState::Skipped.as_str()
+        })
+        .is_some_and(|a| a.state == AttemptState::Succeeded.as_str())
+}
+
+/// The step that changed the code after this attempt looked at it, in the same round: what it said
+/// was about the code before that. However that step ended: one that failed after fixing something,
+/// and only had to finish when it was tried again, changed it all the same.
+pub fn changed_since<'a>(attempts: &'a [Attempt], looked: &Attempt) -> Option<&'a str> {
+    let seen = looked.sha_after.as_ref().or(looked.sha_before.as_ref())?;
+    attempts
+        .iter()
+        .skip_while(|a| a.id != looked.id)
+        .skip(1)
+        .filter(|a| a.round == looked.round && a.kind == "agent")
+        .filter(|a| a.tools == keel_core::ToolProfile::Build.as_str())
+        .find(|a| a.sha_after.as_ref().is_some_and(|after| after != seen))
+        .map(|a| a.step_id.as_str())
 }
 
 /// Where the round's code stopped changing. A step that was skipped changed nothing.
@@ -918,10 +947,114 @@ mod tests {
         WorkflowStep::Check {
             id: "check".into(),
             run: "make test".into(),
+            only_if_changed: false,
         }
     }
 
     use AttemptState::{Failed, Running, Skipped, Succeeded};
+
+    #[test]
+    fn a_check_left_out_because_nothing_changed_says_nothing_and_the_one_before_stands() {
+        let attempts = recorded(&[
+            ("builder", "agent", "build", 0, Succeeded, ""),
+            ("check", "check", "check", 0, Succeeded, "make test"),
+            ("ship", "agent", "build", 0, Skipped, ""),
+            ("check-ship", "check", "check", 0, Skipped, "make test"),
+        ]);
+        assert_eq!(
+            checks_in_round(&[check_step()], &attempts, 0),
+            ran("make test", true)
+        );
+    }
+
+    #[test]
+    fn a_command_passed_on_this_code_only_if_nothing_that_can_change_it_ran_since() {
+        let check = ("check", "check", "check", 0, Succeeded, "make test");
+        let passed = |rows: &[(&str, &str, &str, i64, AttemptState, &str)]| {
+            passed_on_this_code(&recorded(rows), 0, " make test")
+        };
+        assert!(passed(&[check]));
+        assert!(!passed(&[]));
+        assert!(!passed(&[(
+            "check",
+            "check",
+            "check",
+            0,
+            Failed,
+            "make test"
+        )]));
+        assert!(!passed(&[(
+            "check",
+            "check",
+            "check",
+            1,
+            Succeeded,
+            "make test"
+        )]));
+        assert!(!passed(&[(
+            "lint",
+            "check",
+            "check",
+            0,
+            Succeeded,
+            "make lint"
+        )]));
+        assert!(passed(&[
+            check,
+            ("look", "agent", "readOnly", 0, Succeeded, "")
+        ]));
+        assert!(passed(&[check, ("ship", "agent", "build", 0, Skipped, "")]));
+        assert!(!passed(&[
+            check,
+            ("ship", "agent", "build", 0, Succeeded, "")
+        ]));
+        assert!(!passed(&[check, ("ship", "agent", "build", 0, Failed, "")]));
+        // The same step said otherwise later.
+        assert!(!passed(&[
+            check,
+            ("again", "check", "check", 0, Failed, "make test")
+        ]));
+    }
+
+    #[test]
+    fn what_someone_said_is_about_the_code_before_a_step_changed_it() {
+        let mut attempts = recorded(&[
+            ("verify", "agent", "readOnly", 0, Succeeded, ""),
+            ("look", "agent", "readOnly", 0, Succeeded, ""),
+            ("ship", "agent", "build", 0, Succeeded, ""),
+            ("builder", "agent", "build", 1, Succeeded, ""),
+        ]);
+        for attempt in &mut attempts {
+            attempt.sha_before = Some("a".into());
+            attempt.sha_after = Some("a".into());
+        }
+        assert_eq!(changed_since(&attempts, &attempts[0]), None);
+        attempts[2].sha_after = Some("b".into());
+        attempts[3].sha_after = Some("c".into());
+        assert_eq!(changed_since(&attempts, &attempts[0]), Some("ship"));
+        assert_eq!(
+            changed_since(&attempts, &attempts[2]),
+            None,
+            "the next round is another matter"
+        );
+        // A step that failed after fixing something, and only had to finish when it was retried.
+        attempts[2].state = Failed.as_str().into();
+        let mut again = attempts[2].clone();
+        again.id = "again".into();
+        again.state = Succeeded.as_str().into();
+        again.sha_before = Some("b".into());
+        again.sha_after = Some("b".into());
+        attempts.insert(3, again);
+        assert_eq!(changed_since(&attempts, &attempts[0]), Some("ship"));
+        // One whose end Keel never saw says it through the next one.
+        attempts[2].sha_after = None;
+        assert_eq!(changed_since(&attempts, &attempts[0]), Some("ship"));
+        // A check has no commit of its own after it, only the one it ran on.
+        attempts[0].sha_after = None;
+        assert_eq!(changed_since(&attempts, &attempts[0]), Some("ship"));
+        attempts[0].sha_before = None;
+        assert_eq!(changed_since(&attempts, &attempts[0]), None, "not known");
+    }
 
     fn ran(command: &str, passed: bool) -> CheckFact {
         ran_skipping(command, passed, None)

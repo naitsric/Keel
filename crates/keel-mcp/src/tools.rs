@@ -12,8 +12,9 @@ use keel_core::{
 };
 use keel_engine::{
     Error, Finding, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
-    Verification, WhyNotProven, breakable_ids, can_send_back, files_changed, findings_of,
-    limits_with_ids, request_from_issue, skipped_steps, spec_of_attempt, verifications_in_round,
+    Verification, WhyNotProven, after_last_build, breakable_ids, can_send_back, changed_since,
+    files_changed, findings_of, limits_with_ids, request_from_issue, skipped_steps,
+    spec_of_attempt, verifications_in_round,
 };
 use keel_store::{Attempt, Card, MAX_OPEN_RUNS_CEILING, McpClient, NewMcpCall, Project, Run};
 use schemars::JsonSchema;
@@ -357,8 +358,15 @@ pub enum DraftStep {
         #[serde(flatten)]
         agent: DraftAgent,
     },
-    /// A command Keel runs in a sandbox, with no model involved. Exit 0 passes.
-    Check { id: String, run: String },
+    /// A command Keel runs in a sandbox, with no model involved. Exit 0 passes. With `onlyIfChanged`
+    /// it repeats an earlier check with the same command, and runs only if a step that can change
+    /// files has run since that passed.
+    Check {
+        id: String,
+        run: String,
+        #[serde(default)]
+        only_if_changed: bool,
+    },
     /// Read-only agents that run at the same time.
     Parallel { id: String, steps: Vec<DraftMember> },
     /// Waits for the person, for as long as it takes.
@@ -391,7 +399,8 @@ pub struct DraftAgent {
     pub paths: Vec<String>,
     /// `notSmall` skips it for a change Keel finds small. Keel decides that itself, from the change
     /// and whether the check passed, and a person still approves. It has to come after the first
-    /// worker that builds.
+    /// worker that builds. `somethingToFix` skips it when no review asked for changes and no verifier
+    /// found anything unmet, and has to come after one of them.
     #[serde(default)]
     pub when: Option<DraftCondition>,
     #[serde(default)]
@@ -423,6 +432,8 @@ pub enum DraftTools {
 pub enum DraftCondition {
     /// Only if the change isn't small.
     NotSmall,
+    /// Only if a review of the round asked for changes, or a verifier found something unmet.
+    SomethingToFix,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
@@ -1855,20 +1866,19 @@ impl McpServer {
         if more_files > 0 {
             report["moreFilesChanged"] = json!(more_files);
         }
+        if let Some(step) = changed_after_review(attempts, run.round) {
+            report["changedAfterReview"] = json!(step);
+        }
         Ok(report)
     }
 
     /// Whether the check passed on the code as it is in this round, and what it printed when it
-    /// failed. One from an earlier round checked code that has changed since, so it says nothing.
-    /// With several, a failed one is what matters.
+    /// failed. One from an earlier round, or from before a step that could change the code ran in
+    /// this one, checked code that has changed since, so it says nothing. With several, a failed
+    /// one is what matters.
     fn check_report(&self, run: &Run, attempts: &[Attempt]) -> Result<Json, ToolError> {
-        let passed = AttemptState::Succeeded.as_str();
         let failed = AttemptState::Failed.as_str();
-        let checks: Vec<&Attempt> = latest_of_each_step(attempts)
-            .into_iter()
-            .filter(|a| a.kind == "check" && a.round == run.round)
-            .filter(|a| a.state == passed || a.state == failed)
-            .collect();
+        let checks = checks_of_round(attempts, run.round);
         let failure = checks.iter().find(|a| a.state == failed);
         let Some(check) = failure.or(checks.last()) else {
             return Ok(Json::Null);
@@ -1880,6 +1890,34 @@ impl McpServer {
         }
         Ok(view)
     }
+}
+
+/// The checks that ended on the code as it is in this round, each step's latest. One from before a
+/// step that could change the code ran in this round isn't about it.
+fn checks_of_round(attempts: &[Attempt], round: i64) -> Vec<&Attempt> {
+    let ended = [
+        AttemptState::Succeeded.as_str(),
+        AttemptState::Failed.as_str(),
+    ];
+    let in_round: Vec<&Attempt> = attempts.iter().filter(|a| a.round == round).collect();
+    let settled = after_last_build(&in_round);
+    latest_of_each_step(in_round[settled..].iter().copied())
+        .into_iter()
+        .filter(|a| a.kind == "check" && ended.contains(&a.state.as_str()))
+        .collect()
+}
+
+/// The step that changed the code after a review or the verifier looked at it in this round: what
+/// they said is about the code before that.
+fn changed_after_review(attempts: &[Attempt], round: i64) -> Option<&str> {
+    attempts
+        .iter()
+        .filter(|a| {
+            a.round == round
+                && matches!(a.role.as_str(), "reviewer" | "verifier")
+                && a.state == AttemptState::Succeeded.as_str()
+        })
+        .find_map(|looked| changed_since(attempts, looked))
 }
 
 fn neighbour_view(neighbour: &keel_engine::Neighbour) -> Json {
@@ -2068,16 +2106,35 @@ fn close_target<'a>(run: &Run, attempts: &'a [Attempt]) -> Result<&'a Attempt, T
         })
 }
 
-/// What the last worker wrote last. For a task that only reads, that's what it found.
+/// What the last worker wrote last. For a task that only reads, that's what it found. Where several
+/// steps can change files, such as one that fixes what the reviews found, what each of them wrote
+/// last in the round, by name: what the last one did alone isn't what the run did.
 fn answer(attempts: &[Attempt]) -> Option<String> {
-    attempts
+    let worked = |a: &&Attempt| {
+        a.kind == "agent" && a.role == "worker" && a.state != AttemptState::Skipped.as_str()
+    };
+    let last = attempts.iter().rev().find(worked)?;
+    let builders: Vec<&Attempt> = latest_of_each_step(attempts.iter().filter(worked))
+        .into_iter()
+        .filter(|a| a.round == last.round && a.tools == ToolProfile::Build.as_str())
+        .collect();
+    if builders.len() < 2 || last.tools != ToolProfile::Build.as_str() {
+        return last
+            .result_text
+            .as_deref()
+            .map(|text| capped(text, MAX_TEXT));
+    }
+    let said: Vec<String> = builders
         .iter()
-        .rev()
-        .find(|a| {
-            a.kind == "agent" && a.role == "worker" && a.state != AttemptState::Skipped.as_str()
+        .filter_map(|a| {
+            Some(format!(
+                "{}:\n{}",
+                a.step_id,
+                a.result_text.as_deref()?.trim()
+            ))
         })
-        .and_then(|a| a.result_text.as_deref())
-        .map(|text| capped(text, MAX_TEXT))
+        .collect();
+    (!said.is_empty()).then(|| capped(&said.join("\n\n"), MAX_TEXT))
 }
 
 /// What the verifier said about the code as it is in this round, after Keel corrected it: the latest
@@ -2762,7 +2819,17 @@ fn step_summary(step: &WorkflowStep) -> Json {
             "type": "agent", "id": spec.id, "model": spec.model, "tools": spec.tools, "role": spec.role, "when": spec.when,
         }),
         WorkflowStep::Setup { id, run } => json!({ "type": "setup", "id": id, "run": run }),
-        WorkflowStep::Check { id, run } => json!({ "type": "check", "id": id, "run": run }),
+        WorkflowStep::Check {
+            id,
+            run,
+            only_if_changed,
+        } => {
+            let mut check = json!({ "type": "check", "id": id, "run": run });
+            if *only_if_changed {
+                check["onlyIfChanged"] = json!(true);
+            }
+            check
+        }
         WorkflowStep::Parallel { id, steps } => json!({
             "type": "parallel",
             "id": id,
@@ -2779,7 +2846,15 @@ impl DraftStep {
     fn into_step(self) -> Result<WorkflowStep, ToolError> {
         Ok(match self {
             Self::Agent { agent } => WorkflowStep::Agent(agent.into_spec()?),
-            Self::Check { id, run } => WorkflowStep::Check { id, run },
+            Self::Check {
+                id,
+                run,
+                only_if_changed,
+            } => WorkflowStep::Check {
+                id,
+                run,
+                only_if_changed,
+            },
             Self::Parallel { id, steps } => WorkflowStep::Parallel {
                 id,
                 steps: steps
@@ -2822,6 +2897,7 @@ impl DraftAgent {
             paths: self.paths,
             when: self.when.map(|when| match when {
                 DraftCondition::NotSmall => StepCondition::NotSmall,
+                DraftCondition::SomethingToFix => StepCondition::SomethingToFix,
             }),
             risks: Vec::new(),
             model_when_risky: None,
@@ -3225,6 +3301,91 @@ mod tests {
             .collect();
         spec.output = Some(json!({ "summary": "s", "criteria": criteria, "limits": limits }));
         spec
+    }
+
+    fn builder(step: &str, number: i64, said: &str) -> Attempt {
+        Attempt {
+            role: "worker".into(),
+            tools: "build".into(),
+            output: None,
+            result_text: Some(said.into()),
+            sha_before: Some("a".into()),
+            sha_after: Some("a".into()),
+            ..attempt(step, number)
+        }
+    }
+
+    fn check(step: &str, state: &str) -> Attempt {
+        Attempt {
+            kind: "check".into(),
+            role: "worker".into(),
+            tools: "check".into(),
+            state: state.into(),
+            output: None,
+            result_text: None,
+            ..attempt(step, 1)
+        }
+    }
+
+    #[test]
+    fn a_check_from_before_the_code_changed_in_the_round_isnt_the_reports() {
+        let steps = |attempts: &[Attempt]| {
+            checks_of_round(attempts, 0)
+                .into_iter()
+                .map(|a| a.step_id.clone())
+                .collect::<Vec<_>>()
+        };
+        let mut attempts = vec![builder("builder", 1, "Built."), check("check", "succeeded")];
+        assert_eq!(steps(&attempts), ["check"]);
+        let mut ship = builder("ship", 1, "Fixed.");
+        ship.state = "skipped".into();
+        attempts.push(ship.clone());
+        attempts.push(check("check-ship", "skipped"));
+        assert_eq!(steps(&attempts), ["check"], "nothing changed it");
+        attempts.truncate(2);
+        ship.state = "succeeded".into();
+        attempts.push(ship);
+        attempts.push(check("check-ship", "running"));
+        assert!(steps(&attempts).is_empty(), "nothing has checked it yet");
+        attempts[3].state = "failed".into();
+        assert_eq!(steps(&attempts), ["check-ship"]);
+    }
+
+    #[test]
+    fn the_report_says_which_step_changed_the_code_after_the_reviews() {
+        let mut review = attempt("security", 1);
+        review.sha_before = Some("a".into());
+        review.sha_after = Some("a".into());
+        let mut ship = builder("ship", 1, "Fixed.");
+        let of = |ship: &Attempt| {
+            changed_after_review(&[review.clone(), ship.clone()], 0).map(str::to_owned)
+        };
+        assert_eq!(of(&ship), None);
+        ship.sha_after = Some("b".into());
+        assert_eq!(of(&ship).as_deref(), Some("ship"));
+        assert_eq!(changed_after_review(&[review.clone(), ship], 1), None);
+    }
+
+    #[test]
+    fn the_answer_is_what_each_step_that_changed_files_wrote_last_in_the_round() {
+        let first = builder("builder", 1, "Built.");
+        let ship = builder("ship", 1, "Fixed.");
+        assert_eq!(
+            answer(std::slice::from_ref(&first)).as_deref(),
+            Some("Built.")
+        );
+        assert_eq!(
+            answer(&[first.clone(), ship.clone()]).as_deref(),
+            Some("builder:\nBuilt.\n\nship:\nFixed.")
+        );
+        // In the next round it had nothing to fix.
+        let again = builder("builder", 2, "Built again.");
+        let mut skipped = builder("ship", 2, "");
+        skipped.state = "skipped".into();
+        assert_eq!(
+            answer(&[first, ship, again, skipped]).as_deref(),
+            Some("Built again.")
+        );
     }
 
     #[test]

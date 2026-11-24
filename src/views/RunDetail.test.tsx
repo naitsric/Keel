@@ -326,6 +326,56 @@ describe("the approval card", () => {
     expect(page()).not.toContain("ran no check");
   });
 
+  describe("when a step fixed what was found", () => {
+    const shas = (shaBefore: string, shaAfter: string) => ({ shaBefore, shaAfter });
+    const asked = { ...reviewer, ...shas("a", "a"), output: { verdict: "changes", findings: ["calc.py:1 Wrong sign"], summary: "Wrong sign." } as unknown as Attempt["output"] };
+    const unmet = verifier([{ id: "C1", when: "add(1, 2)", then: "it returns 3", result: "unmet", evidence: "calc.py:1" }], shas("a", "a"));
+    const ship = attempt({ id: "ship", stepId: "ship", tools: "build", resultText: "Fixed the sign.", filesChanged: ["calc.py"], runFiles: ["calc.py"], ...shas("a", "b") });
+    const again = attempt({ id: "check-ship", stepId: "check-ship", kind: "check", tools: "check", prompt: "make test" });
+    const note = "ship changed the code after this.";
+
+    it("says what came before it didn't see that, and names the check once", () => {
+      show([builder(["calc.py"]), check, unmet, asked, ship, again, human], ["calc.py"]);
+      expect(page().split(note)).toHaveLength(3);
+      expect(page().split("Keel ran `make test` and it passed.")).toHaveLength(2);
+    });
+
+    it("goes by the check that ran after it", () => {
+      show([builder(["calc.py"]), check, asked, ship, { ...again, state: "failed" }, human], ["calc.py"]);
+      expect(page()).toContain("Keel ran `make test` and it didn't pass.");
+      expect(page()).not.toContain("Keel ran `make test` and it passed.");
+    });
+
+    it("says nothing of it when there was nothing to fix, and the check stands", () => {
+      const left = (step: Attempt, code: string) => ({ ...step, state: "skipped", shaAfter: "a", reason: { code } }) as Attempt;
+      show([builder(["calc.py"]), check, reviewer, left(ship, "nothingToFix"), left(again, "nothingChangedSinceCheck"), human], ["calc.py"]);
+      expect(page()).not.toContain(note);
+      expect(page()).toContain("Keel ran `make test` and it passed.");
+      expect(page()).not.toContain("didn't pass");
+    });
+
+    it("says a check that passed ran before it, when none ran after", () => {
+      const before = { ...check, ...shas("a", "a") };
+      show([builder(["calc.py"]), before, asked, ship, human], ["calc.py"]);
+      expect(page().split(note)).toHaveLength(3);
+    });
+
+    it("names whose words each message is, in short and in full, with how the last round ended", () => {
+      const again1 = { ...builder(["calc.py"], "Built it again."), id: "b2", round: 1 };
+      show([builder(["calc.py"], "Built it."), check, asked, ship, again1, { ...ship, id: "s2", round: 1, resultText: "Fixed another." }, human], ["calc.py"]);
+      const did = [...document.querySelectorAll("dt")].find((dt) => dt.textContent?.startsWith("What it did"))?.nextElementSibling?.textContent;
+      expect(did).toContain("builderBuilt it.");
+      expect(did).toContain("builderBuilt it again.");
+      expect(did).toContain("shipFixed another.");
+      expect(did).not.toContain("Fixed the sign.");
+    });
+
+    it("says nothing of it when it changed nothing", () => {
+      show([builder(["calc.py"]), check, asked, { ...ship, shaAfter: "a" }, again, human], ["calc.py"]);
+      expect(page()).not.toContain(note);
+    });
+  });
+
   it("says how many tests a check that passed skipped, not just that it passed", async () => {
     show([builder(["calc.py"]), { ...check, skippedTests: 385 }, human], ["calc.py"]);
     expect(page()).toContain("Keel ran `make test` and it passed, but 385 tests were skipped.");
@@ -1704,6 +1754,37 @@ describe("the run summary", () => {
       expect(page()).not.toContain("Not proven");
       expect(greenCheck()).not.toBeNull();
     });
+  });
+});
+
+describe("a run whose fix had nothing to fix", () => {
+  let root: Root;
+  const page = () => document.body.textContent ?? "";
+  const event = (data: Record<string, unknown>): AuditEvent => ({ seq: 1, attemptId: "ship", at: "2026-01-01T00:00:00Z", kind: "skipped", data });
+
+  beforeEach(async () => {
+    await i18next.changeLanguage("en");
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+  });
+
+  it("counts the check once in the summary, and not the one that had nothing to repeat", () => {
+    const again = attempt({ id: "check-ship", stepId: "check-ship", kind: "check", tools: "check", prompt: "make test", state: "skipped", reason: { code: "nothingChangedSinceCheck" } });
+    const run = { ...runWith(deliverNext), finishedAt: null } as Run;
+    act(() => root.render(<Summary run={run} attempts={[builder(["calc.py"]), check, again]} current={again} commands={[]} rawCheck="intact" closedBy={null} onShowChanges={() => {}} />));
+    expect(page()).toContain("1 of 1 checks passed.");
+  });
+
+  it("says in the activity why each was left out", () => {
+    const show = (code: string) => act(() => root.render(<ActivityTab events={[event({ reason: { code } })]} role="worker" />));
+    show("nothingToFix");
+    expect(page()).toContain("Skipped: there was nothing to fix");
+    show("nothingChangedSinceCheck");
+    expect(page()).toContain("Skipped: nothing changed since it passed");
+    expect(page()).not.toContain("nothing it covers changed");
   });
 });
 
