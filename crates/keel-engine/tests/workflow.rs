@@ -47,7 +47,7 @@ fn write_script(path: &Path, text: &str) {
 }
 
 /// A step asked for a structured answer gives a spec. Other read-only steps just say something, and
-/// build steps also change a file, unless told not to.
+/// build steps also change a file, unless told not to, and then run `after` if it's there.
 fn fake_claude(log: &Path, flags: &Path) -> String {
     format!(
         r##"#!/bin/bash
@@ -86,6 +86,7 @@ else
     fi
     echo work >> fixed.txt
     git add -A && git commit -qm "fix$secret"
+    if [ -f "{flags}/after" ]; then . "{flags}/after"; fi
   fi
 fi
 echo "{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"$text\",\"num_turns\":1,\"total_cost_usd\":0.01,\"usage\":{{\"input_tokens\":10,\"output_tokens\":2}},\"modelUsage\":{{\"claude-fake\":{{}}}}}}"
@@ -387,6 +388,42 @@ fn a_request_goes_all_the_way_to_a_draft_pull_request() {
     );
     assert_eq!(event.data["account"], "alice");
     assert_eq!(event.data["draft"], true);
+}
+
+/// `git replace` has git read one object as another, and a builder can run it in the run's copy.
+/// Pushing reads the objects as they are. None of these leaves anything uncommitted in the copy.
+#[test]
+fn what_a_person_approves_is_what_gets_pushed_whatever_a_builder_replaced() {
+    keel_harness::needs!(sandbox);
+    for replace in [
+        "git replace HEAD:fixed.txt $(echo harmless | git hash-object -w --stdin)",
+        "git replace HEAD^{tree} HEAD~1^{tree}",
+        "git replace HEAD~1 HEAD",
+    ] {
+        let w = world();
+        std::fs::write(w.dir.path().join("flags/after"), replace).unwrap();
+        let run = w.start(None);
+        let approval = w.wait(&run, "approval", AttemptState::WaitingApproval);
+        let builder = w.step(&run, "builder").unwrap();
+        let replaced = git(Path::new(&builder.workspace), &["replace", "-l"]);
+        assert!(!replaced.is_empty(), "{replace}");
+        let shown = w.engine.run_diff(&run).unwrap();
+        assert!(shown.contains("+work"), "{replace}: {shown}");
+        assert_eq!(
+            builder.files_changed,
+            Some(serde_json::json!(["fixed.txt"])),
+            "{replace}"
+        );
+
+        w.engine.answer_approval(&approval.id, true, "").unwrap();
+        w.wait(&run, "pull-request", AttemptState::Succeeded);
+        let branch = git(
+            &w.remote,
+            &["for-each-ref", "--format=%(refname)", "refs/heads/keel"],
+        );
+        let pushed = git(&w.remote, &["diff", &format!("main..{branch}")]);
+        assert_eq!(shown.trim_end(), pushed, "{replace}");
+    }
 }
 
 #[test]
