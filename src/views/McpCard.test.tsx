@@ -182,6 +182,14 @@ describe("the MCP card", () => {
       expect(page()).toContain("After: none");
     });
 
+    it("shows the domains before and after, one a line", async () => {
+      projectChanges = [change({ changes: [{ field: "allowedDomains", before: "pypi.org", after: "pypi.org\nregistry.npmjs.org" }] })];
+      await open();
+      expect(page()).toContain("Allowed domains");
+      expect(page()).toContain("Before: pypi.org");
+      expect(page()).toContain("After: pypi.org\nregistry.npmjs.org");
+    });
+
     it("names the folder and repo, which two projects with one name don't share", async () => {
       projectChanges = [change({ action: "added" }), change({ seq: 2, projectPath: "/Users/you/other/storefront", githubRepo: null })];
       await open();

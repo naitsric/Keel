@@ -13,6 +13,9 @@ import { FolderChoices, useToolFolders } from "./ToolFolders";
 const NONE = "__none__";
 const POLL_MS = 1000;
 
+/** The saved values this dialog writes over. It leaves the domains as they are, whoever changed them. */
+const commandsOf = ({ githubAccount, setupCommand, checkCommand }: Project): Configured => ({ githubAccount, setupCommand, checkCommand });
+
 /** What each signed-in account can do in this repo, and what `gh` said. */
 interface GithubView {
   base: GithubStatus;
@@ -207,7 +210,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
    */
   const catchUp = (now: Project) => {
     if (!info) return false;
-    const fields = configuredChanges(info.project, now);
+    const fields = configuredChanges(commandsOf(info.project), commandsOf(now));
     if (fields.length === 0) return false;
     const { githubAccount, setupCommand, checkCommand } = now;
     setInfo({ ...info, project: { ...info.project, githubAccount, setupCommand, checkCommand } });
@@ -496,7 +499,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
           }
         />
       )}
-      {info && changed.length > 0 && <ProjectChangedNotice title={t("setup.changed")} saved={info.project} fields={changed} kept={configuredChanges(info.project, { githubAccount: selected, setupCommand: setup || null, checkCommand: check || null })} />}
+      {info && changed.length > 0 && <ProjectChangedNotice title={t("setup.changed")} saved={info.project} fields={changed} kept={configuredChanges(commandsOf(info.project), { githubAccount: selected, setupCommand: setup || null, checkCommand: check || null })} />}
       {error && (
         <p role="alert" className="text-[12px] leading-snug text-danger">
           {error}

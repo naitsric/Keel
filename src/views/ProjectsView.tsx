@@ -4,7 +4,7 @@ import { useTranslation } from "react-i18next";
 import { api, type CiGap, type EnvVar, type GithubStatus, type IssueWatch, type Project, type Service, type Workflow } from "../lib/api";
 import { formatRelative } from "../lib/format";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
-import { ciCommandsLeft, ciLeftOutLeft, type Configured, configuredChanges, foldersToOffer, needsNode, needsSetup, setupMissing, withCheckOption, withFolders } from "../lib/projects";
+import { ciCommandsLeft, ciLeftOutLeft, type Configured, configuredChanges, configuredValue, foldersToOffer, needsNode, needsSetup, setupMissing, withCheckOption, withFolders } from "../lib/projects";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, fieldHintClass, fieldLabelClass, inputClass, SettingRow } from "../ui/primitives";
@@ -86,35 +86,50 @@ function ServiceRow({ service, onChange, onRemove }: { service: Service; onChang
 /**
  * The card reads most of its values only as it mounts, so it has to start over when the setup dialog
  * changes them, or its next Save would put the old ones back: the folders it adds and localhost. The
- * account and the commands aren't here. A client can change them at any moment, and starting over
- * would drop what the person hasn't saved, so the card follows them: see `useSavedConfiguration`.
+ * account, the commands and the domains aren't here. A client can change them at any moment, and
+ * starting over would drop what the person hasn't saved, so the card follows them: see
+ * `useSavedConfiguration`.
  */
 export const projectCardKey = (project: Project) => [project.id, project.githubRepo, project.allowLocalhost, ...project.allowedRead].join("\0");
 
+/** The domains as their box holds them. */
+const domainsText = (project: Configured) => configuredValue(project, "allowedDomains") ?? "";
+
 /**
- * The account and commands as the form holds them. When the saved ones change under it, a field the
- * person hasn't edited takes the new value and an edited one stays. `byClient` has the fields an MCP
- * client changed since the form opened or was last saved.
+ * The account, commands and domains as the form holds them. When the saved ones change under it, a
+ * field the person hasn't edited takes the new value and an edited one stays. `byClient` has the
+ * fields an MCP client changed since the form opened or was last saved.
  */
 function useSavedConfiguration(project: Project) {
   const [account, setAccount] = useState(project.githubAccount ?? NONE);
   const [setup, setSetup] = useState(project.setupCommand ?? "");
   const [check, setCheck] = useState(project.checkCommand ?? "");
+  const [domains, setDomains] = useState(() => domainsText(project));
+  const heldDomains = useRef(domains);
+  heldDomains.current = domains;
+  // The saved domains the box was last filled from, which is what the person has seen in it.
+  const filledFrom = useRef(project.allowedDomains);
   const [byClient, setByClient] = useState<(keyof Configured)[]>([]);
   const seen = useRef<Configured>(project);
   const [openedAt] = useState(() => Date.now());
   const announced = useRef(0);
+  // The last of them the person had been told of when they last saved.
+  const settled = useRef(0);
   const { id, githubAccount, setupCommand, checkCommand } = project;
+  // A new list comes with every look at the projects, so it's told apart by what it says.
+  const allowed = project.allowedDomains.join("\n");
 
   useEffect(() => {
     const before = seen.current;
-    const now = { githubAccount, setupCommand, checkCommand };
+    const now: Configured = { githubAccount, setupCommand, checkCommand, allowedDomains: lines(allowed) };
     const changed = configuredChanges(before, now);
     if (changed.length === 0) return;
     seen.current = now;
     setAccount((held) => (held === (before.githubAccount ?? NONE) ? (now.githubAccount ?? NONE) : held));
     setSetup((held) => (held === (before.setupCommand ?? "") ? (now.setupCommand ?? "") : held));
     setCheck((held) => (held === (before.checkCommand ?? "") ? (now.checkCommand ?? "") : held));
+    if (heldDomains.current === domainsText(before)) filledFrom.current = now.allowedDomains ?? [];
+    setDomains((held) => (held === domainsText(before) ? domainsText(now) : held));
     // The change may be the person's, from the setup dialog. The record of what clients did says.
     api
       .mcpOverview()
@@ -124,20 +139,51 @@ function useSavedConfiguration(project: Project) {
         // Told only once the form holds what the latest of them left: one saved after the values
         // this effect has may be on record already, and saving must still stop for it.
         const latest = news.reduce((a, b) => (b.seq > a.seq ? b : a));
-        if (latest.changes.every(({ field, after }) => now[field] === after)) announced.current = latest.seq;
+        if (latest.changes.every(({ field, after }) => configuredValue(now, field) === after)) announced.current = latest.seq;
         setByClient((fields) => [...new Set([...fields, ...changed])]);
       })
       .catch(() => undefined);
-  }, [id, githubAccount, setupCommand, checkCommand, openedAt]);
+  }, [id, githubAccount, setupCommand, checkCommand, allowed, openedAt]);
 
   /** After a save of `sent`, shows it as Keel wrote it, unless the person has typed since. */
-  const takeSaved = (sent: { account: string; setup: string; check: string }, now: Project) => {
+  const takeSaved = (sent: { account: string; setup: string; check: string; domains: string }, now: Project) => {
     seen.current = now;
+    settled.current = announced.current;
+    filledFrom.current = heldDomains.current === sent.domains ? now.allowedDomains : lines(sent.domains);
     setAccount((held) => (held === sent.account ? (now.githubAccount ?? NONE) : held));
     setSetup((held) => (held === sent.setup ? (now.setupCommand ?? "") : held));
     setCheck((held) => (held === sent.check ? (now.checkCommand ?? "") : held));
+    setDomains((held) => (held === sent.domains ? domainsText(now) : held));
     setByClient([]);
   };
+
+  /**
+   * The saved domains the person has seen, to send with a save: Keel keeps any other the project
+   * has by then, such as one they allowed from a step that waited for it. They're those the box was
+   * filled from, and those a client added since the last save, that the person has been told of and
+   * no client took away again: for those the box wins.
+   */
+  const seenDomains = async (from: string[]) => {
+    // Without the record, only what filled the box counts, so nothing else is taken away.
+    const recorded = await api
+      .mcpOverview()
+      .then(({ projectChanges }) => projectChanges)
+      .catch(() => []);
+    const theirs = new Set<string>();
+    recorded
+      .filter((c) => c.projectId === id && c.seq > settled.current && c.seq <= announced.current && Date.parse(c.at) >= openedAt)
+      .sort((a, b) => a.seq - b.seq)
+      .flatMap((c) => c.changes.filter((change) => change.field === "allowedDomains"))
+      .forEach(({ before, after }) => {
+        const [had, has] = [lines(before ?? ""), lines(after ?? "")];
+        had.filter((domain) => !has.includes(domain)).forEach((domain) => theirs.delete(domain));
+        has.filter((domain) => !had.includes(domain)).forEach((domain) => theirs.add(domain));
+      });
+    return [...new Set([...from, ...theirs])];
+  };
+
+  /** What the box was filled from, to read before saving waits for anything. */
+  const filled = () => filledFrom.current;
 
   /**
    * The last change a client made to the project since the form opened that the form hasn't taken
@@ -165,7 +211,7 @@ function useSavedConfiguration(project: Project) {
   /** The saved values the form has taken in. */
   const taken = () => seen.current;
 
-  return { account, setAccount, setup, setSetup, check, setCheck, byClient, takeSaved, taken, clientChangeUnheard, takeUnheard };
+  return { account, setAccount, setup, setSetup, check, setCheck, domains, setDomains, byClient, takeSaved, taken, filled, seenDomains, clientChangeUnheard, takeUnheard };
 }
 
 /** What the last look at the project's issues found, or why it couldn't look. */
@@ -246,8 +292,7 @@ function useSections(form: RefObject<HTMLDivElement | null>, header: RefObject<H
 function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boolean; onSaved: () => void }) {
   const { t, i18n } = useTranslation();
   const refreshOverview = useApp((s) => s.refreshOverview);
-  const { account, setAccount, setup, setSetup, check, setCheck, byClient, takeSaved, taken, clientChangeUnheard, takeUnheard } = useSavedConfiguration(project);
-  const [domains, setDomains] = useState(project.allowedDomains.join("\n"));
+  const { account, setAccount, setup, setSetup, check, setCheck, domains, setDomains, byClient, takeSaved, taken, filled, seenDomains, clientChangeUnheard, takeUnheard } = useSavedConfiguration(project);
   const [paths, setPaths] = useState(project.allowedRead.join("\n"));
   const [services, setServices] = useState<Service[]>(project.services);
   const [env, setEnv] = useState(project.env.map((v) => `${v.name}=${v.value}`).join("\n"));
@@ -365,6 +410,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
       // A client may have changed the account or commands since the form took them in. Those are
       // shown first rather than written over unseen, and saving again is the person's call.
       const before = taken();
+      const from = filled();
       const unheard = await clientChangeUnheard();
       if (unheard !== null) {
         await refreshOverview();
@@ -374,6 +420,9 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
         return;
       }
       await api.projectUpdate(project.id, {
+        // So that the box doesn't write over a domain the person allowed from a run since it was
+        // filled, which the app may not have heard of yet.
+        domainsSeen: await seenDomains(from),
         githubAccount: account === NONE ? null : account,
         setupCommand: setup,
         checkCommand: check,
@@ -388,7 +437,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
       });
       await refreshOverview();
       const now = useApp.getState().overview.projects.find((p) => p.id === project.id);
-      if (now) takeSaved({ account, setup, check }, now);
+      if (now) takeSaved({ account, setup, check, domains }, now);
       onSaved();
       load();
     } catch (e) {
@@ -660,7 +709,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
       {/* Stays in view while the form scrolls, so saving is never a search. One Save for every section. */}
       <div className="sticky -bottom-5 z-10 bg-bg pt-3 pb-5">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-border-strong bg-elevated px-5 py-2.5 shadow-[0_-6px_16px_-12px_rgb(0_0_0/0.35)]">
-          {byClient.length > 0 && <ProjectChangedNotice title={t("projects.clientChanged")} saved={project} fields={byClient} kept={configuredChanges(project, { githubAccount: account === NONE ? null : account, setupCommand: setup || null, checkCommand: check || null })} />}
+          {byClient.length > 0 && <ProjectChangedNotice title={t("projects.clientChanged")} saved={project} fields={byClient} kept={configuredChanges(project, { githubAccount: account === NONE ? null : account, setupCommand: setup || null, checkCommand: check || null, allowedDomains: lines(domains) })} />}
           <Button variant="primary" onClick={() => void save()}>
             {t("settings.save")}
           </Button>

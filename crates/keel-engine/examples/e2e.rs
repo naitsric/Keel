@@ -40,6 +40,7 @@ fn main() {
                 default_workflow: None,
                 sensitive_paths: vec![],
                 allow_localhost: false,
+                domains_seen: None,
             },
         )
         .unwrap();

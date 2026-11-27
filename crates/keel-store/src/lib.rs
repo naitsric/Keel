@@ -490,6 +490,17 @@ const MIGRATIONS: &[&str] = &[
     create trigger mcp_project_change_no_delete before delete on mcp_project_change
     begin select raise(abort, 'what an mcp client changed is never deleted'); end;
 "#,
+    // 26: The offline variables a project's builder goes without since a person allowed, from a
+    // step that waited for it, a domain that's no known registry: nothing else says whose it is.
+    // One counts while the project allows that domain.
+    r#"
+    create table freed_by_domain (
+        project_id text not null references project (id),
+        domain text not null,
+        variable text not null,
+        primary key (project_id, domain, variable)
+    );
+"#,
 ];
 
 /// Whether the card a query calls `card` can start as far as other cards go: it waits for none,
@@ -570,8 +581,8 @@ pub struct McpClient {
     /// May send work back and retry on the runs it started, and add a note to their cards while
     /// they wait, besides `can_run`. Off unless the person turns it on.
     pub can_steer: bool,
-    /// May add projects and change their GitHub account and setup and check commands, besides
-    /// `can_run`. Off unless the person turns it on.
+    /// May add projects and change their GitHub account, setup and check commands and allowed
+    /// domains, besides `can_run`. Off unless the person turns it on.
     pub can_manage_projects: bool,
     /// How many of its runs may be open at once, counting those that wait for the person.
     pub max_open_runs: i64,
@@ -607,12 +618,15 @@ pub struct NewMcpCall<'a> {
 }
 
 /// What an MCP client changes in a project. `None` leaves a value as it is, and `Some(None)` takes
-/// a command away. Nothing else about a project is a client's to change.
+/// a command away. Its domains it adds to and takes from, so it never writes over ones it didn't
+/// name. Nothing else about a project is a client's to change.
 #[derive(Debug, Clone, Default)]
 pub struct ClientProjectEdit {
     pub github_account: Option<String>,
     pub setup_command: Option<Option<String>>,
     pub check_command: Option<Option<String>>,
+    pub add_domains: Vec<String>,
+    pub remove_domains: Vec<String>,
     /// Where the folder's `origin` points now, for a project brought back: not the client's to
     /// choose, but written and recorded with it, so that neither shows the repo it had before.
     pub github_repo: Option<Option<String>>,
@@ -665,6 +679,38 @@ fn may_manage_projects(conn: &Connection, client_id: &str) -> rusqlite::Result<b
         [client_id],
         |r| r.get(0),
     )
+}
+
+/// The domains a project allows, or `None` for one there isn't.
+fn allowed_domains(conn: &Connection, project_id: &str) -> rusqlite::Result<Option<Vec<String>>> {
+    let held: Option<String> = conn
+        .query_row(
+            "select allowed_domains from project where id = ?1",
+            [project_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(held.map(|held| serde_json::from_str(&held).unwrap_or_default()))
+}
+
+/// A project's domains without those in `remove`, and with those in `add` it lacks at the end.
+/// Case doesn't tell two domains apart.
+fn with_domains(held: &[String], add: &[String], remove: &[String]) -> Vec<String> {
+    let among = |list: &[String], domain: &str| {
+        list.iter()
+            .any(|other| other.trim().eq_ignore_ascii_case(domain.trim()))
+    };
+    let mut domains: Vec<String> = held
+        .iter()
+        .filter(|domain| !among(remove, domain))
+        .cloned()
+        .collect();
+    for domain in add {
+        if !among(&domains, domain) {
+            domains.push(domain.clone());
+        }
+    }
+    domains
 }
 
 /// What differs between what a project held and what it holds now, in the order the app shows it.
@@ -992,6 +1038,10 @@ pub struct ProjectSettings {
     pub default_workflow: Option<String>,
     pub sensitive_paths: Vec<String>,
     pub allow_localhost: bool,
+    /// Not a setting: the saved domains the form being saved had seen. One the project got since
+    /// then, as a person allows from a step that waits for it, isn't taken away by saving. `None`
+    /// saves `allowed_domains` as they are.
+    pub domains_seen: Option<Vec<String>>,
 }
 
 const PROJECT_COLUMNS: &str = "id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths, allow_localhost, issue_label";
@@ -2051,10 +2101,10 @@ impl Store {
         Ok(ClientWrite::Done)
     }
 
-    /// Changes a project's GitHub account and commands for a client, and records each value before
-    /// and after, all or nothing. With `restore` it also brings a removed project back, so it never
-    /// comes back with its old commands, and what it comes back with is recorded even where it
-    /// stayed. Otherwise, setting what's already there records nothing.
+    /// Changes a project's GitHub account, commands and domains for a client, and records each
+    /// value before and after, all or nothing. With `restore` it also brings a removed project
+    /// back, so it never comes back with its old commands, and what it comes back with is recorded
+    /// even where it stayed. Otherwise, setting what's already there records nothing.
     pub fn edit_project_for_mcp_client(
         &self,
         client_id: &str,
@@ -2067,21 +2117,24 @@ impl Store {
         if !may_manage_projects(&tx, client_id)? {
             return Ok(ClientWrite::NotAllowed);
         }
-        let held: Option<(Option<String>, Option<String>, Option<String>)> = tx
+        type Held = (Option<String>, Option<String>, Option<String>, String);
+        let held: Option<Held> = tx
             .query_row(
-                "select github_account, setup_command, check_command from project
+                "select github_account, setup_command, check_command, allowed_domains from project
                  where id = ?1 and (removed_at is not null) = ?2",
                 params![project_id, restore],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((account, setup, check)) = held else {
+        let Some((account, setup, check, domains)) = held else {
             return Ok(ClientWrite::ProjectChanged);
         };
+        let domains: Vec<String> = serde_json::from_str(&domains).unwrap_or_default();
+        let new_domains = with_domains(&domains, &edit.add_domains, &edit.remove_domains);
         let new_account = edit.github_account.clone().or_else(|| account.clone());
         let new_setup = edit.setup_command.clone().unwrap_or_else(|| setup.clone());
         let new_check = edit.check_command.clone().unwrap_or_else(|| check.clone());
-        let changes = field_changes(
+        let mut changes = field_changes(
             [account.as_deref(), setup.as_deref(), check.as_deref()],
             [
                 new_account.as_deref(),
@@ -2090,6 +2143,23 @@ impl Store {
             ],
             restore,
         );
+        // As with the account and the commands, what a project comes back with is recorded too.
+        if new_domains != domains || (restore && !domains.is_empty()) {
+            // One domain a line, as the app shows and edits them.
+            let listed = |list: &[String]| (!list.is_empty()).then(|| list.join("\n"));
+            changes.push(FieldChange {
+                field: "allowedDomains".to_owned(),
+                before: listed(&domains),
+                after: listed(&new_domains),
+            });
+            tx.execute(
+                "update project set allowed_domains = ?2 where id = ?1",
+                params![
+                    project_id,
+                    serde_json::to_string(&new_domains).unwrap_or_default()
+                ],
+            )?;
+        }
         if changes.is_empty() && !restore {
             return Ok(ClientWrite::Done);
         }
@@ -2284,6 +2354,61 @@ impl Store {
         Ok(insert_project(&self.lock(), project)?)
     }
 
+    /// Adds domains to those a project allows, as the person does from a step that waits for them.
+    /// One it already has stays once. Read and written in one go, so a change saved meanwhile
+    /// isn't lost. `freed` are the offline variables each domain frees, as `(domain, variable)`,
+    /// kept with the project: see `freed_variables`.
+    pub fn allow_domains(
+        &self,
+        project_id: &str,
+        domains: &[String],
+        freed: &[(&str, &str)],
+    ) -> Result<()> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let held = allowed_domains(&tx, project_id)?
+            .ok_or_else(|| Error::NotFound(format!("project {project_id}")))?;
+        let now = with_domains(&held, domains, &[]);
+        tx.execute(
+            "update project set allowed_domains = ?2 where id = ?1",
+            params![project_id, serde_json::to_string(&now).unwrap_or_default()],
+        )?;
+        for (domain, variable) in freed {
+            tx.execute(
+                "insert or ignore into freed_by_domain (project_id, domain, variable)
+                 values (?1, ?2, ?3)",
+                params![project_id, domain, variable],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// The offline variables freed by domains the project allows now: see `allow_domains`. One it
+    /// no longer allows frees nothing.
+    pub fn freed_variables(&self, project_id: &str) -> Result<Vec<String>> {
+        let conn = self.lock();
+        let allowed = allowed_domains(&conn, project_id)?.unwrap_or_default();
+        let mut stmt = conn.prepare(
+            "select domain, variable from freed_by_domain where project_id = ?1
+             order by variable",
+        )?;
+        let rows = stmt.query_map([project_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        let mut variables: Vec<String> = Vec::new();
+        for row in rows {
+            let (domain, variable) = row?;
+            let still = allowed
+                .iter()
+                .any(|held| held.trim().eq_ignore_ascii_case(&domain));
+            if still && !variables.contains(&variable) {
+                variables.push(variable);
+            }
+        }
+        Ok(variables)
+    }
+
     /// The label whose issues Keel brings to the board, or none to stop watching.
     pub fn set_issue_label(&self, id: &str, label: Option<&str>) -> Result<()> {
         let changed = self.lock().execute(
@@ -2356,14 +2481,27 @@ impl Store {
         Ok(changed > 0)
     }
 
+    /// Saves what a person set. With `domains_seen`, a domain the project got since the form saw
+    /// those is kept, read and written in one go.
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<()> {
-        self.lock().execute(
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        let domains = match &settings.domains_seen {
+            Some(seen) => {
+                // What it saw and doesn't send, the person took away.
+                let held = allowed_domains(&tx, id)?.unwrap_or_default();
+                let unseen = with_domains(&held, &[], seen);
+                with_domains(&settings.allowed_domains, &unseen, &[])
+            }
+            None => settings.allowed_domains.clone(),
+        };
+        tx.execute(
             "update project set github_account = ?2, check_command = ?3, allowed_domains = ?4, allowed_read = ?5, services = ?6, env = ?7, setup_command = ?8, default_workflow = ?9, sensitive_paths = ?10, allow_localhost = ?11 where id = ?1",
             params![
                 id,
                 settings.github_account,
                 settings.check_command,
-                serde_json::to_string(&settings.allowed_domains).unwrap_or_default(),
+                serde_json::to_string(&domains).unwrap_or_default(),
                 serde_json::to_string(&settings.allowed_read).unwrap_or_default(),
                 serde_json::to_string(&settings.services).unwrap_or_default(),
                 serde_json::to_string(&settings.env).unwrap_or_default(),
@@ -2373,6 +2511,7 @@ impl Store {
                 settings.allow_localhost,
             ],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -3209,16 +3348,18 @@ impl Store {
             }
             output.to_string()
         });
+        // Keel also sends one back that waited for a domain, once the person goes on without it.
         let from = if failed.is_some() {
-            "('queued', 'preparing', 'running', 'stalled')"
+            "(state in ('queued', 'preparing', 'running', 'stalled')
+              or (state = 'blocked' and json_extract(reason, '$.code') = 'networkNeeded'))"
         } else {
-            "('failed')"
+            "state = 'failed'"
         };
         let changed = tx.execute(
             &format!(
                 "update attempt set state = 'returned', reason = coalesce(?2, reason),
                                     output = coalesce(?3, output)
-                 where id = ?1 and kind = 'check' and state in {from}"
+                 where id = ?1 and kind = 'check' and {from}"
             ),
             params![id, reason, output],
         )?;
@@ -4280,7 +4421,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
-                 drop table mcp_project_change;
+                 drop table freed_by_domain; drop table mcp_project_change;
                  alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
@@ -4565,6 +4706,7 @@ mod tests {
                     default_workflow: Some("builtin:simple".into()),
                     sensitive_paths: vec!["billing/".into()],
                     allow_localhost: true,
+                    domains_seen: None,
                 },
             )
             .unwrap();
@@ -4579,6 +4721,69 @@ mod tests {
         assert_eq!(project.allowed_read, ["~/.cargo"]);
         assert_eq!(project.services[0].name(), "db");
         assert_eq!(project.env[0].name, "DB");
+    }
+
+    /// A person allows a domain from a step while a form that doesn't have it is open.
+    #[test]
+    fn saving_what_a_form_holds_keeps_a_domain_allowed_since_it_saw_them() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let save = |domains: &[&str], seen: Option<&[&str]>| {
+            let list = |of: &[&str]| of.iter().map(|d| (*d).to_owned()).collect::<Vec<_>>();
+            store
+                .update_project(
+                    "p",
+                    &ProjectSettings {
+                        allowed_domains: list(domains),
+                        domains_seen: seen.map(list),
+                        ..ProjectSettings::default()
+                    },
+                )
+                .unwrap();
+            store.project("p").unwrap().allowed_domains
+        };
+        let seen: &[&str] = &["a.example", "b.example"];
+        save(seen, None);
+        store
+            .allow_domains("p", &["registry.npmjs.org".into()], &[])
+            .unwrap();
+
+        // What the form saw and doesn't send goes, what it adds stays, and so does the other.
+        assert_eq!(
+            save(&["a.example", "c.example"], Some(seen)),
+            ["a.example", "c.example", "registry.npmjs.org"]
+        );
+        // Case doesn't tell two apart, so one the form has is there once.
+        assert_eq!(
+            save(&["Registry.NPMjs.org"], Some(&["A.example", "c.example"])),
+            ["Registry.NPMjs.org"]
+        );
+        // With nothing said of what was seen, the list is saved as it is.
+        assert!(save(&[], None).is_empty());
+    }
+
+    #[test]
+    fn a_domain_frees_variables_only_while_its_project_allows_it() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let private = "npm.mycorp.example";
+        let freed = [
+            (private, "npm_config_offline"),
+            (private, "pnpm_config_offline"),
+        ];
+        // Twice is as good as once.
+        for _ in 0..2 {
+            store.allow_domains("p", &[private.into()], &freed).unwrap();
+        }
+        assert_eq!(
+            store.freed_variables("p").unwrap(),
+            ["npm_config_offline", "pnpm_config_offline"]
+        );
+
+        store
+            .update_project("p", &ProjectSettings::default())
+            .unwrap();
+        assert!(store.freed_variables("p").unwrap().is_empty());
     }
 
     fn project_reading(store: &Store, id: &str, read: &[&str]) {
@@ -4623,7 +4828,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 15;
-                 drop table mcp_project_change;
+                 drop table freed_by_domain; drop table mcp_project_change;
                  alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
@@ -4706,7 +4911,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 22;
-                 drop table mcp_project_change;
+                 drop table freed_by_domain; drop table mcp_project_change;
                  alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
@@ -4816,7 +5021,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 20;
-                 drop table mcp_project_change;
+                 drop table freed_by_domain; drop table mcp_project_change;
                  alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
@@ -4902,7 +5107,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 21;
-                 drop table mcp_project_change;
+                 drop table freed_by_domain; drop table mcp_project_change;
                  alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
@@ -5280,7 +5485,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 23;
-                 drop table mcp_project_change;
+                 drop table freed_by_domain; drop table mcp_project_change;
                  alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
@@ -7357,7 +7562,7 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
-                 drop table mcp_project_change;
+                 drop table freed_by_domain; drop table mcp_project_change;
                  alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
@@ -8378,7 +8583,7 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "pragma user_version = 16;
-             drop table mcp_project_change;
+             drop table freed_by_domain; drop table mcp_project_change;
              alter table mcp_client drop column can_manage_projects;
              alter table run drop column pr_counted_at;
              alter table run drop column pr_commits_added;

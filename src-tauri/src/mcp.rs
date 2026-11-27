@@ -142,8 +142,8 @@ pub fn mcp_client_set_can_steer(
     Ok(())
 }
 
-/// Lets it add projects and change their GitHub account and commands. It also needs `can_run`,
-/// without which the store keeps it off.
+/// Lets it add projects and change their GitHub account, commands and allowed domains. It also
+/// needs `can_run`, without which the store keeps it off.
 #[tauri::command(async)]
 pub fn mcp_client_set_can_manage_projects(
     id: String,

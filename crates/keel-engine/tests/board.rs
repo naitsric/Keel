@@ -80,6 +80,8 @@ for a in "$@"; do
   [ "$prev" = "--json-schema" ] && schema="$a"
   prev="$a"
 done
+# What a builder is asked to answer with doesn't change what this one does.
+case "$schema" in *neededDomains*) schema="";; esac
 list=$(printf '%s' "$tools" | sed 's/,/","/g')
 [ -n "$schema" ] && list="$list\",\"StructuredOutput"
 echo "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"fake\",\"tools\":[\"$list\"],\"apiKeySource\":\"none\"}"

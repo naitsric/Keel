@@ -130,6 +130,7 @@ impl World {
                     default_workflow: None,
                     sensitive_paths: vec![],
                     allow_localhost: false,
+                    domains_seen: None,
                 },
             )
             .unwrap();

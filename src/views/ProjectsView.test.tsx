@@ -2,7 +2,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { callsTo, hideApp, paletteRow, pressKey, pressMod, row, setCiGap, setIssueWatch, setProjectChanges, setToolFolders, settle, showApp, view } from "../commands/testApp";
 import i18next from "../i18n";
-import { api, type IssueWatch, type McpProjectChange, type Project } from "../lib/api";
+import { api, type IssueWatch, type McpProjectChange, type Project, type ProjectSettings } from "../lib/api";
 import { useApp } from "../lib/store";
 
 const RUNS = [row("r1", "running")];
@@ -249,6 +249,87 @@ describe("the Projects page", () => {
       await click(button(i18next.t("settings.save")));
       expect(saved()).toMatchObject({ githubAccount: "bot-account", setupCommand: "make mine", checkCommand: "make check", env: [{ name: "A", value: "1" }] });
       expect(notice()).toBe("");
+    });
+
+    const domainsBox = () => [...main().querySelectorAll("label")].find((l) => l.textContent?.startsWith(i18next.t("settings.domains")))?.querySelector("textarea") as HTMLTextAreaElement;
+
+    it("takes the domains a client changed, so saving doesn't write over them", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      setProjectChanges([{ ...record(1), changes: [{ field: "allowedDomains", before: null, after: "registry.npmjs.org\npypi.org" }] }]);
+      await change({ allowedDomains: ["registry.npmjs.org", "pypi.org"] });
+      expect(domainsBox().value).toBe("registry.npmjs.org\npypi.org");
+      expect(notice()).toContain(i18next.t("projects.clientChanged"));
+      expect(notice()).toContain(i18next.t("mcp.field.allowedDomains"));
+      expect(notice()).toContain("registry.npmjs.org");
+
+      await click(button(i18next.t("settings.save")));
+      expect(saved().allowedDomains).toEqual(["registry.npmjs.org", "pypi.org"]);
+    });
+
+    it("keeps the domains the person was editing, and says what a client saved", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      await typeInto(domainsBox(), "mine.example");
+      setProjectChanges([record(1)]);
+      await change({ allowedDomains: ["theirs.example"] });
+      expect(domainsBox().value).toBe("mine.example");
+      expect(notice()).toContain("theirs.example");
+      expect(notice()).toContain(i18next.t("projects.yoursKept"));
+    });
+
+    // Keel keeps, as it saves, any domain the project has that isn't among those the form saw.
+    const seen = () => (callsTo("project_update").at(-1)?.args as { settings: ProjectSettings }).settings.domainsSeen;
+
+    it("doesn't count as seen a domain the person allowed from a waiting step while they edited the box", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      await typeInto(domainsBox(), "mine.example");
+      // Allowed from a run, which is on no client's record.
+      await change({ allowedDomains: ["registry.npmjs.org"] });
+      expect(domainsBox().value).toBe("mine.example");
+
+      await click(button(i18next.t("settings.save")));
+      expect(saved().allowedDomains).toEqual(["mine.example"]);
+      expect(seen()).toEqual([]);
+    });
+
+    it("says it saw the domains the box was filled with, so the person can take one away", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      await change({ allowedDomains: ["registry.npmjs.org"] });
+      expect(domainsBox().value).toBe("registry.npmjs.org");
+      await typeInto(domainsBox(), "");
+      await click(button(i18next.t("settings.save")));
+      expect(saved().allowedDomains).toEqual([]);
+      expect(seen()).toEqual(["registry.npmjs.org"]);
+    });
+
+    it("counts as seen what a client added, once the person has been told and saves their own", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      await typeInto(domainsBox(), "mine.example");
+      setProjectChanges([{ ...record(1), changes: [{ field: "allowedDomains", before: null, after: "theirs.example" }] }]);
+      await change({ allowedDomains: ["theirs.example"] });
+      await click(button(i18next.t("settings.save")));
+      expect(saved().allowedDomains).toEqual(["mine.example"]);
+      expect(seen()).toEqual(["theirs.example"]);
+    });
+
+    it("doesn't count as seen one a client added and took away again", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      await typeInto(domainsBox(), "mine.example");
+      setProjectChanges([{ ...record(1), changes: [{ field: "allowedDomains", before: null, after: "theirs.example" }] }]);
+      await change({ allowedDomains: ["theirs.example"] });
+      setProjectChanges([
+        { ...record(2), changes: [{ field: "allowedDomains", before: "theirs.example", after: null }] },
+        { ...record(1), changes: [{ field: "allowedDomains", before: null, after: "theirs.example" }] },
+      ]);
+      await change({ allowedDomains: [] });
+      // The person allows it from a run: it's theirs now, and saving mustn't take it away.
+      await change({ allowedDomains: ["theirs.example"] });
+      await click(button(i18next.t("settings.save")));
+      expect(seen()).toEqual([]);
+    });
+
+    it("says in both languages that domains can be why nothing was saved", () => {
+      expect(i18next.t("projects.notSaved", { lng: "en" })).toContain("domains");
+      expect(i18next.t("projects.notSaved", { lng: "es" })).toContain("dominios");
     });
 
     it("doesn't save over a change it hasn't heard of yet, and says nothing was saved", async () => {

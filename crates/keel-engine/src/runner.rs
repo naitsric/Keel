@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use keel_core::{AttemptState, Reason, StepSpec, ToolProfile, WorkflowStep};
+use keel_core::{AttemptState, NeededDomain, Reason, StepSpec, ToolProfile, WorkflowStep};
 use keel_harness::auth::{self, AuthStatus};
 use keel_harness::github::Issue;
 use keel_harness::process::{self, SIGINT, SIGTERM, Tail};
@@ -17,10 +17,11 @@ use keel_store::{Attempt, Card, Writer, now};
 use serde_json::json;
 
 use crate::git::{Git, RUN_CACHE};
+use crate::proxy::Proxy;
 use crate::services::{self, ServiceSet};
 use crate::specs::{self, Verdict};
 use crate::{
-    Error, Inner, Result, Resume, Turn, brain, joint, localhost, locked, notes, prompts,
+    Error, Inner, Result, Resume, Turn, brain, joint, localhost, locked, network, notes, prompts,
     screenshots, sizing, skipped_tests, verification, workflows,
 };
 
@@ -56,12 +57,17 @@ pub(crate) struct Monitor {
     tail: Tail,
     /// A step that was asked for a structured answer and ends without it didn't do its job.
     requires_output: bool,
+    /// A step that builds is asked for one too, to say which domains it lacked. One that ends
+    /// without it did its job all the same.
+    declares_network: bool,
     role: String,
     /// Why this attempt must end blocked, once decided.
     block: Option<Reason>,
     result: Option<ResultEvent>,
     /// Stops the step's services when dropped.
     services: Option<ServiceSet>,
+    /// A check's way to the allowed domains, closed when dropped.
+    proxy: Option<Proxy>,
     /// A check that ran with localhost open.
     localhost_open: bool,
 }
@@ -88,10 +94,12 @@ impl Monitor {
             child,
             tail,
             requires_output: attempt.role != "worker",
+            declares_network: network::builds(&attempt.kind, &attempt.role, &attempt.tools),
             role: attempt.role.clone(),
             block: None,
             result: None,
             services: None,
+            proxy: None,
             localhost_open: opens_localhost(attempt),
         }
     }
@@ -112,7 +120,7 @@ impl Monitor {
 }
 
 /// Whether one of the project's allowed domains is `host` or a subdomain of it.
-fn allows_host(domains: &[String], host: &str) -> bool {
+pub(crate) fn allows_host(domains: &[String], host: &str) -> bool {
     domains.iter().any(|domain| {
         let domain = domain.trim().trim_start_matches("*.").to_ascii_lowercase();
         domain == host || domain.ends_with(&format!(".{host}"))
@@ -135,6 +143,67 @@ const OFFLINE: [(&str, &str, &str); 7] = [
     // Maven 3.9 on. Maven Central is repo.maven.apache.org.
     ("maven.apache.org", "MAVEN_ARGS", "--offline"),
 ];
+
+/// The offline variables of each tool `network` can tell failed. pnpm before 11 reads npm's.
+const TOOL_OFFLINE: [(&str, &[&str]); 4] = [
+    ("npm", &["npm_config_offline"]),
+    ("pnpm", &["pnpm_config_offline", "npm_config_offline"]),
+    ("cargo", &["CARGO_NET_OFFLINE"]),
+    ("pip", &["PIP_NO_INDEX"]),
+];
+
+/// Whether a domain is a registry Keel knows whose it is: allowing it takes its tool's offline
+/// variables away.
+fn is_known_registry(domain: &str) -> bool {
+    let domain = [domain.to_owned()];
+    network::is_registry_download(&domain[0])
+        || OFFLINE
+            .iter()
+            .any(|(registry, _, _)| allows_host(&domain, registry))
+}
+
+/// What allowing a step what it `lacked` frees for the project from then on, as `(domain,
+/// variable)`: for each domain that's no known registry, what `online_after` says.
+pub(crate) fn freed_by(lacked: &[NeededDomain]) -> Vec<(&str, &'static str)> {
+    let online = online_after(lacked);
+    lacked
+        .iter()
+        .filter(|needed| !is_known_registry(&needed.domain))
+        .flat_map(|needed| {
+            online
+                .iter()
+                .map(|variable| (needed.domain.as_str(), *variable))
+        })
+        .collect()
+}
+
+/// The offline variables a step goes without when it's repeated after a person allowed what it
+/// `lacked`, besides those of the registries it may now reach. A domain that's no known registry,
+/// such as a private one, doesn't say whose it is: those of the tool that failed go, or all of
+/// them if which failed isn't known.
+pub(crate) fn online_after(lacked: &[NeededDomain]) -> Vec<&'static str> {
+    if lacked
+        .iter()
+        .all(|needed| is_known_registry(&needed.domain))
+    {
+        return Vec::new();
+    }
+    let failed: Vec<&str> = lacked
+        .iter()
+        .filter_map(|needed| needed.tool.as_deref())
+        .flat_map(|tool| {
+            TOOL_OFFLINE
+                .iter()
+                .filter(move |(name, _)| *name == tool)
+                .flat_map(|(_, variables)| variables.iter().copied())
+        })
+        .collect();
+    OFFLINE
+        .iter()
+        .map(|(_, name, _)| *name)
+        .filter(|name| failed.is_empty() || failed.contains(name))
+        .collect()
+}
 
 /// What a setup or check command runs with: the home it works in (see `home`), and the little Keel
 /// still tells tools one by one (see `tool_settings`).
@@ -272,6 +341,15 @@ pub(crate) fn readable(project: &keel_store::Project, run: &keel_store::Run) -> 
 /// Whether a check runs with localhost open, as was written down when it was set going.
 fn opens_localhost(attempt: &Attempt) -> bool {
     attempt.kind == "check" && attempt.settings["localhost"] == json!(true)
+}
+
+/// The domains a check reaches, as was written down when it was set going: only one a person
+/// repeats after allowing a domain it lacked has any.
+fn reaches(attempt: &Attempt) -> Option<Vec<String>> {
+    if attempt.kind != "check" {
+        return None;
+    }
+    serde_json::from_value(attempt.settings["allowedDomains"].clone()).ok()
 }
 
 fn runs_commands(kind: &str, tools: Option<ToolProfile>) -> bool {
@@ -696,6 +774,8 @@ impl Inner {
                 && self.agreement(&attempt.run_id)?.is_some()
             {
                 Some(specs::plan_schema().to_owned())
+            } else if network::builds(&attempt.kind, &attempt.role, &attempt.tools) {
+                Some(network::BUILDER_SCHEMA.to_owned())
             } else {
                 workflows::schema_for(&spec.role).map(str::to_owned)
             },
@@ -762,7 +842,14 @@ impl Inner {
             if let Some(file) = &command.env_file {
                 std::fs::write(file, home::script(&run_home, &real_home()))?;
             }
-            process_command.envs(tool_settings(Some(&project.allowed_domains)));
+            // After a person allowed a registry Keel doesn't know, the tool it's for goes
+            // online too.
+            let online = self.online_for_builder(attempt)?;
+            process_command.envs(
+                tool_settings(Some(&project.allowed_domains))
+                    .into_iter()
+                    .filter(|(name, _)| !online.contains(name)),
+            );
         }
         process_command.envs(service_env);
         // After the project's own variables, as for a check, so the folder is always Keel's.
@@ -822,6 +909,14 @@ impl Inner {
         } else {
             sandbox.profile
         };
+        // Only the check a person repeats after allowing a domain it lacked reaches the network,
+        // through a proxy that lets the allowed domains pass: see `proxy`.
+        let allowed = reaches(attempt);
+        let proxy = allowed.as_deref().map(Proxy::start).transpose()?;
+        let profile = match &proxy {
+            Some(proxy) => settings::with_proxy(profile, proxy.port()),
+            None => profile,
+        };
         let stem = format!("{}-{}", attempt.step_id, attempt.number);
         let prompt_file = dir.join(format!("{stem}.stdin"));
         let raw_path = PathBuf::from(&attempt.raw_path);
@@ -858,14 +953,28 @@ impl Inner {
         let (service_set, service_env) = self.start_services(attempt, &project, &tools.path_env)?;
         // A setup before any agent that can write writes to the project's home. Anything else
         // works on the run's own copy of it, with no network at all, whatever the project lets its
-        // builder reach.
-        let home_vars = if sandbox.shares_cache {
+        // builder reach, unless it's the check repeated with a proxy.
+        let mut home_vars = if sandbox.shares_cache {
             home::create(&home)?;
             cache_env(&home, &real_home, None)
         } else {
             home::copy(&self.project_home(project_id), &home)?;
-            cache_env(&home, &real_home, Some(&[]))
+            cache_env(
+                &home,
+                &real_home,
+                Some(allowed.as_deref().unwrap_or_default()),
+            )
         };
+        if let Some(proxy) = &proxy {
+            let online = self.online_for_step(attempt)?;
+            home_vars.retain(|(name, _)| !online.contains(name));
+            for (name, value) in &mut home_vars {
+                if name == JAVA_ON_IPV4.0 {
+                    *value = format!("{value} {}", proxy.java_options());
+                }
+            }
+            home_vars.extend(proxy.env());
+        }
         // After the project's own variables, as for an agent, so the folder is always Keel's.
         command
             .envs(home_vars)
@@ -874,6 +983,7 @@ impl Inner {
         let child = process::spawn_step(command, &prompt_file, &raw_path, &stderr_path)?;
         let mut monitor = self.track_process(attempt, child, project_id)?;
         monitor.services = service_set;
+        monitor.proxy = proxy;
         Ok(Some(monitor))
     }
 
@@ -957,6 +1067,10 @@ impl Inner {
             if let Some(turn) = turn {
                 slots.command_steps.entry(project_id).or_insert(turn);
             }
+        }
+        // Its proxy went with the app, so how it ends isn't about the work.
+        if reaches(attempt).is_some() {
+            self.record_event(&attempt.id, "networkLost", &json!({}));
         }
         // A setup or check that left its exit code is over, whatever its pid looks like now.
         let ended = context.ended_while_away();
@@ -1181,7 +1295,9 @@ impl Inner {
                     let mut found = tools.clone();
                     let mut expected = m.tools_expected.clone();
                     // Claude Code adds this one itself when asked for a structured answer.
-                    if m.requires_output {
+                    if m.requires_output
+                        || (m.declares_network && found.iter().any(|t| t == "StructuredOutput"))
+                    {
                         expected.push("StructuredOutput".to_owned());
                     }
                     found.sort();
@@ -1258,9 +1374,20 @@ impl Inner {
                 // what it called to give it.
                 if result.structured_output.is_none()
                     && result.local_command.is_some()
-                    && m.requires_output
+                    && (m.requires_output || m.declares_network)
                 {
                     result.structured_output = self.answer_given(&m.attempt_id);
+                }
+                // A builder's final message comes inside its structured answer, and is read from
+                // here on as what it said when it finished.
+                if m.declares_network
+                    && !result.is_error
+                    && let Some(message) = result
+                        .structured_output
+                        .as_ref()
+                        .and_then(|answer| answer["message"].as_str())
+                {
+                    result.text = Some(message.to_owned());
                 }
                 self.record_event(
                     &m.attempt_id,
@@ -1324,8 +1451,9 @@ impl Inner {
         process_lost: bool,
     ) {
         // First of all, so that "finished" means nothing is left running, and so the next step
-        // can open the same sockets.
+        // can open the same sockets. A check's way to the network closes with them.
         drop(m.services.take());
+        drop(m.proxy.take());
         if let Ok(lines) = m.tail.read_new(&m.raw_path)
             && !lines.is_empty()
         {
@@ -1456,7 +1584,10 @@ impl Inner {
             fields.push(("turns", optional_int(result.turns)));
             fields.push(("duration_ms", optional_int(result.duration_ms)));
             fields.push(("result_text", text_value(result.text.clone())));
-            if let Some(output) = &result.structured_output {
+            // What a builder lacked isn't what it made: the steps after it read what it said.
+            if let Some(output) = &result.structured_output
+                && !m.declares_network
+            {
                 fields.push(("output", Value::Text(output.to_string())));
             }
             if !result.models.is_empty() {
@@ -1549,6 +1680,13 @@ impl Inner {
         }
         if state == AttemptState::Succeeded && m.role == "reviewer" {
             self.correct_review(&m);
+        }
+        // A step that couldn't go on for lack of a domain waits for the person, before anything
+        // judges it or sends it back: see `network`.
+        let answer = m.result.as_ref().and_then(|r| r.structured_output.as_ref());
+        if let Some(needed) = self.lacks_network(&m.attempt_id, state, reason.as_ref(), answer) {
+            state = AttemptState::Blocked;
+            reason = Some(Reason::NetworkNeeded { needed });
         }
         // A check that ran and failed sends the work back to the builder: see `failed_checks`.
         let sent_back = self.failed_check_goes_back(&m.attempt_id, &mut state, &mut reason);

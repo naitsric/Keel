@@ -15,11 +15,13 @@ mod joint;
 mod limits;
 mod localhost;
 mod log;
+mod network;
 mod notes;
 mod notices;
 mod project_commands;
 mod project_proposals;
 mod prompts;
+mod proxy;
 mod pull_requests;
 mod runner;
 mod screenshots;
@@ -60,6 +62,7 @@ use keel_store::{
     Decision, IssueTold, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
 };
 pub use limits::MOST_CONTINUED_BY_ITSELF;
+pub use network::{NetworkAnswer, is_domain};
 pub use notes::split_assistant_notes;
 pub use notices::{Notice, NoticeSettings, NoticeWatch};
 pub use project_commands::{CommandChange, CommandKind, retry_runs_something_new};
@@ -854,9 +857,22 @@ impl Engine {
     }
 
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<Project> {
+        let held = self.inner.store.project(id)?;
+        // Only new ones: one saved before domains were checked doesn't keep the rest from being
+        // saved.
+        if let Some(wrong) = settings
+            .allowed_domains
+            .iter()
+            .find(|d| !held.allowed_domains.contains(d) && !is_domain(d))
+        {
+            return Err(Error::Blocked(Reason::InvalidSetting {
+                field: "allowedDomains".into(),
+                value: wrong.clone(),
+            }));
+        }
         services::validate(&settings.services, &settings.env).map_err(Error::Blocked)?;
         sizing::check_patterns(&settings.sensitive_paths).map_err(Error::Blocked)?;
-        let before = self.inner.store.project(id)?.github_account;
+        let before = held.github_account;
         self.inner.store.update_project(id, settings)?;
         let project = self.inner.store.project(id)?;
         if project.github_account != before {
@@ -2504,22 +2520,42 @@ impl Inner {
             // can open it before the project does.
             WorkflowStep::Check { run: command, .. } => {
                 let localhost = project.allow_localhost || run.extra_localhost;
-                (
-                String::new(),
-                None,
-                "check".to_owned(),
-                None,
-                None,
-                command.clone(),
-                json!({
-                    "network": if localhost { "localhost only" } else { "none" },
+                // The check a person repeats after allowing a domain it lacked reaches the
+                // allowed ones, and so does trying that one again while it hasn't finished its
+                // work, also one put off for a new setup. No other does.
+                let again = retry.is_some()
+                    || self
+                        .store
+                        .attempts_of_run(run_id)?
+                        .iter()
+                        .rev()
+                        .find(|a| a.step_id == step.id())
+                        .is_some_and(|a| a.state == AttemptState::Postponed.as_str());
+                let online = again && self.inherits_network(run_id, step.id(), run.round)?;
+                let mut record = json!({
+                    "network": match (online, localhost) {
+                        (true, true) => "allowed domains and localhost",
+                        (true, false) => "allowed domains",
+                        (false, true) => "localhost only",
+                        (false, false) => "none",
+                    },
                     "localhost": localhost,
                     "read": read,
                     "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services),
-                })
-                .to_string(),
-                format!("{stem}.log"),
-            )
+                });
+                if online {
+                    record["allowedDomains"] = json!(project.allowed_domains);
+                }
+                (
+                    String::new(),
+                    None,
+                    "check".to_owned(),
+                    None,
+                    None,
+                    command.clone(),
+                    record.to_string(),
+                    format!("{stem}.log"),
+                )
             }
             WorkflowStep::Parallel { .. }
             | WorkflowStep::Approval { .. }

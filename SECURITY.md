@@ -28,9 +28,9 @@ keeps a bug in the app from rewriting history. It doesn't protect against someon
 request needs the token of a client you created, of which only a hash is kept. A client can't
 approve, answer, merge, change what a client may do or let anything into the Brain: there is no tool
 for it. Nor can it change settings, with one exception, off until you turn it on for a client: it can
-add projects and set their GitHub account and their setup and check commands. Each such change is
-recorded with the client and the values before and after, and shown in Settings. Every call is
-recorded. Agents that Keel runs can't reach it.
+add projects, set their GitHub account and their setup and check commands, and change the domains
+their agents can reach. Each such change is recorded with the client and the values before and after,
+and shown in Settings. Every call is recorded. Agents that Keel runs can't reach it.
 
 ## What it does not
 
@@ -43,12 +43,21 @@ what the agents said about it, and look at the draft pull request on GitHub befo
 what it shows, so some will slip through. It doesn't stop a secret an agent committed from being
 pushed with the branch.
 
-**Some steps reach further.** Setup has internet access, to install dependencies. A project that
-opens localhost to its check and builder lets them reach any service on your Mac. Services a
-project declares, like a test database, run outside the sandbox. Open only what a project needs.
+**Some steps reach further.** Setup has internet access, to install dependencies. A check you repeat
+by allowing a domain it lacked, and that one tried again while it hasn't finished, reaches the
+project's allowed domains, through a proxy Keel runs outside the sandbox while it does: what it
+runs, which an agent may have edited, can send there what it can read. A project that opens localhost to its check and builder lets them reach any service on
+your Mac. Services a project declares, like a test database, run outside the sandbox. Open only what
+a project needs.
 
 **Your own tools are trusted.** Keel runs your signed-in `claude` and `gh`, and the commands you set
 for each project, as they are. A client you let add and configure projects sets those commands too,
 without asking you each time: they run in the same sandbox, with whatever you opened to that project,
 and its setup command with internet access, as any setup has, so it could send out what it can read.
-Let only a client you trust.
+It also adds and removes the project's allowed domains, wildcards included, and so decides where the
+agents that build can connect. It can't add `localhost`, a `.localhost` or `.local` name or an IP
+address, though a name it adds can resolve to one. Let only a client you trust.
+
+**A domain you allow stays allowed.** A run that waits for a domain shows what an agent says it needs
+it for, and an agent can be misled. Read the domain itself: allowing it opens it to the project's
+builder in every run from then on.

@@ -23,6 +23,8 @@ export function reasonText(t: TFunction, reason: Reason): string {
       const known = ["notSignedIn", "noPermission", "sso", "repoRules", "signedCommits", "workflowScope"].includes(data.kind);
       return known ? t(`deliveryKinds.${data.kind}`) : t("reasons.deliveryFailed", { detail: data.detail ?? "" });
     }
+    case "networkNeeded":
+      return t("reasons.networkNeeded", { domains: (data.needed ?? []).map((needed: { domain: string }) => needed.domain).join(", ") });
     case "invalidSetting":
       return t(`invalidSettings.${data.field}`, { value: data.value, defaultValue: t("reasons.invalidSetting", { value: data.value }) });
     case "invalidWorkflow":

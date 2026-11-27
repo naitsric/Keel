@@ -163,6 +163,7 @@
     "setupFailed": "La preparación del proyecto falló con código {{exitCode}}.",
     "noStructuredOutput": "Terminó sin la respuesta que se le pidió.",
     "reworkLimit": "El trabajo se devolvió {{rounds}} veces y el aprobador sigue sin quedar conforme. Ahora decides tú.",
+    "networkNeeded": "Necesita red hacia {{domains}}, que el proyecto no permite.",
     "noMatchingPaths": "No cambió nada de lo que cubre ({{paths}}).",
     "noMatchingRisks": "Lo pedido no nombra ninguno de los riesgos que revisa ({{risks}}).",
     "treatedAsSmall": "Keel lo trató como un cambio pequeño, así que no corrió.",
@@ -442,6 +443,19 @@
     "toMyApproval": "Pasarlo a mi aprobación",
     "changesTitle": "Todo lo que cambió esta ejecución",
     "decideReworkLimit": "Elige arriba: una ronda más, tu aprobación o dejarlo.",
+    "decideNetwork_one": "Elige arriba: permitirlo, seguir sin él o detener.",
+    "decideNetwork_other": "Elige arriba: permitirlos, seguir sin ellos o detener.",
+    "networkTitle": "{{step}} necesita red que el proyecto no permite",
+    "networkSeen": "{{tool}} falló porque Keel lo deja sin conexión",
+    "networkWhy": "El agente dice: {{why}}",
+    "networkNote_one": "Permitirlo lo agrega a los dominios a los que llegan los agentes de este proyecto, en todas las ejecuciones de ahora en adelante, y repite este paso. Mientras espera no pasa ninguna ronda.",
+    "networkNote_other": "Permitirlos los agrega a los dominios a los que llegan los agentes de este proyecto, en todas las ejecuciones de ahora en adelante, y repite este paso. Mientras espera no pasa ninguna ronda.",
+    "networkCheckNote_one": "Una verificación no tiene red. Si lo permites, esta se repite con red hacia él y hacia los demás dominios permitidos del proyecto. Las siguientes vuelven a correr sin red, y una que todavía necesite una descarga devuelve el trabajo al builder, que ya la puede hacer.",
+    "networkCheckNote_other": "Una verificación no tiene red. Si los permites, esta se repite con red hacia ellos y hacia los demás dominios permitidos del proyecto. Las siguientes vuelven a correr sin red, y una que todavía necesite una descarga devuelve el trabajo al builder, que ya la puede hacer.",
+    "networkAllow": "Permitir {{domains}} en este proyecto y seguir",
+    "networkGoWithout_one": "Seguir sin él",
+    "networkGoWithout_other": "Seguir sin ellos",
+    "networkStop": "Detener",
     "proposalsTitle": "Lo que esta ejecución propone para el Brain",
     "proposalsHint": "Si aceptas algo, todos los agentes de este proyecto lo reciben de ahora en adelante.",
     "openBrain": "Abrir el Brain",
@@ -571,6 +585,7 @@
     "startedCheck": "Corriendo: {{command}}",
     "services": "Servicios listos: {{names}}",
     "servicesLost": "No se pudieron restaurar los servicios al reabrir: {{error}}",
+    "networkLost": "Su red se perdió al cerrar la app, así que cómo termine no dice nada del trabajo",
     "setupResult": "La preparación terminó con código {{code}}",
     "skipped": "Omitido: no cambió nada de lo que cubre",
     "skippedSmall": "Omitido: Keel lo trató como un cambio pequeño",
@@ -579,6 +594,8 @@
     "reworkLimit": "Llegó al límite de rondas",
     "reworkLimitAnswerRound": "Pediste otra ronda",
     "reworkLimitAnswerApproval": "Lo pasaste a tu aprobación",
+    "networkAllowed": "Permitiste {{domains}} en este proyecto",
+    "networkDeclined": "Elegiste seguir sin {{domains}}",
     "checkSentBack": "Falló, así que Keel le devolvió el trabajo al builder para la ronda {{round}}",
     "checkNotSentBack": "Keel ya había devuelto el trabajo las veces que lo devuelve por su cuenta",
     "checkUnchanged": "El builder no había cambiado nada, así que Keel no devolvió el trabajo otra vez",
@@ -697,7 +714,7 @@
     "githubLinksHint": "Gestionar acceso abre GitHub en tu navegador, y solo quien administra el repo ve esa página. Conectar una cuenta abre Terminal, porque la sesión la guarda gh, no Keel.",
     "githubConnectHint": "Esto abre Terminal, porque la sesión la guarda gh, no Keel.",
     "checkCommand": "Comando de verificación",
-    "checkCommandHint": "Corre después del builder, en un sandbox sin red y sin acceso a tu carpeta personal. El código de salida 0 significa que pasó.",
+    "checkCommandHint": "Corre después del builder, en un sandbox sin red y sin acceso a tu carpeta personal. La excepción es el check que repites al permitir un dominio que le faltaba, que llega a los dominios permitidos del proyecto. El código de salida 0 significa que pasó.",
     "checkCommandPlaceholder": "make test",
     "domains": "Dominios a los que llegan los agentes",
     "domainsHint": "Uno por línea. No se llega a nada más.",
@@ -799,7 +816,8 @@
     "serviceStart": "Escribe el comando que inicia «{{value}}».",
     "envName": "El nombre de una variable usa mayúsculas, números y guiones bajos: «{{value}}».",
     "envReserved": "Keel controla «{{value}}», o podría llevar una credencial, así que un proyecto no puede definirla.",
-    "sensitivePaths": "«{{value}}» no se puede leer como patrón de archivos."
+    "sensitivePaths": "«{{value}}» no se puede leer como patrón de archivos.",
+    "allowedDomains": "«{{value}}» no es un dominio. Escribe un nombre de host, como registry.npmjs.org o *.example.com, sin http://, ruta, puerto ni espacios."
   },
   "invalidWorkflow": {
     "empty": "Un workflow necesita al menos un paso.",
@@ -1153,7 +1171,7 @@
   "mcp": {
     "title": "Servidor MCP",
     "hint": "Deja que un asistente como Claude Code vea tus proyectos y lance ejecuciones en este Mac, y tú las ves aquí. Solo este Mac puede llegar a él, y está apagado hasta que lo enciendas.",
-    "limits": "Si lo permites, puede devolver trabajo, reintentar un paso, cerrar las ejecuciones que lanzó, y agregar una nota a sus tarjetas o volverlas a Todo mientras esperan. No puede aprobar ni rechazar un paso, responder sus preguntas, mergear, guardar un workflow ni aceptar nada en el Brain. Eso sigue siendo tuyo, aquí, igual que los ajustes, salvo uno: si dejas a un cliente agregar y configurar proyectos, puede agregar cualquier repositorio de este Mac y cambiar la cuenta de GitHub y los comandos de preparación y verificación de cualquier proyecto, también de los tuyos. Un workflow que proponga te espera en Workflows, y no puede correr hasta que lo guardes. Un proyecto que proponga no se agrega hasta que lo agregues tú, o un cliente al que se lo permitas.",
+    "limits": "Si lo permites, puede devolver trabajo, reintentar un paso, cerrar las ejecuciones que lanzó, y agregar una nota a sus tarjetas o volverlas a Todo mientras esperan. No puede aprobar ni rechazar un paso, responder sus preguntas, mergear, guardar un workflow ni aceptar nada en el Brain. Eso sigue siendo tuyo, aquí, igual que los ajustes, salvo uno: si dejas a un cliente agregar y configurar proyectos, puede agregar cualquier repositorio de este Mac y cambiar la cuenta de GitHub y los comandos de preparación y verificación de cualquier proyecto, también de los tuyos. También agrega y quita sus dominios permitidos, aunque localhost, nombres .local o direcciones IP solo los agregas tú. Un workflow que proponga te espera en Workflows, y no puede correr hasta que lo guardes. Un proyecto que proponga no se agrega hasta que lo agregues tú, o un cliente al que se lo permitas.",
     "off": "Apagado",
     "on": "Encendido",
     "port": "Puerto",
@@ -1166,7 +1184,7 @@
     "canRun": "Puede lanzar y detener ejecuciones, cerrar las que lanzó, y proponer workflows y proyectos",
     "canSteer": "Puede dar feedback: devolver trabajo, reintentar y agregar notas a sus tarjetas",
     "canSteerNeedsRun": "Primero activa la de arriba.",
-    "canManageProjects": "Puede agregar y configurar proyectos: su cuenta de GitHub y sus comandos de preparación y verificación, que corren en este Mac. La preparación tiene acceso a internet",
+    "canManageProjects": "Puede agregar y configurar proyectos: su cuenta de GitHub, sus comandos de preparación y verificación, que corren en este Mac, y los dominios a los que llegan sus agentes. La preparación tiene acceso a internet",
     "canManageProjectsNeedsRun": "Primero deja que lance y detenga ejecuciones.",
     "projectChanges": "Cambios en proyectos",
     "change": {
@@ -1177,7 +1195,8 @@
     "field": {
       "githubAccount": "Cuenta de GitHub",
       "setupCommand": "Comando de preparación",
-      "checkCommand": "Comando de verificación"
+      "checkCommand": "Comando de verificación",
+      "allowedDomains": "Dominios permitidos"
     },
     "before": "Antes: {{value}}",
     "after": "Después: {{value}}",
@@ -1272,7 +1291,7 @@
     "changedKept": "Abajo está lo guardado ahora. Lo que habías editado sigue en su campo, y al guardar reemplaza esto.",
     "changedTaken": "Abajo está lo guardado ahora. Los campos ya lo muestran.",
     "yoursKept": "se conserva lo que editaste",
-    "notSaved": "No se guardó nada: la cuenta o los comandos cambiaron mientras tanto. Revísalos y vuelve a guardar."
+    "notSaved": "No se guardó nada: la cuenta, los comandos o los dominios cambiaron mientras tanto. Revísalos y vuelve a guardar."
   },
   "setup": {
     "titleNew": "{{name}} quedó agregado",

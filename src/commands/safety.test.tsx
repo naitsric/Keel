@@ -21,7 +21,7 @@ const NOT_ALWAYS_THERE = ["project_remove", "project_try_check"];
 const DECIDING_WORDS = /approve|reject|retry|resume|abandon|accept|retire|dismiss|\bto ?do\b|\bstart|deliver|merge|remove|delete|another round/i;
 const DECIDING_WORDS_ES = /aprob|rechaz|reintent|reanud|abandon|acept|retir|descart|inici|entreg|fusion|elimin|otra ronda/i;
 /** The same calls, as the code writes them. */
-const DECIDING_CALL = /api\.(approvalAnswer|reworkLimitAnswer|runStart|attemptRetry|attemptAbandon|brainAccept|brainDismiss|brainRetire|brainGenerateMap|decisionRetire|cardMove|cardDelete|projectAdd|projectRemove|projectTryCheck|workflowDraftSave|workflowDraftDiscard|projectProposalAccept|projectProposalDiscard)\b/;
+const DECIDING_CALL = /api\.(approvalAnswer|reworkLimitAnswer|networkAnswer|runStart|attemptRetry|attemptAbandon|brainAccept|brainDismiss|brainRetire|brainGenerateMap|decisionRetire|cardMove|cardDelete|projectAdd|projectRemove|projectTryCheck|workflowDraftSave|workflowDraftDiscard|projectProposalAccept|projectProposalDiscard)\b/;
 
 /** The app's own code as text, by path. */
 const SOURCES = import.meta.glob<string>(["/src/**/*.{ts,tsx}", "!/src/**/*.test.{ts,tsx}"], { query: "?raw", import: "default", eager: true });

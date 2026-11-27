@@ -2423,3 +2423,163 @@ describe("a step skipped for the risks of what was asked", () => {
     expect(page()).toContain("Omitido: lo pedido no nombra ninguno de los riesgos que revisa");
   });
 });
+
+describe("a step waiting for a domain the project doesn't allow", () => {
+  let root: Root;
+  let answered: unknown[];
+  let errors: string[];
+  const page = () => document.body.textContent ?? "";
+  const buttons = () => [...document.querySelectorAll("button")].map((b) => b.textContent);
+  const button = (text: string) => [...document.querySelectorAll("button")].find((b) => b.textContent === text);
+  const press = async (text: string) => {
+    await act(async () => button(text)?.click());
+    await act(() => Promise.resolve());
+  };
+  const waiting = (needed: unknown[], fields: Partial<Attempt> = {}) => attempt({ id: "builder-1", runId: "r1", stepId: "builder", tools: "build", state: "blocked", reason: { code: "networkNeeded", needed }, ...fields });
+  const npm = { domain: "registry.npmjs.org", why: "to install next@15.3.9" };
+  const cargo = [
+    { domain: "index.crates.io", tool: "cargo" },
+    { domain: "static.crates.io", tool: "cargo" },
+  ];
+  const render = async (shown: Attempt) => {
+    act(() => root.render(<Actions attempt={shown} projectId="p1" agentsWrote onError={(message) => errors.push(message)} />));
+    await act(() => Promise.resolve());
+  };
+  const arm = () => act(() => vi.advanceTimersByTime(800));
+  /** The card, once what answers for the person can be pressed. */
+  const show = async (shown: Attempt) => {
+    await render(shown);
+    arm();
+  };
+
+  beforeEach(async () => {
+    vi.useFakeTimers();
+    await i18next.changeLanguage("en");
+    answered = [];
+    errors = [];
+    mockIPC((command, args) => {
+      if (command === "network_answer") answered.push(args);
+      return command === "run_command_changes" ? [] : null;
+    });
+    root = createRoot(document.body.appendChild(document.createElement("div")));
+  });
+  afterEach(() => {
+    act(() => root.unmount());
+    document.body.innerHTML = "";
+    vi.useRealTimers();
+  });
+
+  const ALLOW = "Allow registry.npmjs.org in this project and go on";
+
+  it("only lets you allow after a moment, and not with a click that brings the window back", async () => {
+    await render(waiting([npm]));
+    expect(button(ALLOW)?.disabled).toBe(true);
+    await press(ALLOW);
+    arm();
+    expect(button(ALLOW)?.disabled).toBe(false);
+
+    act(() => void window.dispatchEvent(new Event("blur")));
+    expect(button(ALLOW)?.disabled).toBe(true);
+    act(() => void window.dispatchEvent(new Event("focus")));
+    await press(ALLOW);
+    expect(answered).toEqual([]);
+
+    arm();
+    await press(ALLOW);
+    expect(answered).toEqual([{ attemptId: "builder-1", answer: "allow" }]);
+  });
+
+  it("doesn't allow on Enter, which is what opens a run from the palette", async () => {
+    await show(waiting([npm]));
+    const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+    act(() => void button(ALLOW)?.dispatchEvent(enter));
+    expect(enter.defaultPrevented).toBe(true);
+  });
+
+  it("breaks a long domain anywhere and the sentences between words, and its button wraps", async () => {
+    const long = { domain: `${"a".repeat(60)}.example`, why: "to download what the build needs", tool: "npm" };
+    await show(waiting([long]));
+    const item = document.querySelector("li") as HTMLElement;
+    expect(item.className).not.toContain("break-all");
+    expect(item.querySelector("span")?.classList.contains("break-all")).toBe(true);
+    const paragraphs = [...item.querySelectorAll("p")];
+    expect(paragraphs).toHaveLength(2);
+    for (const paragraph of paragraphs) expect(paragraph.classList.contains("break-words")).toBe(true);
+    const allow = button(`Allow ${long.domain} in this project and go on`) as HTMLButtonElement;
+    expect(allow.classList.contains("whitespace-normal")).toBe(true);
+    expect(allow.classList.contains("whitespace-nowrap")).toBe(false);
+    expect(allow.classList.contains("h-7")).toBe(false);
+  });
+
+  it("speaks of several domains as several", async () => {
+    await show(waiting(cargo, { stepId: "check", kind: "check", tools: "check" }));
+    expect(page()).toContain("Allowing adds them to the domains");
+    expect(page()).toContain("with network to them");
+    act(() => root.render(<Summary run={runWith(deliverNext)} attempts={[waiting(cargo)]} current={waiting(cargo)} commands={[]} rawCheck="intact" closedBy={null} onShowChanges={() => {}} />));
+    expect(page()).toContain("Choose above: allow them, go on without them, or stop.");
+
+    await show(waiting([npm], { stepId: "check", kind: "check", tools: "check" }));
+    expect(page()).toContain("Allowing adds it to the domains");
+    expect(page()).toContain("with network to it");
+    act(() => root.render(<Summary run={runWith(deliverNext)} attempts={[waiting([npm])]} current={waiting([npm])} commands={[]} rawCheck="intact" closedBy={null} onShowChanges={() => {}} />));
+    expect(page()).toContain("Choose above: allow it, go on without it, or stop.");
+  });
+
+  it("says which domain is missing, what for and which step asked, with its three answers and no other", async () => {
+    await show(waiting([npm]));
+    expect(page()).toContain("builder needs network the project doesn't allow");
+    expect(page()).toContain("registry.npmjs.org");
+    expect(page()).toContain("The agent says: to install next@15.3.9");
+    expect(buttons()).toEqual(["Allow registry.npmjs.org in this project and go on", "Go on without it", "Stop"]);
+    expect(page()).not.toContain("A check has no network");
+    expect(answered).toEqual([]);
+  });
+
+  it("sends each answer only when it's chosen", async () => {
+    for (const [text, answer] of [
+      ["Allow registry.npmjs.org in this project and go on", "allow"],
+      ["Go on without it", "goWithout"],
+      ["Stop", "stop"],
+    ]) {
+      await show(waiting([npm], { id: `a-${answer}` }));
+      await press(text);
+      expect(answered.at(-1)).toEqual({ attemptId: `a-${answer}`, answer });
+      act(() => root.render(<></>));
+    }
+    expect(answered).toHaveLength(3);
+  });
+
+  it("says what Keel saw fail in a check, and that only the repeated one gets the network", async () => {
+    await show(waiting(cargo, { stepId: "check", kind: "check", tools: "check" }));
+    expect(page()).toContain("cargo failed because Keel keeps it offline");
+    expect(page()).toContain("A check has no network. Allowing repeats this one with network to them and to the project's other allowed domains");
+    expect(button("Allow index.crates.io, static.crates.io in this project and go on")).toBeDefined();
+    expect(button("Go on without them")).toBeDefined();
+  });
+
+  it("says why when the answer can't be taken", async () => {
+    mockIPC((command) => {
+      if (command === "network_answer") throw { code: "invalidState", reason: null, detail: null };
+      return [];
+    });
+    await show(waiting([npm]));
+    await press("Go on without it");
+    expect(errors).toHaveLength(1);
+    expect(button("Go on without it")?.disabled).toBe(false);
+  });
+
+  it("shows a builder's final message in its activity as what it said, not as the answer that carries it", () => {
+    const answered: AuditEvent = { seq: 1, attemptId: "builder-1", at: "2026-01-01T00:00:00Z", kind: "toolCall", data: { id: "t1", name: "StructuredOutput", input: { message: "I couldn't install next.", neededDomains: [npm] } } };
+    act(() => root.render(<ActivityTab events={[answered]} role="worker" />));
+    expect(page()).toContain("I couldn't install next.");
+    expect(page()).not.toContain("StructuredOutput");
+    expect(page()).not.toContain("neededDomains");
+  });
+
+  it("is said in Spanish too", async () => {
+    await i18next.changeLanguage("es");
+    await show(waiting([npm]));
+    expect(buttons()).toEqual(["Permitir registry.npmjs.org en este proyecto y seguir", "Seguir sin él", "Detener"]);
+    expect(page()).toContain("builder necesita red que el proyecto no permite");
+  });
+});
