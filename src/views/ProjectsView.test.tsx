@@ -199,6 +199,26 @@ describe("the Projects page", () => {
       expect(saved()).toMatchObject({ setupCommand: "make deps", checkCommand: "make test", env: [{ name: "A", value: "1" }] });
     });
 
+    it("doesn't count as told a change on record that the form doesn't hold yet", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      // The app heard of the first change, and the record already has a second one.
+      setProjectChanges([
+        { ...record(2), changes: [{ field: "checkCommand", before: "make check", after: "make other" }] },
+        { ...record(1), changes: [{ field: "checkCommand", before: "make test", after: "make check" }] },
+      ]);
+      await change({ checkCommand: "make check" });
+      await click(button(i18next.t("settings.save")));
+      expect(callsTo("project_update")).toEqual([]);
+      expect(main().textContent).toContain(i18next.t("projects.notSaved"));
+    });
+
+    it("looks for CI again when the setup command changes", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      const before = callsTo("project_ci_gap").length;
+      await change({ setupCommand: "make other-deps" });
+      expect(callsTo("project_ci_gap")).toHaveLength(before + 1);
+    });
+
     it("says the fields already show a change when the person had edited none of them", async () => {
       await showApp(RUNS, { name: "projects" }, [START]);
       setProjectChanges([record(1)]);

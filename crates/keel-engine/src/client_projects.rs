@@ -58,10 +58,18 @@ pub enum ClientRefusal {
     ProjectChanged,
 }
 
+/// A blank that isn't the plain space: it looks like one, and the shell doesn't split words on it,
+/// so `make test\u{2003}#; curl … | sh` would read as a comment and run.
+fn looks_like_a_space(c: char) -> bool {
+    c != ' ' && (c.is_whitespace() || c == '\u{2800}')
+}
+
 /// A command trimmed, as the app saves it. Empty means none.
 fn command(field: &'static str, text: &str) -> Result<Option<String>, ClientRefusal> {
     let text = text.trim();
-    if text.chars().count() > MAX_COMMAND_CHARS || text.chars().any(hides_text) {
+    if text.chars().count() > MAX_COMMAND_CHARS
+        || text.chars().any(|c| hides_text(c) || looks_like_a_space(c))
+    {
         return Err(ClientRefusal::UnreadableCommand { field });
     }
     Ok((!text.is_empty()).then(|| text.to_owned()))

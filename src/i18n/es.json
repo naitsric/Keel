@@ -1147,7 +1147,7 @@
   "mcp": {
     "title": "Servidor MCP",
     "hint": "Deja que un asistente como Claude Code vea tus proyectos y lance ejecuciones en este Mac, y tú las ves aquí. Solo este Mac puede llegar a él, y está apagado hasta que lo enciendas.",
-    "limits": "Si lo permites, puede devolver trabajo, reintentar un paso, cerrar las ejecuciones que lanzó, y agregar una nota a sus tarjetas o volverlas a Todo mientras esperan. No puede aprobar ni rechazar un paso, responder sus preguntas, mergear, cambiar ajustes, guardar un workflow ni aceptar nada en el Brain. Eso sigue siendo tuyo, aquí. Un workflow que proponga te espera en Workflows, y no puede correr hasta que lo guardes. Un proyecto que proponga no se agrega hasta que lo agregues tú, salvo que dejes a ese cliente agregar y configurar proyectos: entonces puede agregarlos y ponerles la cuenta de GitHub y los comandos de preparación y verificación.",
+    "limits": "Si lo permites, puede devolver trabajo, reintentar un paso, cerrar las ejecuciones que lanzó, y agregar una nota a sus tarjetas o volverlas a Todo mientras esperan. No puede aprobar ni rechazar un paso, responder sus preguntas, mergear, guardar un workflow ni aceptar nada en el Brain. Eso sigue siendo tuyo, aquí, igual que los ajustes, salvo uno: si dejas a un cliente agregar y configurar proyectos, puede agregar cualquier repositorio de este Mac y cambiar la cuenta de GitHub y los comandos de preparación y verificación de cualquier proyecto, también de los tuyos. Un workflow que proponga te espera en Workflows, y no puede correr hasta que lo guardes. Un proyecto que proponga no se agrega hasta que lo agregues tú, o un cliente al que se lo permitas.",
     "off": "Apagado",
     "on": "Encendido",
     "port": "Puerto",

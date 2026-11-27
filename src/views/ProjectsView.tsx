@@ -106,7 +106,10 @@ function useSavedConfiguration(project: Project) {
       .then(({ projectChanges }) => {
         const news = projectChanges.filter((c) => c.projectId === id && c.seq > announced.current && Date.parse(c.at) >= openedAt);
         if (news.length === 0) return;
-        announced.current = Math.max(...news.map((c) => c.seq));
+        // Told only once the form holds what the latest of them left: one saved after the values
+        // this effect has may be on record already, and saving must still stop for it.
+        const latest = news.reduce((a, b) => (b.seq > a.seq ? b : a));
+        if (latest.changes.every(({ field, after }) => now[field] === after)) announced.current = latest.seq;
         setByClient((fields) => [...new Set([...fields, ...changed])]);
       })
       .catch(() => undefined);
@@ -251,7 +254,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
     return () => {
       current = false;
     };
-  }, [project.id, project.checkCommand]);
+  }, [project.id, project.setupCommand, project.checkCommand]);
 
   // What the last look at the issues found, or, when none has for this label, what a look now
   // finds. Keyed by the saved label, so saving one looks even if this form starts over meanwhile.

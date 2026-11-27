@@ -1147,7 +1147,7 @@
   "mcp": {
     "title": "MCP server",
     "hint": "Lets an assistant like Claude Code see your projects and start runs on this Mac, and you watch them here. Only this Mac can reach it, and it's off until you turn it on.",
-    "limits": "If you allow it, it can send work back, try a step again, close the runs it started, and add a note to their cards or put them back in Todo while they wait. It can't approve or reject a step, answer the questions a step asks, merge, change settings, save a workflow or accept anything into the Brain. Those stay with you, here. A workflow it proposes waits for you on Workflows, and can't run until you save it. A project it proposes isn't added until you add it, unless you let that client add and configure projects: then it can add them and set their GitHub account and setup and check commands.",
+    "limits": "If you allow it, it can send work back, try a step again, close the runs it started, and add a note to their cards or put them back in Todo while they wait. It can't approve or reject a step, answer the questions a step asks, merge, save a workflow or accept anything into the Brain. Those stay with you, here, and so do settings, apart from one: if you let a client add and configure projects, it can add any repository on this Mac, and set the GitHub account and the setup and check commands of any project, yours included. A workflow it proposes waits for you on Workflows, and can't run until you save it. A project it proposes isn't added until you add it, or a client you let does.",
     "off": "Off",
     "on": "On",
     "port": "Port",

@@ -3017,7 +3017,7 @@ fn client_refusal(refusal: ClientRefusal) -> ToolError {
             ))
         }
         ClientRefusal::UnreadableCommand { field } => ToolError::new(format!(
-            "`{field}` has to be one line of up to 4096 characters, with no control characters or others that hide text, so the person can read what runs."
+            "`{field}` has to be one line of up to 4096 characters, with no control characters, others that hide text, or blanks other than the plain space, so the person can read what runs."
         )),
         ClientRefusal::ProjectChanged => ToolError::new(
             "The project was added or removed in the meantime, so Keel did nothing. Look again with list_projects.",
