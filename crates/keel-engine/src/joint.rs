@@ -77,6 +77,7 @@ pub(crate) fn plan_workflow(language: &str) -> Vec<WorkflowStep> {
             when: None,
             risks: Vec::new(),
             model_when_risky: None,
+            skill: None,
             role: StepRole::Specifier,
         }),
         WorkflowStep::Approval { id: human.into() },

@@ -209,6 +209,7 @@ fn agent(id: &str, tools: ToolProfile) -> WorkflowStep {
         when: None,
         risks: vec![],
         model_when_risky: None,
+        skill: None,
         role: Default::default(),
     })
 }
@@ -452,6 +453,7 @@ fn delivered_with_verifier(w: &World, verifier_says: &str, language: &str) -> St
         when: None,
         risks: vec![],
         model_when_risky: None,
+        skill: None,
         role: StepRole::Specifier,
     });
     let verifier = WorkflowStep::Agent(StepSpec {
@@ -466,6 +468,7 @@ fn delivered_with_verifier(w: &World, verifier_says: &str, language: &str) -> St
         when: None,
         risks: vec![],
         model_when_risky: None,
+        skill: None,
         role: StepRole::Verifier,
     });
     let steps = vec![
@@ -1699,6 +1702,7 @@ fn a_cards_run_remembers_the_workflow_it_started_with_and_a_single_step_remember
                 when: None,
                 risks: vec![],
                 model_when_risky: None,
+                skill: None,
                 role: Default::default(),
             },
             "en".into(),

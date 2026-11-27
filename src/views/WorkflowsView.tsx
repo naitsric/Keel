@@ -111,6 +111,38 @@ export function withModelWhenRisky(spec: StepSpec, model: string): StepSpec {
   return model === "" ? rest : { ...rest, modelWhenRisky: model };
 }
 
+/** The levels Claude Code's own review runs at in a step, as the engine takes them after `code-review`. */
+const SKILL_LEVELS = ["low", "medium", "high", "xhigh"] as const;
+
+/** A review that reviews with this. Empty takes it off, and then the step says nothing about it, like one saved before. */
+export function withSkill(spec: StepSpec, skill: string): StepSpec {
+  const { skill: _, ...rest } = spec;
+  return skill === "" ? rest : { ...rest, skill };
+}
+
+/** Whether a review also goes through Claude Code's own review, and how far it looks. */
+function SkillField({ spec, onChange }: { spec: StepSpec; onChange: (spec: StepSpec) => void }) {
+  const { t } = useTranslation();
+  const known = SKILL_LEVELS.map((level) => `code-review ${level}`);
+  const chosen = spec.skill ?? "";
+  return (
+    <div className="max-w-md">
+      <Field label={t("workflows.skill")} hint={t("workflows.skillHint")}>
+        <select value={chosen} onChange={(e) => onChange(withSkill(spec, e.target.value))} className={inputClass}>
+          <option value="">{t("workflows.skillNone")}</option>
+          {SKILL_LEVELS.map((level, index) => (
+            <option key={level} value={known[index]}>
+              {t("workflows.skillCodeReview", { level: t(`newRun.effortLevels.${level}`) })}
+            </option>
+          ))}
+          {/* One the engine doesn't know stays, so saving doesn't drop it: the engine says why it won't run. */}
+          {chosen !== "" && !known.includes(chosen) && <option value={chosen}>{chosen}</option>}
+        </select>
+      </Field>
+    </div>
+  );
+}
+
 /** What a step does by the risks of what was asked: whether it runs, and with which model. */
 function RiskFields({ spec, onChange }: { spec: StepSpec; onChange: (spec: StepSpec) => void }) {
   const { t } = useTranslation();
@@ -144,11 +176,13 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
   const { t } = useTranslation();
   const role = spec.role ?? { kind: "worker" };
   const setRole = (kind: StepRole["kind"]) => {
-    if (kind === "approver") onChange({ ...spec, tools: "readOnly", role: { kind, reworkTo: earlier[earlier.length - 1] ?? "", maxRounds: 2 } });
+    // Only a review reviews with a skill: what the form no longer shows goes with the role.
+    const kept = kind === "reviewer" ? spec : withSkill(spec, "");
+    if (kind === "approver") onChange({ ...kept, tools: "readOnly", role: { kind, reworkTo: earlier[earlier.length - 1] ?? "", maxRounds: 2 } });
     // It works out the risks, so it can't go by them: what the form no longer shows goes too.
-    else if (kind === "specifier") onChange(withModelWhenRisky(withRisks({ ...spec, tools: "readOnly", role: { kind } }, []), ""));
-    else if (kind === "reviewer" || kind === "learner" || kind === "mapper" || kind === "verifier") onChange({ ...spec, tools: "readOnly", role: { kind } });
-    else onChange({ ...spec, role: { kind } });
+    else if (kind === "specifier") onChange(withModelWhenRisky(withRisks({ ...kept, tools: "readOnly", role: { kind } }, []), ""));
+    else if (kind === "reviewer" || kind === "learner" || kind === "mapper" || kind === "verifier") onChange({ ...kept, tools: "readOnly", role: { kind } });
+    else onChange({ ...kept, role: { kind } });
   };
   const judges = role.kind !== "worker";
   return (
@@ -236,6 +270,7 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
         <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t(spec.when === "somethingToFix" ? "workflows.whenSomethingToFixHint" : "workflows.whenHint")}</p>
       </div>
       {role.kind !== "specifier" && <RiskFields spec={spec} onChange={onChange} />}
+      {role.kind === "reviewer" && <SkillField spec={spec} onChange={onChange} />}
       <Field label={t("workflows.paths")} hint={t("workflows.pathsHint")}>
         <input
           value={(spec.paths ?? []).join(", ")}

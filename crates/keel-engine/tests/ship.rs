@@ -305,6 +305,7 @@ fn agent(id: &str, tools: ToolProfile, role: StepRole) -> StepSpec {
         when: None,
         risks: vec![],
         model_when_risky: None,
+        skill: None,
     }
 }
 

@@ -43,6 +43,12 @@ case "$1" in
 auth) echo '{{"loggedIn":true}}'; exit 0;;
 esac
 prompt="$(cat)"
+# A step that reviews with a skill starts with the skill's command, and its prompt is in a file.
+case "$prompt" in
+"/code-review "*)
+  {{ echo "$prompt"; echo "ARGS $*"; prev=""; for a in "$@"; do [ "$prev" = "--append-system-prompt-file" ] && cat "$a"; prev="$a"; done; }} >> "{log}/skill.log"
+  prompt="$(cat "${{prompt#*the change in }}")";;
+esac
 tools=""; prev=""
 for a in "$@"; do [ "$prev" = "--tools" ] && tools="$a"; prev="$a"; done
 list=$(printf '%s' "$tools" | sed 's/,/","/g')
@@ -85,6 +91,16 @@ REVIEW-MINOR*)
   result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{{"verdict":"approved","findings":[{{"file":"built.tsx","line":1,"text":"Could be shorter","breaks":null}},{{"file":"built.tsx","line":2,"text":"Names what the spec lacks","breaks":"C9"}}],"summary":"Fine","unread":[]}}}}';;
 SPEC*)
   result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{{"summary":"Sends each notice once","criteria":[{{"id":"C5","when":"two runs overlap","then":"the notice goes once"}}],"changes":[],"limits":["The schema stays"],"decided":[],"questions":[]}}}}';;
+REVIEW-SKILL-SILENT*)
+  result='{{"type":"result","subtype":"success","is_error":false,"result":"Command completed","num_turns":0,"local_command":"code_review"}}';;
+REVIEW-SKILL*)
+  echo '{{"type":"assistant","parent_tool_use_id":"forked-command-code-review","message":{{"content":[{{"type":"tool_use","id":"t1","name":"StructuredOutput","input":{{"verdict":"approved"}}}}]}}}}'
+  echo '{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","is_error":true,"content":"Output does not match the schema"}}]}}}}'
+  echo '{{"type":"assistant","parent_tool_use_id":"forked-command-code-review","message":{{"content":[{{"type":"tool_use","id":"t2","name":"StructuredOutput","input":{{"verdict":"changes","findings":[{{"file":"built.tsx","line":1,"text":"Divides by zero","breaks":null}}],"summary":"Found with the skill","unread":[],"unchecked":[]}}}}]}}}}'
+  echo '{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t2","content":"Structured output provided successfully"}}]}}}}'
+  echo '{{"type":"assistant","parent_tool_use_id":"toolu_01Agent","message":{{"content":[{{"type":"tool_use","id":"t3","name":"StructuredOutput","input":{{"verdict":"approved","findings":[],"summary":"A subagent said so","unread":[]}}}}]}}}}'
+  echo '{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t3","content":"Structured output provided successfully"}}]}}}}'
+  result='{{"type":"result","subtype":"success","is_error":false,"result":"Command completed","num_turns":0,"local_command":"code_review","total_cost_usd":0.02,"usage":{{"input_tokens":0,"output_tokens":0}},"modelUsage":{{"fake":{{"inputTokens":3,"cacheReadInputTokens":4,"outputTokens":5}}}}}}';;
 REVIEW-NOANSWER*)
   result='{{"type":"result","subtype":"success","is_error":false,"result":"I looked.","num_turns":1}}';;
 REVIEW*)
@@ -156,6 +172,7 @@ fn spec(id: &str, tools: ToolProfile, role: StepRole, paths: &[&str], prompt: &s
         when: None,
         risks: vec![],
         model_when_risky: None,
+        skill: None,
         role,
     }
 }
@@ -668,6 +685,169 @@ fn a_reviewer_without_its_answer_stops_the_run() {
     let reason: Reason = serde_json::from_value(failed.reason.unwrap()).unwrap();
     assert_eq!(reason, Reason::NoStructuredOutput);
     assert!(w.all(&run, "human").is_empty());
+}
+
+/// A builder, and a review that reviews with Claude Code's own skill, beside one that doesn't.
+fn with_skill(prompt: &str) -> Vec<WorkflowStep> {
+    vec![
+        WorkflowStep::Agent(spec(
+            "builder",
+            ToolProfile::Build,
+            StepRole::Worker,
+            &[],
+            "BUILD",
+        )),
+        WorkflowStep::Parallel {
+            id: "reviews".into(),
+            steps: vec![
+                StepSpec {
+                    skill: Some("code-review medium".into()),
+                    ..spec(
+                        "code",
+                        ToolProfile::ReadOnly,
+                        StepRole::Reviewer,
+                        &[],
+                        prompt,
+                    )
+                },
+                spec(
+                    "security",
+                    ToolProfile::ReadOnly,
+                    StepRole::Reviewer,
+                    &[],
+                    "REVIEW security",
+                ),
+            ],
+        },
+        WorkflowStep::Approval { id: "human".into() },
+    ]
+}
+
+/// What follows a slash command reaches the skill as one line, so the step's prompt, with the
+/// change in it, is in a file only that step can read. And Claude Code ends such a step with no
+/// answer in its result: the one it took is in the step's own call.
+#[test]
+fn a_review_with_a_skill_starts_with_its_command_and_reads_what_keel_asks_from_a_file() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.start(with_skill("REVIEW-SKILL code\nDIFF:{{diff}}"));
+    w.wait(&run, "human", AttemptState::WaitingApproval);
+
+    // What it was started with: the command, the level, and where its prompt is.
+    let said = std::fs::read_to_string(w.log.join("skill.log")).unwrap();
+    let line = said.lines().next().unwrap();
+    let brief = line
+        .strip_prefix("/code-review medium the change in ")
+        .unwrap_or_else(|| panic!("{line}"));
+    assert!(brief.ends_with("/brief/code-1/review.md"), "{brief}");
+    let folder = brief.strip_suffix("/review.md").unwrap();
+
+    // The file is the step's prompt as any review gets it, change and all, and it's what the
+    // person sees as the step's prompt.
+    let code = w.all(&run, "code").pop().unwrap();
+    let asked = std::fs::read_to_string(brief).unwrap();
+    assert!(asked.starts_with("REVIEW-SKILL code\nDIFF:"), "{asked}");
+    assert!(asked.contains("+BUILD"), "{asked}");
+    assert_eq!(code.prompt, asked);
+
+    // It can read that folder and change nothing in it, and it's told the file is what holds.
+    let args = said.lines().nth(1).unwrap();
+    assert!(args.contains(&format!("--add-dir {folder} ")), "{args}");
+    let settings = code.settings.to_string();
+    assert!(
+        settings.contains(&format!("Edit(/{folder}/**)")),
+        "{settings}"
+    );
+    assert!(
+        said.contains("# Reviewing with the code-review skill"),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!("is in the file `{brief}`")),
+        "{said}"
+    );
+
+    // Its answer is the last one Claude Code took from the step itself, which under the command
+    // says it's a fork of it: not the one it refused, nor a subagent's. And what it used is counted, though the result says zero.
+    let output = code.output.unwrap();
+    assert_eq!(output["verdict"], "changes", "{output}");
+    assert_eq!(output["summary"], "Found with the skill");
+    assert_eq!(output["findings"][0]["text"], "Divides by zero");
+    assert_eq!((code.input_tokens, code.output_tokens), (Some(7), Some(5)));
+
+    // The review beside it is started as before, with nothing of this.
+    let security = w.all(&run, "security").pop().unwrap();
+    assert!(!security.settings.to_string().contains("/brief/"));
+    assert_eq!(said.matches("/code-review ").count(), 1, "{said}");
+}
+
+#[test]
+fn a_review_with_a_skill_that_gave_no_answer_did_not_review() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.start(with_skill("REVIEW-SKILL-SILENT"));
+    let failed = w.wait(&run, "code", AttemptState::Failed);
+    let reason: Reason = serde_json::from_value(failed.reason.unwrap()).unwrap();
+    assert_eq!(reason, Reason::NoStructuredOutput);
+    assert!(w.all(&run, "human").is_empty());
+}
+
+/// Going on with its session, it isn't started with the command again: the session has what the
+/// skill said. But it may have been stopped before it read its file, so that stays open to it.
+#[test]
+fn going_on_with_a_review_with_a_skill_keeps_the_file_its_session_began_with() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    let run = w.start(with_skill("REVIEW-SKILL-SILENT"));
+    let failed = w.wait(&run, "code", AttemptState::Failed);
+    let started = |attempt: &keel_store::Attempt| {
+        w.store
+            .events(&attempt.id, 0)
+            .unwrap()
+            .into_iter()
+            .find(|event| event.kind == "started")
+            .unwrap()
+            .data
+    };
+    let first = started(&failed);
+    let line = first["skill"].as_str().unwrap();
+    let folder = line
+        .trim_end()
+        .strip_prefix("/code-review medium the change in ")
+        .and_then(|brief| brief.strip_suffix("/review.md"))
+        .unwrap_or_else(|| panic!("{line}"));
+    assert!(folder.ends_with("/brief/code-1"), "{folder}");
+
+    w.engine.retry(&failed.id, true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let again = loop {
+        let all = w.all(&run, "code");
+        if all.len() == 2 && all[1].state == AttemptState::Failed.as_str() {
+            break all[1].clone();
+        }
+        assert!(Instant::now() < deadline, "the second one never ended");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(again.resumed_from.as_deref(), Some(failed.id.as_str()));
+    let second = started(&again);
+    assert!(second["skill"].is_null(), "{second}");
+    let args: Vec<&str> = second["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|arg| arg.as_str())
+        .collect();
+    let at = args.iter().position(|arg| *arg == "--add-dir").unwrap();
+    assert_eq!(args[at + 1], folder, "{args:?}");
+    let settings = again.settings.to_string();
+    assert!(
+        settings.contains(&format!("Edit(/{folder}/**)")),
+        "{settings}"
+    );
+    // Only the first was started with the command, and no second file was written.
+    let said = std::fs::read_to_string(w.log.join("skill.log")).unwrap();
+    assert_eq!(said.matches("/code-review ").count(), 1, "{said}");
+    assert!(!Path::new(&folder.replace("code-1", "code-2")).exists());
 }
 
 #[test]

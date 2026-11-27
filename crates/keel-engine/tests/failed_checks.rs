@@ -127,6 +127,7 @@ fn agent(id: &str, tools: ToolProfile, role: StepRole, prompt: &str) -> Workflow
         when: None,
         risks: vec![],
         model_when_risky: None,
+        skill: None,
         role,
     })
 }

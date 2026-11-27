@@ -67,6 +67,7 @@ pub fn map_workflow(language: &str, model: &str) -> Vec<WorkflowStep> {
         when: None,
         risks: Vec::new(),
         model_when_risky: None,
+        skill: None,
         role: StepRole::Mapper,
     })]
 }
@@ -100,6 +101,7 @@ pub fn learner_step(id: &str, language: &str, model: &str, reviewers: &[&str]) -
         when: None,
         risks: Vec::new(),
         model_when_risky: None,
+        skill: None,
         role: StepRole::Learner,
     }
 }

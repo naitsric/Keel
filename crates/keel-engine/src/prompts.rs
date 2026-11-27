@@ -1,6 +1,8 @@
 //! What agents are told. Anything that comes from outside a step's own definition goes in as
 //! text in a prompt, and never into a shell command.
 
+use std::path::Path;
+
 use keel_core::{StepRole, StepSpec, ToolProfile, WorkflowStep};
 use keel_harness::github::Issue;
 use serde_json::json;
@@ -126,6 +128,23 @@ pub fn system_prompt(
         sources.push(json!({ "source": "instructionFiles", "files": instructions.more.len() }));
     }
     (text, json!(sources))
+}
+
+/// What starts a step that reviews with a skill: the command Claude Code runs it by. What follows
+/// the level reaches the skill as one line, so the step's own prompt can't go there: it's in the
+/// file this names. Nothing here comes from a request, a repo or an agent.
+pub fn skill_line(name: &str, level: &str, brief: &Path) -> String {
+    format!("/{name} {level} the change in {}\n", brief.display())
+}
+
+/// What that step is told about the file, at the end of its system prompt. The skill speaks as if
+/// it had a shell and ended with its own list, and the file is where Keel says otherwise.
+pub fn skill_note(name: &str, brief: &Path) -> String {
+    format!(
+        "\n# Reviewing with the {name} skill\n\n\
+         This step reviews with the {name} skill. What you review, and what Keel asks of your answer, is in the file `{}`: read it whole before anything else. The change is the one that file gives or points to, so don't look for it with git. Where that file and the skill say different things about what to report or how to answer, the file wins, and your answer is the structured one, not the skill's own list.\n",
+        brief.display(),
+    )
 }
 
 /// Fills in `{{request}}`, `{{diff}}`, `{{rework}}`, `{{answers}}`, `{{check}}`, `{{builder}}`,
@@ -574,6 +593,7 @@ pub fn full_workflow(
             when: None,
             risks: Vec::new(),
             model_when_risky: None,
+            skill: None,
             role,
         })
     };

@@ -1000,6 +1000,7 @@ impl McpServer {
                 when: None,
                 risks: Vec::new(),
                 model_when_risky: None,
+                skill: None,
                 role: StepRole::Worker,
             };
             let mut request = StartRun::one_step(project.id, step, language);
@@ -3127,6 +3128,7 @@ impl DraftAgent {
             }),
             risks: Vec::new(),
             model_when_risky: None,
+            skill: None,
             role: match self.role {
                 Some(DraftRole::Worker) | None => StepRole::Worker,
                 Some(DraftRole::Reviewer) => StepRole::Reviewer,

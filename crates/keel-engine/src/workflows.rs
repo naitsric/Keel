@@ -247,6 +247,23 @@ fn valid_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// The skills of Claude Code's a reviewer can review with. Only what Keel has tried with a step's
+/// launch: no shell, no subagents, and the answer Keel asks a reviewer for.
+pub const REVIEW_SKILLS: [&str; 1] = ["code-review"];
+
+/// The levels one runs at. Not the ones above these, which are made of subagents no step has.
+pub const SKILL_LEVELS: [&str; 4] = ["low", "medium", "high", "xhigh"];
+
+/// The name and the level of a step's `skill`, such as `code-review medium`, if Keel runs it.
+/// Nothing else can follow the slash: the line goes to Claude Code as a command.
+pub fn skill_parts(skill: &str) -> Option<(&'static str, &'static str)> {
+    let (name, level) = skill.split_once(' ')?;
+    Some((
+        REVIEW_SKILLS.iter().find(|known| **known == name)?,
+        SKILL_LEVELS.iter().find(|known| **known == level)?,
+    ))
+}
+
 /// Whether a step says what's wrong with a change, for another one to fix.
 fn judges(spec: &StepSpec) -> bool {
     matches!(spec.role, StepRole::Reviewer | StepRole::Verifier)
@@ -285,6 +302,15 @@ pub fn validate(steps: &[WorkflowStep]) -> Result<(), Reason> {
         // A step that decides or judges can't also change what it's judging.
         if spec.role != StepRole::Worker && spec.tools != ToolProfile::ReadOnly {
             return Err(problem("reviewerMustReadOnly", &spec.id));
+        }
+        // The skill is a way to review, and its answer is read as a review's.
+        if let Some(skill) = &spec.skill {
+            if spec.role != StepRole::Reviewer {
+                return Err(problem("skillNeedsReviewer", &spec.id));
+            }
+            if skill_parts(skill).is_none() {
+                return Err(problem("unknownSkill", &spec.id));
+            }
         }
         Ok(())
     };
@@ -1238,6 +1264,7 @@ fn agent(
         when: None,
         risks: Vec::new(),
         model_when_risky: None,
+        skill: None,
         role,
     }
 }
@@ -1396,8 +1423,10 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
                 "Focus on UI: consistency with the repo's design system, existing components, responsive behavior and accessibility. You only see the code, not the screen: say so if something needs to be seen.",
                 "Enfócate en UI: consistencia con el sistema de diseño del repo, componentes existentes, responsive y accesibilidad. Solo ves el código, no la pantalla: dilo si algo requiere verse.",
             )),
+            // With Claude Code's own review, told by the prompt what Keel asks of the answer.
             StepSpec {
                 model_when_risky: Some("opus".into()),
+                skill: Some("code-review medium".into()),
                 ..agent(code, "sonnet", ToolProfile::ReadOnly, StepRole::Reviewer, &[], &review(
                     "Focus on the CODE: that it meets each criterion of the specification, stays within its limits, logic errors, edge cases, and tests that really prove the behavior.",
                     "Enfócate en el CÓDIGO: que cumpla cada criterio de la especificación, que no se salga de sus límites, errores de lógica, casos borde y pruebas que de verdad demuestren el comportamiento.",
@@ -3934,6 +3963,82 @@ mod tests {
         );
         review.model_when_risky = Some("opus".into());
         assert_eq!(validate(&[builder, step_of(review)]), Ok(()));
+    }
+
+    #[test]
+    fn a_skill_is_one_keel_runs_at_a_level_it_runs_and_only_for_a_review() {
+        assert_eq!(
+            skill_parts("code-review medium"),
+            Some(("code-review", "medium"))
+        );
+        for refused in [
+            "code-review",
+            "code-review ",
+            "code-review max",
+            "code-review ultra",
+            "code-review medium --fix",
+            "code-review  medium",
+            "security-review medium",
+            "/code-review medium",
+            "medium",
+            "",
+        ] {
+            assert_eq!(skill_parts(refused), None, "{refused:?}");
+        }
+        let builder = step_of(worker("b", ToolProfile::Build));
+        let mut review = worker("code", ToolProfile::ReadOnly);
+        review.role = StepRole::Reviewer;
+        review.skill = Some("code-review high".into());
+        assert_eq!(
+            validate(&[builder.clone(), step_of(review.clone())]),
+            Ok(())
+        );
+        review.skill = Some("code-review max".into());
+        assert_eq!(
+            validate(&[builder.clone(), step_of(review.clone())]),
+            Err(problem("unknownSkill", "code"))
+        );
+        // Not for a step that does the work, nor one that reads without judging.
+        for tools in [ToolProfile::Build, ToolProfile::ReadOnly] {
+            let mut does = worker("look", tools);
+            does.skill = Some("code-review medium".into());
+            assert_eq!(
+                validate(&[builder.clone(), step_of(does)]),
+                Err(problem("skillNeedsReviewer", "look"))
+            );
+        }
+    }
+
+    #[test]
+    fn only_the_built_in_review_of_code_reviews_with_a_skill() {
+        for language in ["en", "es"] {
+            for workflow in builtin(language, Some("make test")) {
+                let mut with_skill = Vec::new();
+                for step in &workflow.steps {
+                    let specs: Vec<&StepSpec> = match step {
+                        WorkflowStep::Agent(spec) => vec![spec],
+                        WorkflowStep::Parallel { steps, .. } => steps.iter().collect(),
+                        _ => vec![],
+                    };
+                    for spec in specs {
+                        if let Some(skill) = &spec.skill {
+                            assert_eq!(skill_parts(skill), Some(("code-review", "medium")));
+                            // Its prompt is still a review's, which is what the skill is told.
+                            assert!(spec.prompt.contains("{{diff}}"), "{}", spec.id);
+                            with_skill.push(spec.id.as_str());
+                        }
+                    }
+                }
+                let code = if language == "es" { "codigo" } else { "code" };
+                let expected: &[&str] = if workflow.id == "builtin:simple" {
+                    &[]
+                } else {
+                    &[code]
+                };
+                assert_eq!(with_skill, expected, "{} {language}", workflow.id);
+                assert_eq!(validate(&workflow.steps), Ok(()), "{}", workflow.id);
+            }
+        }
     }
 
     #[test]

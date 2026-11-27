@@ -2234,6 +2234,24 @@ impl Inner {
         self.run_dir(run_id).join("change")
     }
 
+    /// Where a step that reviews with a skill finds what Keel asks of it: its prompt, in a folder
+    /// of its own beside the workspace, so it reads no other step's and can change nothing in it.
+    fn brief_dir(&self, run_id: &str, stem: &str) -> PathBuf {
+        self.run_dir(run_id).join("brief").join(stem)
+    }
+
+    /// The one an attempt reads: its own, or the one its session began with, however many times
+    /// that was gone on with. A session stopped before it read the file still finds it there.
+    fn brief_to_read(&self, run_id: &str, stem: &str, resumed_from: Option<&str>) -> PathBuf {
+        let mut stem = stem.to_owned();
+        let mut from = resumed_from.map(str::to_owned);
+        while let Some(earlier) = from.and_then(|id| self.store.attempt(&id).ok()) {
+            stem = format!("{}-{}", earlier.step_id, earlier.number);
+            from = earlier.resumed_from;
+        }
+        self.brief_dir(run_id, &stem)
+    }
+
     /// What an agent can read outside its workspace and change nothing in: the other projects of a
     /// change across several, whose copies are made when the step starts, and the change itself if
     /// it was too big for a prompt.
@@ -2400,7 +2418,19 @@ impl Inner {
                             Vec::new()
                         },
                     ),
-                    &self.read_only_dirs(run_id, &spec.role)?,
+                    &{
+                        let mut dirs = self.read_only_dirs(run_id, &spec.role)?;
+                        // Its own is written as it starts. Going on with a session, the one
+                        // that session began with, if it began with one.
+                        if spec.skill.is_some() {
+                            let from = resume.as_ref().map(|resume| resume.from.as_str());
+                            let brief = self.brief_to_read(run_id, &stem, from);
+                            if resume.is_none() || brief.is_dir() {
+                                dirs.push(brief.to_string_lossy().into_owned());
+                            }
+                        }
+                        dirs
+                    },
                 );
                 // Its Bash runs the project's tests, so it gets localhost when they do. A step
                 // without Bash has nothing to open it for.
@@ -3324,6 +3354,7 @@ mod tests {
             when: None,
             risks: vec![],
             model_when_risky: None,
+            skill: None,
             role: Default::default(),
         });
         let back: WorkflowStep =

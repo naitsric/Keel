@@ -218,6 +218,7 @@ fn spec_of(id: &str, tools: ToolProfile, role: StepRole, when: Option<StepCondit
         when,
         risks: vec![],
         model_when_risky: None,
+        skill: None,
     }
 }
 

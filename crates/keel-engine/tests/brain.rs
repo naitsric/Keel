@@ -114,6 +114,7 @@ fn agent(id: &str, role: StepRole, prompt: &str) -> WorkflowStep {
         when: None,
         risks: Vec::new(),
         model_when_risky: None,
+        skill: None,
         role,
     })
 }

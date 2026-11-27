@@ -1260,6 +1260,98 @@ describe("the workflow editor", () => {
       expect(saved).toMatchObject({ role: { kind: "specifier" } });
     });
   });
+  describe("a review that also goes through Claude Code's own review", () => {
+    const SKILLED: Workflow = {
+      id: "skilled",
+      name: "Skilled",
+      builtin: false,
+      steps: [
+        { type: "agent", ...spec("builder", { tools: "build" }) },
+        { type: "parallel", id: "reviews", steps: [spec("code", { role: { kind: "reviewer" }, skill: "code-review medium" }), spec("security", { role: { kind: "reviewer" } })] },
+        { type: "agent", ...spec("look", { role: { kind: "reviewer" }, skill: "code-review high" }) },
+      ],
+    };
+    const openSkilled = async (workflow = SKILLED) => {
+      mockIPC((command, args) => {
+        if (command === "workflows_list") return [BUILTIN, workflow];
+        if (command === "workflow_save") {
+          if (saveError) throw saveError;
+          saved.push((args as { workflow: Workflow }).workflow);
+          return (args as { workflow: Workflow }).workflow;
+        }
+        return command === "workflow_results" ? [] : command === "workflow_drafts_list" ? [] : null;
+      });
+      await open();
+      await click(text("Skilled"));
+    };
+    const skill = () => labelled<HTMLSelectElement>("Also reviews with", "select");
+    const choose = (select: HTMLSelectElement, value: string) =>
+      act(() => {
+        Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set?.call(select, value);
+        select.dispatchEvent(new Event("change", { bubbles: true }));
+      });
+    const reviews = () => (lastSaved().steps[1] as { steps: StepSpec[] }).steps;
+
+    it("is in plain words, shows what the step has, and only a review has it", async () => {
+      await openSkilled();
+      await click(node("code"));
+      expect(skill()?.value).toBe("code-review medium");
+      expect([...(skill() as HTMLSelectElement).options].map((option) => option.textContent)).toEqual([
+        "Nothing else: only its instructions",
+        "Claude Code's /code-review, level: Low",
+        "Claude Code's /code-review, level: Medium",
+        "Claude Code's /code-review, level: High",
+        "Claude Code's /code-review, level: Extra high",
+      ]);
+      expect(page()).toContain("this step's instructions still say what to check and how to answer");
+      await click(node("security"));
+      expect(skill()?.value).toBe("");
+      await click(node("builder"));
+      expect(skill()).toBeFalsy();
+      expect(page()).not.toContain("Also reviews with");
+      await i18next.changeLanguage("es");
+      await flush();
+      await click(node("code"));
+      expect(page()).toContain("Revisa además con");
+      expect(page()).toContain("El /code-review de Claude Code, nivel: Medio");
+    });
+
+    it("goes as the engine reads it, and off the step says nothing about it, like one saved before", async () => {
+      await openSkilled();
+      await click(node("security"));
+      choose(skill() as HTMLSelectElement, "code-review xhigh");
+      await click(node("code"));
+      choose(skill() as HTMLSelectElement, "");
+      await saveNow();
+      expect(reviews()[1].skill).toBe("code-review xhigh");
+      expect("skill" in reviews()[0]).toBe(false);
+    });
+
+    it("keeps one the engine doesn't know, and says what the engine refused, on the step", async () => {
+      const reviewers = [spec("code", { role: { kind: "reviewer" }, skill: "code-review max" }), spec("security", { role: { kind: "reviewer" } })];
+      await openSkilled({ ...SKILLED, steps: [SKILLED.steps[0], { type: "parallel", id: "reviews", steps: reviewers }, SKILLED.steps[2]] });
+      await click(node("code"));
+      expect(skill()?.value).toBe("code-review max");
+      await saveNow();
+      expect(reviews()[0].skill).toBe("code-review max");
+      saveError = { code: "blocked", reason: { code: "invalidWorkflow", problem: "unknownSkill", step: "code" }, detail: null };
+      await saveNow();
+      expect(page()).toContain("“code” asks for a review of Claude Code's, or a level of it, that Keel doesn't run.");
+    });
+
+    it("goes when the step stops being a review, which hides it", async () => {
+      await openSkilled();
+      await click(node("look"));
+      expect(skill()?.value).toBe("code-review high");
+      await click(text("Does the work"));
+      expect(skill()).toBeFalsy();
+      expect(page()).not.toContain("Also reviews with");
+      await saveNow();
+      const saved = lastSaved().steps[2];
+      expect("skill" in saved).toBe(false);
+      expect(saved).toMatchObject({ role: { kind: "worker" } });
+    });
+  });
   describe("the results", () => {
     const of = (fields: Partial<WorkflowResults>): WorkflowResults => ({ workflowId: "builtin:full", workflowName: "Full, with reviews", runs: 0, finished: 0, merged: 0, closed: 0, mergedAsDelivered: 0, mergedCounted: 0, costPerMergedUsd: null, averageRounds: null, stoppedToAsk: 0, answers: 0, answersRecommended: 0, sentBack: 0, criteriaMet: 0, criteriaUnmet: 0, criteriaUnverified: 0, shortRoute: 0, movedUp: 0, movedUpBecause: [], ...fields });
     const cells = (row: string) => [...document.querySelectorAll("tr")].find((tr) => tr.querySelector("th")?.textContent?.startsWith(row))?.querySelectorAll("td");

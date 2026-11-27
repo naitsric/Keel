@@ -129,6 +129,10 @@ pub struct StepSpec {
     /// from the specification and the change, once both exist.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_when_risky: Option<String>,
+    /// A skill of Claude Code's a reviewer reviews with, and the level it runs at, as typed after
+    /// the slash: `code-review medium`. The step's prompt still says what Keel asks of the answer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
 }
 
 /// Something a project's commands need, such as a test database. Keel runs these outside the
@@ -179,7 +183,9 @@ pub struct EnvVar {
     pub value: String,
 }
 
-/// One step of a workflow. There are few kinds on purpose.
+/// One step of a workflow. There are few kinds on purpose. An agent is far bigger than the rest,
+/// and a workflow has a handful of steps, so it isn't worth a box at every place one is read.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "type",
@@ -1541,6 +1547,7 @@ mod tests {
             when: None,
             risks: vec![],
             model_when_risky: None,
+            skill: None,
         }
     }
 
@@ -1579,6 +1586,23 @@ mod tests {
         assert_eq!(value["risks"], serde_json::json!(["concurrency"]));
         assert_eq!(value["modelWhenRisky"], "opus");
         assert_eq!(serde_json::from_value::<StepSpec>(value).unwrap(), with);
+    }
+
+    #[test]
+    fn a_skill_only_shows_up_on_a_step_that_reviews_with_one() {
+        let without = serde_json::to_value(a_step()).unwrap();
+        assert_eq!(without.get("skill"), None, "what was saved before stays");
+        let with = StepSpec {
+            skill: Some("code-review medium".into()),
+            ..a_step()
+        };
+        let value = serde_json::to_value(&with).unwrap();
+        assert_eq!(value["skill"], "code-review medium");
+        assert_eq!(serde_json::from_value::<StepSpec>(value).unwrap(), with);
+        assert_eq!(
+            serde_json::from_value::<StepSpec>(without).unwrap(),
+            a_step()
+        );
     }
 
     #[test]

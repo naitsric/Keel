@@ -176,6 +176,7 @@ async fn world() -> World {
                         when: None,
                         risks: vec![],
                         model_when_risky: None,
+                        skill: None,
                         role: Default::default(),
                     }),
                     WorkflowStep::Approval { id: "human".into() },
@@ -335,6 +336,7 @@ fn agent(id: &str, tools: ToolProfile, role: StepRole) -> StepSpec {
         when: None,
         risks: vec![],
         model_when_risky: None,
+        skill: None,
         role,
     }
 }
@@ -1376,6 +1378,7 @@ async fn a_step_asking_the_person_something_reads_as_waiting_for_them() {
                     when: None,
                     risks: vec![],
                     model_when_risky: None,
+                    skill: None,
                     role: StepRole::Specifier,
                 })],
             },
