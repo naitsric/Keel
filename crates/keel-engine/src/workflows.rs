@@ -1266,9 +1266,6 @@ fn fitting_the_change(mut steps: Vec<WorkflowStep>, language: &str) -> Vec<Workf
 
 /// The same in both languages, like `spec` and `builder`: the approver's prompt names it.
 const VERIFY_STEP: &str = "verify";
-/// And the one that fixes what was found, with the check that runs again if it did.
-const SHIP_STEP: &str = "ship";
-const CHECK_SHIP_STEP: &str = "check-ship";
 
 const SCREEN_FILES: [&str; 8] = [
     "**/*.tsx",
@@ -1345,17 +1342,12 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
     };
     let state = if es { "estado" } else { "state" };
     let approver_prompt = format!(
-        "{}\n{{{{steps.spec.output}}}}\n\n{VERIFY_STEP}: {{{{steps.{VERIFY_STEP}.output}}}}\n{security}: {{{{steps.{security}.output}}}}\nux: {{{{steps.ux.output}}}}\nui: {{{{steps.ui.output}}}}\n{code}: {{{{steps.{code}.output}}}}\n{state}: {{{{steps.{state}.output}}}}\n{SHIP_STEP}: {{{{steps.{SHIP_STEP}.output}}}}\n\n{{{{rework}}}}\n\n{}\n\n{}\n\n{}\n\n{}",
+        "{}\n{{{{steps.spec.output}}}}\n\n{VERIFY_STEP}: {{{{steps.{VERIFY_STEP}.output}}}}\n{security}: {{{{steps.{security}.output}}}}\nux: {{{{steps.ux.output}}}}\nui: {{{{steps.ui.output}}}}\n{code}: {{{{steps.{code}.output}}}}\n{state}: {{{{steps.{state}.output}}}}\n\n{{{{rework}}}}\n\n{}\n\n{}\n\n{}",
         text("Specification:", "Especificación:"),
         prompts::material_line(language),
         text(
             "You decide whether this change is ready for a person to review, using the reviews above and what `verify` found, and you edit nothing. Check each finding in the code before believing it, and discard false ones. A review with files in `unread` didn't check them: check them yourself before you approve. Anything `unmet` in `verify` is a finding, unless what was sent back above changed it. `unverified` only means no test proves it, and isn't a finding by itself. If the risk you'll set is medium or high, read the code of each `unverified` item yourself, and say in reasons, item by item, whether the code backs it up: one it doesn't back up is a finding. If reading the code can't settle one, such as how it looks on screen, say so in reasons: that isn't a finding, and it stays not proven for the person. What a review put in `unchecked` is what reading the code can't prove, such as how it looks on screen: Keel shows it to the person to check, so it isn't a finding and no reason to send the work back. decision = rework if a real finding remains, approve if not. risk = high if it touches authorization, personal data, money, contractual deadlines or the database schema; low if it's contained and easy to revert; medium otherwise. In instructions, say exactly what to fix.",
             "Decides si este cambio está listo para que lo revise una persona, usando las revisiones de arriba y lo que encontró `verify`, y no editas nada. Comprueba cada hallazgo en el código antes de creerle y descarta los falsos. Una revisión con archivos en `unread` no los revisó: revísalos tú antes de aprobar. Todo lo que esté `unmet` en `verify` es un hallazgo, salvo que lo devuelto arriba lo haya cambiado. `unverified` solo significa que ninguna prueba lo demuestra, y por sí solo no es un hallazgo. Si el riesgo que vas a poner es medium o high, lee tú el código de cada elemento `unverified` y di en reasons, uno por uno, si el código lo sostiene: uno que el código no sostiene es un hallazgo. Si leer el código no puede decidir uno, como cómo se ve en pantalla, dilo en reasons: eso no es un hallazgo, y queda sin probar para la persona. Lo que una revisión puso en `unchecked` es lo que leer el código no puede comprobar, como cómo se ve en pantalla: Keel se lo muestra a la persona para que lo compruebe, así que no es un hallazgo ni motivo para devolver el trabajo. decision = rework si queda un hallazgo real, approve si no. risk = high si toca autorización, datos personales, dinero, plazos contractuales o el esquema de base; low si es acotado y fácil de revertir; medium en otro caso. En instructions, di exactamente qué corregir. Responde en español.",
-        ),
-        // It's the only one who looks at what was fixed after everyone else had looked.
-        text(
-            "If `ship` ran, it fixed the code after the reviews and `verify` looked at it, and they didn't look again. Check in the code what it says it fixed, as you would any claim: something it fixed is no longer a finding, and one it calls false or left as it was still is if you find it real. Look at what its fixes changed too, since no review did: a mistake in them, or a test it deleted, skipped or watered down, is a finding.",
-            "Si `ship` corrió, corrigió el código después de que lo miraran las revisiones y `verify`, y no volvieron a mirarlo. Comprueba en el código lo que dice que corrigió, como harías con cualquier afirmación: lo que corrigió ya no es un hallazgo, y lo que llama falso o dejó como estaba lo sigue siendo si lo encuentras real. Mira también lo que cambiaron sus correcciones, porque ninguna revisión lo hizo: un error en ellas, o una prueba que borró, saltó o aflojó, es un hallazgo.",
         ),
         // What the specification decided on its own is the person's to settle, not the builder's.
         if es {
@@ -1420,30 +1412,6 @@ pub fn builtin(language: &str, check: Option<&str>) -> Vec<Workflow> {
             },
         ],
     });
-    // What they found gets fixed before the approver decides, without a whole round for it. No
-    // review looks at those fixes, so a risky change gets the stronger model.
-    full.push(WorkflowStep::Agent(StepSpec {
-        when: Some(StepCondition::SomethingToFix),
-        model_when_risky: Some("opus".into()),
-        ..agent(
-            SHIP_STEP,
-            "sonnet",
-            ToolProfile::Build,
-            StepRole::Worker,
-            &[],
-            &prompts::ship_prompt(language, &[VERIFY_STEP, security, "ux", "ui", code, state]),
-        )
-    }));
-    if let Some(run) = full.iter().find_map(|step| match step {
-        WorkflowStep::Check { run, .. } => Some(run.clone()),
-        _ => None,
-    }) {
-        full.push(WorkflowStep::Check {
-            id: CHECK_SHIP_STEP.into(),
-            run,
-            only_if_changed: true,
-        });
-    }
     full.push(WorkflowStep::Agent(agent(
         approver,
         "opus",
@@ -1786,8 +1754,6 @@ mod tests {
                 "check",
                 "verify",
                 "reviews",
-                "ship",
-                "check-ship",
                 "aprobador",
                 "humano",
                 "pull-request",
@@ -1816,33 +1782,27 @@ mod tests {
         );
         assert!(group[0].paths.is_empty(), "security always reviews");
         assert!(!group[1].paths.is_empty(), "UX only with screens");
-        // What they found is fixed by a step that can edit, only if they found something, and the
-        // project's check runs again if it did.
-        let WorkflowStep::Agent(ship) = &full.steps[5] else {
-            panic!()
-        };
-        assert_eq!(ship.role, StepRole::Worker);
-        assert_eq!(ship.tools, ToolProfile::Build);
-        assert_eq!(ship.when, Some(StepCondition::SomethingToFix));
-        assert_eq!(ship.model, "sonnet");
-        for judged in ["verify", "seguridad", "ux", "ui", "codigo", "estado"] {
-            let read = format!("{judged}: {{{{steps.{judged}.output}}}}");
-            assert!(ship.prompt.contains(&read), "{judged}");
-        }
-        assert_eq!(
-            full.steps[6],
-            WorkflowStep::Check {
-                id: "check-ship".into(),
-                run: "make test".into(),
-                only_if_changed: true,
+        // What they found goes to the approver, and nothing changes the code after they looked.
+        for workflow in builtin("es", Some("make test")) {
+            for step in &workflow.steps {
+                match step {
+                    WorkflowStep::Agent(spec) => {
+                        assert_ne!(
+                            spec.when,
+                            Some(StepCondition::SomethingToFix),
+                            "{}",
+                            spec.id
+                        )
+                    }
+                    WorkflowStep::Check {
+                        id,
+                        only_if_changed,
+                        ..
+                    } => assert!(!only_if_changed, "{id}"),
+                    _ => {}
+                }
             }
-        );
-        let without = builtin("es", None).remove(0);
-        assert!(find_step(&without.steps, "ship").is_some());
-        assert!(
-            find_step(&without.steps, "check-ship").is_none(),
-            "nothing to repeat"
-        );
+        }
         let WorkflowStep::Agent(spec) = &full.steps[0] else {
             panic!()
         };
@@ -2563,11 +2523,8 @@ mod tests {
                         assert!(!told.contains(piece), "{piece}: {}", said());
                     }
                     // Only who does the work reads what was sent back last: it's what its round
-                    // is for. Whoever judges the change has it with the rest, and so does who
-                    // fixes what they found.
-                    let builds = spec.role == StepRole::Worker
-                        && spec.tools == ToolProfile::Build
-                        && spec.id != SHIP_STEP;
+                    // is for. Whoever judges the change has it with the rest.
+                    let builds = spec.role == StepRole::Worker && spec.tools == ToolProfile::Build;
                     assert_eq!(told.contains("{{rework}}"), builds, "{}", said());
                     if builds {
                         assert!(told.ends_with("\n\n{{rework}}"), "{}", said());
@@ -3143,10 +3100,8 @@ mod tests {
                             );
                         }
                         WorkflowStep::Agent(spec) => {
-                            // With the reviews skipped there's nothing to fix either.
                             let expected = match spec.role {
                                 StepRole::Approver { .. } => Some(StepCondition::NotSmall),
-                                _ if spec.id == SHIP_STEP => Some(StepCondition::SomethingToFix),
                                 _ => None,
                             };
                             assert_eq!(spec.when, expected, "{}", spec.id);
@@ -4013,11 +3968,6 @@ mod tests {
                 };
                 assert_eq!(code.model, "sonnet");
                 assert_eq!(code.model_when_risky.as_deref(), Some("opus"));
-                // Who fixes what they found, with no review after, changes model too.
-                let Some(WorkflowStep::Agent(ship)) = find_step(&workflow.steps, SHIP_STEP) else {
-                    panic!()
-                };
-                assert_eq!(ship.model_when_risky.as_deref(), Some("opus"));
                 // Nobody else changes model or depends on the risks.
                 for step in &workflow.steps {
                     let specs: Vec<&StepSpec> = match step {
@@ -4027,7 +3977,7 @@ mod tests {
                     };
                     for spec in specs
                         .into_iter()
-                        .filter(|s| s.id != state && s.id != code.id && s.id != SHIP_STEP)
+                        .filter(|s| s.id != state && s.id != code.id)
                     {
                         assert!(spec.risks.is_empty(), "{}", spec.id);
                         assert_eq!(spec.model_when_risky, None, "{}", spec.id);
