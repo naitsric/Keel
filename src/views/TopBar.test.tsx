@@ -4,6 +4,7 @@ import { useSearchEverywhere } from "../commands/SearchEverywhere";
 import { callsTo, hideApp, note, paletteOpen, paletteRow, pressKey, pressMod, row, settle, showApp, view } from "../commands/testApp";
 import i18next from "../i18n";
 import { useApp, type View } from "../lib/store";
+import { NAMES_FROM_WIDTH } from "./TopBar";
 
 const RUNS = [row("r1", "running"), row("r2", "succeeded")];
 
@@ -63,7 +64,7 @@ describe("the top bar", () => {
     await showApp(RUNS);
     act(() => useApp.setState({ overview: { ...useApp.getState().overview, pendingProposals: 2 } }));
     expect(headerButton("Brain")?.textContent).toBe("Brain2");
-    expect(headerButton("Brain")?.querySelector("span")?.getAttribute("aria-label")).toBe("2 proposals waiting");
+    expect(headerButton("Brain")?.querySelector("span[aria-label]")?.getAttribute("aria-label")).toBe("2 proposals waiting");
   });
 
   it("shows how many drafts wait, on Workflows", async () => {
@@ -71,7 +72,7 @@ describe("the top bar", () => {
     expect(headerButton("Workflows")?.textContent).toBe("Workflows");
     act(() => useApp.setState({ overview: { ...useApp.getState().overview, workflowDrafts: 2 } }));
     expect(headerButton("Workflows")?.textContent).toBe("Workflows2");
-    expect(headerButton("Workflows")?.querySelector("span")?.getAttribute("aria-label")).toBe("2 workflow drafts to review");
+    expect(headerButton("Workflows")?.querySelector("span[aria-label]")?.getAttribute("aria-label")).toBe("2 workflow drafts to review");
   });
 
   it("is in Spanish too", async () => {
@@ -119,6 +120,100 @@ describe("the top bar", () => {
     await showApp(RUNS, { name: "board", projectId: "p2" });
     await click(headerButton("Board"));
     expect(view()).toEqual({ name: "board", projectId: "p2" });
+  });
+
+  describe("each page's icon and name", () => {
+    const WIDE = 1280;
+    /** The narrowest the window gets (`minWidth` in tauri.conf.json). */
+    const NARROWEST = 900;
+    const startWidth = window.innerWidth;
+    const setWidth = (width: number) => {
+      Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: width });
+      act(() => void window.dispatchEvent(new Event("resize")));
+    };
+    afterEach(() => setWidth(startWidth));
+
+    const pages = () => [...(nav() as Element).querySelectorAll("button")];
+    /** What a page's button shows as words: its name unless that's only there for a screen reader. */
+    const shownName = (button: Element) => [...button.querySelectorAll(":scope > span:not([aria-label])")].filter((span) => !span.classList.contains("sr-only")).map((span) => span.textContent)[0] ?? null;
+    const NAMES = { en: ["Runs", "Board", "Workflows", "Brain", "Projects"], es: ["Ejecuciones", "Tablero", "Workflows", "Brain", "Proyectos"] };
+
+    it("shows both in a wide window, with the icon only for the eye", async () => {
+      setWidth(WIDE);
+      await showApp(RUNS, { name: "board" });
+      expect(pages().map(shownName)).toEqual(NAMES.en);
+      for (const button of pages()) {
+        const icons = button.querySelectorAll("svg");
+        expect(icons).toHaveLength(1);
+        expect(icons[0].getAttribute("aria-hidden")).toBe("true");
+      }
+    });
+
+    it.each(["en", "es"] as const)("in the narrowest window, in %s, keeps the name of the current page and the icon of the others, which a screen reader still hears named", async (language) => {
+      setWidth(NARROWEST);
+      await showApp(RUNS, { name: "projects" });
+      await act(() => i18next.changeLanguage(language));
+      expect(pages().map(shownName)).toEqual([null, null, null, null, NAMES[language][4]]);
+      // The name is still what each button says, and its tooltip still has the name and the key.
+      expect(pages().map((b) => b.textContent)).toEqual(NAMES[language]);
+      expect(pages().map((b) => b.getAttribute("title"))).toEqual(NAMES[language].map((name, index) => `${name}  ⌘${index + 1}`));
+      expect(pages().every((b) => b.querySelectorAll("svg").length === 1)).toBe(true);
+      expect(currentOnes()).toEqual([NAMES[language][4]]);
+      await act(() => i18next.changeLanguage("en"));
+    });
+
+    it("moves the name with the page, also to the page a run was opened from", async () => {
+      setWidth(NARROWEST);
+      await showApp(RUNS, { name: "projects" });
+      await click(headerButton("Board"));
+      expect(pages().map(shownName)).toEqual([null, "Board", null, null, null]);
+      await hideApp();
+      await showApp(RUNS, { name: "run", runId: "r1", backTo: { name: "brain" } });
+      expect(pages().map(shownName)).toEqual([null, null, null, "Brain", null]);
+    });
+
+    it("shows no page's name in the narrowest window on Settings, which isn't one of them", async () => {
+      setWidth(NARROWEST);
+      await showApp(RUNS, { name: "settings" });
+      expect(pages().map(shownName)).toEqual([null, null, null, null, null]);
+      expect(pages().map((b) => b.textContent)).toEqual(NAMES.en);
+    });
+
+    it("keeps the counts beside the icons in the narrowest window", async () => {
+      setWidth(NARROWEST);
+      await showApp(RUNS);
+      act(() => useApp.setState({ overview: { ...useApp.getState().overview, pendingProposals: 12, workflowDrafts: 3 } }));
+      const count = (name: string) => headerButton(name)?.querySelector("span[aria-label]");
+      expect(shownName(headerButton("Brain") as Element)).toBeNull();
+      expect(count("Brain")?.textContent).toBe("12");
+      expect(count("Brain")?.classList.contains("sr-only")).toBe(false);
+      expect(count("Workflows")?.textContent).toBe("3");
+      expect(count("Workflows")?.getAttribute("aria-label")).toBe("3 workflow drafts to review");
+    });
+
+    it("has room for every name from 1100 px, and follows the window as it's resized", async () => {
+      expect(NAMES_FROM_WIDTH).toBe(1100);
+      setWidth(NAMES_FROM_WIDTH);
+      await showApp(RUNS, { name: "board" });
+      expect(pages().map(shownName)).toEqual(NAMES.en);
+      setWidth(NAMES_FROM_WIDTH - 1);
+      expect(pages().map(shownName)).toEqual([null, "Board", null, null, null]);
+      setWidth(WIDE);
+      expect(pages().map(shownName)).toEqual(NAMES.en);
+    });
+
+    it("lets only the search give way, so the pages, the primary button and Settings are never cut off", async () => {
+      setWidth(NARROWEST);
+      await showApp(RUNS, { name: "board" });
+      const gives = (el: Element | null | undefined) => !el?.classList.contains("shrink-0");
+      expect(gives(nav())).toBe(false);
+      expect(gives(headerButton("New task"))).toBe(false);
+      expect(gives(settings())).toBe(false);
+      const search = header().querySelector('button[title^="Search"]') as HTMLElement;
+      expect(gives(search)).toBe(true);
+      expect(search.classList.contains("min-w-7")).toBe(true);
+      expect(search.classList.contains("overflow-hidden")).toBe(true);
+    });
   });
 
   it("drags the window from everything except what can be clicked", async () => {
