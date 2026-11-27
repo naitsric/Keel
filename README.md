@@ -37,8 +37,9 @@ It's an app on your Mac, with no account and no server. It uses your own signed-
 4. **What proves it.** An agent goes through what was asked and says what a test really proves and
    what nothing does.
 5. **The reviews.** Reviewers look at the change at the same time: security and code always, and
-   UX, UI and state when the change calls for them. What they find is fixed before an approver decides, and the check runs again. The approver
-   can send the work back too. A run goes back at most twice on its own, and after that you decide.
+   UX, UI and state when the change calls for them. An approver goes through what they found and
+   sends the work back to the builder if something real is left. A run goes back at most twice on
+   its own, and after that you decide.
 6. **You.** You see what was asked, what changed, what proves it and what the reviews said. You can
    change anything it decided on its own, which sends the work back without starting over. Approve,
    and Keel opens a draft pull request.

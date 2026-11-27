@@ -1,6 +1,7 @@
-//! The step that fixes what the reviews and the verifier found before the approver decides, and the
+//! A step that fixes what the reviews and the verifier found before the approver decides, and a
 //! check that runs again if it did, against a fake `claude`, a fake `gh` and a local bare repo
-//! standing in for GitHub.
+//! standing in for GitHub. No workflow Keel ships has them, so each run here is a workflow of the
+//! person's own: most are one Keel ships with the two steps put in.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use keel_core::{AttemptState, StepCondition, StepRole, StepSpec, ToolProfile, WorkflowStep};
-use keel_engine::{Config, Engine, Error, RetryOptions, StartRun};
+use keel_engine::{Config, Engine, Error, StartRun};
 use keel_harness::Tools;
 use keel_store::{Attempt, ProjectSettings, Store};
 
@@ -185,25 +186,33 @@ fn world() -> World {
 }
 
 impl World {
-    /// One of the workflows Keel ships, as a person would start it.
+    /// One of the workflows Keel ships with the two steps after its reviews, and an approver that
+    /// reads what the fix said.
     fn start(&self, workflow: &str) -> String {
-        let workflow = self
+        let mut steps = self
             .engine
             .workflow(&self.project_id, workflow, "en")
             .unwrap()
-            .unwrap();
-        self.engine
-            .start_run(StartRun {
-                project_id: self.project_id.clone(),
-                title: None,
-                request: "Fix add".into(),
-                saved_workflow: Some(workflow.reference()),
-                workflow: workflow.steps,
-                language: "en".into(),
-                source_issue: None,
-                started_by: None,
-            })
             .unwrap()
+            .steps;
+        let reviews = steps
+            .iter()
+            .position(|step| step.id() == "reviews")
+            .unwrap();
+        let fix = WorkflowStep::Agent(StepSpec {
+            when: Some(StepCondition::SomethingToFix),
+            prompt: "ship {{steps.security.output}} {{rework}}".into(),
+            ..agent("ship", ToolProfile::Build, StepRole::Worker)
+        });
+        steps.splice(reviews + 1..reviews + 1, [fix, check("check-ship", true)]);
+        for step in &mut steps {
+            if let WorkflowStep::Agent(spec) = step
+                && matches!(spec.role, StepRole::Approver { .. })
+            {
+                spec.prompt.push_str("\n\nship: {{steps.ship.output}}");
+            }
+        }
+        self.start_own(steps).unwrap()
     }
 
     /// Steps of a workflow of the person's own.
@@ -347,34 +356,6 @@ const UNMET: &str =
     r#"{"criteria":[{"id":"C1","result":"unmet","evidence":"calc.py:1"}],"summary":"Not yet"}"#;
 
 #[test]
-fn the_built_in_workflow_fixes_what_was_found_between_the_reviews_and_the_approver() {
-    let w = world();
-    for (id, full) in [
-        ("builtin:full", true),
-        ("builtin:organic", true),
-        ("builtin:simple", false),
-    ] {
-        let steps = w
-            .engine
-            .workflow(&w.project_id, id, "es")
-            .unwrap()
-            .unwrap()
-            .steps;
-        let ids: Vec<&str> = steps.iter().map(WorkflowStep::id).collect();
-        let at = |id: &str| ids.iter().position(|step| *step == id);
-        assert_eq!(at("ship").is_some(), full, "{id}: {ids:?}");
-        assert_eq!(at("check-ship").is_some(), full, "{id}: {ids:?}");
-        if full {
-            let reviews = at("reviews").unwrap();
-            assert_eq!(
-                &ids[reviews..reviews + 5],
-                ["reviews", "ship", "check-ship", "aprobador", "humano"]
-            );
-        }
-    }
-}
-
-#[test]
 fn with_nothing_to_fix_neither_it_nor_its_check_runs_and_the_check_still_counts_as_passed() {
     keel_harness::needs!(sandbox);
     let w = world();
@@ -422,7 +403,6 @@ fn a_review_that_asks_for_changes_gets_them_fixed_and_checked_again_before_the_a
     assert_eq!(ship.state, "succeeded");
     assert_eq!(ship.tools, "build");
     assert!(ship.prompt.contains("A-REAL-FINDING"), "{}", ship.prompt);
-    assert!(ship.prompt.contains("Check each finding in the code"));
     assert_ne!(ship.sha_before, ship.sha_after, "it left a commit");
     assert_eq!(
         w.step(&run, "check").number,
@@ -770,44 +750,4 @@ fn a_builder_that_changed_nothing_after_the_second_check_failed_doesnt_go_round_
     let check = w.wait(&run, "check", AttemptState::Failed, 2);
     assert_eq!(check.reason.unwrap()["unchanged"], true);
     assert_eq!(w.store.run(&run).unwrap().round, 1);
-}
-
-#[test]
-fn new_project_commands_reach_both_checks() {
-    keel_harness::needs!(sandbox);
-    let w = world();
-    let settings = |command: &str| ProjectSettings {
-        github_account: Some("alice".into()),
-        check_command: Some(command.into()),
-        ..Default::default()
-    };
-    let slow = "test ! -f slow || sleep 30";
-    w.engine
-        .update_project(&w.project_id, &settings(slow))
-        .unwrap();
-    w.set("verdicts", "changes\n");
-    w.set("edit-2.sh", "touch slow");
-    let run = w.start("builtin:full");
-    let running = w.wait(&run, "check-ship", AttemptState::Running, 1);
-    w.engine.stop(&running.id).unwrap();
-    w.wait(&run, "check-ship", AttemptState::Stopped, 1);
-    w.engine
-        .update_project(&w.project_id, &settings("test -f slow"))
-        .unwrap();
-    let changes = w.engine.command_changes(&run).unwrap();
-    let steps: Vec<&str> = changes.iter().map(|c| c.step_id.as_str()).collect();
-    assert_eq!(steps, ["check", "check-ship"]);
-    w.engine
-        .retry_with(
-            &running.id,
-            RetryOptions {
-                resume: false,
-                by: None,
-                current_commands: true,
-            },
-        )
-        .unwrap();
-    let body = w.delivered(&run);
-    assert_eq!(w.step(&run, "check-ship").prompt, "test -f slow");
-    assert!(body.contains("- `test -f slow`: passed\n"), "{body}");
 }

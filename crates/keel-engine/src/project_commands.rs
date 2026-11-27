@@ -28,9 +28,8 @@ pub struct CommandChange {
 const MARK: &str = "fromProject";
 /// The ids Keel gives the project's setup when it puts it first in a run. See `start_run`.
 const SETUP_IDS: [&str; 2] = ["setup", "project-setup"];
-/// The ids of the project's check in the built-in workflows: see `prompts::full_workflow`, and the
-/// one that repeats it, in `workflows::builtin`.
-const CHECK_IDS: [&str; 2] = ["check", "check-ship"];
+/// The id of the project's check in the built-in workflows: see `prompts::full_workflow`.
+const CHECK_IDS: [&str; 1] = ["check"];
 
 /// Whether the steps came from one of the workflows Keel ships, which take the project's check.
 fn is_builtin(workflow_id: Option<&str>) -> bool {
