@@ -122,16 +122,32 @@ function useSavedConfiguration(project: Project) {
   };
 
   /**
-   * Whether a client changed the project since the form opened, and the form hasn't taken it in
-   * yet: the app hears of a change a moment after it's saved, and saving then would write over it.
+   * The last change a client made to the project since the form opened that the form hasn't taken
+   * in yet, or null: the app hears of a change a moment after it's saved, and saving then would
+   * write over it.
    */
   const clientChangeUnheard = () =>
     api
       .mcpOverview()
-      .then(({ projectChanges }) => projectChanges.some((c) => c.projectId === id && c.seq > announced.current && Date.parse(c.at) >= openedAt))
-      .catch(() => false);
+      .then(({ projectChanges }) => {
+        const seqs = projectChanges.filter((c) => c.projectId === id && c.seq > announced.current && Date.parse(c.at) >= openedAt).map((c) => c.seq);
+        return seqs.length > 0 ? Math.max(...seqs) : null;
+      })
+      .catch(() => null);
 
-  return { account, setAccount, setup, setSetup, check, setCheck, byClient, takeSaved, clientChangeUnheard };
+  /**
+   * Counts the changes up to `seq` as told, once the saved values have been read again, and marks
+   * what differs from `before`. A client may have put a value back, so there can be nothing to mark.
+   */
+  const takeUnheard = (seq: number, before: Configured, now: Configured) => {
+    announced.current = Math.max(announced.current, seq);
+    setByClient((fields) => [...new Set([...fields, ...configuredChanges(before, now)])]);
+  };
+
+  /** The saved values the form has taken in. */
+  const taken = () => seen.current;
+
+  return { account, setAccount, setup, setSetup, check, setCheck, byClient, takeSaved, taken, clientChangeUnheard, takeUnheard };
 }
 
 /** What the last look at the project's issues found, or why it couldn't look. */
@@ -167,7 +183,7 @@ function IssueWatchLine({ watch, looking }: { watch: IssueWatch | null; looking:
 function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boolean; onSaved: () => void }) {
   const { t, i18n } = useTranslation();
   const refreshOverview = useApp((s) => s.refreshOverview);
-  const { account, setAccount, setup, setSetup, check, setCheck, byClient, takeSaved, clientChangeUnheard } = useSavedConfiguration(project);
+  const { account, setAccount, setup, setSetup, check, setCheck, byClient, takeSaved, taken, clientChangeUnheard, takeUnheard } = useSavedConfiguration(project);
   const [domains, setDomains] = useState(project.allowedDomains.join("\n"));
   const [paths, setPaths] = useState(project.allowedRead.join("\n"));
   const [services, setServices] = useState<Service[]>(project.services);
@@ -281,8 +297,12 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
     try {
       // A client may have changed the account or commands since the form took them in. Those are
       // shown first rather than written over unseen, and saving again is the person's call.
-      if (await clientChangeUnheard()) {
+      const before = taken();
+      const unheard = await clientChangeUnheard();
+      if (unheard !== null) {
         await refreshOverview();
+        const fresh = useApp.getState().overview.projects.find((p) => p.id === project.id);
+        if (fresh) takeUnheard(unheard, before, fresh);
         setError(t("projects.notSaved"));
         return;
       }

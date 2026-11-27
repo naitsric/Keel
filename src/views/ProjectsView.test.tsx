@@ -184,6 +184,21 @@ describe("the Projects page", () => {
       expect(saved().checkCommand).toBe("make check");
     });
 
+    it("saves on the second try when a client changed a value and put it back before the app heard", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      await typeInto(envBox(), "A=1");
+      setProjectChanges([record(2), record(1)]);
+      await click(button(i18next.t("settings.save")));
+      expect(callsTo("project_update")).toEqual([]);
+      expect(main().textContent).toContain(i18next.t("projects.notSaved"));
+      // No field differs from what the form had, so none is marked.
+      expect(notice()).toBe("");
+
+      await click(button(i18next.t("settings.save")));
+      expect(callsTo("project_update")).toHaveLength(1);
+      expect(saved()).toMatchObject({ setupCommand: "make deps", checkCommand: "make test", env: [{ name: "A", value: "1" }] });
+    });
+
     it("says the fields already show a change when the person had edited none of them", async () => {
       await showApp(RUNS, { name: "projects" }, [START]);
       setProjectChanges([record(1)]);
