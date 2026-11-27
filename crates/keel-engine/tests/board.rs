@@ -3079,7 +3079,11 @@ fn stopping_and_quitting_starts_nothing_new_and_the_queue_is_there_on_reopening(
     w.reopen(|_| {});
     w.engine.recover().unwrap();
     w.engine.start_board();
-    assert_eq!(w.wait_started(3)[2], "card-3");
+    // Both waiting cards start at once, since two agents may work at a time, and which of the two
+    // agents writes its line first isn't Keel's to decide.
+    let mut reopened = w.wait_started(4)[2..].to_vec();
+    reopened.sort();
+    assert_eq!(reopened, ["card-3", "card-4"]);
     for n in 3..=4 {
         w.flag(&format!("go-card-{n}"));
     }
