@@ -19,6 +19,9 @@ use crate::process::{SIGKILL, signal_group};
 const LOOK_LIMIT: Duration = Duration::from_secs(30);
 /// How a `gh` that went past its limit starts saying so.
 const TOOK_TOO_LONG: &str = "gh took longer than";
+/// How long `gh` gets to say which accounts it has. It checks each one with GitHub, and whoever
+/// asked is waiting.
+pub const ACCOUNTS_LIMIT: Duration = LOOK_LIMIT;
 /// What Keel reads of a pull request. Its newest commits come oldest first, each with how many
 /// parents it has, so that Keel can tell what was added after it delivered. They're asked under a
 /// name of their own, since the checks ask for the last commit alone.
@@ -402,18 +405,12 @@ impl Gh {
         })
     }
 
-    /// The accounts `gh` knows. Reads no token.
-    pub fn accounts(&self) -> Result<Vec<Account>, GhError> {
+    /// The accounts `gh` knows, giving up at the limit. Reads no token.
+    pub fn accounts(&self, limit: Duration) -> Result<Vec<Account>, GhError> {
         // `gh auth status` exits non-zero if any account is in trouble, and still prints all of them.
-        let output = self
-            .command()
-            .args(["auth", "status", "--json", "hosts"])
-            .output()
-            .map_err(|e| GhError {
-                kind: "other",
-                detail: e.to_string(),
-            })?;
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_default();
+        let (_, out, _) =
+            self.run_within_answer(None, &["auth", "status", "--json", "hosts"], limit)?;
+        let value: serde_json::Value = serde_json::from_str(&out).unwrap_or_default();
         let accounts = value
             .pointer("/hosts/github.com")
             .and_then(|a| a.as_array())
@@ -545,7 +542,7 @@ impl Gh {
             "query=query($owner:String!,$name:String!,$label:String!){{repository(owner:$owner,name:$name){{label(name:$label){{name}} open:issues(labels:[$label],states:OPEN,first:{MOST_ISSUES},orderBy:{{field:CREATED_AT,direction:DESC}}){{nodes{{number title url body author{{login}}}}}}{states}}}}}"
         );
         let (_, out, err) = self.run_within_answer(
-            token,
+            Some(token),
             &[
                 "api",
                 "graphql",
@@ -624,7 +621,7 @@ impl Gh {
     /// `run`, giving up at the limit along with anything it started. For what runs on its own in the
     /// background, where nobody would notice it hanging and everything after it would wait.
     fn run_within(&self, token: &Token, args: &[&str], limit: Duration) -> Result<String, GhError> {
-        let (succeeded, out, err) = self.run_within_answer(token, args, limit)?;
+        let (succeeded, out, err) = self.run_within_answer(Some(token), args, limit)?;
         if succeeded {
             return Ok(out);
         }
@@ -639,18 +636,20 @@ impl Gh {
     /// it succeeded, its output, and what it said on stderr, without the token.
     fn run_within_answer(
         &self,
-        token: &Token,
+        token: Option<&Token>,
         args: &[&str],
         limit: Duration,
     ) -> Result<(bool, String, String), GhError> {
         let mut command = self.command();
         command
             .args(args)
-            .env("GH_TOKEN", token.expose())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
+        if let Some(token) = token {
+            command.env("GH_TOKEN", token.expose());
+        }
         let failed = |detail: String| GhError {
             kind: "other",
             detail,
@@ -691,7 +690,8 @@ impl Gh {
                 .to_owned()
         };
         let (out, err) = (text(stdout), text(stderr));
-        Ok((status.success(), out, token.redact(&err)))
+        let err = token.map_or_else(|| err.clone(), |t| t.redact(&err));
+        Ok((status.success(), out, err))
     }
 
     /// What became of a pull request, and what its CI says, in one question. Only reads: after
@@ -1600,6 +1600,41 @@ esac"#,
         // One that hangs isn't asked again without the checks: it would only hang again.
         let calls = std::fs::read_to_string(&log).unwrap();
         assert_eq!(calls.lines().count(), 1, "{calls}");
+    }
+
+    #[test]
+    fn a_gh_that_never_says_its_accounts_is_given_up_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("gh");
+        crate::testing::write_script(&bin, "#!/bin/sh\nsleep 30 &\nwait\n").unwrap();
+        let gh = Gh {
+            bin,
+            path_env: "/usr/bin:/bin".to_owned(),
+        };
+        let started = Instant::now();
+        let error = gh.accounts(Duration::from_millis(100)).unwrap_err();
+        assert!(error.detail.contains("longer than"), "{}", error.detail);
+        assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn the_accounts_are_read_without_a_token_even_when_gh_fails_over_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("gh");
+        let script = r#"#!/bin/sh
+test -z "$GH_TOKEN" || exit 1
+echo '{"hosts":{"github.com":[{"login":"alice","active":true,"state":"error","scopes":"repo"}]}}'
+exit 1
+"#;
+        crate::testing::write_script(&bin, script).unwrap();
+        let gh = Gh {
+            bin,
+            path_env: "/usr/bin:/bin".to_owned(),
+        };
+        let accounts = gh.accounts(ACCOUNTS_LIMIT).unwrap();
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].login, "alice");
+        assert!(!accounts[0].ok);
     }
 
     #[test]

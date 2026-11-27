@@ -1147,7 +1147,7 @@
   "mcp": {
     "title": "Servidor MCP",
     "hint": "Deja que un asistente como Claude Code vea tus proyectos y lance ejecuciones en este Mac, y tú las ves aquí. Solo este Mac puede llegar a él, y está apagado hasta que lo enciendas.",
-    "limits": "Si lo permites, puede devolver trabajo, reintentar un paso, cerrar las ejecuciones que lanzó, y agregar una nota a sus tarjetas o volverlas a Todo mientras esperan. No puede aprobar ni rechazar un paso, responder sus preguntas, mergear, cambiar ajustes, guardar un workflow ni aceptar nada en el Brain. Eso sigue siendo tuyo, aquí. Un workflow que proponga te espera en Workflows, y no puede correr hasta que lo guardes. Un proyecto que proponga no se agrega hasta que lo agregues tú.",
+    "limits": "Si lo permites, puede devolver trabajo, reintentar un paso, cerrar las ejecuciones que lanzó, y agregar una nota a sus tarjetas o volverlas a Todo mientras esperan. No puede aprobar ni rechazar un paso, responder sus preguntas, mergear, guardar un workflow ni aceptar nada en el Brain. Eso sigue siendo tuyo, aquí, igual que los ajustes, salvo uno: si dejas a un cliente agregar y configurar proyectos, puede agregar cualquier repositorio de este Mac y cambiar la cuenta de GitHub y los comandos de preparación y verificación de cualquier proyecto, también de los tuyos. Un workflow que proponga te espera en Workflows, y no puede correr hasta que lo guardes. Un proyecto que proponga no se agrega hasta que lo agregues tú, o un cliente al que se lo permitas.",
     "off": "Apagado",
     "on": "Encendido",
     "port": "Puerto",
@@ -1160,6 +1160,22 @@
     "canRun": "Puede lanzar y detener ejecuciones, cerrar las que lanzó, y proponer workflows y proyectos",
     "canSteer": "Puede dar feedback: devolver trabajo, reintentar y agregar notas a sus tarjetas",
     "canSteerNeedsRun": "Primero activa la de arriba.",
+    "canManageProjects": "Puede agregar y configurar proyectos: su cuenta de GitHub y sus comandos de preparación y verificación, que corren en este Mac. La preparación tiene acceso a internet",
+    "canManageProjectsNeedsRun": "Primero deja que lance y detenga ejecuciones.",
+    "projectChanges": "Cambios en proyectos",
+    "change": {
+      "added": "{{client}} agregó {{project}}",
+      "restored": "{{client}} volvió a agregar {{project}}",
+      "configured": "{{client}} configuró {{project}}"
+    },
+    "field": {
+      "githubAccount": "Cuenta de GitHub",
+      "setupCommand": "Comando de preparación",
+      "checkCommand": "Comando de verificación"
+    },
+    "before": "Antes: {{value}}",
+    "after": "Después: {{value}}",
+    "noValue": "nada",
     "maxOpenRuns": "Ejecuciones abiertas a la vez",
     "maxOpenRunsHint": "hasta {{max}}, contando las que te esperan",
     "clients": "Clientes",
@@ -1176,6 +1192,7 @@
     "copied": "Copiado",
     "activity": "Actividad",
     "noActivity": "Todavía no hay llamadas.",
+    "calls": "Llamadas",
     "openRun": "Abrir la ejecución"
   },
   "projects": {
@@ -1237,7 +1254,12 @@
     "proposalGone": "Esta carpeta ya no es un repositorio de git con commits, así que solo se puede descartar.",
     "proposalNotNow": "Ahora no",
     "proposalDiscard": "Descartar",
-    "proposalAdd": "Agregar proyecto"
+    "proposalAdd": "Agregar proyecto",
+    "clientChanged": "Un cliente cambió este proyecto.",
+    "changedKept": "Abajo está lo guardado ahora. Lo que habías editado sigue en su campo, y al guardar reemplaza esto.",
+    "changedTaken": "Abajo está lo guardado ahora. Los campos ya lo muestran.",
+    "yoursKept": "se conserva lo que editaste",
+    "notSaved": "No se guardó nada: la cuenta o los comandos cambiaron mientras tanto. Revísalos y vuelve a guardar."
   },
   "setup": {
     "titleNew": "{{name}} quedó agregado",
@@ -1281,6 +1303,7 @@
     "mapSignedOut": "No has iniciado sesión en Claude Code, así que Keel todavía no puede escribir el mapa de este proyecto. Inicia sesión y arráncalo desde el Brain.",
     "mapFailed": "Keel no pudo arrancar el mapa de este proyecto. {{reason}} Puedes arrancarlo desde el Brain.",
     "openBrain": "Abrir el Brain",
+    "changed": "Este proyecto cambió mientras este diálogo estaba abierto.",
     "moreOptions": "Hay más opciones en Ajustes.",
     "later": "Después",
     "save": "Guardar"

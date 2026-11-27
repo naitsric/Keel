@@ -5,7 +5,7 @@ use std::process::Command;
 
 use keel_core::{Log, Masked};
 use keel_mcp::{McpServer, McpSettings, ServerStatus};
-use keel_store::{McpCall, McpClient};
+use keel_store::{McpCall, McpClient, McpProjectChange};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, State};
 
@@ -15,6 +15,8 @@ use crate::{AppState, CommandError, CommandResult, launch};
 const SERVER_NAME: &str = launch::mcp_server_name(launch::BRANCH_BUILD);
 const CLAUDE_CLIENT: &str = "Claude Code";
 const CALLS_SHOWN: i64 = 30;
+/// Apart from the calls, so that later ones don't push a change to a project out of sight.
+const PROJECT_CHANGES_SHOWN: i64 = 100;
 /// For the status bar. A server that starts or stops says nothing else that the UI would hear.
 const MCP_EVENT: &str = "keel://mcp-changed";
 
@@ -42,6 +44,9 @@ pub struct McpOverview {
     clients: Vec<McpClient>,
     /// A call's arguments and error can hold whatever a client sent or a step wrote.
     calls: Masked<Vec<McpCall>>,
+    /// Not masked, as a project's commands aren't in its settings: the person has to see all of
+    /// what a client set to run on their Mac.
+    project_changes: Vec<McpProjectChange>,
 }
 
 #[derive(Serialize)]
@@ -58,6 +63,7 @@ fn overview(state: &AppState, mcp: &McpState) -> CommandResult<McpOverview> {
         status: mcp.0.status(),
         clients: state.store.mcp_clients()?,
         calls: Masked(state.store.mcp_calls(CALLS_SHOWN)?),
+        project_changes: state.store.mcp_project_changes(PROJECT_CHANGES_SHOWN)?,
     })
 }
 
@@ -133,6 +139,20 @@ pub fn mcp_client_set_can_steer(
     state: State<'_, AppState>,
 ) -> CommandResult<()> {
     state.store.set_mcp_client_can_steer(&id, can_steer)?;
+    Ok(())
+}
+
+/// Lets it add projects and change their GitHub account and commands. It also needs `can_run`,
+/// without which the store keeps it off.
+#[tauri::command(async)]
+pub fn mcp_client_set_can_manage_projects(
+    id: String,
+    can_manage_projects: bool,
+    state: State<'_, AppState>,
+) -> CommandResult<()> {
+    state
+        .store
+        .set_mcp_client_can_manage_projects(&id, can_manage_projects)?;
     Ok(())
 }
 

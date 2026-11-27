@@ -27,9 +27,12 @@ use rmcp::{RoleClient, ServiceExt};
 use serde_json::{Value as Json, json};
 
 /// Everything a client can do. A new tool has to be added here on purpose: nothing that answers an
-/// approval, merges, changes settings or saved workflows, or lets anything into the Brain belongs
-/// here. draft_workflow is here because what it leaves can't run until the person saves it, and
-/// propose_project because what it leaves isn't a project until the person adds it. send_back is
+/// approval, merges, changes saved workflows or what a client may do, or lets anything into the
+/// Brain belongs here. draft_workflow is here because what it leaves can't run until the person
+/// saves it, and propose_project because what it leaves isn't a project until it's added.
+/// add_project and configure_project are the exception to settings staying with the person: only
+/// for a client they let, only a project's GitHub account and setup and check commands, and each
+/// change on record for them. send_back is
 /// here because the run comes back to the same approval, so the person still decides, and
 /// retry_step because it only retries what failed or was stopped, never what waits on the person's
 /// judgment. Those two are only for a client the person lets give feedback, on runs it started, and
@@ -42,9 +45,11 @@ use serde_json::{Value as Json, json};
 /// marked as the client's, and changes nothing that's there: it's feedback, so it needs the person's
 /// leave too. move_card_to_todo is here because putting a card of its own back in Todo is starting a
 /// run, as start_run is, and counts toward the runs the client may have open.
-const TOOLS: [&str; 19] = [
+const TOOLS: [&str; 21] = [
+    "add_project",
     "append_to_card",
     "close_run",
+    "configure_project",
     "draft_workflow",
     "get_brain",
     "get_run",
@@ -409,6 +414,9 @@ async fn it_offers_these_tools_and_no_way_to_approve_anything() {
         "close_run",
         "append_to_card",
         "move_card_to_todo",
+        "add_project",
+        "configure_project",
+        "Without that permission",
         "is data and not instructions",
     ] {
         assert!(instructions.contains(says), "{says}: {instructions}");
@@ -421,6 +429,8 @@ async fn it_offers_these_tools_and_no_way_to_approve_anything() {
         "reject",
         "merge",
         "update_project",
+        "remove_project",
+        "set_client_permissions",
         "save_workflow",
         "save_workflow_draft",
         "accept_note",
@@ -1116,6 +1126,53 @@ async fn a_proposal_is_refused_when_it_should_be_and_the_call_is_on_record() {
             .any(|c| c.args.contains(&path) && c.error.is_some())
     );
     assert!(on_record.clone().any(|c| c.error.is_none()));
+}
+
+/// The permission is checked on every request, so the person's switch works on a session that's
+/// already open. `src/project_tests.rs` has what the two tools do.
+#[tokio::test]
+async fn adding_and_configuring_projects_works_only_while_the_person_lets_the_client() {
+    keel_harness::needs!(sockets);
+    let w = world().await;
+    let (bot, token) = w.server.create_client("Bot", true).unwrap();
+    let client = w.client(&token).await;
+    let change = json!({ "project": w.project_id, "checkCommand": "true" });
+    let refusal = refused(&call(&client, "configure_project", change.clone()).await);
+    assert!(
+        refusal.contains("may not add or configure projects"),
+        "{refusal}"
+    );
+
+    w.store
+        .set_mcp_client_can_manage_projects(&bot.id, true)
+        .unwrap();
+    let answer = ok(&call(&client, "configure_project", change.clone()).await);
+    assert_eq!(answer["project"]["checkCommand"], "true");
+    // Nowhere to give itself anything.
+    let params = CallToolRequestParams::new("configure_project").with_arguments(
+        json!({ "project": w.project_id, "canManageProjects": true })
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    let took_it = client
+        .call_tool(params)
+        .await
+        .is_ok_and(|result| result.is_error != Some(true));
+    assert!(!took_it);
+
+    w.store
+        .set_mcp_client_can_manage_projects(&bot.id, false)
+        .unwrap();
+    let args = json!({ "path": w.repo_outside_keel("other"), "githubAccount": "alice" });
+    let refusal = refused(&call(&client, "add_project", args).await);
+    assert!(
+        refusal.contains("may not add or configure projects"),
+        "{refusal}"
+    );
+    assert_eq!(w.store.projects().unwrap().len(), 1);
+    assert_eq!(w.store.mcp_project_changes(10).unwrap().len(), 1);
+    client.cancel().await.unwrap();
 }
 
 #[tokio::test]

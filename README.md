@@ -168,7 +168,8 @@ one of them is part of the change and reaches no agent as a rule until you merge
 
 Keel hides known secrets when it shows a run, when an assistant reads one over MCP, in a pull
 request's title and description, and in its own error log. The audit record and what agents receive
-keep the original.
+keep the original. A project's commands show whole in its settings, and so does what an assistant
+set or changed in them, so you can see all of what runs.
 
 It goes by known token shapes and names like `API_KEY`, so some secrets will slip through. It also
 doesn't stop a secret an agent committed from being pushed with the branch, so review the draft
@@ -219,12 +220,21 @@ MCP server.
 | Stop, close or start again the runs it started         | `stop_run`, `close_run`, `move_card_to_todo` |
 | Give feedback, if you let it                           | `send_back`, `retry_step`, `append_to_card` |
 | Propose, for you to accept                             | `draft_workflow`, `propose_project` |
+| Add and configure projects, if you let it              | `add_project`, `configure_project` |
 
 **It can't decide for you.** A client can't approve or reject a step, answer a step's questions,
-merge, change settings, save a workflow or accept anything into the Brain: a run that needs you
-waits for you in the app. Whether it can start runs, and whether it can give feedback, you allow for
-each client.
+merge, remove a project, save a workflow or accept anything into the Brain: a run that needs you
+waits for you in the app. Nor can it change settings, apart from a project's GitHub account and
+commands if you let it, as below. Whether it can start runs, whether it can give feedback, and
+whether it can add and configure projects, you allow for each client, and no client can change that.
 **Settings** shows every call, and revoking a client cuts it off at once.
+
+**A client you trust can add and configure projects.** The permission is off until you turn it on
+for that client, and needs the one to start runs. With it, a client can add a repository on your
+Mac, from its path or from a proposal, and set a project's GitHub account and its setup and check
+commands, which run on your Mac, the setup one with internet access as every setup has. Adding one starts the agent that maps it, on your Claude usage.
+The network, folders, services, variables, default workflow and sensitive paths of a project stay
+yours. **Settings** shows which client added or changed what, with each value before and after.
 
 **It hands out work like an assistant hands it to helpers.** It splits a request into runs, and into
 read-only tasks that only look into something, waits on several at once, and reads what each one
@@ -239,8 +249,8 @@ page. It shows the commands it would run, the agents that could change files, an
 would happen after your approval. Nothing can run it until you save it, you can change it first,
 and saving always creates a new workflow rather than replacing one. A project a client proposes
 waits in a bar at the top of the window, with its folder and GitHub repository. It isn't added, and
-nothing can run on it, until you add it and choose its account and commands. All a client can name
-is the folder.
+nothing can run on it, until you add it and choose its account and commands, or a client you let add
+projects adds it. All a proposal names is the folder.
 
 ## If something goes wrong
 

@@ -50,6 +50,8 @@ interface Scene {
 describe("the setup dialog", () => {
   let root: Root;
   let calls: { command: string; args: Record<string, unknown> }[];
+  /** The project as Keel has it saved. */
+  let kept: Project;
 
   const settle = () => act(async () => {
     for (let i = 0; i < 4; i++) await new Promise((resolve) => setTimeout(resolve));
@@ -57,6 +59,7 @@ describe("the setup dialog", () => {
 
   const show = async ({ project = PROJECT, guess = NO_GUESS, accounts = {}, gh, added = null, attempts = [], events = [], folders = [] }: Scene) => {
     const logins = Object.keys(accounts);
+    kept = project;
     mockIPC((command, payload) => {
       const args = (payload ?? {}) as Record<string, unknown>;
       calls.push({ command, args });
@@ -64,7 +67,7 @@ describe("the setup dialog", () => {
         case "project_setup":
           return { project, guess };
         case "overview":
-          return { ...useApp.getState().overview, projects: [project] };
+          return { ...useApp.getState().overview, projects: [kept] };
         case "github_status": {
           const status: GithubStatus = { repo: project.githubRepo, accounts: gh ? [] : logins.map(ACCOUNT), info: null, excessScopes: [], error: gh ? { code: "ghMissing" } : null };
           const login = args.account as string | null;
@@ -91,6 +94,13 @@ describe("the setup dialog", () => {
       projectSetup: { projectId: project.id, added, returnToNewRun: false },
     });
     await act(async () => root.render(<ProjectSetupDialog />));
+    await settle();
+  };
+
+  /** Saved without the dialog, as a client does over MCP. The app hears of it unless `heard` is false. */
+  const savedMeanwhile = async (fields: Partial<Project>, { heard = true } = {}) => {
+    kept = { ...kept, ...fields };
+    if (heard) await act(async () => useApp.setState({ overview: { ...useApp.getState().overview, projects: [kept] } }));
     await settle();
   };
 
@@ -317,7 +327,7 @@ describe("the setup dialog", () => {
 
     it("starts from the project as it is by then, not as it was when this opened", async () => {
       await show({ accounts: { "you-work": "WRITE" } });
-      useApp.setState({ overview: { ...useApp.getState().overview, projects: [{ ...PROJECT, allowedDomains: ["changed.example"] }] } });
+      await savedMeanwhile({ allowedDomains: ["changed.example"] }, { heard: false });
       await click("Save");
       expect((called("project_update")[0].args.settings as Project).allowedDomains).toEqual(["changed.example"]);
       expect((called("project_update")[0].args.settings as Project).sensitivePaths).toEqual(["billing/"]);
@@ -327,11 +337,91 @@ describe("the setup dialog", () => {
       await show({ accounts: { "you-work": "WRITE" } });
       mockIPC((command) => {
         if (command === "project_update") throw { code: "blocked", reason: { code: "invalidSetting", field: "x", value: "y" }, detail: null };
+        if (command === "overview") return useApp.getState().overview;
         return null;
       });
       await click("Save");
       expect(document.querySelector('[role="alert"]')?.textContent).toContain("y");
       expect(useApp.getState().projectSetup).not.toBeNull();
+    });
+  });
+
+  describe("a change to the project while this is open", () => {
+    const SAVED: Project = { ...PROJECT, githubAccount: "you-work", setupCommand: "make deps", checkCommand: "make test" };
+    const BOTH = { "you-work": "WRITE", "you-bot": "WRITE" } as const;
+    const notice = () => document.querySelector('[role="status"]')?.textContent ?? "";
+    const sent = () => called("project_update")[0].args.settings as Project;
+    const values = () => inputs().filter((input) => input.type !== "checkbox").map((input) => input.value);
+
+    it("refreshes what the person hadn't touched, keeps what they had, and says so", async () => {
+      await show({ project: SAVED, accounts: BOTH });
+      await type(inputs()[1], "make mine");
+      expect(notice()).toBe("");
+
+      await savedMeanwhile({ githubAccount: "you-bot", setupCommand: "make theirs", checkCommand: "make check" });
+      expect(values()).toEqual(["make check", "make mine"]);
+      expect(select().value).toBe("you-bot");
+      expect(notice()).toContain(i18next.t("setup.changed"));
+      expect(notice()).toContain(i18next.t("projects.changedKept"));
+      expect(notice()).toContain("make theirs");
+
+      // Looking at the accounts again doesn't bring the old one back.
+      await act(async () => void window.dispatchEvent(new Event("focus")));
+      await settle();
+      expect(select().value).toBe("you-bot");
+
+      await click("Save");
+      expect(sent()).toMatchObject({ githubAccount: "you-bot", setupCommand: "make mine", checkCommand: "make check" });
+      expect(useApp.getState().projectSetup).toBeNull();
+    });
+
+    it("keeps the account the person chose", async () => {
+      await show({ project: SAVED, accounts: { ...BOTH, "you-admin": "ADMIN" } });
+      await choose("you-admin");
+      await savedMeanwhile({ githubAccount: "you-bot" });
+      expect(select().value).toBe("you-admin");
+      expect(notice()).toContain("you-bot");
+    });
+
+    it("replaces a guess with a command saved meanwhile", async () => {
+      await show({ guess: PNPM, accounts: BOTH, project: { ...SAVED, setupCommand: null, checkCommand: null } });
+      expect(values()).toEqual(["pnpm test", "pnpm install --frozen-lockfile"]);
+      await savedMeanwhile({ checkCommand: "make check" });
+      expect(values()).toEqual(["make check", "pnpm install --frozen-lockfile"]);
+    });
+
+    it("doesn't save over a change it hasn't shown yet", async () => {
+      await show({ project: SAVED, accounts: BOTH });
+      await savedMeanwhile({ checkCommand: "make check" }, { heard: false });
+      await click("Save");
+      expect(called("project_update")).toEqual([]);
+      expect(useApp.getState().projectSetup).not.toBeNull();
+      expect(values()[0]).toBe("make check");
+      expect(notice()).toContain(i18next.t("setup.changed"));
+
+      await click("Save");
+      expect(sent().checkCommand).toBe("make check");
+      expect(useApp.getState().projectSetup).toBeNull();
+    });
+
+    it("warns before saving over a change to a field the person had edited", async () => {
+      await show({ project: SAVED, accounts: BOTH });
+      await type(inputs()[0], "make mine");
+      await savedMeanwhile({ checkCommand: "make check" }, { heard: false });
+      await click("Save");
+      expect(called("project_update")).toEqual([]);
+      expect(values()[0]).toBe("make mine");
+      expect(notice()).toContain("make check");
+      await click("Save");
+      expect(sent().checkCommand).toBe("make mine");
+    });
+
+    it("forgets a trial of a command that was replaced", async () => {
+      await show({ project: SAVED, accounts: BOTH, attempts: [{ id: "a", kind: "check", state: "succeeded", exitCode: 0, reason: null }] });
+      await click("Try it");
+      expect(page()).toContain(i18next.t("setup.passed"));
+      await savedMeanwhile({ checkCommand: "make check" });
+      expect(page()).not.toContain(i18next.t("setup.passed"));
     });
   });
 
