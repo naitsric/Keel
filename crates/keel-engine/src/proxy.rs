@@ -610,7 +610,17 @@ mod tests {
         drop(proxy);
 
         assert_eq!(stream.read(&mut [0; 1]).unwrap_or(0), 0);
-        assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
+        // Nothing of it answers on its port any more. Something else may: the port is free for
+        // whatever asks for one next, another test included, so only what it would say counts.
+        if let Ok(mut late) = TcpStream::connect(("127.0.0.1", port)) {
+            late.set_read_timeout(Some(Duration::from_millis(500)))
+                .unwrap();
+            let _ = write!(late, "CONNECT registry.example:443 HTTP/1.1\r\n{auth}\r\n");
+            let mut said = Vec::new();
+            let _ = late.read_to_end(&mut said);
+            let said = String::from_utf8_lossy(&said);
+            assert!(!said.starts_with("HTTP/1.1 200"), "{said}");
+        }
     }
 
     /// What the system says of listening on an address that isn't this Mac's.
