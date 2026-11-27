@@ -72,6 +72,8 @@ auth)
   echo '{"loggedIn":true,"subscriptionType":"max","email":"a@example.com"}'; exit 0;;
 esac
 prompt="$(cat)"
+# The built-in review of code starts with a skill's command, and its prompt is in the file that names.
+case "$prompt" in "/code-review "*) prompt="$(cat "${prompt#*the change in }")";; esac
 tools=""; schema=""; prev=""
 for a in "$@"; do
   [ "$prev" = "--tools" ] && tools="$a"
@@ -254,6 +256,7 @@ fn agent(id: &str, tools: ToolProfile) -> WorkflowStep {
         when: None,
         risks: vec![],
         model_when_risky: None,
+        skill: None,
         role: Default::default(),
     })
 }
@@ -1396,6 +1399,7 @@ fn a_task_a_client_closed_runs_again_as_the_same_task_that_only_reads() {
         when: None,
         risks: vec![],
         model_when_risky: None,
+        skill: None,
         role: Default::default(),
     };
     let mut task = StartRun::one_step(w.project_id.clone(), step, "en".into());

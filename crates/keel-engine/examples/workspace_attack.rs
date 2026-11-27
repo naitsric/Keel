@@ -73,6 +73,7 @@ fn main() {
                 when: None,
                 risks: vec![],
                 model_when_risky: None,
+                skill: None,
                 role: Default::default(),
             })],
             language: "en".into(),

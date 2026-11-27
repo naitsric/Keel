@@ -466,6 +466,7 @@ fn run_start(state: State<'_, AppState>, request: RunRequest) -> CommandResult<S
                 when: None,
                 risks: vec![],
                 model_when_risky: None,
+                skill: None,
                 role: Default::default(),
             });
             (vec![step], None)

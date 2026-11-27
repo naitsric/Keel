@@ -248,6 +248,7 @@ fn agent_with(
         when,
         risks: vec![],
         model_when_risky: None,
+        skill: None,
         role,
     })
 }

@@ -67,6 +67,10 @@ pub struct ResultEvent {
     pub models: Vec<String>,
     pub denials: Vec<String>,
     pub structured_output: Option<Value>,
+    /// Set when the prompt was a slash command, such as a skill. Claude Code then ends with
+    /// `Command completed` and no `structured_output`, even if the step gave its answer: that is
+    /// in its `StructuredOutput` call.
+    pub local_command: Option<String>,
 }
 
 fn text_of(value: &Value, key: &str) -> Option<String> {
@@ -199,9 +203,43 @@ fn content_blocks(value: &Value) -> Vec<Value> {
         .unwrap_or_default()
 }
 
-fn parse_result(value: &Value) -> ResultEvent {
+/// What a result says it used. After a slash command `usage` is all zeros, and what was used is
+/// only under each model, with the same counts under other names.
+fn tokens_used(value: &Value) -> (i64, Option<i64>) {
     let usage = value.get("usage");
     let tokens = |key: &str| usage.and_then(|u| u.get(key)).and_then(Value::as_i64);
+    let input = tokens("input_tokens").unwrap_or(0)
+        + tokens("cache_read_input_tokens").unwrap_or(0)
+        + tokens("cache_creation_input_tokens").unwrap_or(0);
+    let output = tokens("output_tokens");
+    if input != 0 || output.unwrap_or(0) != 0 {
+        return (input, output);
+    }
+    let Some(models) = value.get("modelUsage").and_then(Value::as_object) else {
+        return (input, output);
+    };
+    let sum = |keys: &[&str]| -> i64 {
+        models
+            .values()
+            .flat_map(|model| keys.iter().filter_map(|key| model.get(key)?.as_i64()))
+            .sum()
+    };
+    let by_model = (
+        sum(&[
+            "inputTokens",
+            "cacheReadInputTokens",
+            "cacheCreationInputTokens",
+        ]),
+        sum(&["outputTokens"]),
+    );
+    if by_model == (0, 0) {
+        return (input, output);
+    }
+    (by_model.0, Some(by_model.1))
+}
+
+fn parse_result(value: &Value) -> ResultEvent {
+    let (input_tokens, output_tokens) = tokens_used(value);
     ResultEvent {
         subtype: text_of(value, "subtype").unwrap_or_default(),
         is_error: value
@@ -227,12 +265,8 @@ fn parse_result(value: &Value) -> ResultEvent {
         turns: value.get("num_turns").and_then(Value::as_i64),
         duration_ms: value.get("duration_ms").and_then(Value::as_i64),
         cost_usd: value.get("total_cost_usd").and_then(Value::as_f64),
-        input_tokens: Some(
-            tokens("input_tokens").unwrap_or(0)
-                + tokens("cache_read_input_tokens").unwrap_or(0)
-                + tokens("cache_creation_input_tokens").unwrap_or(0),
-        ),
-        output_tokens: tokens("output_tokens"),
+        input_tokens: Some(input_tokens),
+        output_tokens,
         models: value
             .get("modelUsage")
             .and_then(Value::as_object)
@@ -247,6 +281,7 @@ fn parse_result(value: &Value) -> ResultEvent {
             .get("structured_output")
             .filter(|v| !v.is_null())
             .cloned(),
+        local_command: text_of(value, "local_command"),
     }
 }
 
@@ -351,6 +386,31 @@ mod tests {
     fn structured_output_is_captured() {
         let r = result(&fixture("structured")).map(|r| r.structured_output.clone());
         assert_eq!(r.unwrap().unwrap()["verdict"], "approved");
+    }
+
+    /// As Claude Code 2.1.332 ended a step whose prompt was `/code-review`.
+    #[test]
+    fn a_slash_commands_result_names_it_and_its_usage_comes_from_each_model() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":0,"result":"Command completed","local_command":"code_review","total_cost_usd":0.05,"usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0,"output_tokens":0},"modelUsage":{"claude-sonnet-5-5":{"inputTokens":4,"outputTokens":1763,"cacheReadInputTokens":7125,"cacheCreationInputTokens":8113},"claude-haiku-5-5":{"inputTokens":1,"outputTokens":7,"cacheReadInputTokens":0,"cacheCreationInputTokens":0}}}"#;
+        let events = parse_line(line);
+        let r = result(&events).unwrap();
+        assert_eq!(r.local_command.as_deref(), Some("code_review"));
+        assert_eq!(r.structured_output, None);
+        assert_eq!(r.input_tokens, Some(4 + 7125 + 8113 + 1));
+        assert_eq!(r.output_tokens, Some(1763 + 7));
+    }
+
+    #[test]
+    fn a_result_that_says_what_it_used_is_believed_over_each_models_count() {
+        let line = r#"{"type":"result","subtype":"success","usage":{"input_tokens":10,"cache_read_input_tokens":5,"output_tokens":3},"modelUsage":{"m":{"inputTokens":99,"outputTokens":99}}}"#;
+        let events = parse_line(line);
+        let r = result(&events).unwrap();
+        assert_eq!((r.input_tokens, r.output_tokens), (Some(15), Some(3)));
+        assert_eq!(r.local_command, None);
+        // And one that says nothing at all stays as it was read before.
+        let events = parse_line(r#"{"type":"result","subtype":"success"}"#);
+        let r = result(&events).unwrap();
+        assert_eq!((r.input_tokens, r.output_tokens), (Some(0), None));
     }
 
     #[test]

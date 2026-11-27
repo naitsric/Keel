@@ -336,6 +336,8 @@ export interface StepSpec {
   risks?: string[];
   /** The model it runs with instead when the change is risky. Absent keeps `model`. */
   modelWhenRisky?: string;
+  /** What a review reviews with besides its own prompt: a skill of Claude Code's and its level, as `code-review medium`. */
+  skill?: string;
 }
 
 export type WorkflowStep =

@@ -37,7 +37,8 @@ It's an app on your Mac, with no account and no server. It uses your own signed-
 4. **What proves it.** An agent goes through what was asked and says what a test really proves and
    what nothing does.
 5. **The reviews.** Reviewers look at the change at the same time: security and code always, and
-   UX, UI and state when the change calls for them. An approver goes through what they found and
+   UX, UI and state when the change calls for them. The review of code also goes through Claude
+   Code's own `/code-review`, and any review can. An approver goes through what they found and
    sends the work back to the builder if something real is left. A run goes back at most twice on
    its own, and after that you decide.
 6. **You.** You see what was asked, what changed, what proves it and what the reviews said. You can

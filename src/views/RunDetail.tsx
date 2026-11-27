@@ -1913,6 +1913,8 @@ function DetailsTab({ attempt, events }: { attempt: Attempt; events: AuditEvent[
         <Detail label={t("details.authSource")}>{source}</Detail>
         <Detail label={t("details.cliVersion")}>{attempt.cliVersion}</Detail>
         {attempt.kind === "agent" && <Detail label={t("details.tools")}>{attempt.tools === "build" ? t("newRun.toolsBuild") : t("newRun.toolsReadOnly")}</Detail>}
+        {/* A review that went through Claude Code's own: the command it began with, which names the file its prompt is in. */}
+        {typeof started?.skill === "string" && <Detail label={t("details.skill")}>{started.skill.trim()}</Detail>}
         <Detail label={t("details.started")}>{formatDateTime(attempt.startedAt)}</Detail>
         <Detail label={t("details.finished")}>{attempt.finishedAt && formatDateTime(attempt.finishedAt)}</Detail>
         <Detail label={t("details.duration")}>{attempt.durationMs != null && formatDuration(attempt.durationMs)}</Detail>

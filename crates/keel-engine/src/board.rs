@@ -250,6 +250,7 @@ impl Engine {
                         when: None,
                         risks: Vec::new(),
                         model_when_risky: None,
+                        skill: None,
                         role: StepRole::Worker,
                     })],
                     saved: None,
@@ -920,6 +921,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Done.","nu
             when: None,
             risks: vec![],
             model_when_risky: None,
+            skill: None,
             role: Default::default(),
         })
     }

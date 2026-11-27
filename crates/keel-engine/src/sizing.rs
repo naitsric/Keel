@@ -866,6 +866,7 @@ mod tests {
             when: Some(keel_core::StepCondition::NotSmall),
             risks: vec![],
             model_when_risky: None,
+            skill: None,
         }
     }
 

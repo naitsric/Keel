@@ -24,6 +24,10 @@ use crate::{
     screenshots, sizing, skipped_tests, verification, workflows,
 };
 
+/// How Claude Code names what a step does under a skill's command, where a subagent's work names
+/// the call that started it: `forked-command-code-review`.
+const FORKED_COMMAND: &str = "forked-command-";
+
 /// Tool output kept in the database. The raw file always has all of it.
 const EVENT_TEXT_LIMIT: usize = 64 * 1024;
 
@@ -643,12 +647,39 @@ impl Inner {
         } else {
             self.brain_block(project_id)?
         };
-        let (system_prompt, sources) =
+        let (mut system_prompt, mut sources) =
             prompts::system_prompt(&instructions, &attempt.language, spec.tools, &brain, &joint);
+        // A step that reviews with a skill starts with the skill's command, and reads its own
+        // prompt from a file. Only where its settings open that folder to it, closed to changes.
+        // Going on with a session it's told what any step is, and can still read the file that
+        // session began with.
+        let brief_dir = self.brief_to_read(&attempt.run_id, &stem, attempt.resumed_from.as_deref());
+        let reads_brief = settings::is_read_only(&attempt.settings, &brief_dir.to_string_lossy());
+        let skill = spec
+            .skill
+            .as_deref()
+            .and_then(workflows::skill_parts)
+            .filter(|_| resume.is_none() && reads_brief);
+        let skill_line = match skill {
+            Some((name, level)) => {
+                let brief = brief_dir.join("review.md");
+                std::fs::create_dir_all(&brief_dir)?;
+                std::fs::write(&brief, &attempt.prompt)?;
+                system_prompt.push_str(&prompts::skill_note(name, &brief));
+                if let Some(sources) = sources.as_array_mut() {
+                    sources.push(json!({ "source": "skill", "skill": name, "level": level }));
+                }
+                Some(prompts::skill_line(name, level, &brief))
+            }
+            None => None,
+        };
         let system_prompt_file = dir.join(format!("{stem}.system.md"));
         std::fs::write(&system_prompt_file, &system_prompt)?;
         let prompt_file = dir.join(format!("{stem}.prompt.txt"));
-        std::fs::write(&prompt_file, &attempt.prompt)?;
+        std::fs::write(
+            &prompt_file,
+            skill_line.as_deref().unwrap_or(&attempt.prompt),
+        )?;
         // Only steps that can run commands get services, a folder for screenshots, and the run's
         // home. A read-only step has no way to use them.
         let can_write = spec.tools == ToolProfile::Build;
@@ -675,6 +706,7 @@ impl Inner {
                     dir.is_dir()
                         && settings::is_read_only(&attempt.settings, &dir.to_string_lossy())
                 }))
+                .chain(Some(brief_dir.clone()).filter(|dir| reads_brief && dir.is_dir()))
                 .collect(),
             // Beside the workspace, where the agent can't change it.
             env_file: can_write.then(|| dir.join(format!("{stem}.env"))),
@@ -702,6 +734,7 @@ impl Inner {
                 "systemPrompt": system_prompt,
                 "systemPromptSources": sources,
                 "resumedFrom": attempt.resumed_from,
+                "skill": skill_line,
                 "home": can_write.then(|| run_home(&workspace)),
             }),
         )?;
@@ -1220,7 +1253,15 @@ impl Inner {
                     &json!({ "status": status, "resetsAt": resets_at, "kind": kind, "usingOverage": using_overage }),
                 );
             }
-            Parsed::Result(result) => {
+            Parsed::Result(mut result) => {
+                // A step that began with a skill's command ends without its answer, which is in
+                // what it called to give it.
+                if result.structured_output.is_none()
+                    && result.local_command.is_some()
+                    && m.requires_output
+                {
+                    result.structured_output = self.answer_given(&m.attempt_id);
+                }
                 self.record_event(
                     &m.attempt_id,
                     "result",
@@ -1235,6 +1276,43 @@ impl Inner {
             }
             Parsed::Other { .. } => {}
         }
+    }
+
+    /// The structured answer a step gave by calling for it, going by what was kept of its stream:
+    /// the last one Claude Code took. Not one it refused, such as one that didn't fit what was
+    /// asked for, nor one a subagent gave. Claude Code runs a skill's command as a fork of the
+    /// step, and says so in everything the step then does: that is the step, not a subagent.
+    fn answer_given(&self, attempt_id: &str) -> Option<serde_json::Value> {
+        let events = self.store.events(attempt_id, 0).ok()?;
+        let its_own = |parent: &serde_json::Value| {
+            parent.is_null()
+                || parent
+                    .as_str()
+                    .is_some_and(|parent| parent.starts_with(FORKED_COMMAND))
+        };
+        let mut given: Vec<(String, serde_json::Value)> = Vec::new();
+        let mut answer = None;
+        for event in events {
+            let id = event.data["id"].as_str().unwrap_or_default().to_owned();
+            match event.kind.as_str() {
+                "toolCall"
+                    if event.data["name"] == "StructuredOutput"
+                        && its_own(&event.data["parent"]) =>
+                {
+                    given.push((id, event.data["input"].clone()));
+                }
+                "toolResult" => {
+                    if let Some(at) = given.iter().position(|(call, _)| *call == id) {
+                        let (_, input) = given.remove(at);
+                        if event.data["isError"] != true {
+                            answer = Some(input);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        answer
     }
 
     /// Closes an attempt: keeps everything it left, decides what state that means, and moves the
