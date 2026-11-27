@@ -1282,6 +1282,8 @@ function NetworkWait({ attempt, onError }: { attempt: Attempt; onError: (message
   const needed = (attempt.reason?.needed ?? []) as NeededDomain[];
   const domains = needed.map((n) => n.domain).join(", ");
   const count = needed.length;
+  // Those nothing says whose they are: allowing one opens more than the domain.
+  const unknown = needed.filter((n) => n.freesOffline).map((n) => n.domain);
   const answer = (said: NetworkAnswer) => {
     setBusy(true);
     void api
@@ -1305,13 +1307,19 @@ function NetworkWait({ attempt, onError }: { attempt: Attempt; onError: (message
         ))}
       </ul>
       <p className="mt-2 text-[12px] break-words text-muted">{t("run.networkNote", { count })}</p>
-      {attempt.kind === "check" && <p className="mt-1 text-[12px] break-words text-muted">{t("run.networkCheckNote", { count })}</p>}
+      {unknown.length > 0 && <p className="mt-1 text-[12px] break-words text-muted">{t("run.networkFrees", { count: unknown.length, domains: unknown.join(", ") })}</p>}
+      {attempt.kind === "check" && (
+        <p className="mt-1 text-[12px] break-words text-muted">
+          {t("run.networkCheckNote", { count })} {t("run.networkCheckWithout", { count })}
+        </p>
+      )}
       <div className="mt-2.5 flex flex-wrap gap-2">
         {/* Its label has the domains in it, however long they are, so it wraps. */}
         <Button variant="primary" className="h-auto min-h-7 max-w-full py-1 text-left whitespace-normal wrap-anywhere" disabled={!armed || busy} onKeyDown={ignoreEnter} onClick={() => answer("allow")}>
           {t("run.networkAllow", { domains })}
         </Button>
-        <Button disabled={busy} onClick={() => answer("goWithout")}>
+        {/* It decides too: on a check, the work goes back and a round with it. */}
+        <Button disabled={!armed || busy} onKeyDown={ignoreEnter} onClick={() => answer("goWithout")}>
           {t("run.networkGoWithout", { count })}
         </Button>
         <Button variant="danger" disabled={busy} onClick={() => answer("stop")}>

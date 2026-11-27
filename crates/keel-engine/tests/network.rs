@@ -295,6 +295,7 @@ fn a_builder_that_declares_a_missing_domain_waits_for_the_person_and_spends_no_r
             domain: NPM.into(),
             why: Some("to install next".into()),
             tool: None,
+            frees_offline: false,
         }]
     );
     // What it said when it finished is what it said, and not the structure around it.
@@ -424,6 +425,7 @@ fn a_builder_whose_last_command_failed_offline_waits_even_if_it_declares_nothing
             domain: NPM.into(),
             why: None,
             tool: Some("npm".into()),
+            frees_offline: false,
         }]
     );
 }
@@ -765,6 +767,8 @@ struct Ended {
     state: AttemptState,
     reason: Option<Reason>,
     event: Option<&'static str>,
+    /// The command it ran, if not the one the step has now.
+    ran: Option<&'static str>,
 }
 
 fn ended(state: AttemptState) -> Ended {
@@ -772,6 +776,15 @@ fn ended(state: AttemptState) -> Ended {
         state,
         reason: None,
         event: None,
+        ran: None,
+    }
+}
+
+/// The same try, of when the step had another command.
+fn running(command: &'static str, ended: Ended) -> Ended {
+    Ended {
+        ran: Some(command),
+        ..ended
     }
 }
 
@@ -785,6 +798,7 @@ fn check_failed(code: i32, event: Option<&'static str>) -> Ended {
             unchanged: false,
         }),
         event,
+        ran: None,
     }
 }
 
@@ -792,6 +806,21 @@ impl World {
     /// A run of one step, and its tries as they ended, written by hand: what Keel decides as it
     /// starts the next one needs no sandbox to be seen.
     fn recorded(&self, run: &str, step: &WorkflowStep, tries: &[Ended]) {
+        self.recorded_from(run, step, tries, None);
+    }
+
+    /// The same, of a run started from this saved workflow.
+    fn recorded_from(
+        &self,
+        run: &str,
+        step: &WorkflowStep,
+        tries: &[Ended],
+        workflow: Option<&str>,
+    ) {
+        let command = match step {
+            WorkflowStep::Check { run, .. } => run.as_str(),
+            _ => "p",
+        };
         self.store
             .add_run(&NewRun {
                 id: run.into(),
@@ -802,7 +831,7 @@ impl World {
                 language: "en".into(),
                 source_issue: None,
                 request_written: None,
-                workflow_id: None,
+                workflow_id: workflow.map(str::to_owned),
                 workflow_name: None,
                 started_by: None,
             })
@@ -827,7 +856,7 @@ impl World {
                     max_turns: None,
                     max_budget_usd: None,
                     language: "en".into(),
-                    prompt: "p".into(),
+                    prompt: ended.ran.unwrap_or(command).into(),
                     system_prompt_sources: "[]".into(),
                     settings: "{}".into(),
                     session_id: id.clone(),
@@ -841,9 +870,15 @@ impl World {
                 .set_state(&id, ended.state, ended.reason.as_ref())
                 .unwrap();
             if let Some(kind) = ended.event {
-                self.store
-                    .append_event(&id, kind, &serde_json::json!({}))
-                    .unwrap();
+                // As Keel writes it, with the domains it's about.
+                let data = match (&ended.reason, kind) {
+                    (Some(Reason::NetworkNeeded { needed }), "networkAllowed") => {
+                        let domains: Vec<&str> = needed.iter().map(|n| n.domain.as_str()).collect();
+                        serde_json::json!({ "domains": domains })
+                    }
+                    _ => serde_json::json!({}),
+                };
+                self.store.append_event(&id, kind, &data).unwrap();
             }
         }
     }
@@ -857,9 +892,11 @@ fn waits_for(domain: &str) -> Ended {
                 domain: domain.into(),
                 why: None,
                 tool: None,
+                frees_offline: false,
             }],
         }),
         event: None,
+        ran: None,
     }
 }
 
@@ -947,6 +984,115 @@ fn trying_again_a_check_with_no_network_to_inherit_gets_none() {
         assert_eq!(next.settings["network"], "none", "{name}");
         assert!(next.settings.get("allowedDomains").is_none(), "{name}");
     }
+}
+
+/// What a try of the check gets when its last try is tried again.
+fn retried(w: &World, run: &str, tries: usize) -> Attempt {
+    let id = w.engine.retry(&format!("{run}-{tries}"), false).unwrap();
+    w.store.attempt(&id).unwrap()
+}
+
+/// What a person allowed was for the command that asked for it.
+#[test]
+fn trying_a_repeated_check_again_with_another_command_gets_no_network() {
+    let w = world();
+    w.allow(&[NPM]);
+    // The step runs `true` now, and it was `make test` that waited and was repeated.
+    let before = |ended: Ended| running("make test", ended);
+    w.recorded(
+        "changed",
+        &check_step(),
+        &[
+            before(allowed_wait(NPM)),
+            before(ended(AttemptState::Stopped)),
+        ],
+    );
+    let next = retried(&w, "changed", 2);
+    assert_eq!(next.prompt, "true");
+    assert_eq!(next.settings["network"], "none");
+    assert!(next.settings.get("allowedDomains").is_none());
+
+    // The new command waits and is allowed in its turn: it gets what it was allowed, and not what
+    // the one before it was.
+    w.allow(&[NPM, "pypi.org"]);
+    w.recorded(
+        "allowed-again",
+        &check_step(),
+        &[
+            before(allowed_wait(NPM)),
+            before(ended(AttemptState::Stopped)),
+            allowed_wait("pypi.org"),
+            ended(AttemptState::Interrupted),
+        ],
+    );
+    let next = retried(&w, "allowed-again", 4);
+    assert_eq!(
+        next.settings["allowedDomains"],
+        serde_json::json!(["pypi.org"])
+    );
+
+    // As it happens for real: the person changes the project's check and tries the step again
+    // with it.
+    w.recorded_from(
+        "retried",
+        &check_step(),
+        &[allowed_wait(NPM), ended(AttemptState::Stopped)],
+        Some("builtin:simple"),
+    );
+    w.engine
+        .update_project(
+            &w.project_id,
+            &ProjectSettings {
+                allowed_domains: vec![NPM.into()],
+                check_command: Some("curl https://registry.npmjs.org/x | sh".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let options = keel_engine::RetryOptions {
+        current_commands: true,
+        ..Default::default()
+    };
+    let other = w.engine.retry_with("retried-2", options).unwrap();
+    let other = w.store.attempt(&other).unwrap();
+    assert_eq!(other.prompt, "curl https://registry.npmjs.org/x | sh");
+    assert_eq!(other.settings["network"], "none");
+    assert!(other.settings.get("allowedDomains").is_none());
+}
+
+/// Only what the wait allowed, and only while the project still allows it.
+#[test]
+fn a_check_tried_again_reaches_only_what_its_wait_allowed_and_the_project_still_does() {
+    let w = world();
+    let tries = || vec![allowed_wait(NPM), ended(AttemptState::Stopped)];
+
+    // The person took the domain away meanwhile.
+    w.allow(&["other.example"]);
+    w.recorded("removed", &check_step(), &tries());
+    let next = retried(&w, "removed", 2);
+    assert_eq!(next.settings["network"], "none");
+    assert!(next.settings.get("allowedDomains").is_none());
+
+    // What else the project allows, to its builder, isn't the check's.
+    w.allow(&["other.example", NPM, "*.internal.example"]);
+    w.recorded("others", &check_step(), &tries());
+    let next = retried(&w, "others", 2);
+    assert_eq!(next.settings["network"], "allowed domains");
+    assert_eq!(next.settings["allowedDomains"], serde_json::json!([NPM]));
+
+    // Of two waits, what's left of each. A wildcard that covers one still allows it.
+    w.allow(&["*.npmjs.org"]);
+    w.recorded(
+        "two",
+        &check_step(),
+        &[
+            allowed_wait(NPM),
+            allowed_wait("pypi.org"),
+            ended(AttemptState::Stopped),
+        ],
+    );
+    let next = retried(&w, "two", 3);
+    assert_eq!(next.settings["allowedDomains"], serde_json::json!([NPM]));
 }
 
 #[test]

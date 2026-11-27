@@ -182,6 +182,7 @@ impl World {
                 domain: "registry.npmjs.org".into(),
                 why: Some("to install next".into()),
                 tool: None,
+                frees_offline: false,
             }],
         };
         self.store
@@ -976,6 +977,63 @@ async fn domains_are_refused_without_the_permission_or_when_one_is_no_domain() {
     assert!(w.store.mcp_project_changes(10).unwrap().is_empty());
 }
 
+/// So that each one can be read where Keel shows what a client changed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_adds_only_so_many_domains_in_one_call() {
+    let w = world();
+    let bot = w.manager();
+    let project = with_domains(&w, &["example.com"]);
+    let named =
+        |count: usize| -> Vec<String> { (0..count).map(|n| format!("cdn{n}.example")).collect() };
+    let most = keel_engine::MOST_DOMAINS_ADDED;
+    assert_eq!(most, 20);
+
+    let args = json!({ "project": "app", "addAllowedDomains": named(most + 1) });
+    let refusal = w.configure(&bot, args).await.unwrap_err().0;
+    assert!(refusal.contains("has 21 domains"), "{refusal}");
+    assert!(refusal.contains("at most 20"), "{refusal}");
+    assert!(refusal.contains("nothing was changed"), "{refusal}");
+    assert_eq!(
+        w.store.project(&project.id).unwrap().allowed_domains,
+        ["example.com"]
+    );
+    assert!(w.store.mcp_project_changes(10).unwrap().is_empty());
+
+    // As many as that are added, and taking away has no limit: it opens nothing.
+    w.configure(
+        &bot,
+        json!({ "project": "app", "addAllowedDomains": named(most) }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        w.store.project(&project.id).unwrap().allowed_domains.len(),
+        most + 1
+    );
+    let mut all = named(most);
+    all.push("example.com".into());
+    w.configure(
+        &bot,
+        json!({ "project": "app", "removeAllowedDomains": all }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        w.store
+            .project(&project.id)
+            .unwrap()
+            .allowed_domains
+            .is_empty()
+    );
+    // The tool says the limit where a client reads how to use it.
+    let schema =
+        serde_json::to_string(&schemars::schema_for!(crate::tools::ConfigureProjectArgs)).unwrap();
+    assert!(
+        schema.contains(&format!("At most {most} in one call")),
+        "{schema}"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_client_adds_no_domain_for_this_mac_the_local_network_or_an_address() {
     let w = world();
@@ -996,6 +1054,25 @@ async fn a_client_adds_no_domain_for_this_mac_the_local_network_or_an_address() 
         "0x7f000001",
         "127.0.0.0x1",
         "*.0.0.1",
+        // A machine on the network this Mac is on, and the names such networks give theirs.
+        "router",
+        "NAS",
+        "*.lan",
+        "nas.lan",
+        "x.internal",
+        "*.internal",
+        "*.build.Internal",
+        "x.home",
+        "x.home.arpa",
+        "*.home.arpa",
+        "wiki.intranet",
+        "*.intranet",
+        "git.corp",
+        "*.corp",
+        "box.localdomain",
+        "*.localdomain",
+        // No name at all under the wildcard.
+        "*.com",
     ] {
         // The good one beside it isn't saved either.
         let args = json!({ "project": "app", "addAllowedDomains": ["good.example", local] });
@@ -1008,6 +1085,31 @@ async fn a_client_adds_no_domain_for_this_mac_the_local_network_or_an_address() 
         ["example.com"]
     );
     assert!(w.store.mcp_project_changes(10).unwrap().is_empty());
+
+    // Names on the internet that only look like those.
+    let public = [
+        "internal.example.com",
+        "*.internal.example.com",
+        "lan.example",
+        "corp.example",
+        "home.example",
+        "arpa.example",
+    ];
+    w.configure(
+        &bot,
+        json!({ "project": "app", "addAllowedDomains": public }),
+    )
+    .await
+    .unwrap();
+    let mut held = vec!["example.com"];
+    held.extend(public);
+    assert_eq!(w.store.project(&project.id).unwrap().allowed_domains, held);
+    w.configure(
+        &bot,
+        json!({ "project": "app", "removeAllowedDomains": public }),
+    )
+    .await
+    .unwrap();
 
     // One the person allowed, the client may take away.
     let project = w

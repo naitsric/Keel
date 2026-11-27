@@ -174,6 +174,7 @@ impl Inner {
             reopens: false,
             commands: None,
             put_off: None,
+            allowed: None,
         };
         let resume = Resume {
             session: attempt.session_id.clone(),

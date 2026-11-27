@@ -143,12 +143,13 @@ one of them is part of the change and reaches no agent as a rule until you merge
   the builder's last command fails with a tool's unmistakable offline error, the run waits for you:
   allow it in the project and repeat the step, go on without it, or stop. It spends no round of
   rework. When the domain you allow is a registry Keel doesn't know, such as a private one, the
-  builder also stops being kept offline for that tool, or for all of them if Keel can't tell which,
-  for as long as the project allows it.
+  builder's package tools also stop being kept offline, for as long as the project allows it: the
+  wait says so before you allow it, and removing the domain in the project's settings undoes it.
 - A check has no network, with one exception: the check you repeat by allowing a domain, and that
-  one tried again in the same round while it hasn't finished, because it was stopped or
-  interrupted, say. It reaches the project's allowed domains through a proxy Keel runs for it,
-  which refuses every other domain and never connects to your Mac, and its sandbox opens only the
+  one tried again in the same round with the same command while it hasn't finished, because it was
+  stopped or interrupted, say. It reaches the domains you allowed it, while the project still
+  allows them, through a proxy Keel runs for it, which refuses every other domain and never
+  connects to your Mac or to an address of a private network, and its sandbox opens only the
   proxy's port on localhost. A tool that ignores the usual proxy variables stays offline there.
   Later checks have no network again.
 - Keel uses your own signed-in `claude` and `gh`, and never stores a credential. Agents never
@@ -247,8 +248,9 @@ whether it can add and configure projects, you allow for each client, and no cli
 for that client, and needs the one to start runs. With it, a client can add a repository on your
 Mac, from its path or from a proposal, and set a project's GitHub account and its setup and check
 commands, which run on your Mac, the setup one with internet access as every setup has. Adding one starts the agent that maps it, on your Claude usage.
-It can also add and remove the domains the project's agents can reach, but not add `localhost`, a
-`.localhost` or `.local` name or an IP address. The folders, services, variables, localhost, default
+It can also add and remove the domains the project's agents can reach, up to 20 in one call, but
+not add a name of your Mac or of a local network, such as `localhost`, a name with no dot or one
+ending in `.local`, `.lan` or `.internal`, or an IP address. The folders, services, variables, localhost, default
 workflow and sensitive paths of a project stay yours. **Settings** shows which client added or
 changed what, with each value before and after.
 

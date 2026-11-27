@@ -376,8 +376,10 @@ pub struct ConfigureProjectArgs {
     pub check_command: Option<String>,
     /// Domains to add to those the project's builder may reach. Each a host name, with `*.` in
     /// front for its subdomains, such as `registry.npmjs.org` or `*.example.com`: no scheme, path,
-    /// port or spaces. Not `localhost`, a `.localhost` or `.local` name or an IP address, which
-    /// only the person adds. Those already there stay once.
+    /// port or spaces. At most 20 in one call. Not a name of this Mac or of a local network, such
+    /// as `localhost`, one with no dot, or one ending in `.local`, `.lan`, `.internal`, `.home`,
+    /// `.corp` or the like, nor an IP address: only the person adds those. Those already there
+    /// stay once.
     #[serde(default)]
     pub add_allowed_domains: Vec<String>,
     /// Domains to take from those the project's builder may reach, as list_projects shows them.
@@ -3084,7 +3086,11 @@ fn client_refusal(refusal: ClientRefusal) -> ToolError {
             "{domain:?} isn't a domain, so nothing was changed. Give a host name, with `*.` in front for its subdomains, such as `registry.npmjs.org` or `*.example.com`: no scheme, path, port or spaces."
         )),
         ClientRefusal::LocalDomain { domain } => ToolError::new(format!(
-            "{domain:?} names this Mac, the local network or an IP address, which only the person can allow, in Keel's settings, so nothing was changed. Add only domains on the internet."
+            "{domain:?} names this Mac, the local network or an IP address, which only the person can allow, in Keel's settings, so nothing was changed. Add only domains on the internet: a name with a dot that doesn't end in `.local`, `.lan`, `.internal`, `.home`, `.home.arpa`, `.intranet`, `.corp`, `.localdomain` or `.localhost`."
+        )),
+        ClientRefusal::TooManyDomains { given } => ToolError::new(format!(
+            "`addAllowedDomains` has {given} domains and takes at most {} in one call, so the person can read each one, and nothing was changed. Add only the ones the work needs.",
+            keel_engine::MOST_DOMAINS_ADDED
         )),
         ClientRefusal::DomainBothWays { domain } => ToolError::new(format!(
             "{domain:?} is in both `addAllowedDomains` and `removeAllowedDomains`, so nothing was changed. Say which."

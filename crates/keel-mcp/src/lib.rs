@@ -87,7 +87,7 @@ and a proposed folder isn't a project until it's added. Tell them it's there rat
 pending proposal, and configure_project changes a project's GitHub account, setup command, check command and allowed \
 domains. Take the account from `githubAccounts` in list_projects. The domains are the network the project's builder \
 may reach: list_projects shows them to you as `allowedDomains`, and you add with `addAllowedDomains` and remove \
-with `removeAllowedDomains`. Only the person adds `localhost`, a `.local` name or an IP address. The commands run on the person's Mac, so set only what they asked for, domains \
+with `removeAllowedDomains`. Only the person adds a name of this Mac or of a local network, such as `localhost`, one with no dot or one ending in `.local`, `.lan` or `.internal`, or an IP address. The commands run on the person's Mac, so set only what they asked for, domains \
 included. Keel records what you set, before and after, and shows them. Without that permission both are refused: \
 adding and configuring projects is the person's, in Keel, and you can propose_project. Only the person grants it, \
 in Keel's settings, and you can't give yourself that or any other permission.\n\

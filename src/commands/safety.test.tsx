@@ -13,7 +13,7 @@ import { useCommands, type Command } from "./registry";
 import { answers, button, callsTo, calls, hideApp, note, paletteOpen, paletteRow, paletteRows, pressEnter, pressKey, pressMod, row, settle, showApp, tapShift, type, view } from "./testApp";
 
 /** The backend calls that decide, spend or can't be taken back. No command may ever reach one. */
-const DECIDES = ["approval_answer", "rework_limit_answer", "run_start", "attempt_retry", "attempt_abandon", "brain_accept", "brain_dismiss", "brain_retire", "brain_generate_map", "decision_retire", "card_move", "card_delete", "project_add", "project_remove", "project_try_check", "workflow_draft_save", "workflow_draft_discard", "project_proposal_accept", "project_proposal_discard"];
+const DECIDES = ["approval_answer", "rework_limit_answer", "network_answer", "run_start", "attempt_retry", "attempt_abandon", "brain_accept", "brain_dismiss", "brain_retire", "brain_generate_map", "decision_retire", "card_move", "card_delete", "project_add", "project_remove", "project_try_check", "workflow_draft_save", "workflow_draft_discard", "project_proposal_accept", "project_proposal_discard"];
 /** These arrive with the add-project work, so they may not be in api.ts yet. */
 const NOT_ALWAYS_THERE = ["project_remove", "project_try_check"];
 

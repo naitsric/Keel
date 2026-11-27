@@ -15,6 +15,10 @@ use crate::{AddOutcome, AddedProject, Engine, Error, Result, is_domain};
 /// Longer than any command a person would read through, which they have to be able to.
 const MAX_COMMAND_CHARS: usize = 4096;
 
+/// The most domains a client adds in one call, so that the person can read each one where Keel
+/// shows what changed, and none hides among hundreds.
+pub const MOST_DOMAINS_ADDED: usize = 20;
+
 /// Where a project a client adds comes from.
 #[derive(Debug, Clone)]
 pub enum ProjectSource {
@@ -67,6 +71,10 @@ pub enum ClientRefusal {
     LocalDomain {
         domain: String,
     },
+    /// More domains to add at once than `MOST_DOMAINS_ADDED`.
+    TooManyDomains {
+        given: usize,
+    },
     /// The same domain to add and to remove, which doesn't say what's wanted.
     DomainBothWays {
         domain: String,
@@ -97,7 +105,12 @@ fn edit_of(values: &ProjectValues) -> Result<ClientProjectEdit, ClientRefusal> {
     let read =
         |field, text: &Option<String>| text.as_deref().map(|text| command(field, text)).transpose();
     // Only what's added is checked. Taking one away opens nothing, so anything saved can go, one
-    // from before domains were checked included.
+    // from before domains were checked included, and any number of them.
+    if values.add_domains.len() > MOST_DOMAINS_ADDED {
+        return Err(ClientRefusal::TooManyDomains {
+            given: values.add_domains.len(),
+        });
+    }
     if let Some(wrong) = values.add_domains.iter().find(|domain| !is_domain(domain)) {
         return Err(ClientRefusal::InvalidDomain {
             domain: wrong.clone(),

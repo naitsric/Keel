@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 
 pub use board::{Board, BoardCard, BoardIssue};
 pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
-pub use client_projects::{ClientRefusal, ProjectSource, ProjectValues};
+pub use client_projects::{ClientRefusal, MOST_DOMAINS_ADDED, ProjectSource, ProjectValues};
 pub use copies::{CopiesFreed, CopyNotFreed};
 pub use detect::{CiGap, CiLeftOut, CiWhy, Guess};
 pub use git::{ChangeSize, Git, GitError, Snapshot};
@@ -1586,6 +1586,7 @@ impl Engine {
                 event: &changed,
             }),
             put_off: put_off.as_ref(),
+            allowed: None,
         };
         match &setup_first {
             Some(setup) => {
@@ -2520,9 +2521,9 @@ impl Inner {
             // can open it before the project does.
             WorkflowStep::Check { run: command, .. } => {
                 let localhost = project.allow_localhost || run.extra_localhost;
-                // The check a person repeats after allowing a domain it lacked reaches the
-                // allowed ones, and so does trying that one again while it hasn't finished its
-                // work, also one put off for a new setup. No other does.
+                // The check a person repeats after allowing a domain it lacked reaches those
+                // it was allowed, and so does trying that one again with the same command while
+                // it hasn't finished its work, also one put off for a new setup. No other does.
                 let again = retry.is_some()
                     || self
                         .store
@@ -2531,7 +2532,24 @@ impl Inner {
                         .rev()
                         .find(|a| a.step_id == step.id())
                         .is_some_and(|a| a.state == AttemptState::Postponed.as_str());
-                let online = again && self.inherits_network(run_id, step.id(), run.round)?;
+                let reaches = if again {
+                    let check = network::CheckTry {
+                        run_id,
+                        step_id: step.id(),
+                        round: run.round,
+                        command,
+                    };
+                    // The wait this try answers, if it's a person allowing what it lacked.
+                    let allowed: Option<Vec<String>> =
+                        retry.and_then(|retry| retry.allowed).and_then(|allowed| {
+                            serde_json::from_value(allowed["domains"].clone()).ok()
+                        });
+                    let allowing = retry.zip(allowed.as_deref()).map(|(r, a)| (r.retried, a));
+                    self.inherited_network(&check, &project.allowed_domains, allowing)?
+                } else {
+                    Vec::new()
+                };
+                let online = !reaches.is_empty();
                 let mut record = json!({
                     "network": match (online, localhost) {
                         (true, true) => "allowed domains and localhost",
@@ -2544,7 +2562,7 @@ impl Inner {
                     "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services),
                 });
                 if online {
-                    record["allowedDomains"] = json!(project.allowed_domains);
+                    record["allowedDomains"] = json!(reaches);
                 }
                 (
                     String::new(),

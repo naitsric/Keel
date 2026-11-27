@@ -52,13 +52,33 @@ pub fn is_domain(domain: &str) -> bool {
         })
 }
 
+/// What names of this Mac and of a local network end in. None of them is anyone's on the internet.
+const LOCAL_ENDINGS: [&str; 9] = [
+    "localhost",
+    "local",
+    "internal",
+    "lan",
+    "home",
+    "home.arpa",
+    "intranet",
+    "corp",
+    "localdomain",
+];
+
 /// Whether a domain, a wildcard included, is a name for a host on the internet: not this Mac, the
-/// local network or an IP address, however it's written. An address ends in a number, which may be
+/// local network or an IP address, however it's written. A name with no dot is a machine's on the
+/// network this Mac is on, such as `router`. An address ends in a number, which may be
 /// hexadecimal, and no name's last label does.
 pub(crate) fn names_the_internet(domain: &str) -> bool {
-    let domain = domain.to_ascii_lowercase();
-    let last = domain.rsplit('.').next().unwrap_or_default();
-    !["localhost", "local"].contains(&last)
+    let domain = domain.trim().to_ascii_lowercase();
+    let host = domain.strip_prefix("*.").unwrap_or(&domain);
+    let last = host.rsplit('.').next().unwrap_or_default();
+    let local = LOCAL_ENDINGS.iter().any(|ending| {
+        host.strip_suffix(ending)
+            .is_some_and(|rest| rest.is_empty() || rest.ends_with('.'))
+    });
+    host.contains('.')
+        && !local
         && !last.starts_with("0x")
         && !last.bytes().all(|b| b.is_ascii_digit())
 }
@@ -109,8 +129,7 @@ fn declared(answer: &Value) -> Vec<NeededDomain> {
         .flatten()
         .filter_map(|item| {
             let domain = item["domain"].as_str()?.trim().to_ascii_lowercase();
-            let on_the_internet = domain.contains('.') && names_the_internet(&domain);
-            if domain.starts_with("*.") || !is_domain(&domain) || !on_the_internet {
+            if domain.starts_with("*.") || !is_domain(&domain) || !names_the_internet(&domain) {
                 return None;
             }
             let why: String = item["why"]
@@ -127,6 +146,7 @@ fn declared(answer: &Value) -> Vec<NeededDomain> {
                         domain: host.to_owned(),
                         why: (!why.is_empty()).then(|| why.clone()),
                         tool: None,
+                        frees_offline: false,
                     })
                     .collect::<Vec<_>>(),
             )
@@ -240,6 +260,7 @@ fn seen(offline: &Offline) -> impl Iterator<Item = NeededDomain> {
         domain: (*host).to_owned(),
         why: None,
         tool: Some(offline.tool.to_owned()),
+        frees_offline: false,
     })
 }
 
@@ -382,7 +403,38 @@ impl Inner {
                 needed.push(domain);
             }
         }
+        // Said here, for the person to know before they allow it: see `runner::online_after`.
+        for domain in &mut needed {
+            domain.frees_offline = !runner::is_known_registry(&domain.domain);
+        }
         Ok(needed)
+    }
+
+    /// As a step ends, before its state is on the record: if it couldn't go on for lack of a
+    /// domain (see `lacks_network`), it waits for the person, and `state` and `reason` say so. A
+    /// stop asked for while it closed wins: then it ends stopped, and waits for nothing.
+    pub(crate) fn waits_for_network(
+        &self,
+        attempt_id: &str,
+        state: &mut AttemptState,
+        reason: &mut Option<Reason>,
+        answer: Option<&Value>,
+    ) {
+        let Some(needed) = self.lacks_network(attempt_id, *state, reason.as_ref(), answer) else {
+            return;
+        };
+        // A stop is taken with this held, while the attempt still reads as running: see
+        // `Engine::stop`. One taken before the wait is written wins, and one after finds the step
+        // waiting, which only its own answer stops.
+        let controls = locked(&self.controls);
+        if controls.get(attempt_id).is_some_and(|c| c.stop_requested) {
+            *state = AttemptState::Stopped;
+            *reason = None;
+            return;
+        }
+        *state = AttemptState::Blocked;
+        *reason = Some(Reason::NetworkNeeded { needed });
+        self.keep_state(attempt_id, *state, reason.as_ref());
     }
 
     /// What a step lacked, if it waits for a domain and a person allowed it, which starts the step
@@ -438,32 +490,65 @@ impl Inner {
         Ok(online)
     }
 
-    /// Whether a check of this step, tried again in this round, reaches the network: one of its
-    /// tries waited and a person allowed what it lacked, and none since got to say anything about
-    /// the work.
-    pub(crate) fn inherits_network(&self, run_id: &str, step_id: &str, round: i64) -> Result<bool> {
-        let attempts = self.store.attempts_of_run(run_id)?;
+    /// The domains a check of this step reaches when it's tried again in this round with this
+    /// `command`, or none. It's the same command a try of it ran when it waited and a person
+    /// allowed what it lacked, and no try since got to say anything about the work. It reaches what
+    /// those waits allowed and the project still allows, and nothing else the project does.
+    /// `allowing` is the wait this try answers, whose domains are on the record only once it's
+    /// started: see `Engine::answer_network`.
+    pub(crate) fn inherited_network(
+        &self,
+        check: &CheckTry,
+        project_allows: &[String],
+        allowing: Option<(&str, &[String])>,
+    ) -> Result<Vec<String>> {
+        let attempts = self.store.attempts_of_run(check.run_id)?;
+        let mut domains: Vec<String> = Vec::new();
         for earlier in attempts
             .iter()
             .rev()
-            .filter(|a| a.step_id == step_id && a.round == round)
+            .filter(|a| a.step_id == check.step_id && a.round == check.round)
         {
-            if self.allowed_wait(&earlier.id)?.is_some() {
-                return Ok(true);
+            let allowed = match allowing {
+                Some((wait, domains)) if wait == earlier.id => Some(domains.to_vec()),
+                _ => self
+                    .allowed_wait(&earlier.id)?
+                    .map(|needed| needed.into_iter().map(|n| n.domain).collect()),
+            };
+            if let Some(allowed) = allowed {
+                // What was allowed was for the command that asked.
+                if earlier.prompt.trim() != check.command.trim() {
+                    break;
+                }
+                for domain in allowed {
+                    if covers(project_allows, &domain) && !domains.contains(&domain) {
+                        domains.push(domain);
+                    }
+                }
+                continue;
             }
             let events = self.store.events(&earlier.id, 0)?;
             if failed_checks::finished_its_work(earlier, &events) {
                 break;
             }
         }
-        Ok(false)
+        Ok(domains)
     }
+}
+
+/// A check about to be tried: its run, step and round, and the command it runs.
+pub(crate) struct CheckTry<'a> {
+    pub run_id: &'a str,
+    pub step_id: &'a str,
+    pub round: i64,
+    pub command: &'a str,
 }
 
 impl Engine {
     /// A person answers a step that waits to know whether it may reach a domain. Only they do: no
     /// MCP tool reaches this. Allowing adds the domains to the project and starts the step over, in
-    /// the same round. Going without ends the step as it would have ended without asking.
+    /// the same round. If it can't start, the domains stay added, the error says so, and the step
+    /// still waits. Going without ends the step as it would have ended without asking.
     pub fn answer_network(&self, attempt_id: &str, answer: NetworkAnswer) -> Result<()> {
         self.answer_network_as(attempt_id, answer, None)
     }
@@ -510,7 +595,9 @@ impl Engine {
                     workflows::find_step(&steps, &attempt.step_id).ok_or(Error::InvalidState)?;
                 // Before the step starts, which reads what the project allows.
                 store.allow_domains(&run.project_id, &domains, &runner::freed_by(&needed))?;
-                store.append_event(attempt_id, "networkAllowed", &json!({ "domains": domains }))?;
+                // That they were allowed goes on the record with the try that repeats the step,
+                // so a step that couldn't start isn't one a person allowed and nothing came of.
+                let allowed = json!({ "domains": domains });
                 let retry = Retry {
                     run_id: &attempt.run_id,
                     retried: attempt_id,
@@ -519,9 +606,20 @@ impl Engine {
                     reopens: false,
                     commands: None,
                     put_off: None,
+                    allowed: Some(&allowed),
                 };
                 let number = workflows::next_number(&attempts, &attempt.step_id);
-                inner.start_step_with(&attempt.run_id, &step, number, None, Some(&retry), None)?;
+                let started =
+                    inner.start_step_with(&attempt.run_id, &step, number, None, Some(&retry), None);
+                if let Err(error) = started {
+                    // The project has them all the same, which the person has to know.
+                    drop(guard);
+                    inner.changed("");
+                    return Err(Error::Blocked(Reason::DomainAllowedNotStarted {
+                        domains,
+                        detail: error.to_string(),
+                    }));
+                }
                 false
             }
             NetworkAnswer::GoWithout => {
@@ -588,6 +686,7 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::sync::Arc;
 
     use keel_harness::Tools;
@@ -702,6 +801,14 @@ mod tests {
             "127.0.0x1",
             "0x7f.0x1",
             "host.0X7F",
+            "router",
+            "nas.lan",
+            "registry.Internal",
+            "a.b.corp",
+            "printer.home",
+            "printer.home.arpa",
+            "wiki.intranet",
+            "box.localdomain",
         ] {
             let answer = json!({ "neededDomains": [{ "domain": domain, "why": "x" }] });
             assert!(declared(&answer).is_empty(), "{domain}");
@@ -712,6 +819,11 @@ mod tests {
             "local.dev",
             "0x.org",
             "a1.example2",
+            "internal.example.com",
+            "lan.example",
+            "mycorp.example",
+            "homes.example",
+            "x.arpa.example",
         ] {
             let answer = json!({ "neededDomains": [{ "domain": domain, "why": "x" }] });
             assert_eq!(declared(&answer).len(), 1, "{domain}");
@@ -719,12 +831,57 @@ mod tests {
     }
 
     #[test]
-    fn a_private_registry_takes_the_failed_tools_offline_variables_or_all_of_them() {
-        let needed = |domain: &str, tool: Option<&str>| NeededDomain {
+    fn a_name_of_a_local_network_is_not_one_on_the_internet_with_a_wildcard_or_without() {
+        for local in [
+            "router",
+            "NAS",
+            "localhost",
+            "*.lan",
+            "*.internal",
+            "*.corp",
+            "*.com",
+            "nas.lan",
+            "x.internal",
+            "x.home.arpa",
+            "home.arpa",
+            "*.home.arpa",
+            "*.x.home.arpa",
+            "a.b.Intranet",
+            "x.corp",
+            "x.home",
+            "x.localdomain",
+            "*.printers.local",
+            "*.dev.localhost",
+            "10.0.0.1",
+            "*.0.0.1",
+        ] {
+            assert!(!names_the_internet(local), "{local}");
+        }
+        for public in [
+            "registry.npmjs.org",
+            "*.npmjs.org",
+            "internal.example.com",
+            "*.internal.example.com",
+            "corp.example",
+            "lan.example",
+            "homearpa.example",
+            "arpa.example",
+        ] {
+            assert!(names_the_internet(public), "{public}");
+        }
+    }
+
+    fn lacked(domain: &str, tool: Option<&str>) -> NeededDomain {
+        NeededDomain {
             domain: domain.into(),
             why: None,
             tool: tool.map(str::to_owned),
-        };
+            frees_offline: false,
+        }
+    }
+
+    #[test]
+    fn a_private_registry_takes_the_failed_tools_offline_variables_or_all_of_them() {
         // Known registries: allowing them is what takes their variables away.
         for domain in [
             NPM,
@@ -733,36 +890,60 @@ mod tests {
             "proxy.golang.org",
             "repo.maven.apache.org",
         ] {
-            assert!(
-                runner::online_after(&[needed(domain, None)]).is_empty(),
-                "{domain}"
-            );
+            for tool in [None, Some("npm")] {
+                assert!(
+                    runner::online_after(&[lacked(domain, tool)]).is_empty(),
+                    "{domain}"
+                );
+            }
         }
-        let private = needed("npm.mycorp.example", None);
-        let all = runner::online_after(std::slice::from_ref(&private));
-        for name in [
-            "CARGO_NET_OFFLINE",
-            "GOPROXY",
-            "npm_config_offline",
-            "pnpm_config_offline",
-            "PIP_NO_INDEX",
-            "UV_OFFLINE",
-            "MAVEN_ARGS",
-        ] {
-            assert!(all.contains(&name), "{name}: {all:?}");
-        }
+        let private = lacked("npm.mycorp.example", None);
+        assert_eq!(
+            runner::online_after(std::slice::from_ref(&private)),
+            EVERY_VARIABLE_IN_ORDER
+        );
+        // Only the tool that failed for the private domain itself narrows what goes.
         for (tool, expected) in [
             ("npm", &["npm_config_offline"][..]),
             ("pnpm", &["npm_config_offline", "pnpm_config_offline"]),
             ("cargo", &["CARGO_NET_OFFLINE"]),
             ("pip", &["PIP_NO_INDEX"]),
         ] {
+            let its_own = lacked("npm.mycorp.example", Some(tool));
+            assert_eq!(runner::online_after(&[its_own]), expected, "{tool}");
+            // One that failed for another domain says nothing about the private one.
             assert_eq!(
-                runner::online_after(&[private.clone(), needed(NPM, Some(tool))]),
-                expected,
+                runner::online_after(&[private.clone(), lacked(NPM, Some(tool))]),
+                EVERY_VARIABLE_IN_ORDER,
                 "{tool}"
             );
         }
+        // A tool Keel doesn't know narrows nothing.
+        assert_eq!(
+            runner::online_after(&[lacked("npm.mycorp.example", Some("yarn"))]),
+            EVERY_VARIABLE_IN_ORDER
+        );
+    }
+
+    #[test]
+    fn each_domain_frees_for_the_project_only_what_it_frees_itself() {
+        let lacking = [
+            lacked("pip.mycorp.example", None),
+            lacked(NPM, Some("npm")),
+            lacked("npm.mycorp.example", Some("npm")),
+        ];
+        let freed = runner::freed_by(&lacking);
+        let of = |domain: &str| -> Vec<&str> {
+            freed
+                .iter()
+                .filter(|(freed_by, _)| *freed_by == domain)
+                .map(|(_, variable)| *variable)
+                .collect()
+        };
+        assert_eq!(of("pip.mycorp.example"), EVERY_VARIABLE_IN_ORDER);
+        assert_eq!(of("npm.mycorp.example"), ["npm_config_offline"]);
+        assert!(of(NPM).is_empty());
+        assert_eq!(freed.len(), EVERY_VARIABLE_IN_ORDER.len() + 1);
     }
 
     #[test]
@@ -834,7 +1015,11 @@ mod tests {
 
     impl Recorded {
         fn run(&self, run: &str) {
-            let workflow = json!([{ "type": "agent", "id": "builder", "model": "m", "effort": null, "tools": "build", "prompt": "p", "maxTurns": null, "maxBudgetUsd": null }]);
+            let workflow = json!([
+                { "type": "agent", "id": "builder", "model": "m", "effort": null, "tools": "build", "prompt": "p", "maxTurns": null, "maxBudgetUsd": null },
+                { "type": "check", "id": "check", "run": "make test" },
+                { "type": "approval", "id": "human" },
+            ]);
             self.store
                 .add_run(&NewRun {
                     id: run.into(),
@@ -853,48 +1038,70 @@ mod tests {
         }
 
         fn builder(&self, run: &str, round: i64, number: i64, state: AttemptState) -> Attempt {
-            let id = format!("{run}-{number}");
+            self.attempt(run, "builder", round, number, state, "{}")
+        }
+
+        /// A try of the run's check, with the settings it was set going with.
+        fn check(&self, run: &str, number: i64, state: AttemptState, settings: &str) -> Attempt {
+            self.attempt(run, "check", 0, number, state, settings)
+        }
+
+        fn attempt(
+            &self,
+            run: &str,
+            step: &str,
+            round: i64,
+            number: i64,
+            state: AttemptState,
+            settings: &str,
+        ) -> Attempt {
+            let id = format!("{run}-{step}-{number}");
+            let builds = step == "builder";
+            let files = self.dir.path().join("files");
+            std::fs::create_dir_all(&files).unwrap();
             self.store
                 .add_attempt(&NewAttempt {
                     id: id.clone(),
                     run_id: run.into(),
-                    step_id: "builder".into(),
-                    kind: "agent".into(),
+                    step_id: step.into(),
+                    kind: if builds { "agent" } else { "check" }.into(),
                     role: "worker".into(),
                     round,
                     number,
                     state,
-                    model_requested: "m".into(),
+                    model_requested: if builds { "m".into() } else { String::new() },
                     effort: None,
-                    tools: "build".into(),
+                    tools: if builds { "build" } else { "check" }.into(),
                     max_turns: None,
                     max_budget_usd: None,
                     language: "en".into(),
-                    prompt: "p".into(),
+                    prompt: if builds { "p" } else { "make test" }.into(),
                     system_prompt_sources: "[]".into(),
-                    settings: "{}".into(),
+                    settings: settings.into(),
                     session_id: id.clone(),
                     resumed_from: None,
                     workspace: self.dir.path().join("nowhere").display().to_string(),
-                    raw_path: self.dir.path().join("nowhere/raw").display().to_string(),
+                    raw_path: files.join(format!("{id}.log")).display().to_string(),
                     started_at: keel_store::now(),
                 })
                 .unwrap();
             self.store.attempt(&id).unwrap()
         }
 
+        fn kinds(&self, attempt: &Attempt) -> Vec<String> {
+            let events = self.store.events(&attempt.id, 0).unwrap();
+            events.into_iter().map(|event| event.kind).collect()
+        }
+
+        fn state(&self, attempt: &Attempt) -> String {
+            self.store.attempt(&attempt.id).unwrap().state
+        }
+
         /// A builder's try that waits for these, as it ended.
         fn waiting(&self, run: &str, number: i64, domains: &[&str]) -> Attempt {
             let attempt = self.builder(run, 0, number, AttemptState::Blocked);
             let reason = Reason::NetworkNeeded {
-                needed: domains
-                    .iter()
-                    .map(|domain| NeededDomain {
-                        domain: (*domain).to_owned(),
-                        why: None,
-                        tool: None,
-                    })
-                    .collect(),
+                needed: domains.iter().map(|domain| lacked(domain, None)).collect(),
             };
             self.store
                 .set_state(&attempt.id, AttemptState::Blocked, Some(&reason))
@@ -909,6 +1116,17 @@ mod tests {
             online
         }
     }
+
+    /// As `runner::OFFLINE` lists them.
+    const EVERY_VARIABLE_IN_ORDER: [&str; 7] = [
+        "CARGO_NET_OFFLINE",
+        "GOPROXY",
+        "npm_config_offline",
+        "pnpm_config_offline",
+        "PIP_NO_INDEX",
+        "UV_OFFLINE",
+        "MAVEN_ARGS",
+    ];
 
     const EVERY_VARIABLE: [&str; 7] = [
         "CARGO_NET_OFFLINE",
@@ -979,6 +1197,207 @@ mod tests {
         w.run("b");
         let next = w.builder("b", 0, 1, AttemptState::Queued);
         assert!(w.online(&next).is_empty());
+    }
+
+    const NPM_OFFLINE: &str = "npm error code ENOTCACHED\nnpm error request to https://registry.npmjs.org/next failed: cache mode is 'only-if-cached' but no cached response is available.";
+
+    /// A builder declares a private registry of pip's, and its last command is npm failing for
+    /// being offline: nothing says the private one is npm's.
+    #[test]
+    fn a_private_domain_declared_beside_a_tool_that_failed_offline_frees_every_variable() {
+        let w = recorded_project();
+        w.run("a");
+        let built = w.builder("a", 0, 1, AttemptState::Running);
+        for (kind, data) in [
+            ("toolCall", json!({ "id": "t1", "name": "Bash" })),
+            (
+                "toolResult",
+                json!({ "id": "t1", "isError": true, "text": NPM_OFFLINE }),
+            ),
+        ] {
+            w.store.append_event(&built.id, kind, &data).unwrap();
+        }
+        let answer = json!({ "message": "x", "neededDomains": [
+            { "domain": "pip.mycorp.example", "why": "our own packages" },
+        ]});
+        let (mut state, mut reason) = (AttemptState::Succeeded, None);
+
+        w.engine
+            .inner
+            .waits_for_network(&built.id, &mut state, &mut reason, Some(&answer));
+
+        assert_eq!(state, AttemptState::Blocked);
+        let Some(Reason::NetworkNeeded { needed }) = reason else {
+            panic!("not waiting: {reason:?}");
+        };
+        let said: Vec<_> = needed
+            .iter()
+            .map(|n| (n.domain.as_str(), n.tool.as_deref(), n.frees_offline))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                ("pip.mycorp.example", None, true),
+                (NPM, Some("npm"), false)
+            ]
+        );
+        assert!(runner::online_after(&needed).contains(&"PIP_NO_INDEX"));
+        // It's on the record as it waits, and allowing it frees pip's in later runs too.
+        assert_eq!(w.state(&built), "blocked");
+        w.engine
+            .answer_network(&built.id, NetworkAnswer::Allow)
+            .unwrap();
+        w.run("b");
+        let next = w.builder("b", 0, 1, AttemptState::Queued);
+        assert_eq!(w.online(&next), EVERY_VARIABLE);
+    }
+
+    /// A check that is closing after it failed as npm does offline, as `finish` hands it over.
+    fn closing_offline(w: &Recorded, run: &str) -> (Attempt, AttemptState, Option<Reason>) {
+        w.run(run);
+        w.builder(run, 0, 1, AttemptState::Succeeded);
+        let check = w.check(run, 2, AttemptState::Running, "{}");
+        w.store
+            .append_event(
+                &check.id,
+                "checkResult",
+                &json!({ "stdout": "", "stderr": NPM_OFFLINE }),
+            )
+            .unwrap();
+        let failed = Reason::CheckFailed {
+            exit_code: Some(1),
+            localhost_refused: false,
+            failed_times: None,
+            unchanged: false,
+        };
+        (check, AttemptState::Failed, Some(failed))
+    }
+
+    #[test]
+    fn a_stop_asked_for_while_a_step_that_lacks_a_domain_closes_wins_over_waiting_for_it() {
+        let w = recorded_project();
+        let (check, mut state, mut reason) = closing_offline(&w, "a");
+        // The check reads as running until it's closed, so the stop is taken.
+        w.engine.stop(&check.id).unwrap();
+
+        w.engine
+            .inner
+            .waits_for_network(&check.id, &mut state, &mut reason, None);
+
+        assert_eq!((state, reason), (AttemptState::Stopped, None));
+        assert_eq!(w.state(&check), "running", "nothing says it waits");
+        // Stopped is no failed check either, so the work doesn't go back.
+        let mut reason = None;
+        assert!(
+            !w.engine
+                .inner
+                .failed_check_goes_back(&check.id, &mut state, &mut reason)
+        );
+        assert_eq!(w.store.run("a").unwrap().round, 0);
+    }
+
+    #[test]
+    fn a_stop_that_comes_once_a_step_waits_for_a_domain_is_refused_instead_of_lost() {
+        let w = recorded_project();
+        let (check, mut state, mut reason) = closing_offline(&w, "a");
+
+        w.engine
+            .inner
+            .waits_for_network(&check.id, &mut state, &mut reason, None);
+
+        assert_eq!(state, AttemptState::Blocked);
+        assert!(matches!(reason, Some(Reason::NetworkNeeded { .. })));
+        assert_eq!(w.state(&check), "blocked");
+        assert!(matches!(w.engine.stop(&check.id), Err(Error::InvalidState)));
+        assert!(!w.kinds(&check).contains(&"stopRequested".to_owned()));
+        // Stopping it is then an answer to what it waits for.
+        w.engine
+            .answer_network(&check.id, NetworkAnswer::Stop)
+            .unwrap();
+        assert_eq!(w.state(&check), "stopped");
+    }
+
+    #[test]
+    fn allowing_a_domain_to_a_step_that_cannot_start_says_it_was_added_and_leaves_it_waiting() {
+        let w = recorded_project();
+        w.run("a");
+        let waited = w.waiting("a", 1, &["npm.mycorp.example"]);
+        // Where the run keeps its files there's a file, so no step of it can start.
+        let runs = w.dir.path().join("data/runs");
+        std::fs::create_dir_all(&runs).unwrap();
+        std::fs::write(runs.join("a"), "").unwrap();
+
+        let refused = w.engine.answer_network(&waited.id, NetworkAnswer::Allow);
+
+        let Err(Error::Blocked(Reason::DomainAllowedNotStarted { domains, detail })) = refused
+        else {
+            panic!("it started, or didn't say: {refused:?}");
+        };
+        assert_eq!(domains, ["npm.mycorp.example"]);
+        assert!(!detail.is_empty());
+        // The project has it, and nothing says the step was repeated with it.
+        let allowed = w.store.project("p").unwrap().allowed_domains;
+        assert_eq!(allowed, ["npm.mycorp.example"]);
+        assert!(!w.kinds(&waited).contains(&"networkAllowed".to_owned()));
+        assert_eq!(w.store.attempts_of_run("a").unwrap().len(), 1);
+        assert!(w.engine.inner.allowed_wait(&waited.id).unwrap().is_none());
+
+        // It still waits: once the step can start, allowing it again repeats it.
+        std::fs::remove_file(runs.join("a")).unwrap();
+        w.engine
+            .answer_network(&waited.id, NetworkAnswer::Allow)
+            .unwrap();
+        assert!(w.kinds(&waited).contains(&"networkAllowed".to_owned()));
+        assert_eq!(w.store.attempts_of_run("a").unwrap().len(), 2);
+        assert_eq!(allowed, w.store.project("p").unwrap().allowed_domains);
+    }
+
+    /// A check repeated with the network that the app closed under, as it's found on reopening.
+    fn found_on_reopening(w: &Recorded, run: &str, exit_code: Option<&str>) -> Attempt {
+        w.run(run);
+        w.builder(run, 0, 1, AttemptState::Succeeded);
+        let settings = json!({ "network": "allowed domains", "allowedDomains": [NPM] });
+        let check = w.check(run, 2, AttemptState::Running, &settings.to_string());
+        std::fs::write(&check.raw_path, "").unwrap();
+        if let Some(code) = exit_code {
+            let left = keel_harness::process::exit_code_file(Path::new(&check.raw_path));
+            std::fs::write(left, code).unwrap();
+        }
+        w.engine.inner.recover_attempt(&check).unwrap();
+        w.store.attempt(&check.id).unwrap()
+    }
+
+    #[test]
+    fn a_check_with_the_network_that_had_ended_when_the_app_reopens_did_not_lose_it() {
+        let w = recorded_project();
+
+        let failed = found_on_reopening(&w, "a", Some("1"));
+
+        // It failed on the work, which goes back to the builder as with any check.
+        assert!(!w.kinds(&failed).contains(&"networkLost".to_owned()));
+        assert_eq!(failed.state, "returned");
+        assert_eq!(w.store.run("a").unwrap().round, 1);
+
+        let passed = found_on_reopening(&w, "b", Some("0"));
+        assert!(!w.kinds(&passed).contains(&"networkLost".to_owned()));
+        assert_eq!(passed.state, "succeeded");
+    }
+
+    #[test]
+    fn a_check_with_the_network_that_left_no_exit_code_lost_it_with_the_app() {
+        let w = recorded_project();
+        // Gone with nothing said, or ended by a signal, which is no code to go by.
+        for (run, left) in [("a", None), ("b", Some("143"))] {
+            let lost = found_on_reopening(&w, run, left);
+            assert!(w.kinds(&lost).contains(&"networkLost".to_owned()), "{run}");
+            assert_eq!(lost.state, "interrupted", "{run}");
+            assert_eq!(w.store.run(run).unwrap().round, 0, "{run}");
+        }
+        // One without the network lost nothing.
+        w.run("c");
+        let plain = w.check("c", 1, AttemptState::Running, "{}");
+        w.engine.inner.recover_attempt(&plain).unwrap();
+        assert!(!w.kinds(&plain).contains(&"networkLost".to_owned()));
     }
 
     fn tools(output: &str) -> Vec<&'static str> {

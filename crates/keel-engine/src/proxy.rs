@@ -1,14 +1,14 @@
 //! The way out for a check a person repeats after allowing a domain it lacked. A Seatbelt profile
 //! can't hold a command to a list of domains, so the check's sandbox opens one port on localhost,
 //! this proxy's (see `settings::with_proxy`), and the proxy, outside the sandbox, connects only to
-//! the domains the project allows, and never to this Mac. It asks for a password that only that
-//! check is given, so another sandbox with localhost open can't borrow it, and it goes when the
-//! check ends.
+//! the domains the check may reach, and never to this Mac or to an address of a local network. It
+//! asks for a password that only that check is given, so another sandbox with localhost open can't
+//! borrow it, and it goes when the check ends.
 
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Shutdown, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, TcpListener, TcpStream, ToSocketAddrs, UdpSocket};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -17,9 +17,12 @@ use base64::Engine as _;
 
 use crate::{locked, network};
 
-/// The most connections at once, well past what a package manager opens, so that a command can't
-/// use up the files Keel may have open.
-const MOST_AT_ONCE: usize = 128;
+/// The most connections at once, counting those of every proxy there is: they all hold the app's
+/// descriptors, and each connection holds two, the command's end and the domain's. That's 96 of
+/// the 256 macOS gives an app unless it asks for more, which leaves Keel its own files, and is as
+/// many as pnpm opens to one registry, the most of the package managers. One more waits its turn
+/// without being answered, which a command sees as a slow connection and not as a failure.
+const MOST_AT_ONCE: usize = 48;
 const MOST_HEAD_BYTES: usize = 32 * 1024;
 /// For a request to arrive, and for the domain it names to answer.
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -27,10 +30,50 @@ const USER: &str = "keel";
 
 type Connect = dyn Fn(&str, u16) -> io::Result<TcpStream> + Send + Sync;
 
+/// How many connections are open, of at most so many. One for every proxy of the app: see
+/// `MOST_AT_ONCE`.
+struct Places {
+    taken: AtomicUsize,
+    most: usize,
+}
+
+static PLACES: Places = Places {
+    taken: AtomicUsize::new(0),
+    most: MOST_AT_ONCE,
+};
+
+/// A connection's place among those open, given back when dropped.
+struct Place(&'static Places);
+
+impl Places {
+    /// A place for one more connection, or `None` while there are as many as there may be.
+    fn take(&'static self) -> Option<Place> {
+        let mut taken = self.taken.load(Ordering::SeqCst);
+        while taken < self.most {
+            let now = taken + 1;
+            match self
+                .taken
+                .compare_exchange(taken, now, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return Some(Place(self)),
+                Err(found) => taken = found,
+            }
+        }
+        None
+    }
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        self.0.taken.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 struct Shared {
     domains: Vec<String>,
     password: String,
     connect: Box<Connect>,
+    places: &'static Places,
     stopped: AtomicBool,
     /// The sockets of the connections under way, to close them when the proxy goes.
     open: Mutex<HashMap<u64, Vec<Arc<TcpStream>>>>,
@@ -49,6 +92,14 @@ impl Proxy {
     }
 
     fn start_with(domains: &[String], connect: Box<Connect>) -> io::Result<Self> {
+        Self::start_among(domains, connect, &PLACES)
+    }
+
+    fn start_among(
+        domains: &[String],
+        connect: Box<Connect>,
+        places: &'static Places,
+    ) -> io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))?;
         listener.set_nonblocking(true)?;
         let port = listener.local_addr()?.port();
@@ -56,6 +107,7 @@ impl Proxy {
             domains: domains.to_vec(),
             password: uuid::Uuid::new_v4().simple().to_string(),
             connect,
+            places,
             stopped: AtomicBool::new(false),
             open: Mutex::default(),
         });
@@ -118,27 +170,29 @@ impl Drop for Proxy {
 fn accept(listener: &TcpListener, shared: &Arc<Shared>) {
     let mut next = 0u64;
     while !shared.stopped.load(Ordering::SeqCst) {
-        let Ok((client, _)) = listener.accept() else {
+        // Taken before the connection is, so that one past the most there may be holds no
+        // descriptor of the app's: it waits in the system's queue until another ends.
+        let accepted = shared
+            .places
+            .take()
+            .and_then(|place| Some((listener.accept().ok()?.0, place)));
+        let Some((client, place)) = accepted else {
             std::thread::sleep(Duration::from_millis(20));
             continue;
         };
         let client = Arc::new(client);
         let id = next;
         next += 1;
-        {
-            let mut open = locked(&shared.open);
-            // Dropped here, which closes it.
-            if open.len() >= MOST_AT_ONCE {
-                continue;
-            }
-            open.insert(id, vec![client.clone()]);
-        }
+        locked(&shared.open).insert(id, vec![client.clone()]);
         let serving = shared.clone();
         let spawned = std::thread::Builder::new().spawn(move || {
             // A connection that breaks is the command's to report.
             let _ = serve(&serving, id, &client);
             let _ = client.shutdown(Shutdown::Both);
             locked(&serving.open).remove(&id);
+            // Once both its ends are closed.
+            drop(client);
+            drop(place);
         });
         if spawned.is_err() {
             locked(&shared.open).remove(&id);
@@ -314,8 +368,9 @@ fn tunnel(client: &Arc<TcpStream>, upstream: &Arc<TcpStream>) -> io::Result<()> 
     received.map(|_| ())
 }
 
-/// Connects to a host at an address that isn't this Mac's: a name that resolves here would be a way
-/// to what the check's sandbox keeps closed.
+/// Connects to a host at an address that's neither this Mac's nor a local network's: a name that
+/// resolves to one would be a way to what the check's sandbox keeps closed, and to machines only
+/// this Mac's network reaches.
 fn connect_out(host: &str, port: u16) -> io::Result<TcpStream> {
     let mut failed = io::Error::from(io::ErrorKind::PermissionDenied);
     for address in (host, port).to_socket_addrs()? {
@@ -330,9 +385,18 @@ fn connect_out(host: &str, port: u16) -> io::Result<TcpStream> {
     Err(failed)
 }
 
-/// Whether an address is another machine's: not this Mac's, by loopback or by any address of its
-/// own, nor one that only reaches the link it's on.
+/// Whether an address is a machine's on the internet: not this Mac's, by loopback or by any address
+/// of its own, nor one that only reaches the link it's on or a private network, such as a router
+/// or another machine at home or at work. No project setting opens those to a check.
 fn is_elsewhere(address: IpAddr) -> bool {
+    is_elsewhere_given(address, |address| UdpSocket::bind((address, 0)).map(|_| ()))
+}
+
+/// `is_elsewhere`, with what listening on the address says. Only this Mac's own addresses can be
+/// listened on, so an address is another machine's only when the system says it isn't one of
+/// them. Anything else it says, such as having no descriptors left, tells nothing about the
+/// address, and then it counts as this Mac's.
+fn is_elsewhere_given(address: IpAddr, listen: impl Fn(IpAddr) -> io::Result<()>) -> bool {
     let address = match address {
         IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(address, IpAddr::V4),
         IpAddr::V4(_) => address,
@@ -344,16 +408,24 @@ fn is_elsewhere(address: IpAddr) -> bool {
                 || v4.is_link_local()
                 || v4.is_multicast()
                 || v4.is_broadcast()
+                || v4.is_private()
+                || is_shared(v4)
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()
                 || v6.is_unspecified()
                 || v6.is_multicast()
                 || (v6.segments()[0] & 0xffc0) == 0xfe80
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
         }
     };
-    // Only this Mac's own addresses can be listened on.
-    !special && UdpSocket::bind((address, 0)).is_err()
+    !special && listen(address).is_err_and(|error| error.kind() == io::ErrorKind::AddrNotAvailable)
+}
+
+/// 100.64.0.0/10, which carriers and private networks between machines use.
+fn is_shared(address: Ipv4Addr) -> bool {
+    let [first, second, ..] = address.octets();
+    first == 100 && (second & 0xc0) == 64
 }
 
 #[cfg(test)]
@@ -394,6 +466,7 @@ mod tests {
             domains: domains.iter().map(|d| (*d).to_owned()).collect(),
             password: "secret".into(),
             connect: Box::new(connect),
+            places: &PLACES,
             stopped: AtomicBool::new(false),
             open: Mutex::default(),
         };
@@ -540,6 +613,11 @@ mod tests {
         assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
     }
 
+    /// What the system says of listening on an address that isn't this Mac's.
+    fn not_mine(_: IpAddr) -> io::Result<()> {
+        Err(io::ErrorKind::AddrNotAvailable.into())
+    }
+
     #[test]
     fn it_never_connects_to_this_mac() {
         for here in [
@@ -555,11 +633,154 @@ mod tests {
             "fe80::1",
         ] {
             assert!(!is_elsewhere(here.parse().unwrap()), "{here}");
+            // Whatever listening on it says.
+            assert!(
+                !is_elsewhere_given(here.parse().unwrap(), not_mine),
+                "{here}"
+            );
         }
+        // An address of its own on a network, which it can listen on.
+        assert!(!is_elsewhere_given(
+            "93.184.216.34".parse().unwrap(),
+            |_| { Ok(()) }
+        ));
         keel_harness::needs!(sockets);
         for there in ["93.184.216.34", "2606:2800:220:1::1"] {
             assert!(is_elsewhere(there.parse().unwrap()), "{there}");
         }
         assert!(connect_out("localhost", 9).is_err());
+    }
+
+    #[test]
+    fn it_never_connects_to_an_address_of_a_private_network() {
+        for private in [
+            "10.0.0.1",
+            "10.255.255.255",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "100.64.0.1",
+            "100.127.255.255",
+            "fc00::1",
+            "fd12:3456:789a::1",
+            "::ffff:192.168.1.1",
+            "::ffff:10.0.0.1",
+        ] {
+            assert!(
+                !is_elsewhere_given(private.parse().unwrap(), not_mine),
+                "{private}"
+            );
+            assert!(!is_elsewhere(private.parse().unwrap()), "{private}");
+        }
+        // The ones next to those are the internet's.
+        for public in [
+            "9.255.255.255",
+            "11.0.0.1",
+            "172.15.255.255",
+            "172.32.0.1",
+            "192.167.255.255",
+            "192.169.0.1",
+            "100.63.255.255",
+            "100.128.0.1",
+            "fe00::1",
+            "2606:2800:220:1::1",
+        ] {
+            assert!(
+                is_elsewhere_given(public.parse().unwrap(), not_mine),
+                "{public}"
+            );
+        }
+    }
+
+    /// Only "that address isn't here" says an address is another machine's.
+    #[test]
+    fn an_address_it_cannot_tell_is_another_machines_counts_as_this_macs() {
+        let there: IpAddr = "93.184.216.34".parse().unwrap();
+        assert!(is_elsewhere_given(there, not_mine));
+        let no_descriptors_left =
+            |_: IpAddr| -> io::Result<()> { Err(io::Error::from_raw_os_error(24)) };
+        assert_eq!(
+            no_descriptors_left(there).unwrap_err().to_string(),
+            "Too many open files (os error 24)"
+        );
+        assert!(!is_elsewhere_given(there, no_descriptors_left));
+        for kind in [
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::AddrInUse,
+            io::ErrorKind::OutOfMemory,
+            io::ErrorKind::Other,
+        ] {
+            assert!(!is_elsewhere_given(there, |_| Err(kind.into())), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn every_proxy_shares_the_places_for_connections_and_gives_them_back() {
+        let places: &'static Places = Box::leak(Box::new(Places {
+            taken: AtomicUsize::new(0),
+            most: 2,
+        }));
+        let (first, second) = (places.take().unwrap(), places.take().unwrap());
+        assert!(places.take().is_none(), "two are as many as there may be");
+        drop(first);
+        let third = places.take().unwrap();
+        assert!(places.take().is_none());
+        drop((second, third));
+        assert_eq!(places.taken.load(Ordering::SeqCst), 0);
+        // Each connection holds two descriptors, and the app has 256 unless it asks for more.
+        assert!(PLACES.most * 2 <= 128, "{}", PLACES.most);
+    }
+
+    /// One proxy at its most leaves no place in another, and a connection past the most waits
+    /// instead of being refused.
+    #[test]
+    fn a_connection_past_the_most_waits_for_another_to_end() {
+        keel_harness::needs!(sockets);
+        let places: &'static Places = Box::leak(Box::new(Places {
+            taken: AtomicUsize::new(0),
+            most: 1,
+        }));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let there = listener.local_addr().unwrap().port();
+        let start = || {
+            Proxy::start_among(
+                &["registry.example".to_owned()],
+                Box::new(move |_, _| TcpStream::connect(("127.0.0.1", there))),
+                places,
+            )
+            .unwrap()
+        };
+        let (one, other) = (start(), start());
+        let connect = |proxy: &Proxy| {
+            let mut stream = TcpStream::connect(("127.0.0.1", proxy.port())).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(300)))
+                .unwrap();
+            let auth = authorization(&proxy.shared.password);
+            write!(
+                stream,
+                "CONNECT registry.example:443 HTTP/1.1\r\n{auth}\r\n"
+            )
+            .unwrap();
+            stream
+        };
+        let first = connect(&one);
+        let (upstream, _) = listener.accept().unwrap();
+        read_head(&first).unwrap();
+        assert_eq!(places.taken.load(Ordering::SeqCst), 1);
+
+        // The other proxy's, while the first is open: nobody answers it yet.
+        let second = connect(&other);
+        assert!(read_head(&second).is_err(), "it waits");
+
+        // Both ends of the first are done.
+        drop((first, upstream));
+        second
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let (_upstream, _) = listener.accept().unwrap();
+        let (head, _) = read_head(&second).unwrap();
+        assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+        drop((one, other));
     }
 }

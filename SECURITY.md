@@ -44,9 +44,10 @@ what it shows, so some will slip through. It doesn't stop a secret an agent comm
 pushed with the branch.
 
 **Some steps reach further.** Setup has internet access, to install dependencies. A check you repeat
-by allowing a domain it lacked, and that one tried again while it hasn't finished, reaches the
-project's allowed domains, through a proxy Keel runs outside the sandbox while it does: what it
-runs, which an agent may have edited, can send there what it can read. A project that opens localhost to its check and builder lets them reach any service on
+by allowing a domain it lacked, and that one tried again with the same command while it hasn't
+finished, reaches the domains you allowed it, through a proxy Keel runs outside the sandbox while it
+does: what it runs, which an agent may have edited, can send there what it can read. The proxy
+connects to no address of your Mac or of a private network, whatever a name resolves to. A project that opens localhost to its check and builder lets them reach any service on
 your Mac. Services a project declares, like a test database, run outside the sandbox. Open only what
 a project needs.
 
@@ -54,10 +55,14 @@ a project needs.
 for each project, as they are. A client you let add and configure projects sets those commands too,
 without asking you each time: they run in the same sandbox, with whatever you opened to that project,
 and its setup command with internet access, as any setup has, so it could send out what it can read.
-It also adds and removes the project's allowed domains, wildcards included, and so decides where the
-agents that build can connect. It can't add `localhost`, a `.localhost` or `.local` name or an IP
-address, though a name it adds can resolve to one. Let only a client you trust.
+It also adds and removes the project's allowed domains, wildcards included and up to 20 in one call,
+and so decides where the agents that build can connect. It can't add a name of your Mac or of a
+local network (`localhost`, a name with no dot, or one ending in `.local`, `.lan`, `.internal`,
+`.home`, `.home.arpa`, `.intranet`, `.corp` or `.localdomain`) or an IP address, though a name it
+adds can resolve to one. Let only a client you trust.
 
 **A domain you allow stays allowed.** A run that waits for a domain shows what an agent says it needs
 it for, and an agent can be misled. Read the domain itself: allowing it opens it to the project's
-builder in every run from then on.
+builder in every run from then on. If it's no registry Keel knows, the builder's package tools also
+stop being kept offline in that project, which the wait says before you allow it. Removing the
+domain in the project's settings undoes both.

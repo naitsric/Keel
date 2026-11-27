@@ -44,6 +44,8 @@ export interface NeededDomain {
   why?: string;
   /** The tool Keel saw fail for being offline. */
   tool?: string;
+  /** It's no registry Keel knows: allowing it also lets the builder's package tools go online in this project. */
+  freesOffline?: boolean;
 }
 
 /** What a person says to a step waiting for a domain. */
@@ -220,7 +222,7 @@ export interface McpClient {
   canRun: boolean;
   /** May send work back and retry on the runs it started, and add a note to their cards while they wait. Only with `canRun`. */
   canSteer: boolean;
-  /** May add projects and change their GitHub account, setup and check commands and allowed domains, though only the person adds localhost, a `.local` name or an IP address. Only with `canRun`. */
+  /** May add projects and change their GitHub account, setup and check commands and allowed domains, though only the person adds a name of this Mac or of a local network, or an IP address. Only with `canRun`. */
   canManageProjects: boolean;
   /** How many of its runs may be open at once, counting those that wait for the person. */
   maxOpenRuns: number;

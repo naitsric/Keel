@@ -154,7 +154,7 @@ const TOOL_OFFLINE: [(&str, &[&str]); 4] = [
 
 /// Whether a domain is a registry Keel knows whose it is: allowing it takes its tool's offline
 /// variables away.
-fn is_known_registry(domain: &str) -> bool {
+pub(crate) fn is_known_registry(domain: &str) -> bool {
     let domain = [domain.to_owned()];
     network::is_registry_download(&domain[0])
         || OFFLINE
@@ -162,46 +162,46 @@ fn is_known_registry(domain: &str) -> bool {
             .any(|(registry, _, _)| allows_host(&domain, registry))
 }
 
+/// The offline variables that go when a person allows this domain to a step that lacked it, besides
+/// those of the registries it may now reach. None for a known registry. Any other, such as a
+/// private one, doesn't say whose it is: those of the tool Keel saw fail for it go, or all of them
+/// if it saw none. A tool that failed for another domain says nothing about this one.
+fn frees(lacked: &NeededDomain) -> Vec<&'static str> {
+    if is_known_registry(&lacked.domain) {
+        return Vec::new();
+    }
+    let of_its_tool = TOOL_OFFLINE
+        .iter()
+        .find(|(tool, _)| lacked.tool.as_deref() == Some(tool))
+        .map(|(_, variables)| *variables);
+    OFFLINE
+        .iter()
+        .map(|(_, name, _)| *name)
+        .filter(|name| of_its_tool.is_none_or(|variables| variables.contains(name)))
+        .collect()
+}
+
 /// What allowing a step what it `lacked` frees for the project from then on, as `(domain,
-/// variable)`: for each domain that's no known registry, what `online_after` says.
+/// variable)`: see `frees`.
 pub(crate) fn freed_by(lacked: &[NeededDomain]) -> Vec<(&str, &'static str)> {
-    let online = online_after(lacked);
     lacked
         .iter()
-        .filter(|needed| !is_known_registry(&needed.domain))
         .flat_map(|needed| {
-            online
-                .iter()
-                .map(|variable| (needed.domain.as_str(), *variable))
+            frees(needed)
+                .into_iter()
+                .map(|variable| (needed.domain.as_str(), variable))
         })
         .collect()
 }
 
 /// The offline variables a step goes without when it's repeated after a person allowed what it
-/// `lacked`, besides those of the registries it may now reach. A domain that's no known registry,
-/// such as a private one, doesn't say whose it is: those of the tool that failed go, or all of
-/// them if which failed isn't known.
+/// `lacked`: what each of those domains frees.
 pub(crate) fn online_after(lacked: &[NeededDomain]) -> Vec<&'static str> {
-    if lacked
-        .iter()
-        .all(|needed| is_known_registry(&needed.domain))
-    {
-        return Vec::new();
-    }
-    let failed: Vec<&str> = lacked
-        .iter()
-        .filter_map(|needed| needed.tool.as_deref())
-        .flat_map(|tool| {
-            TOOL_OFFLINE
-                .iter()
-                .filter(move |(name, _)| *name == tool)
-                .flat_map(|(_, variables)| variables.iter().copied())
-        })
-        .collect();
+    let freed: Vec<&str> = lacked.iter().flat_map(frees).collect();
     OFFLINE
         .iter()
         .map(|(_, name, _)| *name)
-        .filter(|name| failed.is_empty() || failed.contains(name))
+        .filter(|name| freed.contains(name))
         .collect()
 }
 
@@ -1068,12 +1068,13 @@ impl Inner {
                 slots.command_steps.entry(project_id).or_insert(turn);
             }
         }
-        // Its proxy went with the app, so how it ends isn't about the work.
-        if reaches(attempt).is_some() {
-            self.record_event(&attempt.id, "networkLost", &json!({}));
-        }
         // A setup or check that left its exit code is over, whatever its pid looks like now.
         let ended = context.ended_while_away();
+        // Its proxy went with the app, so how it ends isn't about the work. Not for one that left
+        // its exit code: it's over, and how it ended is all there is to go by.
+        if reaches(attempt).is_some() && ended.flatten().is_none() {
+            self.record_event(&attempt.id, "networkLost", &json!({}));
+        }
         if alive && ended.is_none() {
             let mut context = context;
             if context.holds_project {
@@ -1684,10 +1685,7 @@ impl Inner {
         // A step that couldn't go on for lack of a domain waits for the person, before anything
         // judges it or sends it back: see `network`.
         let answer = m.result.as_ref().and_then(|r| r.structured_output.as_ref());
-        if let Some(needed) = self.lacks_network(&m.attempt_id, state, reason.as_ref(), answer) {
-            state = AttemptState::Blocked;
-            reason = Some(Reason::NetworkNeeded { needed });
-        }
+        self.waits_for_network(&m.attempt_id, &mut state, &mut reason, answer);
         // A check that ran and failed sends the work back to the builder: see `failed_checks`.
         let sent_back = self.failed_check_goes_back(&m.attempt_id, &mut state, &mut reason);
         self.keep_state(&m.attempt_id, state, reason.as_ref());

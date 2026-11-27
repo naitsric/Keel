@@ -713,6 +713,28 @@ fn with_domains(held: &[String], add: &[String], remove: &[String]) -> Vec<Strin
     domains
 }
 
+/// Forgets the offline variables freed by domains a project no longer allows. One allowed again
+/// later, by anyone, frees nothing by itself: only a person allowing it from a step that waits
+/// for it does.
+fn forget_freed(conn: &Connection, project_id: &str, allowed: &[String]) -> rusqlite::Result<()> {
+    let freed: Vec<String> = conn
+        .prepare("select distinct domain from freed_by_domain where project_id = ?1")?
+        .query_map([project_id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for domain in freed {
+        let still = allowed
+            .iter()
+            .any(|held| held.trim().eq_ignore_ascii_case(&domain));
+        if !still {
+            conn.execute(
+                "delete from freed_by_domain where project_id = ?1 and domain = ?2",
+                params![project_id, domain],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// What differs between what a project held and what it holds now, in the order the app shows it.
 /// With `kept_too`, also what it held and holds still.
 fn field_changes(
@@ -1301,6 +1323,9 @@ pub struct Retry<'a> {
     /// The step it retries, put off for a new setup to run first: it comes round again after
     /// that. The attempt that ran keeps how it ended.
     pub put_off: Option<&'a NewAttempt>,
+    /// For `networkAllowed`, when the retried attempt waited for domains and a person allowed
+    /// them: written with the attempt that repeats it, so it's only there once that one is.
+    pub allowed: Option<&'a serde_json::Value>,
 }
 
 /// A retry with the project's current commands: the run's steps with them, and what changed.
@@ -2159,6 +2184,7 @@ impl Store {
                     serde_json::to_string(&new_domains).unwrap_or_default()
                 ],
             )?;
+            forget_freed(&tx, project_id, &new_domains)?;
         }
         if changes.is_empty() && !restore {
             return Ok(ClientWrite::Done);
@@ -2385,7 +2411,8 @@ impl Store {
     }
 
     /// The offline variables freed by domains the project allows now: see `allow_domains`. One it
-    /// no longer allows frees nothing.
+    /// no longer allows frees nothing, and what it freed is forgotten as it's taken away: see
+    /// `forget_freed`.
     pub fn freed_variables(&self, project_id: &str) -> Result<Vec<String>> {
         let conn = self.lock();
         let allowed = allowed_domains(&conn, project_id)?.unwrap_or_default();
@@ -2482,7 +2509,8 @@ impl Store {
     }
 
     /// Saves what a person set. With `domains_seen`, a domain the project got since the form saw
-    /// those is kept, read and written in one go.
+    /// those is kept, read and written in one go. A domain that goes takes with it the offline
+    /// variables it freed.
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<()> {
         let mut conn = self.lock();
         let tx = conn.transaction()?;
@@ -2495,6 +2523,7 @@ impl Store {
             }
             None => settings.allowed_domains.clone(),
         };
+        forget_freed(&tx, id, &domains)?;
         tx.execute(
             "update project set github_account = ?2, check_command = ?3, allowed_domains = ?4, allowed_read = ?5, services = ?6, env = ?7, setup_command = ?8, default_workflow = ?9, sensitive_paths = ?10, allow_localhost = ?11 where id = ?1",
             params![
@@ -3100,6 +3129,9 @@ impl Store {
         };
         if let Some(by) = retry.requested {
             event("retryRequested", by)?;
+        }
+        if let Some(domains) = retry.allowed {
+            event("networkAllowed", domains)?;
         }
         if let Some(commands) = retry.commands {
             tx.execute(
@@ -4786,6 +4818,67 @@ mod tests {
         assert!(store.freed_variables("p").unwrap().is_empty());
     }
 
+    /// What a person freed by allowing a domain from a step doesn't come back when someone else
+    /// allows that domain again, such as an MCP client.
+    #[test]
+    fn a_domain_taken_away_and_allowed_again_frees_nothing() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_mcp_client("c1", "Bot", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        store
+            .set_mcp_client_can_manage_projects("c1", true)
+            .unwrap();
+        let private = "npm.mycorp.example";
+        let free = || {
+            let freed = [(private, "npm_config_offline")];
+            store.allow_domains("p", &[private.into()], &freed).unwrap();
+            assert_eq!(store.freed_variables("p").unwrap(), ["npm_config_offline"]);
+        };
+        let by_client = |add: &[&str], remove: &[&str]| {
+            let list = |of: &[&str]| of.iter().map(|d| (*d).to_owned()).collect::<Vec<_>>();
+            let edit = ClientProjectEdit {
+                add_domains: list(add),
+                remove_domains: list(remove),
+                ..ClientProjectEdit::default()
+            };
+            let done = store
+                .edit_project_for_mcp_client("c1", "p", &edit, false)
+                .unwrap();
+            assert!(matches!(done, ClientWrite::Done), "{done:?}");
+        };
+        let by_person = |domains: &[&str]| {
+            let settings = ProjectSettings {
+                allowed_domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+                ..ProjectSettings::default()
+            };
+            store.update_project("p", &settings).unwrap();
+        };
+
+        // The person takes it away in the project's settings, and a client adds it.
+        free();
+        by_person(&[]);
+        by_client(&[private], &[]);
+        assert_eq!(store.project("p").unwrap().allowed_domains, [private]);
+        assert!(store.freed_variables("p").unwrap().is_empty());
+
+        // A client takes it away, and the person writes it in the settings again.
+        free();
+        by_client(&[], &["NPM.mycorp.example"]);
+        by_person(&[private]);
+        assert!(store.freed_variables("p").unwrap().is_empty());
+
+        // Another domain coming or going leaves what this one freed.
+        free();
+        by_client(&["other.example"], &[]);
+        by_person(&[private]);
+        assert_eq!(store.freed_variables("p").unwrap(), ["npm_config_offline"]);
+        // Only a person allowing it from a step frees them again.
+        by_person(&[]);
+        free();
+    }
+
     fn project_reading(store: &Store, id: &str, read: &[&str]) {
         store
             .add_project(&Project {
@@ -5933,6 +6026,7 @@ mod tests {
                 event: &changes,
             }),
             put_off: Some(&put_off),
+            allowed: None,
         };
         let setup = || NewAttempt {
             kind: "setup".into(),
@@ -6014,6 +6108,7 @@ mod tests {
             reopens: false,
             commands: None,
             put_off: None,
+            allowed: None,
         };
         let again = NewAttempt {
             number: 2,

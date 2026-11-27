@@ -190,8 +190,10 @@ const CONFIGURE_PROJECT: &str = "Change a project's GitHub account, setup comman
                                  then name what to add in `addAllowedDomains` and what to take in \
                                  `removeAllowedDomains`. What you add is a host name, with `*.` in front for its \
                                  subdomains: no scheme, path, port or spaces. What you take is as list_projects \
-                                 shows it. You can't add `localhost`, a `.localhost` or \
-                                 `.local` name or an IP address: only the person does. They apply to steps that \
+                                 shows it. You can add at most 20 in one call, and no name of this Mac or of a \
+                                 local network (`localhost`, one with no dot, or one ending in `.local`, `.lan`, \
+                                 `.internal`, `.home`, `.corp` or the like) nor an IP address: only the person \
+                                 adds those. They apply to steps that \
                                  start from then on, also in runs already open; a check has no network, except one \
                                  the person repeats after allowing a domain it lacked. Adding one doesn't answer a \
                                  run that waits for it, which is the person's. Keel records which client changed it and \

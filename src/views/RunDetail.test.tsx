@@ -2470,29 +2470,33 @@ describe("a step waiting for a domain the project doesn't allow", () => {
   });
 
   const ALLOW = "Allow registry.npmjs.org in this project and go on";
+  const WITHOUT = "Go on without it";
 
-  it("only lets you allow after a moment, and not with a click that brings the window back", async () => {
+  it.each([
+    [ALLOW, "allow"],
+    [WITHOUT, "goWithout"],
+  ])("only takes “%s” after a moment, and not with a click that brings the window back", async (text, answer) => {
     await render(waiting([npm]));
-    expect(button(ALLOW)?.disabled).toBe(true);
-    await press(ALLOW);
+    expect(button(text)?.disabled).toBe(true);
+    await press(text);
     arm();
-    expect(button(ALLOW)?.disabled).toBe(false);
+    expect(button(text)?.disabled).toBe(false);
 
     act(() => void window.dispatchEvent(new Event("blur")));
-    expect(button(ALLOW)?.disabled).toBe(true);
+    expect(button(text)?.disabled).toBe(true);
     act(() => void window.dispatchEvent(new Event("focus")));
-    await press(ALLOW);
+    await press(text);
     expect(answered).toEqual([]);
 
     arm();
-    await press(ALLOW);
-    expect(answered).toEqual([{ attemptId: "builder-1", answer: "allow" }]);
+    await press(text);
+    expect(answered).toEqual([{ attemptId: "builder-1", answer }]);
   });
 
-  it("doesn't allow on Enter, which is what opens a run from the palette", async () => {
+  it.each([ALLOW, WITHOUT])("doesn't take “%s” on Enter, which is what opens a run from the palette", async (text) => {
     await show(waiting([npm]));
     const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
-    act(() => void button(ALLOW)?.dispatchEvent(enter));
+    act(() => void button(text)?.dispatchEvent(enter));
     expect(enter.defaultPrevented).toBe(true);
   });
 
@@ -2552,9 +2556,49 @@ describe("a step waiting for a domain the project doesn't allow", () => {
   it("says what Keel saw fail in a check, and that only the repeated one gets the network", async () => {
     await show(waiting(cargo, { stepId: "check", kind: "check", tools: "check" }));
     expect(page()).toContain("cargo failed because Keel keeps it offline");
-    expect(page()).toContain("A check has no network. Allowing repeats this one with network to them and to the project's other allowed domains");
+    expect(page()).toContain("A check has no network. Allowing repeats this one with network to them and nothing else.");
     expect(button("Allow index.crates.io, static.crates.io in this project and go on")).toBeDefined();
     expect(button("Go on without them")).toBeDefined();
+  });
+
+  it("says on a check's card that going on without it counts the check as failed and uses a round", async () => {
+    await show(waiting(cargo, { stepId: "check", kind: "check", tools: "check" }));
+    expect(page()).toContain("Going on without them counts this check as failed and sends the work back to the builder, which uses up a round.");
+    await show(waiting([{ domain: "registry.npmjs.org", tool: "npm" }], { stepId: "check", kind: "check", tools: "check" }));
+    expect(page()).toContain("Going on without it counts this check as failed and sends the work back to the builder, which uses up a round.");
+
+    // A builder that goes on without it goes on to the next step, and no round goes by.
+    await show(waiting([npm]));
+    expect(page()).not.toContain("counts this check as failed");
+    expect(page()).not.toContain("uses up a round");
+  });
+
+  it("says when allowing a domain Keel doesn't know also takes the package tools online, and how to undo it", async () => {
+    const own = { domain: "npm.mycorp.example", why: "our own packages", freesOffline: true };
+    await show(waiting([own, npm]));
+    expect(page()).toContain("Keel doesn't know npm.mycorp.example as a package registry, so it can't tell which tool it's for.");
+    expect(page()).toContain("Allowing it also stops Keel keeping the builder's package tools offline in this project (npm, pnpm, pip, uv, cargo, Go and Maven), which still reach only the allowed domains.");
+    expect(page()).toContain("To undo it, remove the domain in the project's settings.");
+
+    await show(waiting([own, { domain: "pip.mycorp.example", freesOffline: true }]));
+    expect(page()).toContain("Keel doesn't know npm.mycorp.example, pip.mycorp.example as package registries");
+    expect(page()).toContain("To undo it, remove those domains in the project's settings.");
+
+    // A registry Keel knows takes only its own tool online, by being allowed.
+    await show(waiting([npm]));
+    expect(page()).not.toContain("package registry");
+    expect(page()).not.toContain("To undo it");
+  });
+
+  it("says the domain was added all the same when the step couldn't be started over", async () => {
+    mockIPC((command) => {
+      if (command === "network_answer") throw { code: "blocked", reason: { code: "domainAllowedNotStarted", domains: ["registry.npmjs.org", "pypi.org"], detail: "Not a directory (os error 20)" }, detail: null };
+      return [];
+    });
+    await show(waiting([npm]));
+    await press(ALLOW);
+    expect(errors).toEqual(["The project now allows registry.npmjs.org, pypi.org, but the step couldn't be started over: Not a directory (os error 20). It still waits here: choose “Allow” again to start it over, or remove what was added in the project's settings."]);
+    expect(button(ALLOW)?.disabled).toBe(false);
   });
 
   it("says why when the answer can't be taken", async () => {
@@ -2563,9 +2607,9 @@ describe("a step waiting for a domain the project doesn't allow", () => {
       return [];
     });
     await show(waiting([npm]));
-    await press("Go on without it");
+    await press(WITHOUT);
     expect(errors).toHaveLength(1);
-    expect(button("Go on without it")?.disabled).toBe(false);
+    expect(button(WITHOUT)?.disabled).toBe(false);
   });
 
   it("shows a builder's final message in its activity as what it said, not as the answer that carries it", () => {
@@ -2581,5 +2625,11 @@ describe("a step waiting for a domain the project doesn't allow", () => {
     await show(waiting([npm]));
     expect(buttons()).toEqual(["Permitir registry.npmjs.org en este proyecto y seguir", "Seguir sin él", "Detener"]);
     expect(page()).toContain("builder necesita red que el proyecto no permite");
+
+    await show(waiting([{ domain: "npm.mycorp.example", freesOffline: true }], { stepId: "check", kind: "check", tools: "check" }));
+    expect(page()).toContain("Si lo permites, esta se repite con red solo hacia él.");
+    expect(page()).toContain("Seguir sin él da esta verificación por fallida y le devuelve el trabajo al builder, lo que gasta una ronda.");
+    expect(page()).toContain("Keel no conoce npm.mycorp.example como registro de paquetes, así que no sabe de qué herramienta es.");
+    expect(page()).toContain("Para deshacerlo, quita el dominio en los ajustes del proyecto.");
   });
 });
