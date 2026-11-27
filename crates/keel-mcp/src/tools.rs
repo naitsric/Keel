@@ -2998,6 +2998,9 @@ fn client_refusal(refusal: ClientRefusal) -> ToolError {
             "{} is already in Keel, with the id {}. configure_project changes its GitHub account and commands.",
             project.name, project.id
         )),
+        ClientRefusal::AccountsUnavailable { detail } => ToolError::new(format!(
+            "Keel couldn't ask `gh` which GitHub accounts it has, so nothing was added or changed: {detail}. Try again later, or ask the person to look at `gh` on their Mac."
+        )),
         ClientRefusal::UnknownAccount { login, known } => {
             let known = if known.is_empty() {
                 "none".to_owned()

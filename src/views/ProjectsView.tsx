@@ -4,11 +4,12 @@ import { useTranslation } from "react-i18next";
 import { api, type CiGap, type EnvVar, type GithubStatus, type IssueWatch, type Project, type Service, type Workflow } from "../lib/api";
 import { formatRelative } from "../lib/format";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
-import { ciCommandsLeft, ciLeftOutLeft, foldersToOffer, needsNode, needsSetup, withCheckOption, withFolders } from "../lib/projects";
+import { ciCommandsLeft, ciLeftOutLeft, type Configured, configuredChanges, foldersToOffer, needsNode, needsSetup, withCheckOption, withFolders } from "../lib/projects";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
 import { Button, Card, cx, Field, inputClass } from "../ui/primitives";
 import { AddProjectButton, useAddProject } from "./AddProject";
+import { ProjectChangedNotice } from "./ProjectChangedNotice";
 import { RemoveProjectDialog } from "./RemoveProjectDialog";
 import { FolderOffers, useToolFolders } from "./ToolFolders";
 
@@ -68,10 +69,60 @@ function ServiceRow({ service, onChange, onRemove }: { service: Service; onChang
 }
 
 /**
- * The card reads its values only as it mounts, so it has to start over when the setup dialog changes
- * them, or its next Save would put the old ones back. That includes the folders the dialog adds.
+ * The card reads most of its values only as it mounts, so it has to start over when the setup dialog
+ * changes them, or its next Save would put the old ones back: the folders it adds and localhost. The
+ * account and the commands aren't here. A client can change them at any moment, and starting over
+ * would drop what the person hasn't saved, so the card follows them: see `useSavedConfiguration`.
  */
-export const projectCardKey = (project: Project) => [project.id, project.githubAccount, project.githubRepo, project.setupCommand, project.checkCommand, ...project.allowedRead].join("\0");
+export const projectCardKey = (project: Project) => [project.id, project.githubRepo, project.allowLocalhost, ...project.allowedRead].join("\0");
+
+/**
+ * The account and commands as the form holds them. When the saved ones change under it, a field the
+ * person hasn't edited takes the new value and an edited one stays. `byClient` has the fields an MCP
+ * client changed since the form opened or was last saved.
+ */
+function useSavedConfiguration(project: Project) {
+  const [account, setAccount] = useState(project.githubAccount ?? NONE);
+  const [setup, setSetup] = useState(project.setupCommand ?? "");
+  const [check, setCheck] = useState(project.checkCommand ?? "");
+  const [byClient, setByClient] = useState<(keyof Configured)[]>([]);
+  const seen = useRef<Configured>(project);
+  const [openedAt] = useState(() => Date.now());
+  const announced = useRef(0);
+  const { id, githubAccount, setupCommand, checkCommand } = project;
+
+  useEffect(() => {
+    const before = seen.current;
+    const now = { githubAccount, setupCommand, checkCommand };
+    const changed = configuredChanges(before, now);
+    if (changed.length === 0) return;
+    seen.current = now;
+    setAccount((held) => (held === (before.githubAccount ?? NONE) ? (now.githubAccount ?? NONE) : held));
+    setSetup((held) => (held === (before.setupCommand ?? "") ? (now.setupCommand ?? "") : held));
+    setCheck((held) => (held === (before.checkCommand ?? "") ? (now.checkCommand ?? "") : held));
+    // The change may be the person's, from the setup dialog. The record of what clients did says.
+    api
+      .mcpOverview()
+      .then(({ projectChanges }) => {
+        const news = projectChanges.filter((c) => c.projectId === id && c.seq > announced.current && Date.parse(c.at) >= openedAt);
+        if (news.length === 0) return;
+        announced.current = Math.max(...news.map((c) => c.seq));
+        setByClient((fields) => [...new Set([...fields, ...changed])]);
+      })
+      .catch(() => undefined);
+  }, [id, githubAccount, setupCommand, checkCommand, openedAt]);
+
+  /** After a save of `sent`, shows it as Keel wrote it, unless the person has typed since. */
+  const takeSaved = (sent: { account: string; setup: string; check: string }, now: Project) => {
+    seen.current = now;
+    setAccount((held) => (held === sent.account ? (now.githubAccount ?? NONE) : held));
+    setSetup((held) => (held === sent.setup ? (now.setupCommand ?? "") : held));
+    setCheck((held) => (held === sent.check ? (now.checkCommand ?? "") : held));
+    setByClient([]);
+  };
+
+  return { account, setAccount, setup, setSetup, check, setCheck, byClient, takeSaved };
+}
 
 /** What the last look at the project's issues found, or why it couldn't look. */
 function IssueWatchLine({ watch, looking }: { watch: IssueWatch | null; looking: boolean }) {
@@ -106,9 +157,7 @@ function IssueWatchLine({ watch, looking }: { watch: IssueWatch | null; looking:
 function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boolean; onSaved: () => void }) {
   const { t, i18n } = useTranslation();
   const refreshOverview = useApp((s) => s.refreshOverview);
-  const [account, setAccount] = useState(project.githubAccount ?? NONE);
-  const [setup, setSetup] = useState(project.setupCommand ?? "");
-  const [check, setCheck] = useState(project.checkCommand ?? "");
+  const { account, setAccount, setup, setSetup, check, setCheck, byClient, takeSaved } = useSavedConfiguration(project);
   const [domains, setDomains] = useState(project.allowedDomains.join("\n"));
   const [paths, setPaths] = useState(project.allowedRead.join("\n"));
   const [services, setServices] = useState<Service[]>(project.services);
@@ -176,7 +225,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
     return () => {
       current = false;
     };
-  }, [project.id]);
+  }, [project.id, project.checkCommand]);
 
   // What the last look at the issues found, or, when none has for this label, what a look now
   // finds. Keyed by the saved label, so saving one looks even if this form starts over meanwhile.
@@ -200,7 +249,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
       current = false;
       setLooking(false);
     };
-  }, [project.id, project.issueLabel, t]);
+  }, [project.id, project.issueLabel, project.githubAccount, t]);
 
   const openOnGithub = (url: string) => {
     setError(null);
@@ -234,6 +283,8 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
         issueLabel: label.trim() || null,
       });
       await refreshOverview();
+      const now = useApp.getState().overview.projects.find((p) => p.id === project.id);
+      if (now) takeSaved({ account, setup, check }, now);
       onSaved();
       load();
     } catch (e) {
@@ -436,7 +487,8 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
         </Section>
 
         {/* Stays in view while the form scrolls, so saving is never a search. */}
-        <div className="sticky -bottom-5 z-10 -mx-5 -mb-5 flex items-center gap-2 rounded-b-lg border-t border-border bg-elevated px-5 py-3">
+        <div className="sticky -bottom-5 z-10 -mx-5 -mb-5 flex flex-wrap items-center gap-2 rounded-b-lg border-t border-border bg-elevated px-5 py-3">
+          {byClient.length > 0 && <ProjectChangedNotice title={t("projects.clientChanged")} saved={project} fields={byClient} />}
           <Button variant="primary" onClick={() => void save()}>
             {t("settings.save")}
           </Button>

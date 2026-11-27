@@ -1254,7 +1254,9 @@
     "proposalGone": "This folder isn't a git repository with commits anymore, so all you can do is discard it.",
     "proposalNotNow": "Not now",
     "proposalDiscard": "Discard",
-    "proposalAdd": "Add project"
+    "proposalAdd": "Add project",
+    "clientChanged": "A client changed this project.",
+    "changedKept": "Saved now, as below. What you had edited is still in its field, and saving puts it in place of this."
   },
   "setup": {
     "titleNew": "{{name}} is added",
@@ -1298,6 +1300,7 @@
     "mapSignedOut": "You aren't signed in to Claude Code, so Keel can't write this project's map yet. Sign in, then start it from the Brain.",
     "mapFailed": "Keel couldn't start this project's map. {{reason}} You can start it from the Brain.",
     "openBrain": "Open the Brain",
+    "changed": "This project changed while this was open.",
     "moreOptions": "More options are in Settings.",
     "later": "Later",
     "save": "Save"

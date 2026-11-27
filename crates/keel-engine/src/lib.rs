@@ -160,6 +160,8 @@ pub struct Config {
     pub keep_awake: bool,
     /// How long `claude` gets to answer each question about the session.
     pub session_check_limit: Duration,
+    /// How long `gh` gets to say which accounts it has.
+    pub gh_accounts_limit: Duration,
     /// Where git reaches GitHub. Tests point this at local repos.
     pub github_git_base: String,
     /// How long what Keel knows about a pull request is good for, in the background.
@@ -189,6 +191,7 @@ impl Config {
             max_agents: 2,
             keep_awake: true,
             session_check_limit: auth::CHECK_LIMIT,
+            gh_accounts_limit: github::ACCOUNTS_LIMIT,
             github_git_base: "https://github.com".to_owned(),
             pr_look_again: pull_requests::LOOK_AGAIN,
             issue_look_again: issues::LOOK_AGAIN,
@@ -864,7 +867,9 @@ impl Engine {
 
     /// The accounts signed in to `gh`. Never changes the active one.
     pub fn github_accounts(&self) -> Result<Vec<github::Account>> {
-        self.gh()?.accounts().map_err(gh_blocked)
+        self.gh()?
+            .accounts(self.inner.config.gh_accounts_limit)
+            .map_err(gh_blocked)
     }
 
     /// The accounts in `gh`, and what `account` can do in the project's repo. It takes the account
@@ -886,7 +891,9 @@ impl Engine {
                 return Ok(status);
             }
         };
-        status.accounts = gh.accounts().map_err(gh_blocked)?;
+        status.accounts = gh
+            .accounts(self.inner.config.gh_accounts_limit)
+            .map_err(gh_blocked)?;
         let Some(chosen) =
             account.and_then(|login| status.accounts.iter().find(|a| a.login == login))
         else {

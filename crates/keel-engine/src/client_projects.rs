@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use keel_core::Reason;
 use keel_store::{ClientProjectEdit, ClientWrite, Project};
 
 use crate::project_proposals::{hides_text, readable_path};
@@ -39,6 +40,10 @@ pub enum ClientRefusal {
     /// The folder's path has characters that could hide what it is.
     UnreadablePath,
     AlreadyInKeel(Box<Project>),
+    /// `gh` couldn't say which accounts it has, so the one given couldn't be checked.
+    AccountsUnavailable {
+        detail: String,
+    },
     /// `gh` has no account by that name. `known` are the ones it has.
     UnknownAccount {
         login: String,
@@ -134,7 +139,7 @@ impl Engine {
             return Ok(Err(ClientRefusal::AlreadyInKeel(Box::new(project.clone()))));
         }
         let login = edit.github_account.clone().unwrap_or_default();
-        if let Some(refusal) = self.unknown_account(&login)? {
+        if let Some(refusal) = self.account_refusal(&login)? {
             return Ok(Err(refusal));
         }
 
@@ -198,7 +203,7 @@ impl Engine {
             Err(refusal) => return Ok(Err(refusal)),
         };
         if let Some(login) = &edit.github_account
-            && let Some(refusal) = self.unknown_account(login)?
+            && let Some(refusal) = self.account_refusal(login)?
         {
             return Ok(Err(refusal));
         }
@@ -216,12 +221,16 @@ impl Engine {
         Ok(Ok(project))
     }
 
-    fn unknown_account(&self, login: &str) -> Result<Option<ClientRefusal>> {
-        let known: Vec<String> = self
-            .github_accounts()?
-            .into_iter()
-            .map(|account| account.login)
-            .collect();
+    /// Why this account can't be a project's, if it can't.
+    fn account_refusal(&self, login: &str) -> Result<Option<ClientRefusal>> {
+        let accounts = match self.github_accounts() {
+            Ok(accounts) => accounts,
+            Err(Error::Blocked(Reason::DeliveryFailed { detail, .. })) => {
+                return Ok(Some(ClientRefusal::AccountsUnavailable { detail }));
+            }
+            Err(error) => return Err(error),
+        };
+        let known: Vec<String> = accounts.into_iter().map(|account| account.login).collect();
         Ok(
             (!known.iter().any(|known| known == login)).then(|| ClientRefusal::UnknownAccount {
                 login: login.to_owned(),

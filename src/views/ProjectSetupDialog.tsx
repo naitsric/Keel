@@ -1,12 +1,13 @@
 import { AlertTriangle, Check, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { api, type Attempt, type AuditEvent, type GithubStatus, type MapStart, type ProjectSetup } from "../lib/api";
+import { api, type Attempt, type AuditEvent, type GithubStatus, type MapStart, type Project, type ProjectSetup } from "../lib/api";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
-import { accountToSelect, checkOptionsLeft, commandNotFound, foldersToOffer, needsNode, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withFolders, withSetup, withSetupOption } from "../lib/projects";
+import { accountToSelect, checkOptionsLeft, commandNotFound, type Configured, configuredChanges, foldersToOffer, needsNode, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withFolders, withSetup, withSetupOption } from "../lib/projects";
 import { errorText, needsSignIn, reasonText } from "../lib/reason";
 import { type ProjectSetupRequest, useApp } from "../lib/store";
 import { Button, cx, Field, inputClass, Modal } from "../ui/primitives";
+import { ProjectChangedNotice } from "./ProjectChangedNotice";
 import { FolderChoices, useToolFolders } from "./ToolFolders";
 
 const NONE = "__none__";
@@ -175,24 +176,55 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
   const [error, setError] = useState<string | null>(null);
   const latestRequest = useRef(0);
   const chose = useRef(false);
+  const typed = useRef({ setup: false, check: false });
+  // The saved account and commands that changed while this was open.
+  const [changed, setChanged] = useState<(keyof Configured)[]>([]);
 
   // Reads the folder first: `origin` may have changed, and GitHub is asked about what it says now.
   useEffect(() => {
     let current = true;
     api
       .projectSetup(projectId)
-      .then((next) => {
+      .then(async (next) => {
+        // Before showing it, so that nothing older than this is ever taken for a change. A refresh
+        // that fails doesn't keep the dialog from opening: saving asks again.
+        await refreshOverview().catch(() => undefined);
         if (!current) return;
         setInfo(next);
         setCheck(next.project.checkCommand ?? next.guess.check ?? "");
         setSetup(next.project.setupCommand ?? next.guess.setup ?? "");
-        void refreshOverview();
       })
       .catch((e) => current && setError(errorText(t, e)));
     return () => {
       current = false;
     };
   }, [projectId, refreshOverview, t]);
+
+  /**
+   * Takes in the account and commands saved since they were last shown here, by an MCP client for
+   * one. What the person typed or chose stays. Says whether there was anything.
+   */
+  const catchUp = (now: Project) => {
+    if (!info) return false;
+    const fields = configuredChanges(info.project, now);
+    if (fields.length === 0) return false;
+    const { githubAccount, setupCommand, checkCommand } = now;
+    setInfo({ ...info, project: { ...info.project, githubAccount, setupCommand, checkCommand } });
+    if (fields.includes("githubAccount") && !chose.current) setAccount(githubAccount ?? NONE);
+    const newSetup = fields.includes("setupCommand") && !typed.current.setup;
+    const newCheck = fields.includes("checkCommand") && !typed.current.check;
+    if (newSetup) setSetup(setupCommand ?? "");
+    if (newCheck) setCheck(checkCommand ?? "");
+    if (newSetup || newCheck) forgetTrial();
+    setChanged((before) => [...new Set([...before, ...fields])]);
+    return true;
+  };
+
+  const listed = useApp((s) => s.overview.projects.find((p) => p.id === projectId));
+  useEffect(() => {
+    if (listed) catchUp(listed);
+    // Only a change to what's saved, or the first sight of it, is news.
+  }, [info === null, listed?.githubAccount, listed?.setupCommand, listed?.checkCommand]);
 
   const saved = info?.project.githubAccount ?? null;
   const known = info !== null;
@@ -272,10 +304,12 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
     setTrying(false);
   };
   const changeCheck = (value: string) => {
+    typed.current.check = true;
     setCheck(value);
     forgetTrial();
   };
   const changeSetup = (value: string) => {
+    typed.current.setup = true;
     setSetup(value);
     forgetTrial();
   };
@@ -307,11 +341,15 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
       setError(t("reasons.githubAccountMissing"));
       return;
     }
-    // Fresh, because Settings or an assistant may have changed something since this opened.
-    const project = useApp.getState().overview.projects.find((p) => p.id === projectId) ?? info?.project;
-    if (!project) return;
+    if (!info) return;
     setBusy(true);
     try {
+      // Fresh, because Settings or an assistant may have changed something since this opened.
+      await refreshOverview();
+      const project = useApp.getState().overview.projects.find((p) => p.id === projectId) ?? info.project;
+      // An account or command saved since this showed it isn't written over unseen: it's shown
+      // first, and saving again is the person's call.
+      if (catchUp(project)) return;
       await api.projectUpdate(projectId, withSetup(project, { githubAccount: showAccounts ? selected : project.githubAccount, setupCommand: setup, checkCommand: check, allowedRead: withFolders(project.allowedRead, chosen), allowLocalhost: project.allowLocalhost || openLocalhost }));
       await refreshOverview();
       closeSetup();
@@ -439,6 +477,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
           }
         />
       )}
+      {info && changed.length > 0 && <ProjectChangedNotice title={t("setup.changed")} saved={info.project} fields={changed} />}
       {error && (
         <p role="alert" className="text-[12px] text-danger">
           {error}

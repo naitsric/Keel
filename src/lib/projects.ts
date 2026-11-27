@@ -13,6 +13,13 @@ export const needsSetup = (project: Project) => !project.checkCommand || (Boolea
  */
 export const withSetup = (project: Project, change: Pick<ProjectSettings, "githubAccount" | "setupCommand" | "checkCommand"> & Partial<Pick<ProjectSettings, "allowedRead" | "allowLocalhost">>): ProjectSettings => ({ ...project, ...change });
 
+/** What an MCP client may set, so what can change under a form that's open. */
+export type Configured = Pick<Project, "githubAccount" | "setupCommand" | "checkCommand">;
+const CONFIGURED = ["githubAccount", "setupCommand", "checkCommand"] as const;
+
+/** Which of them aren't what they were. */
+export const configuredChanges = (before: Configured, now: Configured) => CONFIGURED.filter((field) => before[field] !== now[field]);
+
 /** One way of writing each folder: with `~` for the home folder and no `/` at the end. */
 const sameFolder = (folder: string) => shortPath(folder.trim()).replace(/\/+$/, "");
 

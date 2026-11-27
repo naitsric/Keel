@@ -53,6 +53,10 @@ fn git(repo: &Path, args: &[&str]) {
 }
 
 fn world() -> World {
+    world_with(|_| {})
+}
+
+fn world_with(set: impl FnOnce(&mut Config)) -> World {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
@@ -63,6 +67,7 @@ fn world() -> World {
     let mut config = Config::new(dir.path().join("data"));
     config.tick = Duration::from_millis(20);
     config.keep_awake = false;
+    set(&mut config);
     let engine = Engine::new(store.clone(), config, tools, |_| {});
     let server = McpServer::new(engine.clone(), store.clone());
     World {
@@ -734,6 +739,59 @@ async fn list_projects_still_answers_without_gh() {
 
     assert_eq!(listed["projects"], json!([]));
     assert_eq!(listed["githubAccounts"], Json::Null);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gh_that_never_finishes_is_given_up_on_and_leaves_the_client_its_turn() {
+    let w = world_with(|config| config.gh_accounts_limit = Duration::from_millis(300));
+    let bot = w.manager();
+    let there = w.repo("there");
+    let there = w.engine.add_project(Path::new(&there)).unwrap();
+    let path = w.repo("app");
+    keel_harness::testing::write_script(
+        &w.dir.path().join("bin/gh"),
+        "#!/bin/bash\nsleep 60 &\nwait\n",
+    )
+    .unwrap();
+
+    // Well under what the fake `gh` takes, so a call that waited for it fails here.
+    let soon = Duration::from_secs(20);
+    let listed = tokio::time::timeout(soon, w.list(&bot)).await.unwrap();
+    assert_eq!(listed["githubAccounts"], Json::Null);
+    assert_eq!(listed["projects"][0]["id"], json!(there.id));
+
+    let add = json!({ "path": path, "githubAccount": "alice" });
+    let configure = json!({ "project": "there", "githubAccount": "alice", "checkCommand": "true" });
+    let refusals = [
+        tokio::time::timeout(soon, w.add(&bot, add)).await.unwrap(),
+        tokio::time::timeout(soon, w.configure(&bot, configure))
+            .await
+            .unwrap(),
+    ];
+    for refusal in refusals {
+        let refusal = refusal.unwrap_err().0;
+        assert!(
+            refusal.contains("couldn't ask `gh` which GitHub accounts"),
+            "{refusal}"
+        );
+        assert!(refusal.contains("longer than"), "{refusal}");
+        assert!(
+            refusal.contains("nothing was added or changed"),
+            "{refusal}"
+        );
+    }
+    assert_eq!(w.store.projects().unwrap().len(), 1);
+    let now = w.store.project(&there.id).unwrap();
+    assert_eq!((now.github_account, now.check_command), (None, None));
+    assert!(w.store.mcp_project_changes(10).unwrap().is_empty());
+
+    // The client's turn is free again: its next change goes through. One with no account
+    // doesn't ask `gh` at all.
+    let configure = json!({ "project": "there", "checkCommand": "true" });
+    tokio::time::timeout(soon, w.configure(&bot, configure))
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread")]

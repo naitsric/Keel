@@ -1254,7 +1254,9 @@
     "proposalGone": "Esta carpeta ya no es un repositorio de git con commits, así que solo se puede descartar.",
     "proposalNotNow": "Ahora no",
     "proposalDiscard": "Descartar",
-    "proposalAdd": "Agregar proyecto"
+    "proposalAdd": "Agregar proyecto",
+    "clientChanged": "Un cliente cambió este proyecto.",
+    "changedKept": "Abajo está lo guardado ahora. Lo que habías editado sigue en su campo, y al guardar reemplaza esto."
   },
   "setup": {
     "titleNew": "{{name}} quedó agregado",
@@ -1298,6 +1300,7 @@
     "mapSignedOut": "No has iniciado sesión en Claude Code, así que Keel todavía no puede escribir el mapa de este proyecto. Inicia sesión y arráncalo desde el Brain.",
     "mapFailed": "Keel no pudo arrancar el mapa de este proyecto. {{reason}} Puedes arrancarlo desde el Brain.",
     "openBrain": "Abrir el Brain",
+    "changed": "Este proyecto cambió mientras este diálogo estaba abierto.",
     "moreOptions": "Hay más opciones en Ajustes.",
     "later": "Después",
     "save": "Guardar"

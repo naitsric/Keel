@@ -1,8 +1,8 @@
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { callsTo, hideApp, paletteRow, pressKey, pressMod, row, setCiGap, setIssueWatch, setToolFolders, settle, showApp, view } from "../commands/testApp";
+import { callsTo, hideApp, paletteRow, pressKey, pressMod, row, setCiGap, setIssueWatch, setProjectChanges, setToolFolders, settle, showApp, view } from "../commands/testApp";
 import i18next from "../i18n";
-import type { IssueWatch, Project } from "../lib/api";
+import type { IssueWatch, McpProjectChange, Project } from "../lib/api";
 import { useApp } from "../lib/store";
 
 const RUNS = [row("r1", "running")];
@@ -131,6 +131,99 @@ describe("the Projects page", () => {
     });
   });
 
+  describe("a change to the project while its form is open", () => {
+    const START = project("alpha", { setupCommand: "make deps", checkCommand: "make test" });
+    const input = (label: string) => [...main().querySelectorAll("label")].find((l) => l.textContent?.startsWith(label))?.querySelector("input") as HTMLInputElement;
+    const setupBox = () => input(i18next.t("settings.setupCommand"));
+    const checkBox = () => input(i18next.t("settings.checkCommand"));
+    const notice = () => main().querySelector('[role="status"]')?.textContent ?? "";
+    const saved = () => (callsTo("project_update").at(-1)?.args as { settings: Project }).settings;
+    const record = (seq: number, at = new Date().toISOString()): McpProjectChange => ({ seq, clientId: "c1", clientName: "Bot", projectId: "alpha", projectName: "alpha", projectPath: "/Users/you/alpha", githubRepo: "acme/alpha", action: "configured", changes: [], at });
+    const change = async (fields: Partial<Project>) => {
+      act(() => useApp.setState({ overview: { ...useApp.getState().overview, projects: [{ ...useApp.getState().overview.projects[0], ...fields }] } }));
+      await settle();
+    };
+
+    it("keeps what the person hadn't saved, takes a client's values in the rest, and says a client changed it", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      await typeInto(envBox(), "A=1");
+      await typeInto(setupBox(), "make mine");
+      expect(notice()).toBe("");
+
+      setProjectChanges([record(1)]);
+      await change({ githubAccount: "bot-account", setupCommand: "make theirs", checkCommand: "make check" });
+
+      expect(envBox().value).toBe("A=1");
+      expect(setupBox().value).toBe("make mine");
+      expect(checkBox().value).toBe("make check");
+      expect(notice()).toContain(i18next.t("projects.clientChanged"));
+      expect(notice()).toContain(i18next.t("projects.changedKept"));
+      // What's saved now, also for the field that still shows what the person typed.
+      for (const value of ["bot-account", "make theirs", "make check"]) expect(notice()).toContain(value);
+      // The CI hint is about the saved check.
+      expect(callsTo("project_ci_gap")).toHaveLength(2);
+      expect(callsTo("project_update")).toEqual([]);
+
+      await click(button(i18next.t("settings.save")));
+      expect(saved()).toMatchObject({ githubAccount: "bot-account", setupCommand: "make mine", checkCommand: "make check", env: [{ name: "A", value: "1" }] });
+      expect(notice()).toBe("");
+    });
+
+    it("takes a command the client removed", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      setProjectChanges([record(1)]);
+      await change({ setupCommand: null });
+      expect(setupBox().value).toBe("");
+      expect(notice()).toContain(i18next.t("mcp.noValue"));
+    });
+
+    it("says nothing of a client when none made the change", async () => {
+      // One from before the form opened says nothing about what changes now.
+      setProjectChanges([record(1, "2026-01-01T00:00:00.000Z")]);
+      await showApp(RUNS, { name: "projects" }, [START]);
+      await typeInto(envBox(), "A=1");
+      await change({ checkCommand: "make check" });
+      expect(checkBox().value).toBe("make check");
+      expect(envBox().value).toBe("A=1");
+      expect(notice()).toBe("");
+    });
+
+    it("doesn't announce a client's change again when something else changes the project", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      setProjectChanges([record(1)]);
+      await change({ checkCommand: "make check" });
+      await click(button(i18next.t("settings.save")));
+      await change({ checkCommand: "make other" });
+      expect(checkBox().value).toBe("make other");
+      expect(notice()).toBe("");
+    });
+
+    it("shows what was saved once the person saves, as Keel wrote it", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      const write = useApp.subscribe((state) => {
+        const [now] = state.overview.projects;
+        if (now.checkCommand !== now.checkCommand?.trim()) useApp.setState({ overview: { ...state.overview, projects: [{ ...now, checkCommand: now.checkCommand?.trim() ?? null }] } });
+      });
+      await typeInto(checkBox(), "make all  ");
+      await click(button(i18next.t("settings.save")));
+      write();
+      expect(checkBox().value).toBe("make all");
+    });
+
+    it("still starts over when the setup dialog opens localhost, so saving here doesn't close it", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      await change({ allowLocalhost: true });
+      await click(button(i18next.t("settings.save")));
+      expect(saved().allowLocalhost).toBe(true);
+    });
+
+    it("has its words in both languages", () => {
+      for (const key of ["projects.clientChanged", "projects.changedKept", "setup.changed"]) {
+        for (const lng of ["en", "es"]) expect(i18next.exists(key, { lng, fallbackLng: [] }), `${lng} ${key}`).toBe(true);
+      }
+    });
+  });
+
   it("refuses an env line without = and saves a valid one, saying so", async () => {
     await showApp(RUNS, { name: "projects" }, THREE);
     await typeInto(envBox(), "nope");
@@ -204,11 +297,11 @@ describe("the Projects page", () => {
     it("still looks and shows it when the same save makes the form start over", async () => {
       await showApp(RUNS, { name: "projects" }, [project("alpha")]);
       setIssueWatch(WATCH, { stored: false });
-      const check = [...main().querySelectorAll("label")].find((l) => l.textContent?.startsWith(i18next.t("settings.checkCommand")))?.querySelector("input") as HTMLInputElement;
-      await typeInto(check, "make test-all");
+      const read = [...main().querySelectorAll("label")].find((l) => l.textContent?.startsWith(i18next.t("settings.readPaths")))?.querySelector("textarea") as HTMLTextAreaElement;
+      await typeInto(read, "~/.nvm");
       await typeInto(field() as HTMLInputElement, "keel");
       await click(button(i18next.t("settings.save")));
-      expect(saved().checkCommand).toBe("make test-all");
+      expect(saved().allowedRead).toEqual(["~/.nvm"]);
       expect(field()?.value).toBe("keel");
       expect(callsTo("issues_look")).toHaveLength(1);
       expect(main().textContent).toContain(i18next.t("projects.issueWatch.brought", { count: 2 }));
