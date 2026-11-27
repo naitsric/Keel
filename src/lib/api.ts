@@ -37,6 +37,20 @@ export type CiState = "pending" | "passed" | "failed" | "noCi";
 /** A code with its data. The backend sends no sentences; `reasonText` writes them. */
 export type Reason = { code: string } & Record<string, unknown>;
 
+/** A domain a step lacked network to, as the `networkNeeded` reason has it. */
+export interface NeededDomain {
+  domain: string;
+  /** What it was needed for, in the agent's own words. */
+  why?: string;
+  /** The tool Keel saw fail for being offline. */
+  tool?: string;
+  /** It's no registry Keel knows: allowing it also lets the builder's package tools go online in this project. */
+  freesOffline?: boolean;
+}
+
+/** What a person says to a step waiting for a domain. */
+export type NetworkAnswer = "allow" | "goWithout" | "stop";
+
 export interface AuthStatus {
   loggedIn: boolean;
   method: string | null;
@@ -124,6 +138,8 @@ export interface ProjectSettings {
   sensitivePaths: string[];
   allowLocalhost: boolean;
   issueLabel: string | null;
+  /** Not a setting: the saved domains the form had seen. One the project got since then isn't taken away by saving. */
+  domainsSeen?: string[];
 }
 
 /** A folder in the home folder where programs a project's commands use are installed. */
@@ -206,7 +222,7 @@ export interface McpClient {
   canRun: boolean;
   /** May send work back and retry on the runs it started, and add a note to their cards while they wait. Only with `canRun`. */
   canSteer: boolean;
-  /** May add projects and change their GitHub account and setup and check commands. Only with `canRun`. */
+  /** May add projects and change their GitHub account, setup and check commands and allowed domains, though only the person adds a name of this Mac or of a local network, or an IP address. Only with `canRun`. */
   canManageProjects: boolean;
   /** How many of its runs may be open at once, counting those that wait for the person. */
   maxOpenRuns: number;
@@ -239,7 +255,8 @@ export interface McpProjectChange {
   projectPath: string;
   githubRepo: string | null;
   action: "added" | "restored" | "configured";
-  changes: { field: "githubAccount" | "setupCommand" | "checkCommand"; before: string | null; after: string | null }[];
+  /** `allowedDomains` has one domain a line. */
+  changes: { field: "githubAccount" | "setupCommand" | "checkCommand" | "allowedDomains"; before: string | null; after: string | null }[];
   at: string;
 }
 
@@ -915,6 +932,7 @@ export const api = {
   workflowDraftSave: (projectId: string, draftId: string, workflow: Workflow) => invoke<Workflow>("workflow_draft_save", { projectId, draftId, workflow }),
   workflowDraftDiscard: (projectId: string, draftId: string) => invoke<void>("workflow_draft_discard", { projectId, draftId }),
   reworkLimitAnswer: (attemptId: string, anotherRound: boolean) => invoke<void>("rework_limit_answer", { attemptId, anotherRound }),
+  networkAnswer: (attemptId: string, answer: NetworkAnswer) => invoke<void>("network_answer", { attemptId, answer }),
   runAttempts: (runId: string) => invoke<Attempt[]>("run_attempts", { runId }),
   projectUpdate: (projectId: string, settings: ProjectSettings) => invoke<Project>("project_update", { projectId, settings }),
   githubStatus: (projectId: string, account: string | null) => invoke<GithubStatus>("github_status", { projectId, account }),

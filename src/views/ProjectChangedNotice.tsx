@@ -1,7 +1,7 @@
 import { AlertTriangle } from "lucide-react";
 import { useId } from "react";
 import { useTranslation } from "react-i18next";
-import type { Configured } from "../lib/projects";
+import { type Configured, configuredValue } from "../lib/projects";
 
 /**
  * That a project changed under an open form, with what's saved now. `kept` are the fields where
@@ -24,7 +24,7 @@ export function ProjectChangedNotice({ title, saved, fields, kept }: { title: st
         {fields.map((field) => (
           <li key={field} className="break-all">
             <span className="text-muted">{t(`mcp.field.${field}`)}: </span>
-            <span className="selectable whitespace-pre-wrap font-mono text-[11.5px]">{saved[field] ?? t("mcp.noValue")}</span>
+            <span className="selectable whitespace-pre-wrap font-mono text-[11.5px]">{configuredValue(saved, field) ?? t("mcp.noValue")}</span>
             {kept.includes(field) && <span className="text-warning"> ({t("projects.yoursKept")})</span>}
           </li>
         ))}

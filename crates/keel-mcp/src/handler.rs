@@ -9,8 +9,9 @@
 //! note to a card that waits are only for a client the person also lets give feedback, and only on
 //! runs and cards it started. A client can propose a workflow or a project. Only the person saves
 //! the one. They add the other, as does a client they let add and configure projects, which may set
-//! a project's GitHub account and its setup and check commands, and none of its other settings. No
-//! tool changes what a client may do.
+//! a project's GitHub account, its setup and check commands and its allowed domains, and none of its
+//! other settings. Only the person answers a step that waits for a domain: a client that may start
+//! runs can stop it, and nothing else. No tool changes what a client may do.
 //! `tests/http.rs` fails if the list of tools grows without someone deciding so.
 
 use std::sync::Arc;
@@ -40,7 +41,9 @@ const LIST_PROJECTS: &str = "List the projects in Keel: each one's id, name, Git
                              that haven't been added yet, which aren't projects. `githubAccounts` are the GitHub \
                              accounts Keel has, each with its `login` and whether it's signed in (`ok`), for \
                              add_project and configure_project, which only a client the person allows may use. \
-                             It's null when Keel can't read them.";
+                             It's null when Keel can't read them. For such a client each project also lists \
+                             `allowedDomains`, the domains its builder may reach, which configure_project \
+                             adds to and removes from.";
 const LIST_WORKFLOWS: &str = "List the workflows a project can run: each one's id, name, and its steps with the \
                               model of each agent. start_run takes one of these ids. `drafts` are the ones \
                               proposed with draft_workflow that the person hasn't saved yet, which can't run.";
@@ -68,7 +71,13 @@ const GET_RUN: &str = "Get a run: its overall state (working, waitingForPerson, 
                        minute, and the answer shows on your next call. `waitingFor` \
                        says what it waits for: the `questions` the person has to answer, or whether an \
                        approval canSendBack, and `youCan`, the tools this client may use on it now. Answering \
-                       and approving are the person's, in Keel. In a change across projects, each of \
+                       and approving are the person's, in Keel. A step that builds, or a check, that lacks \
+                       network to a domain the project doesn't allow reads `blocked`, with the `reason` \
+                       networkNeeded: `needed` lists each `domain`, `why` as the builder said it or the \
+                       `tool` Keel saw fail offline. Only the person answers it, in Keel, by allowing it \
+                       or going on without it: there is no tool for either. A client that may start runs \
+                       can only stop the step, with stop_run. It spends no round. In a change across \
+                       projects, each of \
                        `jointChange.parts` has its `cardId` and `youCan`, the tools this client may use on \
                        that card now. `steps` lists each attempt with its state, \
                        model, cost, tokens and time, but not what it wrote or the files it changed: get_step \
@@ -164,22 +173,37 @@ const ADD_PROJECT: &str = "Add a git repository on this Mac to Keel as a project
                            it started. That map is a run of this client's, `mapRunId`, and counts toward the \
                            runs it may keep open. One the person had removed comes back with its history \
                            (`state` is restored), and its cards waiting in Todo start at once. Keel records which client added it and what it set, and shows the person. \
-                           Its network, folders, services, variables and other settings stay the person's. \
+                           A new one starts with no allowed domains and a restored one keeps those it had: \
+                           configure_project adds and removes them. Its folders, services, variables and other \
+                           settings stay the person's. \
                            Refused if it isn't a git repository with commits, the account isn't in \
                            `githubAccounts` of list_projects, or it's already in Keel.";
-const CONFIGURE_PROJECT: &str = "Change a project's GitHub account, setup command or check command. Only for a client \
-                                 the person lets add and configure projects, in Keel's settings: otherwise it's \
-                                 refused, and the change is theirs to make in the app. What you leave out stays, and \
-                                 an empty command removes it. The commands run on the person's Mac, so change only \
-                                 what they asked for. Commands apply to new runs; runs already open keep the ones \
-                                 they started with, which get_run lists in `commandsChanged`. The account applies \
-                                 at once, also to runs already open: the ones the person approves after this push \
-                                 and open their pull request with it. Keel records which \
-                                 client changed it and each value before and after, and shows the person. Nothing \
-                                 else about a project can be changed here.";
-const STOP_RUN: &str = "Ask whatever a run has working to stop. It doesn't close the run: close_run does that \
-                        for one this client started, and otherwise what happens next is the person's decision \
-                        in Keel. Refused if this client may only read.";
+const CONFIGURE_PROJECT: &str = "Change a project's GitHub account, setup command, check command or allowed domains. \
+                                 Only for a client the person lets add and configure projects, in Keel's settings: \
+                                 otherwise it's refused, and the change is theirs to make in the app. What you leave \
+                                 out stays, and an empty command removes it. The commands run on the person's Mac, so \
+                                 change only what they asked for. Commands apply to new runs; runs already open keep \
+                                 the ones they started with, which get_run lists in `commandsChanged`. The account \
+                                 applies at once, also to runs already open: the ones the person approves after this \
+                                 push and open their pull request with it. The allowed domains are the network the \
+                                 agents that build can reach, and so can what they run: read them in list_projects, \
+                                 then name what to add in `addAllowedDomains` and what to take in \
+                                 `removeAllowedDomains`. What you add is a host name, with `*.` in front for its \
+                                 subdomains: no scheme, path, port or spaces. What you take is as list_projects \
+                                 shows it. You can add at most 20 in one call, and no name of this Mac or of a \
+                                 local network (`localhost`, one with no dot, or one ending in `.local`, `.lan`, \
+                                 `.internal`, `.home`, `.corp` or the like) nor an IP address: only the person \
+                                 adds those. They apply to steps that \
+                                 start from then on, also in runs already open; a check has no network, except one \
+                                 the person repeats after allowing a domain it lacked. Adding one doesn't answer a \
+                                 run that waits for it, which is the person's. Keel records which client changed it and \
+                                 each value before and after, and shows the person. Nothing else about a project can \
+                                 be changed here.";
+const STOP_RUN: &str = "Ask whatever a run has working to stop. It also stops a step that waits for a domain \
+                        (networkNeeded), which neither allows the domain nor goes on without it. It doesn't \
+                        close the run: close_run does that for one this client started, and otherwise what \
+                        happens next is the person's decision in Keel. Refused if this client may only \
+                        read.";
 const SEND_BACK: &str = "Send the work of a run this client started back from the person's approval, with what \
                          to change. Everything from where the work is done runs again, the check included, and \
                          the run comes back to the same approval: the person still approves. Use it when \
@@ -456,7 +480,7 @@ impl Handler {
 
     #[tool(
         name = "configure_project",
-        title = "Change a project's account and commands",
+        title = "Change a project's account, commands and domains",
         description = CONFIGURE_PROJECT,
         input_schema = input_schema::<ConfigureProjectArgs>(),
         annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = true)

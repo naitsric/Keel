@@ -31,8 +31,8 @@ use serde_json::{Value as Json, json};
 /// Brain belongs here. draft_workflow is here because what it leaves can't run until the person
 /// saves it, and propose_project because what it leaves isn't a project until it's added.
 /// add_project and configure_project are the exception to settings staying with the person: only
-/// for a client they let, only a project's GitHub account and setup and check commands, and each
-/// change on record for them. send_back is
+/// for a client they let, only a project's GitHub account, setup and check commands and, with
+/// configure_project, allowed domains, and each change on record for them. send_back is
 /// here because the run comes back to the same approval, so the person still decides, and
 /// retry_step because it only retries what failed or was stopped, never what waits on the person's
 /// judgment. Those two are only for a client the person lets give feedback, on runs it started, and
@@ -107,6 +107,8 @@ for a in "$@"; do
   [ "$prev" = "--json-schema" ] && schema="$a"
   prev="$a"
 done
+# What a builder is asked to answer with doesn't change what this one does.
+case "$schema" in *neededDomains*) schema="";; esac
 list=$(printf '%s' "$tools" | sed 's/,/","/g')
 [ -n "$schema" ] && list="$list\",\"StructuredOutput"
 echo "{\"type\":\"system\",\"subtype\":\"init\",\"model\":\"claude-fake\",\"tools\":[\"$list\"],\"apiKeySource\":\"none\"}"

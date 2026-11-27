@@ -12,16 +12,23 @@ export const setupMissing = (project: Project): ("check" | "account")[] => [...(
 
 /**
  * What to send when only these fields change. `project_update` replaces every field, so everything
- * else goes back as it came, including any field added later.
+ * else goes back as it came, including any field added later. The domains that go back are the ones
+ * seen, so one the project gets before this is saved stays.
  */
-export const withSetup = (project: Project, change: Pick<ProjectSettings, "githubAccount" | "setupCommand" | "checkCommand"> & Partial<Pick<ProjectSettings, "allowedRead" | "allowLocalhost">>): ProjectSettings => ({ ...project, ...change });
+export const withSetup = (project: Project, change: Pick<ProjectSettings, "githubAccount" | "setupCommand" | "checkCommand"> & Partial<Pick<ProjectSettings, "allowedRead" | "allowLocalhost">>): ProjectSettings => ({ ...project, ...change, domainsSeen: project.allowedDomains });
 
-/** What an MCP client may set, so what can change under a form that's open. */
-export type Configured = Pick<Project, "githubAccount" | "setupCommand" | "checkCommand">;
-const CONFIGURED = ["githubAccount", "setupCommand", "checkCommand"] as const;
+/**
+ * What an MCP client may set, so what can change under a form that's open. The domains only matter
+ * to a form that edits them, and one that doesn't leaves them out.
+ */
+export type Configured = Pick<Project, "githubAccount" | "setupCommand" | "checkCommand"> & Partial<Pick<Project, "allowedDomains">>;
+const CONFIGURED = ["githubAccount", "setupCommand", "checkCommand", "allowedDomains"] as const;
+
+/** A value as the record of what clients changed writes it: one domain a line, and none as nothing. */
+export const configuredValue = (project: Configured, field: keyof Configured): string | null => (field === "allowedDomains" ? project.allowedDomains?.join("\n") || null : project[field]);
 
 /** Which of them aren't what they were. */
-export const configuredChanges = (before: Configured, now: Configured) => CONFIGURED.filter((field) => before[field] !== now[field]);
+export const configuredChanges = (before: Configured, now: Configured) => CONFIGURED.filter((field) => configuredValue(before, field) !== configuredValue(now, field));
 
 /** One way of writing each folder: with `~` for the home folder and no `/` at the end. */
 const sameFolder = (folder: string) => shortPath(folder.trim()).replace(/\/+$/, "");

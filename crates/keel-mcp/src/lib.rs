@@ -10,10 +10,11 @@
 //!   runs, putting their cards back in Todo, and proposing workflows and projects. A client the
 //!   person also lets give feedback can send its own runs back from an approval and retry a step
 //!   that failed, a few times per run at most, and add a note to a card of its own that waits. A
-//!   client the person also lets add and configure projects can add one and set its GitHub account
-//!   and its setup and check commands. There is no tool to approve, reject, answer a step's
-//!   questions, merge, change any other setting, remove a project, save a workflow, change what a
-//!   client may do or let anything into the Brain, because a person does those.
+//!   client the person also lets add and configure projects can add one, set its GitHub account and
+//!   its setup and check commands, and change its allowed domains. There is no tool to approve,
+//!   reject, answer a step's questions or whether it may reach a domain, merge, change any other
+//!   setting, remove a project, save a workflow, change what a client may do or let anything into
+//!   the Brain, because a person does those.
 //! - **Audit.** Every call leaves a row nobody can rewrite, shown in the app's settings. So does
 //!   each project a client added or configured, with every value before and after.
 //!
@@ -67,8 +68,13 @@ read it.\n\
 reaches the approval, send_back with clear instructions.\n\
 - When a run waits for answers or an approval, bring the person exactly what waitingFor says and tell them to decide \
 in Keel. Never answer for them. You can't approve, reject or answer a step, merge, change saved workflows, remove a \
-project, change a project's settings other than the GitHub account and commands covered below, change what a client \
-may do, or accept anything into the Brain: there is no tool for it, so don't try another route around it.\n\
+project, change a project's settings other than the GitHub account, commands and allowed domains covered below, \
+change what a client may do, or accept anything into the Brain: there is no tool for it, so don't try another route \
+around it.\n\
+- A run also waits when a step lacks network to a domain the project doesn't allow: `waitingFor.reason` is \
+networkNeeded, with each domain and why. Tell the person, who allows it, goes on without it or stops the step, in \
+Keel. You can only stop it, with stop_run where youCan lists it, and only if they ask. Don't add the domain yourself \
+to get around the wait: it doesn't answer it.\n\
 - Close a run you started and won't take further, like one that failed and you won't retry, with close_run. It \
 delivers nothing, and frees its place among the runs you may have open.\n\
 - A card of yours waiting in Todo, like a part waiting for its turn, takes a note at its end with \
@@ -78,9 +84,11 @@ in `jointChange` says which of these apply to its card.\n\
 - draft_workflow and propose_project only leave a proposal for the person. A draft can't run until they save it, \
 and a proposed folder isn't a project until it's added. Tell them it's there rather than waiting for it.\n\
 - If the person lets this client add and configure projects, add_project adds a repository, from its path or a \
-pending proposal, and configure_project changes a project's GitHub account, setup command and check command. Take \
-the account from `githubAccounts` in list_projects. The commands run on the person's Mac, so set only what they \
-asked for. Keel records what you set, before and after, and shows them. Without that permission both are refused: \
+pending proposal, and configure_project changes a project's GitHub account, setup command, check command and allowed \
+domains. Take the account from `githubAccounts` in list_projects. The domains are the network the project's builder \
+may reach: list_projects shows them to you as `allowedDomains`, and you add with `addAllowedDomains` and remove \
+with `removeAllowedDomains`. Only the person adds a name of this Mac or of a local network, such as `localhost`, one with no dot or one ending in `.local`, `.lan` or `.internal`, or an IP address. The commands run on the person's Mac, so set only what they asked for, domains \
+included. Keel records what you set, before and after, and shows them. Without that permission both are refused: \
 adding and configuring projects is the person's, in Keel, and you can propose_project. Only the person grants it, \
 in Keel's settings, and you can't give yourself that or any other permission.\n\
 - Runs spend the person's Claude usage, so start only what they asked for.\n\

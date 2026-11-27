@@ -336,7 +336,17 @@ describe("the setup dialog", () => {
       await click("Save");
       const [{ args }] = called("project_update");
       expect(args.projectId).toBe("p1");
-      expect(args.settings).toEqual({ ...PROJECT, githubAccount: "you-work", checkCommand: "pnpm test", setupCommand: "pnpm install --frozen-lockfile" });
+      expect(args.settings).toEqual({ ...PROJECT, githubAccount: "you-work", checkCommand: "pnpm test", setupCommand: "pnpm install --frozen-lockfile", domainsSeen: PROJECT.allowedDomains });
+    });
+
+    // It leaves the domains as they are, so one allowed between its look and its save stays.
+    it("says which domains it saw, which are those it sends back", async () => {
+      await show({ accounts: { "you-work": "WRITE" } });
+      await savedMeanwhile({ allowedDomains: ["changed.example"] }, { heard: false });
+      await click("Save");
+      const settings = called("project_update")[0].args.settings as Project & { domainsSeen: string[] };
+      expect(settings.domainsSeen).toEqual(["changed.example"]);
+      expect(settings.allowedDomains).toEqual(["changed.example"]);
     });
 
     it("starts from the project as it is by then, not as it was when this opened", async () => {

@@ -7,13 +7,16 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
-use keel_core::{CardLane, WorkflowStep};
+use keel_core::{AttemptState, CardLane, NeededDomain, Reason, WorkflowStep};
 use keel_engine::{Config, Engine};
 use keel_harness::Tools;
-use keel_store::{McpClient, ProjectSettings, Store};
+use keel_store::{McpClient, NewAttempt, NewRun, ProjectSettings, Store};
 use serde_json::{Value as Json, json};
 
-use crate::tools::{AddProjectArgs, ConfigureProjectArgs, ListProjectsArgs, ProposeProjectArgs};
+use crate::tools::{
+    AddProjectArgs, ConfigureProjectArgs, GetRunArgs, ListProjectsArgs, ProposeProjectArgs,
+    StopRunArgs,
+};
 use crate::{INSTRUCTIONS, McpServer, ToolError};
 
 const CLAUDE: &str = r#"#!/bin/bash
@@ -122,11 +125,69 @@ impl World {
     }
 
     async fn propose(&self, client: &McpClient, path: &str) -> Json {
+        self.propose_answer(client, path).await.unwrap()
+    }
+
+    async fn propose_answer(&self, client: &McpClient, path: &str) -> Result<Json, ToolError> {
         let args = ProposeProjectArgs { path: path.into() };
-        self.server
-            .propose_project(client.clone(), args)
-            .await
-            .unwrap()
+        self.server.propose_project(client.clone(), args).await
+    }
+
+    /// A run whose builder waits for the person to say whether the project may reach npm.
+    fn waiting_for_a_domain(&self, project_id: &str, run_id: &str, attempt_id: &str) {
+        let workflow = json!([{ "type": "agent", "id": "builder", "model": "m", "effort": null, "tools": "build", "prompt": "p", "maxTurns": null, "maxBudgetUsd": null }]);
+        self.store
+            .add_run(&NewRun {
+                id: run_id.into(),
+                project_id: project_id.into(),
+                title: "Upgrade next".into(),
+                request: "Upgrade next".into(),
+                workflow: workflow.to_string(),
+                language: "en".into(),
+                source_issue: None,
+                request_written: None,
+                workflow_id: None,
+                workflow_name: None,
+                started_by: None,
+            })
+            .unwrap();
+        self.store
+            .add_attempt(&NewAttempt {
+                id: attempt_id.into(),
+                run_id: run_id.into(),
+                step_id: "builder".into(),
+                kind: "agent".into(),
+                role: "worker".into(),
+                round: 0,
+                number: 1,
+                state: AttemptState::Blocked,
+                model_requested: "m".into(),
+                effort: None,
+                tools: "build".into(),
+                max_turns: None,
+                max_budget_usd: None,
+                language: "en".into(),
+                prompt: "p".into(),
+                system_prompt_sources: "[]".into(),
+                settings: "{}".into(),
+                session_id: "s".into(),
+                resumed_from: None,
+                workspace: "/nowhere".into(),
+                raw_path: "/nowhere/raw".into(),
+                started_at: keel_store::now(),
+            })
+            .unwrap();
+        let reason = Reason::NetworkNeeded {
+            needed: vec![NeededDomain {
+                domain: "registry.npmjs.org".into(),
+                why: Some("to install next".into()),
+                tool: None,
+                frees_offline: false,
+            }],
+        };
+        self.store
+            .set_state(attempt_id, AttemptState::Blocked, Some(&reason))
+            .unwrap();
     }
 
     /// Whether a run that writes this project's map was started.
@@ -632,6 +693,7 @@ async fn a_removed_project_comes_back_with_its_history_and_what_the_client_gave(
             ("githubAccount", Some("alice"), Some("bob")),
             ("setupCommand", Some("make deps"), None),
             ("checkCommand", Some("make test"), Some("make test")),
+            ("allowedDomains", Some("example.com"), Some("example.com")),
         ]
     );
 }
@@ -747,6 +809,444 @@ async fn what_cannot_be_configured_is_refused_and_changes_nothing() {
     assert!(w.store.mcp_project_changes(10).unwrap().is_empty());
 }
 
+/// A project in Keel that may reach these domains.
+fn with_domains(w: &World, domains: &[&str]) -> keel_store::Project {
+    let path = w.repo("app");
+    let project = w.engine.add_project(Path::new(&path)).unwrap();
+    w.engine
+        .update_project(
+            &project.id,
+            &ProjectSettings {
+                allowed_domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+                ..Default::default()
+            },
+        )
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configuring_adds_and_removes_domains_and_records_before_and_after() {
+    let w = world();
+    let bot = w.manager();
+    let project = with_domains(&w, &["example.com", "pypi.org"]);
+
+    let answer = w
+        .configure(
+            &bot,
+            json!({
+                "project": "app",
+                "addAllowedDomains": ["registry.npmjs.org", "*.example.org", "PYPI.org"],
+                "removeAllowedDomains": ["Example.com", "never.example"],
+            }),
+        )
+        .await
+        .unwrap();
+
+    let expected = ["pypi.org", "registry.npmjs.org", "*.example.org"];
+    assert_eq!(answer["project"]["allowedDomains"], json!(expected));
+    assert_eq!(
+        w.store.project(&project.id).unwrap().allowed_domains,
+        expected
+    );
+    let changes = w.store.mcp_project_changes(10).unwrap();
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].action, "configured");
+    assert_eq!(
+        values(&changes[0]),
+        [(
+            "allowedDomains",
+            Some("example.com\npypi.org"),
+            Some("pypi.org\nregistry.npmjs.org\n*.example.org")
+        )]
+    );
+
+    // What's already so changes nothing and records nothing.
+    w.configure(
+        &bot,
+        json!({ "project": "app", "addAllowedDomains": ["pypi.org"], "removeAllowedDomains": ["never.example"] }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(w.store.mcp_project_changes(10).unwrap().len(), 1);
+
+    // Taking the last one away leaves none.
+    w.configure(
+        &bot,
+        json!({ "project": "app", "removeAllowedDomains": expected }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        w.store
+            .project(&project.id)
+            .unwrap()
+            .allowed_domains
+            .is_empty()
+    );
+    assert_eq!(
+        values(&w.store.mcp_project_changes(10).unwrap()[0]),
+        [(
+            "allowedDomains",
+            Some("pypi.org\nregistry.npmjs.org\n*.example.org"),
+            None
+        )]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_client_the_person_lets_sees_the_domains() {
+    let w = world();
+    let bot = w.manager();
+    let runner = w.client("Runner", true);
+    let reader = w.client("Reader", false);
+    let project = with_domains(&w, &["example.com"]);
+
+    let listed = w.list(&bot).await;
+    assert_eq!(
+        listed["projects"][0]["allowedDomains"],
+        json!(["example.com"])
+    );
+    for client in [&runner, &reader] {
+        let listed = w.list(client).await;
+        assert_eq!(listed["projects"][0]["id"], json!(project.id));
+        assert!(!listed.to_string().contains("example.com"), "{listed}");
+        assert!(!listed.to_string().contains("allowedDomains"), "{listed}");
+        let proposed = w.propose_answer(client, &project.path).await;
+        if let Ok(proposed) = proposed {
+            assert!(!proposed.to_string().contains("example.com"), "{proposed}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn domains_are_refused_without_the_permission_or_when_one_is_no_domain() {
+    let w = world();
+    let bot = w.manager();
+    let runner = w.client("Runner", true);
+    let reader = w.client("Reader", false);
+    let project = with_domains(&w, &["example.com"]);
+    let change = json!({ "project": "app", "addAllowedDomains": ["pypi.org"], "removeAllowedDomains": ["example.com"] });
+
+    for (client, says) in [
+        (&runner, "may not add or configure"),
+        (&reader, "only read"),
+    ] {
+        let refusal = w.configure(client, change.clone()).await.unwrap_err().0;
+        assert!(refusal.contains(says), "{refusal}");
+    }
+    for bad in [
+        "https://pypi.org",
+        "pypi.org/simple",
+        "pypi.org:443",
+        "pypi .org",
+        " pypi.org",
+        "",
+        "*",
+        "*.",
+        "-pypi.org",
+        "pypi..org",
+    ] {
+        // The good ones beside it aren't saved either.
+        let args = json!({ "project": "app", "checkCommand": "true", "addAllowedDomains": ["good.example", bad] });
+        let refusal = w.configure(&bot, args).await.unwrap_err().0;
+        assert!(refusal.contains("isn't a domain"), "{bad:?}: {refusal}");
+    }
+    let both = w
+        .configure(
+            &bot,
+            json!({ "project": "app", "addAllowedDomains": ["pypi.org"], "removeAllowedDomains": ["PyPI.org"] }),
+        )
+        .await
+        .unwrap_err()
+        .0;
+    assert!(both.contains("both"), "{both}");
+    // Blanks around the one to take away don't tell them apart: the store takes it away the
+    // same, and would then add it back, which isn't what either list says.
+    let spaced = w
+        .configure(
+            &bot,
+            json!({ "project": "app", "addAllowedDomains": ["example.com"], "removeAllowedDomains": [" Example.com\n"] }),
+        )
+        .await
+        .unwrap_err()
+        .0;
+    assert!(spaced.contains("both"), "{spaced}");
+    // Empty lists say nothing to change.
+    let nothing = w
+        .configure(
+            &bot,
+            json!({ "project": "app", "addAllowedDomains": [], "removeAllowedDomains": [] }),
+        )
+        .await
+        .unwrap_err()
+        .0;
+    assert!(nothing.contains("what to change"), "{nothing}");
+
+    let now = w.store.project(&project.id).unwrap();
+    assert_eq!(now.allowed_domains, ["example.com"]);
+    assert_eq!(now.check_command, None);
+    assert!(w.store.mcp_project_changes(10).unwrap().is_empty());
+}
+
+/// So that each one can be read where Keel shows what a client changed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_adds_only_so_many_domains_in_one_call() {
+    let w = world();
+    let bot = w.manager();
+    let project = with_domains(&w, &["example.com"]);
+    let named =
+        |count: usize| -> Vec<String> { (0..count).map(|n| format!("cdn{n}.example")).collect() };
+    let most = keel_engine::MOST_DOMAINS_ADDED;
+    assert_eq!(most, 20);
+
+    let args = json!({ "project": "app", "addAllowedDomains": named(most + 1) });
+    let refusal = w.configure(&bot, args).await.unwrap_err().0;
+    assert!(refusal.contains("has 21 domains"), "{refusal}");
+    assert!(refusal.contains("at most 20"), "{refusal}");
+    assert!(refusal.contains("nothing was changed"), "{refusal}");
+    assert_eq!(
+        w.store.project(&project.id).unwrap().allowed_domains,
+        ["example.com"]
+    );
+    assert!(w.store.mcp_project_changes(10).unwrap().is_empty());
+
+    // As many as that are added, and taking away has no limit: it opens nothing.
+    w.configure(
+        &bot,
+        json!({ "project": "app", "addAllowedDomains": named(most) }),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        w.store.project(&project.id).unwrap().allowed_domains.len(),
+        most + 1
+    );
+    let mut all = named(most);
+    all.push("example.com".into());
+    w.configure(
+        &bot,
+        json!({ "project": "app", "removeAllowedDomains": all }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        w.store
+            .project(&project.id)
+            .unwrap()
+            .allowed_domains
+            .is_empty()
+    );
+    // The tool says the limit where a client reads how to use it.
+    let schema =
+        serde_json::to_string(&schemars::schema_for!(crate::tools::ConfigureProjectArgs)).unwrap();
+    assert!(
+        schema.contains(&format!("At most {most} in one call")),
+        "{schema}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_adds_no_domain_for_this_mac_the_local_network_or_an_address() {
+    let w = world();
+    let bot = w.manager();
+    let project = with_domains(&w, &["example.com"]);
+    for local in [
+        "localhost",
+        "LocalHost",
+        "*.localhost",
+        "api.localhost",
+        "*.local",
+        "printer.LOCAL",
+        "127.0.0.1",
+        "10.0.0.1",
+        "169.254.169.254",
+        "127.1",
+        "2130706433",
+        "0x7f000001",
+        "127.0.0.0x1",
+        "*.0.0.1",
+        // A machine on the network this Mac is on, and the names such networks give theirs.
+        "router",
+        "NAS",
+        "*.lan",
+        "nas.lan",
+        "x.internal",
+        "*.internal",
+        "*.build.Internal",
+        "x.home",
+        "x.home.arpa",
+        "*.home.arpa",
+        "wiki.intranet",
+        "*.intranet",
+        "git.corp",
+        "*.corp",
+        "box.localdomain",
+        "*.localdomain",
+        // No name at all under the wildcard.
+        "*.com",
+    ] {
+        // The good one beside it isn't saved either.
+        let args = json!({ "project": "app", "addAllowedDomains": ["good.example", local] });
+        let refusal = w.configure(&bot, args).await.unwrap_err().0;
+        assert!(refusal.contains("only the person"), "{local:?}: {refusal}");
+        assert!(refusal.contains("nothing was changed"), "{refusal}");
+    }
+    assert_eq!(
+        w.store.project(&project.id).unwrap().allowed_domains,
+        ["example.com"]
+    );
+    assert!(w.store.mcp_project_changes(10).unwrap().is_empty());
+
+    // Names on the internet that only look like those.
+    let public = [
+        "internal.example.com",
+        "*.internal.example.com",
+        "lan.example",
+        "corp.example",
+        "home.example",
+        "arpa.example",
+    ];
+    w.configure(
+        &bot,
+        json!({ "project": "app", "addAllowedDomains": public }),
+    )
+    .await
+    .unwrap();
+    let mut held = vec!["example.com"];
+    held.extend(public);
+    assert_eq!(w.store.project(&project.id).unwrap().allowed_domains, held);
+    w.configure(
+        &bot,
+        json!({ "project": "app", "removeAllowedDomains": public }),
+    )
+    .await
+    .unwrap();
+
+    // One the person allowed, the client may take away.
+    let project = w
+        .engine
+        .update_project(
+            &project.id,
+            &ProjectSettings {
+                allowed_domains: vec!["localhost".into(), "10.0.0.1".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    w.configure(
+        &bot,
+        json!({ "project": "app", "removeAllowedDomains": ["localhost", "10.0.0.1"] }),
+    )
+    .await
+    .unwrap();
+    assert!(
+        w.store
+            .project(&project.id)
+            .unwrap()
+            .allowed_domains
+            .is_empty()
+    );
+}
+
+/// One saved before domains were checked is no domain, and still has to be something to take away.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_takes_away_a_saved_value_that_is_no_domain() {
+    let w = world();
+    let bot = w.manager();
+    let project = with_domains(&w, &["example.com"]);
+    let old = ["https://old.example.com/x", "two words"];
+    w.store
+        .update_project(
+            &project.id,
+            &ProjectSettings {
+                allowed_domains: vec!["example.com".into(), old[0].into(), old[1].into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let answer = w
+        .configure(
+            &bot,
+            json!({ "project": "app", "removeAllowedDomains": old }),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(answer["project"]["allowedDomains"], json!(["example.com"]));
+    assert_eq!(w.store.mcp_project_changes(10).unwrap().len(), 1);
+    // Adding one is still checked.
+    let refusal = w
+        .configure(
+            &bot,
+            json!({ "project": "app", "addAllowedDomains": [old[0]] }),
+        )
+        .await
+        .unwrap_err()
+        .0;
+    assert!(refusal.contains("isn't a domain"), "{refusal}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_waiting_for_a_domain_says_only_the_person_answers_it() {
+    let w = world();
+    let bot = w.manager();
+    let runner = w.client("Runner", true);
+    let reader = w.client("Reader", false);
+    let project = with_domains(&w, &[]);
+    w.waiting_for_a_domain(&project.id, "run-net", "attempt-net");
+    let get = || -> GetRunArgs { serde_json::from_value(json!({ "run": "run-net" })).unwrap() };
+    let stop = || -> StopRunArgs { serde_json::from_value(json!({ "run": "run-net" })).unwrap() };
+
+    let run = w.server.get_run(bot.clone(), get()).await.unwrap();
+
+    assert_eq!(run["state"], "waitingForPerson");
+    let waiting = &run["waitingFor"];
+    assert_eq!(waiting["step"], "builder");
+    assert_eq!(waiting["reason"]["code"], "networkNeeded");
+    assert_eq!(
+        waiting["reason"]["needed"][0],
+        json!({ "domain": "registry.npmjs.org", "why": "to install next" })
+    );
+    let who = waiting["who"].as_str().unwrap();
+    assert!(who.contains("Only the person"), "{who}");
+    assert!(who.contains("in Keel"), "{who}");
+    // Not a step to try again. Stopping it is all a client may do with it.
+    let may = waiting["youCan"].to_string();
+    assert!(!may.contains("retry_step"), "{may}");
+    assert!(may.contains("stop_run"), "{may}");
+
+    // One that may only read may not stop it either.
+    let read = w.server.get_run(reader.clone(), get()).await.unwrap();
+    let may = read["waitingFor"]["youCan"].to_string();
+    assert!(!may.contains("stop_run"), "{may}");
+    let refusal = w.server.stop_run(reader, stop()).await.unwrap_err().0;
+    assert!(refusal.contains("only read"), "{refusal}");
+    assert_eq!(w.store.attempt("attempt-net").unwrap().state, "blocked");
+
+    let stopped = w.server.stop_run(runner, stop()).await.unwrap();
+
+    assert_eq!(stopped["waitingFor"]["state"], "stopped");
+    assert_eq!(w.store.attempt("attempt-net").unwrap().state, "stopped");
+    // It stopped it, and answered nothing else: no domain allowed and none gone without.
+    assert!(
+        w.store
+            .project(&project.id)
+            .unwrap()
+            .allowed_domains
+            .is_empty()
+    );
+    let events = w.store.events("attempt-net", 0).unwrap();
+    let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+    assert!(!kinds.contains(&"networkAllowed"), "{kinds:?}");
+    assert!(!kinds.contains(&"networkDeclined"), "{kinds:?}");
+    // Its record says which client did.
+    let asked = events.iter().find(|e| e.kind == "stopRequested").unwrap();
+    assert_eq!(asked.data["by"], "Runner");
+    // Nothing left to stop.
+    assert!(w.server.stop_run(bot, stop()).await.is_err());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn list_projects_names_the_github_accounts_in_keel() {
     let w = world();
@@ -854,6 +1354,9 @@ fn the_instructions_say_what_a_client_can_do_with_the_permission_and_without_it(
         "If the person lets this client add and configure projects",
         "Without that permission",
         "can't give yourself",
+        "addAllowedDomains",
+        "removeAllowedDomains",
+        "lacks network to a domain",
     ] {
         assert!(INSTRUCTIONS.contains(says), "{says}: {INSTRUCTIONS}");
     }

@@ -139,6 +139,19 @@ one of them is part of the change and reaches no agent as a rule until you merge
 - Agents can't read your home folder, including your credentials, or reach the network
   beyond the domains a project allows. [`docs/m0-report.md`](docs/m0-report.md) has the tests
   behind this.
+- When a builder says it couldn't go on without a domain the project doesn't allow, or a check or
+  the builder's last command fails with a tool's unmistakable offline error, the run waits for you:
+  allow it in the project and repeat the step, go on without it, or stop. It spends no round of
+  rework. When the domain you allow is a registry Keel doesn't know, such as a private one, the
+  builder's package tools also stop being kept offline, for as long as the project allows it: the
+  wait says so before you allow it, and removing the domain in the project's settings undoes it.
+- A check has no network, with one exception: the check you repeat by allowing a domain, and that
+  one tried again in the same round with the same command while it hasn't finished, because it was
+  stopped or interrupted, say. It reaches the domains you allowed it, while the project still
+  allows them, through a proxy Keel runs for it, which refuses every other domain and never
+  connects to your Mac or to an address of a private network, and its sandbox opens only the
+  proxy's port on localhost. A tool that ignores the usual proxy variables, as Java's do, stays
+  offline there. Later checks have no network again.
 - Keel uses your own signed-in `claude` and `gh`, and never stores a credential. Agents never
   get GitHub access: Keel pushes the branch and opens the pull request itself, as a draft. It
   doesn't merge.
@@ -224,9 +237,10 @@ MCP server.
 | Add and configure projects, if you let it              | `add_project`, `configure_project` |
 
 **It can't decide for you.** A client can't approve or reject a step, answer a step's questions,
-merge, remove a project, save a workflow or accept anything into the Brain: a run that needs you
-waits for you in the app. Nor can it change settings, apart from a project's GitHub account and
-commands if you let it, as below. Whether it can start runs, whether it can give feedback, and
+allow the domain a run waits for or go on without it, merge, remove a project, save a workflow or
+accept anything into the Brain: a run that needs you waits for you in the app. A client that can
+start runs can stop one that waits for a domain. Nor can it change settings, apart from a project's GitHub account,
+commands and allowed domains if you let it, as below. Whether it can start runs, whether it can give feedback, and
 whether it can add and configure projects, you allow for each client, and no client can change that.
 **Settings** shows every call, and revoking a client cuts it off at once.
 
@@ -234,8 +248,11 @@ whether it can add and configure projects, you allow for each client, and no cli
 for that client, and needs the one to start runs. With it, a client can add a repository on your
 Mac, from its path or from a proposal, and set a project's GitHub account and its setup and check
 commands, which run on your Mac, the setup one with internet access as every setup has. Adding one starts the agent that maps it, on your Claude usage.
-The network, folders, services, variables, default workflow and sensitive paths of a project stay
-yours. **Settings** shows which client added or changed what, with each value before and after.
+It can also add and remove the domains the project's agents can reach, up to 20 in one call, but
+not add a name of your Mac or of a local network, such as `localhost`, a name with no dot or one
+ending in `.local`, `.lan` or `.internal`, or an IP address. The folders, services, variables, localhost, default
+workflow and sensitive paths of a project stay yours. **Settings** shows which client added or
+changed what, with each value before and after.
 
 **It hands out work like an assistant hands it to helpers.** It splits a request into runs, and into
 read-only tasks that only look into something, waits on several at once, and reads what each one

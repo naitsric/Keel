@@ -61,7 +61,7 @@ describe("what saving sends", () => {
       ...({ addedLater: 1 } as object),
     });
     const sent = withSetup(before, { githubAccount: "you", setupCommand: "npm ci", checkCommand: "npm test" });
-    expect(sent).toEqual({ ...before, githubAccount: "you", setupCommand: "npm ci", checkCommand: "npm test" });
+    expect(sent).toEqual({ ...before, githubAccount: "you", setupCommand: "npm ci", checkCommand: "npm test", domainsSeen: ["pypi.org"] });
     expect(sent.defaultWorkflow).toBe("mine");
     expect(sent.sensitivePaths).toEqual(["billing/"]);
     expect(sent.env).toEqual([{ name: "DB", value: "x" }]);

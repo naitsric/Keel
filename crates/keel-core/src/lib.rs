@@ -573,6 +573,36 @@ pub enum Reason {
     /// The run ended long ago and Keel freed the copy it worked in, so no step can run there again
     /// and its change can't be read from it. What each step did is still on record.
     CopyFreed,
+    /// A step that builds, or a check, couldn't go on for lack of network to these domains, which
+    /// the project doesn't allow. It waits for the person, who allows them, goes on without them
+    /// or stops it.
+    NetworkNeeded {
+        needed: Vec<NeededDomain>,
+    },
+    /// A person allowed the domains a step waited for, and the project has them now, but the step
+    /// couldn't be started over. It still waits, and they can say so again.
+    DomainAllowedNotStarted {
+        domains: Vec<String>,
+        detail: String,
+    },
+}
+
+/// A domain a step lacked network to.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NeededDomain {
+    pub domain: String,
+    /// What it was needed for, as the builder said it: an agent's words.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    /// The tool Keel saw fail for being offline, such as `npm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    /// It's no registry Keel knows, so nothing says which tool it's for: allowing it from the step
+    /// that waits also lets the builder's package tools go online in this project, while it
+    /// allows the domain.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub frees_offline: bool,
 }
 
 /// Why a run doesn't count as small. Each is a fact the engine checked for itself, and any one is
@@ -854,6 +884,10 @@ impl Reason {
             Self::NewCommandsNeedSetupOrCheck => false,
             // One run, and one that has ended.
             Self::CopyFreed => false,
+            // One run, whose project may not reach a domain it needs.
+            Self::NetworkNeeded { .. } => false,
+            // One step, which still waits.
+            Self::DomainAllowedNotStarted { .. } => false,
         }
     }
 }
@@ -1258,6 +1292,14 @@ mod tests {
             (Reason::PullRequestAhead, false),
             (Reason::PullRequestOver, false),
             (Reason::PullRequestNotSynced { detail: text() }, false),
+            (Reason::NetworkNeeded { needed: vec![] }, false),
+            (
+                Reason::DomainAllowedNotStarted {
+                    domains: vec![],
+                    detail: text(),
+                },
+                false,
+            ),
         ]
     }
 
@@ -1326,6 +1368,8 @@ mod tests {
             Reason::PullRequestRewritten => 59,
             Reason::PullRequestAhead => 60,
             Reason::PullRequestOver => 61,
+            Reason::NetworkNeeded { .. } => 62,
+            Reason::DomainAllowedNotStarted { .. } => 63,
         }
     }
 
@@ -1339,7 +1383,7 @@ mod tests {
         let mut rows: Vec<usize> = table.iter().map(|(r, _)| stopping_row(r)).collect();
         rows.sort_unstable();
         rows.dedup();
-        assert_eq!(rows, (0..=61).collect::<Vec<_>>(), "a row for each reason");
+        assert_eq!(rows, (0..=63).collect::<Vec<_>>(), "a row for each reason");
     }
 
     #[test]

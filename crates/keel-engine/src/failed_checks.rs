@@ -96,8 +96,9 @@ enum Next {
 }
 
 /// Events on a check's record that say how it ended isn't about the work: a person killed the
-/// command it was stuck on, or it outlived the app without the services it uses.
-const DID_NOT_REALLY_RUN: [&str; 2] = ["commandKilled", "servicesLost"];
+/// command it was stuck on, or it outlived the app without the services it uses or the way to the
+/// network it was given.
+const DID_NOT_REALLY_RUN: [&str; 3] = ["commandKilled", "servicesLost", "networkLost"];
 
 /// A code that says the command didn't get to say anything about the work. 126 and 127 are a shell
 /// that couldn't run it at all, as the app reads them where a person tries a check, and above 128
@@ -109,7 +110,7 @@ fn could_not_run(code: i32) -> bool {
 /// Whether how a check ended is about the work: it ran, and ended on its own with a code other
 /// than 0. One that couldn't start, that a signal cut short, or that the sandbox refused localhost,
 /// says nothing about it.
-fn about_the_work(reason: Option<&Reason>) -> bool {
+pub(crate) fn about_the_work(reason: Option<&Reason>) -> bool {
     matches!(
         reason,
         Some(Reason::CheckFailed {
@@ -131,7 +132,17 @@ fn really_ran(check: &Attempt, events: &[Event]) -> bool {
     about_the_work(why_it_failed(check).as_ref()) && !stopped_from_outside(events)
 }
 
-fn stopped_from_outside(events: &[Event]) -> bool {
+/// Whether a try of a check got to say something about the work: it passed, or it ran and
+/// failed.
+pub(crate) fn finished_its_work(check: &Attempt, events: &[Event]) -> bool {
+    match AttemptState::parse(&check.state) {
+        Some(AttemptState::Succeeded | AttemptState::Returned) => true,
+        Some(AttemptState::Failed) => really_ran(check, events),
+        _ => false,
+    }
+}
+
+pub(crate) fn stopped_from_outside(events: &[Event]) -> bool {
     events
         .iter()
         .any(|event| DID_NOT_REALLY_RUN.contains(&event.kind.as_str()))
@@ -355,9 +366,18 @@ impl Inner {
     }
 
     fn send_failed_check_back(&self, attempt_id: &str, failed: &mut Reason) -> Result<bool> {
-        let store = &self.store;
         // Held from looking until it's on the record, as `advance` holds it to move a run on.
         let _guard = locked(&self.advancing);
+        self.send_failed_check_back_held(attempt_id, failed)
+    }
+
+    /// `send_failed_check_back` for a caller that holds `advancing`.
+    pub(crate) fn send_failed_check_back_held(
+        &self,
+        attempt_id: &str,
+        failed: &mut Reason,
+    ) -> Result<bool> {
+        let store = &self.store;
         let attempt = store.attempt(attempt_id)?;
         let run = store.run(&attempt.run_id)?;
         if run.finished_at.is_some() || stopped_from_outside(&store.events(attempt_id, 0)?) {

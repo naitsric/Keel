@@ -121,7 +121,8 @@ pub fn is_read_only(settings: &Value, folder: &str) -> bool {
 /// that can write gets this too, for the same reason. A Seatbelt profile for `sandbox-exec`: no
 /// home folder except what's listed, no network, and writes only here. An agent's Bash may reach
 /// the project's allowed domains, but this can't be held to a list of domains, so it gets none. A
-/// project can open localhost to a check (see `with_localhost`).
+/// project can open localhost to a check (see `with_localhost`), and a check a person repeats after
+/// allowing a domain reaches the allowed ones through a proxy (see `with_proxy`).
 pub fn check_profile(
     workspace: &Path,
     home: &Path,
@@ -238,6 +239,12 @@ pub fn with_localhost(profile: String) -> String {
         "{profile}(allow network-bind network-inbound (local ip \"localhost:*\"))\n\
          (allow network-outbound (remote ip \"localhost:*\"))\n"
     )
+}
+
+/// Opens to a check one port on localhost, where Keel's proxy for it listens, and nothing else:
+/// the proxy, outside the sandbox, is what holds the check to a list of domains.
+pub fn with_proxy(profile: String, port: u16) -> String {
+    format!("{profile}(allow network-outbound (remote ip \"localhost:{port}\"))\n")
 }
 
 /// The same for an agent's Bash: Claude Code's own switch, which is all of localhost or none.
@@ -436,6 +443,18 @@ mod tests {
                 .is_none(),
             "that would open every local port"
         );
+    }
+
+    #[test]
+    fn a_proxy_opens_to_a_check_its_one_port_and_nothing_else() {
+        let closed = check_profile(Path::new("/h/w"), Path::new("/h"), &[], &[]);
+        let open = with_proxy(closed.clone(), 50123);
+        // After the rule that closes the network, or it would take it back.
+        assert_eq!(
+            open.strip_prefix(&closed),
+            Some("(allow network-outbound (remote ip \"localhost:50123\"))\n")
+        );
+        assert!(closed.contains("(deny network*)"), "{closed}");
     }
 
     /// #123: a project whose tests start servers on localhost opens all of it, to its check and to

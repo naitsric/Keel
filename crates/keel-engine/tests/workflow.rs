@@ -63,6 +63,8 @@ for a in "$@"; do
   [ "$prev" = "--json-schema" ] && schema="$a"
   prev="$a"
 done
+# What a builder is asked to answer with doesn't change what this one does.
+case "$schema" in *neededDomains*) schema="";; esac
 {{ echo "=== CLAUDE tools=$tools"; echo "$prompt"; echo "--- system"; cat "$system"; }} >> "{log}/claude.log"
 list=$(printf '%s' "$tools" | sed 's/,/","/g')
 [ -n "$schema" ] && list="$list\",\"StructuredOutput"
@@ -177,6 +179,7 @@ fn world() -> World {
                 default_workflow: None,
                 sensitive_paths: vec![],
                 allow_localhost: false,
+                domains_seen: None,
             },
         )
         .unwrap();

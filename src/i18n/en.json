@@ -163,6 +163,8 @@
     "setupFailed": "Preparing the project failed with code {{exitCode}}.",
     "noStructuredOutput": "It finished without the answer it was asked for.",
     "reworkLimit": "This work went back {{rounds}} times and the approver still isn't satisfied. It's your call now.",
+    "networkNeeded": "It needs network to {{domains}}, which the project doesn't allow.",
+    "domainAllowedNotStarted": "The project now allows {{domains}}, but the step couldn't be started over: {{detail}}. It still waits here: choose “Allow” again to start it over, or remove what was added in the project's settings.",
     "noMatchingPaths": "Nothing it covers changed ({{paths}}).",
     "noMatchingRisks": "What was asked names none of the risks it looks at ({{risks}}).",
     "treatedAsSmall": "Keel treated this as a small change, so it didn't run.",
@@ -442,6 +444,23 @@
     "toMyApproval": "Send it to my approval",
     "changesTitle": "Everything this run changed",
     "decideReworkLimit": "Choose above: one more round, your approval, or leave it.",
+    "decideNetwork_one": "Choose above: allow it, go on without it, or stop.",
+    "decideNetwork_other": "Choose above: allow them, go on without them, or stop.",
+    "networkTitle": "{{step}} needs network the project doesn't allow",
+    "networkSeen": "{{tool}} failed because Keel keeps it offline",
+    "networkWhy": "The agent says: {{why}}",
+    "networkNote_one": "Allowing adds it to the domains this project's agents can reach, in every run from now on, and starts this step over. No round goes by while it waits.",
+    "networkNote_other": "Allowing adds them to the domains this project's agents can reach, in every run from now on, and starts this step over. No round goes by while it waits.",
+    "networkCheckNote_one": "A check has no network. Allowing repeats this one with network to it and nothing else. Later checks have none again, and one that still needs a download sends the work back to the builder, which then can get it.",
+    "networkCheckNote_other": "A check has no network. Allowing repeats this one with network to them and nothing else. Later checks have none again, and one that still needs a download sends the work back to the builder, which then can get it.",
+    "networkCheckWithout_one": "Going on without it counts this check as failed and sends the work back to the builder, which uses up a round.",
+    "networkCheckWithout_other": "Going on without them counts this check as failed and sends the work back to the builder, which uses up a round.",
+    "networkFrees_one": "Keel doesn't know {{domains}} as a package registry, so it can't tell which tool it's for. Allowing it also stops Keel keeping the builder's package tools offline in this project (npm, pnpm, pip, uv, cargo, Go and Maven), which still reach only the allowed domains. To undo it, remove the domain in the project's settings.",
+    "networkFrees_other": "Keel doesn't know {{domains}} as package registries, so it can't tell which tool they're for. Allowing them also stops Keel keeping the builder's package tools offline in this project (npm, pnpm, pip, uv, cargo, Go and Maven), which still reach only the allowed domains. To undo it, remove those domains in the project's settings.",
+    "networkAllow": "Allow {{domains}} in this project and go on",
+    "networkGoWithout_one": "Go on without it",
+    "networkGoWithout_other": "Go on without them",
+    "networkStop": "Stop",
     "proposalsTitle": "What this run proposes for the Brain",
     "proposalsHint": "If you accept one, every agent on this project gets it from now on.",
     "openBrain": "Open the Brain",
@@ -571,6 +590,7 @@
     "startedCheck": "Running: {{command}}",
     "services": "Services ready: {{names}}",
     "servicesLost": "Couldn't restore the services after reopening: {{error}}",
+    "networkLost": "Its network went away when the app closed, so how it ends isn't about the work",
     "setupResult": "Preparation ended with code {{code}}",
     "skipped": "Skipped: nothing it covers changed",
     "skippedSmall": "Skipped: Keel treated this as a small change",
@@ -579,6 +599,8 @@
     "reworkLimit": "Reached the limit of rounds",
     "reworkLimitAnswerRound": "You asked for another round",
     "reworkLimitAnswerApproval": "You sent it on to your approval",
+    "networkAllowed": "You allowed {{domains}} in this project",
+    "networkDeclined": "You chose to go on without {{domains}}",
     "checkSentBack": "It failed, so Keel sent the work back to the builder for round {{round}}",
     "checkNotSentBack": "Keel had already sent the work back as often as it does on its own",
     "checkUnchanged": "The builder had changed nothing, so Keel didn't send the work back again",
@@ -697,7 +719,7 @@
     "githubLinksHint": "Managing access opens GitHub in your browser, and only someone who administers the repo sees that page. Connecting an account opens Terminal, because gh keeps the session, not Keel.",
     "githubConnectHint": "This opens Terminal, because gh keeps the session, not Keel.",
     "checkCommand": "Check command",
-    "checkCommandHint": "Runs after the builder, in a sandbox with no network and no access to your home folder. Exit code 0 passes.",
+    "checkCommandHint": "Runs after the builder, in a sandbox with no network and no access to your home folder. The exception is the check you repeat by allowing a domain it lacked, which reaches that domain. Trying it again before it has finished has the network too. Exit code 0 passes.",
     "checkCommandPlaceholder": "make test",
     "domains": "Domains agents can reach",
     "domainsHint": "One per line. Nothing else is reachable.",
@@ -799,7 +821,8 @@
     "serviceStart": "Write the command that starts “{{value}}”.",
     "envName": "A variable name uses capital letters, numbers and underscores: “{{value}}”.",
     "envReserved": "Keel controls “{{value}}”, or it could carry a credential, so a project can't set it.",
-    "sensitivePaths": "“{{value}}” can't be read as a file pattern."
+    "sensitivePaths": "“{{value}}” can't be read as a file pattern.",
+    "allowedDomains": "“{{value}}” isn't a domain. Write a host name, like registry.npmjs.org or *.example.com, with no http://, path, port or spaces."
   },
   "invalidWorkflow": {
     "empty": "A workflow needs at least one step.",
@@ -1153,7 +1176,7 @@
   "mcp": {
     "title": "MCP server",
     "hint": "Lets an assistant like Claude Code see your projects and start runs on this Mac, and you watch them here. Only this Mac can reach it, and it's off until you turn it on.",
-    "limits": "If you allow it, it can send work back, try a step again, close the runs it started, and add a note to their cards or put them back in Todo while they wait. It can't approve or reject a step, answer the questions a step asks, merge, save a workflow or accept anything into the Brain. Those stay with you, here, and so do settings, apart from one: if you let a client add and configure projects, it can add any repository on this Mac, and set the GitHub account and the setup and check commands of any project, yours included. A workflow it proposes waits for you on Workflows, and can't run until you save it. A project it proposes isn't added until you add it, or a client you let does.",
+    "limits": "If you allow it, it can send work back, try a step again, close the runs it started, and add a note to their cards or put them back in Todo while they wait. It can't approve or reject a step, answer the questions a step asks, merge, save a workflow or accept anything into the Brain. Those stay with you, here, and so do settings, apart from one: if you let a client add and configure projects, it can add any repository on this Mac, and set the GitHub account and the setup and check commands of any project, yours included. It also adds and removes their allowed domains, up to 20 in one call, though only you add names of this Mac or of your local network, such as localhost, .local or .lan, or IP addresses. A workflow it proposes waits for you on Workflows, and can't run until you save it. A project it proposes isn't added until you add it, or a client you let does.",
     "off": "Off",
     "on": "On",
     "port": "Port",
@@ -1166,7 +1189,7 @@
     "canRun": "Can start and stop runs, close the ones it started, and propose workflows and projects",
     "canSteer": "Can give feedback: send work back, try again and add notes to its cards",
     "canSteerNeedsRun": "Turn on the one above first.",
-    "canManageProjects": "Can add and configure projects: their GitHub account and their setup and check commands, which run on this Mac. Setup has internet access",
+    "canManageProjects": "Can add and configure projects: their GitHub account, their setup and check commands, which run on this Mac, and the domains their agents can reach. Setup has internet access",
     "canManageProjectsNeedsRun": "First let it start and stop runs.",
     "projectChanges": "Changes to projects",
     "change": {
@@ -1177,7 +1200,8 @@
     "field": {
       "githubAccount": "GitHub account",
       "setupCommand": "Setup command",
-      "checkCommand": "Check command"
+      "checkCommand": "Check command",
+      "allowedDomains": "Allowed domains"
     },
     "before": "Before: {{value}}",
     "after": "After: {{value}}",
@@ -1272,7 +1296,7 @@
     "changedKept": "Saved now, as below. What you had edited is still in its field, and saving puts it in place of this.",
     "changedTaken": "Saved now, as below. The fields already show it.",
     "yoursKept": "your edit is kept",
-    "notSaved": "Nothing was saved: the account or commands changed meanwhile. Look at them and save again."
+    "notSaved": "Nothing was saved: the account, commands or domains changed meanwhile. Look at them and save again."
   },
   "setup": {
     "titleNew": "{{name}} is added",

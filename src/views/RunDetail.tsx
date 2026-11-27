@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { keymapHeld, watchKeymapHold } from "../commands/keymapHold";
 import { useRunCommands } from "../commands/pageCommands";
-import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CommandChange, isActive, type PrState, type PullRequestAsked, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
+import { api, type BrainNote, type Attempt, type AttemptState, type AuditEvent, type CommandChange, isActive, type NeededDomain, type NetworkAnswer, type PrState, type PullRequestAsked, type QuestionAnswer, type Questioned, type RawCheck, type Reason, type Run, type RunJoint, type Screenshot, type Screenshots, type SpecDecided, type SpecQuestion, type VerificationOutput } from "../lib/api";
 import { accountsOf, activityFrom, type ActivityItem, agentCouldHaveWritten, approvalOutcome, askedText, breakableIds, changedSince, checkSentBackInto, closedByAssistant, type CommandEnd, commandEnd, commandsFrom, type CommandRun, explainingAttempts, filesChangedBy, findingsOf, type FindingShown, focusAttempt, gist, latestOfEachStep, notProvenInRound, pullRequestAsked, reviewsOfRound, roundsAnswered, sentBackByAssistant, shownState, specifyingAttempt, specOf, standingChecks, toolSummary, touchesWorkflows, stillGoing, uncheckedInRound, uncheckedOf, verificationCounts, verificationInRound, verificationLine, verificationOf, whyNotProven } from "../lib/audit";
 import { contractChangedText, partText, partWarningText } from "../lib/board";
 import { attemptChoices, canSendBack, canSendBackFromCheck, type FlowNode, flowOf, isReadOnlyTask, nodeOfAttempt, nodeWithKey, parseSteps } from "../lib/flow";
@@ -141,7 +141,7 @@ export function Summary({ run, attempts, current, commands, rawCheck, closedBy, 
   const followed = attempts.some((a) => a.kind === "watch");
   // A run that only had to work out what's asked has that to say for itself, and no worker to say it.
   const onlyUnderstood = !mapper && explaining.length === 0 && current.state === "succeeded" ? specOf(current) : null;
-  const decision = mapper && current.state === "succeeded" ? "run.decideMap" : run?.prUrl && (run.finishedAt || current.state === "watching" || !followed) ? PR_DECISIONS[run.prState ?? "draft"] : current.reason?.code === "reworkLimit" ? "run.decideReworkLimit" : between ? "run.decideActive" : DECISIONS[current.state];
+  const decision = mapper && current.state === "succeeded" ? "run.decideMap" : run?.prUrl && (run.finishedAt || current.state === "watching" || !followed) ? PR_DECISIONS[run.prState ?? "draft"] : current.reason?.code === "reworkLimit" ? "run.decideReworkLimit" : current.state === "blocked" && current.reason?.code === "networkNeeded" ? "run.decideNetwork" : between ? "run.decideActive" : DECISIONS[current.state];
   return (
     <Card className={cx("grid gap-5 p-4 md:grid-cols-2", going && "mt-6 border-l-2 border-l-accent")}>
       <h2 className="text-[13px] font-semibold md:col-span-2">{t(going ? "run.summaryTitle" : "run.summaryTitleDone")}</h2>
@@ -191,7 +191,8 @@ export function Summary({ run, attempts, current, commands, rawCheck, closedBy, 
           </p>
         </SummaryBlock>
         <SummaryBlock title={t("run.whatToDecide")}>
-          <p>{closedBy ? t("run.decideAbandonedBy", { client: closedBy }) : t(decision)}</p>
+          {/* The count only matters to a sentence about the domains a step waits for. */}
+          <p>{closedBy ? t("run.decideAbandonedBy", { client: closedBy }) : t(decision, { count: ((current.reason?.needed ?? []) as unknown[]).length })}</p>
         </SummaryBlock>
       </div>
     </Card>
@@ -1271,6 +1272,65 @@ function WatchActions({ attempt, act: run }: { attempt: Attempt; act: (run: () =
 }
 
 /**
+ * A step that couldn't go on for lack of network to a domain the project doesn't allow: which, what
+ * for, and what the person can say. What an agent says it needed it for is marked as its words.
+ */
+function NetworkWait({ attempt, onError }: { attempt: Attempt; onError: (message: string) => void }) {
+  const { t } = useTranslation();
+  const armed = useArmed();
+  const [busy, setBusy] = useState(false);
+  const needed = (attempt.reason?.needed ?? []) as NeededDomain[];
+  const domains = needed.map((n) => n.domain).join(", ");
+  const count = needed.length;
+  // Those nothing says whose they are: allowing one opens more than the domain.
+  const unknown = needed.filter((n) => n.freesOffline).map((n) => n.domain);
+  const answer = (said: NetworkAnswer) => {
+    setBusy(true);
+    void api
+      .networkAnswer(attempt.id, said)
+      .catch((e) => onError(errorText(t, e)))
+      .finally(() => setBusy(false));
+  };
+  return (
+    <Card role="alert" className="border-warning/40 p-4">
+      <p className="flex items-center gap-2 text-[13px] font-semibold text-warning">
+        <AlertTriangle size={15} />
+        {t("run.networkTitle", { step: attempt.stepId })}
+      </p>
+      <ul className="selectable mt-1.5 space-y-1 text-[12.5px]">
+        {needed.map((n) => (
+          <li key={n.domain}>
+            <span className="font-mono font-medium break-all">{n.domain}</span>
+            {n.tool && <p className="break-words text-muted">{t("run.networkSeen", { tool: n.tool })}</p>}
+            {n.why && <p className="break-words text-muted">{t("run.networkWhy", { why: n.why })}</p>}
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 text-[12px] break-words text-muted">{t("run.networkNote", { count })}</p>
+      {unknown.length > 0 && <p className="mt-1 text-[12px] break-words text-muted">{t("run.networkFrees", { count: unknown.length, domains: unknown.join(", ") })}</p>}
+      {attempt.kind === "check" && (
+        <p className="mt-1 text-[12px] break-words text-muted">
+          {t("run.networkCheckNote", { count })} {t("run.networkCheckWithout", { count })}
+        </p>
+      )}
+      <div className="mt-2.5 flex flex-wrap gap-2">
+        {/* Its label has the domains in it, however long they are, so it wraps. */}
+        <Button variant="primary" className="h-auto min-h-7 max-w-full py-1 text-left whitespace-normal wrap-anywhere" disabled={!armed || busy} onKeyDown={ignoreEnter} onClick={() => answer("allow")}>
+          {t("run.networkAllow", { domains })}
+        </Button>
+        {/* It decides too: on a check, the work goes back and a round with it. */}
+        <Button disabled={!armed || busy} onKeyDown={ignoreEnter} onClick={() => answer("goWithout")}>
+          {t("run.networkGoWithout", { count })}
+        </Button>
+        <Button variant="danger" disabled={busy} onClick={() => answer("stop")}>
+          {t("run.networkStop")}
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+/**
  * What can be done with a step that stopped. `agentsWrote` says whether an agent that can change files
  * has had the run's copy: a setup started then gets no more than the agents do, and the person is told
  * before choosing.
@@ -1298,6 +1358,7 @@ export function Actions({ attempt, projectId, agentsWrote, canSendBack = false, 
       </Card>
     );
   }
+  if (attempt.state === "blocked" && attempt.reason?.code === "networkNeeded") return <NetworkWait attempt={attempt} onError={onError} />;
   if (attempt.kind === "watch" && (attempt.state === "watching" || attempt.state === "blocked")) return <WatchActions attempt={attempt} act={act} />;
   if (attempt.kind === "deliver" && attempt.state === "blocked" && attempt.reason?.code === "pullRequestAhead") return <WatchActions attempt={attempt} act={act} />;
   if (attempt.state === "stalled") {
@@ -1414,6 +1475,8 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       // Its answer has a tab of its own, as text to read.
       if (role === "specifier" && data.name === "StructuredOutput") return line(t("activity.specAnswer"), "text-subtle");
       if (role === "verifier" && data.name === "StructuredOutput") return line(t("activity.verifyAnswer"), "text-subtle");
+      // A builder's final message comes inside its answer, and reads as the rest of what it said.
+      if (role === "worker" && data.name === "StructuredOutput" && typeof data.input?.message === "string") return <p className="selectable text-[13px] leading-relaxed whitespace-pre-wrap">{data.input.message}</p>;
       const failed = result?.data.isError === true;
       // Only a command's output is read for failures: a file that was read can say anything.
       const end = data.name === "Bash" ? commandEnd(String(data.input?.command ?? ""), result) : null;
@@ -1489,6 +1552,10 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       return line(t("activity.reworkLimit"), "text-warning");
     case "reworkLimitAnswer":
       return line(data.anotherRound ? t("activity.reworkLimitAnswerRound") : t("activity.reworkLimitAnswerApproval"));
+    case "networkAllowed":
+      return line(t("activity.networkAllowed", { domains: (data.domains ?? []).join(", ") }), "font-medium");
+    case "networkDeclined":
+      return line(t("activity.networkDeclined", { domains: (data.domains ?? []).join(", ") }), "font-medium");
     case "checkSentBack":
       return line(t("activity.checkSentBack", { round: data.round + 1 }), "text-warning");
     case "checkNotSentBack":
@@ -1554,6 +1621,8 @@ function ActivityEntry({ item, role, corrected }: { item: ActivityItem; role: At
       return line(t("activity.services", { names: (data.services ?? []).map((service: { name: string }) => service.name).join(", ") }), "text-subtle");
     case "servicesLost":
       return line(t("activity.servicesLost", { error: data.error }), "text-danger");
+    case "networkLost":
+      return line(t("activity.networkLost"), "text-danger");
     case "decision":
       return (
         <div>

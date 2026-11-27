@@ -1,17 +1,23 @@
 //! Adding and configuring projects for an MCP client the person lets do it. Only a project's GitHub
-//! account and its setup and check commands are a client's to set: what its commands may reach
-//! stays with the person. Each write is recorded with what it set, in one go with it.
+//! account, its setup and check commands and its allowed domains are a client's to set: the rest of
+//! what its commands may reach stays with the person. Each write is recorded with what it set, in
+//! one go with it.
 
 use std::path::PathBuf;
 
 use keel_core::Reason;
 use keel_store::{ClientProjectEdit, ClientWrite, Project};
 
+use crate::network::names_the_internet;
 use crate::project_proposals::{hides_text, readable_path_for_client};
-use crate::{AddOutcome, AddedProject, Engine, Error, Result};
+use crate::{AddOutcome, AddedProject, Engine, Error, Result, is_domain};
 
 /// Longer than any command a person would read through, which they have to be able to.
 const MAX_COMMAND_CHARS: usize = 4096;
+
+/// The most domains a client adds in one call, so that the person can read each one where Keel
+/// shows what changed, and none hides among hundreds.
+pub const MOST_DOMAINS_ADDED: usize = 20;
 
 /// Where a project a client adds comes from.
 #[derive(Debug, Clone)]
@@ -22,13 +28,16 @@ pub enum ProjectSource {
     Proposal(String),
 }
 
-/// A project's GitHub account and commands as a client gives them. When configuring, `None` leaves a
-/// value as it is. An empty command means the project has none, as in the app.
+/// A project's GitHub account, commands and domains as a client gives them. When configuring,
+/// `None` leaves a value as it is. An empty command means the project has none, as in the app.
+/// Domains only configuring changes.
 #[derive(Debug, Clone, Default)]
 pub struct ProjectValues {
     pub github_account: Option<String>,
     pub setup_command: Option<String>,
     pub check_command: Option<String>,
+    pub add_domains: Vec<String>,
+    pub remove_domains: Vec<String>,
 }
 
 /// Why Keel didn't do what a client asked, with nothing added or changed.
@@ -53,6 +62,22 @@ pub enum ClientRefusal {
     /// characters that hide text.
     UnreadableCommand {
         field: &'static str,
+    },
+    /// Not a host name with an optional `*.`: see `is_domain`.
+    InvalidDomain {
+        domain: String,
+    },
+    /// This Mac, the local network or an IP address, which only the person allows.
+    LocalDomain {
+        domain: String,
+    },
+    /// More domains to add at once than `MOST_DOMAINS_ADDED`.
+    TooManyDomains {
+        given: usize,
+    },
+    /// The same domain to add and to remove, which doesn't say what's wanted.
+    DomainBothWays {
+        domain: String,
     },
     /// The project was added or removed while Keel was looking.
     ProjectChanged,
@@ -79,6 +104,37 @@ fn command(field: &'static str, text: &str) -> Result<Option<String>, ClientRefu
 fn edit_of(values: &ProjectValues) -> Result<ClientProjectEdit, ClientRefusal> {
     let read =
         |field, text: &Option<String>| text.as_deref().map(|text| command(field, text)).transpose();
+    // Only what's added is checked. Taking one away opens nothing, so anything saved can go, one
+    // from before domains were checked included, and any number of them.
+    if values.add_domains.len() > MOST_DOMAINS_ADDED {
+        return Err(ClientRefusal::TooManyDomains {
+            given: values.add_domains.len(),
+        });
+    }
+    if let Some(wrong) = values.add_domains.iter().find(|domain| !is_domain(domain)) {
+        return Err(ClientRefusal::InvalidDomain {
+            domain: wrong.clone(),
+        });
+    }
+    if let Some(local) = values
+        .add_domains
+        .iter()
+        .find(|domain| !names_the_internet(domain))
+    {
+        return Err(ClientRefusal::LocalDomain {
+            domain: local.clone(),
+        });
+    }
+    if let Some(both) = values.add_domains.iter().find(|added| {
+        values
+            .remove_domains
+            .iter()
+            .any(|removed| removed.trim().eq_ignore_ascii_case(added))
+    }) {
+        return Err(ClientRefusal::DomainBothWays {
+            domain: both.clone(),
+        });
+    }
     Ok(ClientProjectEdit {
         github_account: values
             .github_account
@@ -86,6 +142,8 @@ fn edit_of(values: &ProjectValues) -> Result<ClientProjectEdit, ClientRefusal> {
             .map(|login| login.trim().to_owned()),
         setup_command: read("setupCommand", &values.setup_command)?,
         check_command: read("checkCommand", &values.check_command)?,
+        add_domains: values.add_domains.clone(),
+        remove_domains: values.remove_domains.clone(),
         github_repo: None,
     })
 }
@@ -208,8 +266,8 @@ impl Engine {
         )))
     }
 
-    /// Changes a project's GitHub account and commands for a client, whether or not it has runs
-    /// open, as the app does.
+    /// Changes a project's GitHub account, commands and domains for a client, whether or not it
+    /// has runs open, as the app does.
     pub fn configure_project_for_client(
         &self,
         client_id: &str,

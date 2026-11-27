@@ -15,11 +15,13 @@ mod joint;
 mod limits;
 mod localhost;
 mod log;
+mod network;
 mod notes;
 mod notices;
 mod project_commands;
 mod project_proposals;
 mod prompts;
+mod proxy;
 mod pull_requests;
 mod runner;
 mod screenshots;
@@ -41,7 +43,7 @@ use std::time::{Duration, Instant};
 
 pub use board::{Board, BoardCard, BoardIssue};
 pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
-pub use client_projects::{ClientRefusal, ProjectSource, ProjectValues};
+pub use client_projects::{ClientRefusal, MOST_DOMAINS_ADDED, ProjectSource, ProjectValues};
 pub use copies::{CopiesFreed, CopyNotFreed};
 pub use detect::{CiGap, CiLeftOut, CiWhy, Guess};
 pub use git::{ChangeSize, Git, GitError, Snapshot};
@@ -60,11 +62,13 @@ use keel_store::{
     Decision, IssueTold, NewAttempt, NewRun, Project, ProjectSettings, Store, WorkflowResults, now,
 };
 pub use limits::MOST_CONTINUED_BY_ITSELF;
+pub use network::{NetworkAnswer, is_domain};
 pub use notes::split_assistant_notes;
 pub use notices::{Notice, NoticeSettings, NoticeWatch};
 pub use project_commands::{CommandChange, CommandKind, retry_runs_something_new};
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
 pub use prompts::full_workflow;
+pub use proxy::Connector;
 pub use screenshots::{Screenshot, Screenshots};
 use serde_json::json;
 // What a reader outside the engine needs to tell what a run did and what it waits for, read the way
@@ -176,6 +180,10 @@ pub struct Config {
     /// which project files changed (see `keel_harness::hook`). The app installs it. Without it, or
     /// without git, no hook.
     pub bash_hook: Option<PathBuf>,
+    /// How the proxy of a check with network connects to a domain it lets through. None, as the
+    /// app has it, finds the domain's address and refuses this Mac's and a private network's.
+    /// Tests give one that leads to a server of theirs.
+    pub check_connects: Option<Connector>,
 }
 
 impl Config {
@@ -198,6 +206,7 @@ impl Config {
             continue_after_reset: limits::AFTER_RESET,
             limit_look_again: limits::LOOK_AGAIN,
             bash_hook: None,
+            check_connects: None,
         }
     }
 }
@@ -453,7 +462,14 @@ struct Inner {
     issue_watch: Mutex<HashMap<String, IssueWatch>>,
     /// The last comment on each project's issues that didn't work, until one does.
     issue_comment_failed: Mutex<HashMap<String, CommentFailed>>,
+    /// For a test to act where a person's answer can come in: once a step that closes is on the
+    /// record as waiting for a domain, and before the rest of its closing. See `runner::finish`.
+    #[cfg(test)]
+    once_it_waits: Mutex<Option<WaitHook>>,
 }
+
+#[cfg(test)]
+type WaitHook = Box<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Engine {
@@ -526,6 +542,8 @@ impl Engine {
                 issue_looks: Mutex::default(),
                 issue_watch: Mutex::default(),
                 issue_comment_failed: Mutex::default(),
+                #[cfg(test)]
+                once_it_waits: Mutex::default(),
             }),
         }
     }
@@ -854,9 +872,22 @@ impl Engine {
     }
 
     pub fn update_project(&self, id: &str, settings: &ProjectSettings) -> Result<Project> {
+        let held = self.inner.store.project(id)?;
+        // Only new ones: one saved before domains were checked doesn't keep the rest from being
+        // saved.
+        if let Some(wrong) = settings
+            .allowed_domains
+            .iter()
+            .find(|d| !held.allowed_domains.contains(d) && !is_domain(d))
+        {
+            return Err(Error::Blocked(Reason::InvalidSetting {
+                field: "allowedDomains".into(),
+                value: wrong.clone(),
+            }));
+        }
         services::validate(&settings.services, &settings.env).map_err(Error::Blocked)?;
         sizing::check_patterns(&settings.sensitive_paths).map_err(Error::Blocked)?;
-        let before = self.inner.store.project(id)?.github_account;
+        let before = held.github_account;
         self.inner.store.update_project(id, settings)?;
         let project = self.inner.store.project(id)?;
         if project.github_account != before {
@@ -1570,6 +1601,7 @@ impl Engine {
                 event: &changed,
             }),
             put_off: put_off.as_ref(),
+            allowed: None,
         };
         match &setup_first {
             Some(setup) => {
@@ -2504,22 +2536,59 @@ impl Inner {
             // can open it before the project does.
             WorkflowStep::Check { run: command, .. } => {
                 let localhost = project.allow_localhost || run.extra_localhost;
-                (
-                String::new(),
-                None,
-                "check".to_owned(),
-                None,
-                None,
-                command.clone(),
-                json!({
-                    "network": if localhost { "localhost only" } else { "none" },
+                // The check a person repeats after allowing a domain it lacked reaches those
+                // it was allowed, and so does trying that one again with the same command while
+                // it hasn't finished its work, also one put off for a new setup. No other does.
+                let again = retry.is_some()
+                    || self
+                        .store
+                        .attempts_of_run(run_id)?
+                        .iter()
+                        .rev()
+                        .find(|a| a.step_id == step.id())
+                        .is_some_and(|a| a.state == AttemptState::Postponed.as_str());
+                let reaches = if again {
+                    let check = network::CheckTry {
+                        run_id,
+                        step_id: step.id(),
+                        round: run.round,
+                        command,
+                    };
+                    // The wait this try answers, if it's a person allowing what it lacked.
+                    let allowed: Option<Vec<String>> =
+                        retry.and_then(|retry| retry.allowed).and_then(|allowed| {
+                            serde_json::from_value(allowed["domains"].clone()).ok()
+                        });
+                    let allowing = retry.zip(allowed.as_deref()).map(|(r, a)| (r.retried, a));
+                    self.inherited_network(&check, &project.allowed_domains, allowing)?
+                } else {
+                    Vec::new()
+                };
+                let online = !reaches.is_empty();
+                let mut record = json!({
+                    "network": match (online, localhost) {
+                        (true, true) => "allowed domains and localhost",
+                        (true, false) => "allowed domains",
+                        (false, true) => "localhost only",
+                        (false, false) => "none",
+                    },
                     "localhost": localhost,
                     "read": read,
                     "sockets": services::socket_dirs(&services::root_for(&project.id), &project.services),
-                })
-                .to_string(),
-                format!("{stem}.log"),
-            )
+                });
+                if online {
+                    record["allowedDomains"] = json!(reaches);
+                }
+                (
+                    String::new(),
+                    None,
+                    "check".to_owned(),
+                    None,
+                    None,
+                    command.clone(),
+                    record.to_string(),
+                    format!("{stem}.log"),
+                )
             }
             WorkflowStep::Parallel { .. }
             | WorkflowStep::Approval { .. }

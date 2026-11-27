@@ -15,9 +15,9 @@ use keel_core::{
 };
 use keel_engine::{
     AddedProject, Answer, Board, BrainView, CiGap, CommandChange, Config, ContractEdit, Engine,
-    Error as EngineError, GithubStatus, IssueWatch, JointChangeView, NoticeSettings, Preflight,
-    ProjectProposalReview, ProjectSetup, RawCheck, RetryOptions, RunJoint, StartRun, Workflow,
-    WorkflowDraft, request_from_issue, title_from_issue,
+    Error as EngineError, GithubStatus, IssueWatch, JointChangeView, NetworkAnswer, NoticeSettings,
+    Preflight, ProjectProposalReview, ProjectSetup, RawCheck, RetryOptions, RunJoint, StartRun,
+    Workflow, WorkflowDraft, request_from_issue, title_from_issue,
 };
 use keel_harness::Tools;
 use keel_harness::github::{Account, Issue};
@@ -309,6 +309,9 @@ struct ProjectSettingsInput {
     /// The label whose issues Keel brings to the Backlog. Empty or missing: it watches none.
     #[serde(default)]
     issue_label: Option<String>,
+    /// The saved domains the form had seen, so saving keeps one the project got since.
+    #[serde(default)]
+    domains_seen: Option<Vec<String>>,
 }
 
 #[tauri::command(async)]
@@ -332,6 +335,7 @@ fn project_update(
             default_workflow: clean(settings.default_workflow),
             sensitive_paths: settings.sensitive_paths,
             allow_localhost: settings.allow_localhost,
+            domains_seen: settings.domains_seen,
         },
     )?;
     Ok(state
@@ -735,6 +739,16 @@ fn questions_answer(
     answers: Vec<Answer>,
 ) -> CommandResult<()> {
     Ok(state.engine.answer_questions(&attempt_id, &answers)?)
+}
+
+/// What the person says to a step waiting to know whether it may reach a domain.
+#[tauri::command(async)]
+fn network_answer(
+    state: State<'_, AppState>,
+    attempt_id: String,
+    answer: NetworkAnswer,
+) -> CommandResult<()> {
+    Ok(state.engine.answer_network(&attempt_id, answer)?)
 }
 
 #[tauri::command(async)]
@@ -1211,6 +1225,7 @@ pub fn run() {
             project_proposal_accept,
             project_proposal_discard,
             rework_limit_answer,
+            network_answer,
             run_attempts,
             project_update,
             github_status,
