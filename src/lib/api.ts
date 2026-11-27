@@ -235,6 +235,9 @@ export interface McpProjectChange {
   clientName: string;
   projectId: string;
   projectName: string;
+  /** The folder and the GitHub repo, as they were then: two folders can have the same name. */
+  projectPath: string;
+  githubRepo: string | null;
   action: "added" | "restored" | "configured";
   changes: { field: "githubAccount" | "setupCommand" | "checkCommand"; before: string | null; after: string | null }[];
   at: string;

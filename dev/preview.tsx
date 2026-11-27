@@ -658,8 +658,8 @@ const mcpOverview = () => {
       : [],
     projectChanges: mcp === "on"
       ? [
-          { seq: 2, clientId: "c1", clientName: "Claude Code", projectId: "p1", projectName: "demo", action: "configured", changes: [{ field: "checkCommand", before: "make test", after: "make lint test" }], at: at(15) },
-          { seq: 1, clientId: "c1", clientName: "Claude Code", projectId: "p2", projectName: "payments", action: "added", changes: [{ field: "githubAccount", before: null, after: "you-work" }, { field: "setupCommand", before: null, after: "pnpm install --frozen-lockfile" }], at: at(120) },
+          { seq: 2, clientId: "c1", clientName: "Claude Code", projectId: "p1", projectName: "demo", projectPath: "/Users/you/www/demo", githubRepo: "acme/demo", action: "configured", changes: [{ field: "checkCommand", before: "make test", after: "make lint test" }], at: at(15) },
+          { seq: 1, clientId: "c1", clientName: "Claude Code", projectId: "p2", projectName: "payments", projectPath: "/Users/you/work/payments", githubRepo: "acme/payments", action: "added", changes: [{ field: "githubAccount", before: null, after: "you-work" }, { field: "setupCommand", before: null, after: "pnpm install --frozen-lockfile" }], at: at(120) },
         ]
       : [],
   };

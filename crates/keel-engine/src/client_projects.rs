@@ -87,14 +87,15 @@ fn refusal_of(write: ClientWrite) -> Option<ClientRefusal> {
 impl Engine {
     /// Adds a folder as when the person adds one, map included, with the account and commands the
     /// client gives. A command it leaves out means none, also on a removed project, which comes
-    /// back with its history. One already in use is refused.
+    /// back with its history. One already in use is refused. With the project comes the run of its
+    /// map, if one started, which is the client's as a run it started.
     pub fn add_project_for_client(
         &self,
         client_id: &str,
         source: &ProjectSource,
         values: &ProjectValues,
         language: &str,
-    ) -> Result<Result<AddedProject, ClientRefusal>> {
+    ) -> Result<Result<(AddedProject, Option<String>), ClientRefusal>> {
         let mut edit = match edit_of(values) {
             Ok(edit) => edit,
             Err(refusal) => return Ok(Err(refusal)),
@@ -159,7 +160,7 @@ impl Engine {
             }
         };
         self.inner.settle_project_proposals(&root_text);
-        let (project, map) = match outcome {
+        let (project, (map, map_run)) = match outcome {
             AddOutcome::New => {
                 let map = self.map_new_project(&id, language);
                 (store.project(&id)?, map)
@@ -169,16 +170,19 @@ impl Engine {
                 if existing.and_then(|before| before.github_account) != project.github_account {
                     self.inner.compare_map_with_github(&project)?;
                 }
-                (project, None)
+                (project, (None, None))
             }
         };
         // For the app to show it, and for the board to look at the cards a restored one had in Todo.
         self.inner.changed("");
-        Ok(Ok(AddedProject {
-            project,
-            outcome,
-            map,
-        }))
+        Ok(Ok((
+            AddedProject {
+                project,
+                outcome,
+                map,
+            },
+            map_run,
+        )))
     }
 
     /// Changes a project's GitHub account and commands for a client, whether or not it has runs

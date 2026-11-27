@@ -161,8 +161,9 @@ const ADD_PROJECT: &str = "Add a git repository on this Mac to Keel as a project
                            itself says it uses. A command left out, or empty, means the project has none. It's \
                            named after its folder; a subfolder adds its repo, and the answer says which. Adding a \
                            new one starts an agent that maps the repo, on their Claude usage, and `map` says if \
-                           it started. One the person had removed comes back with its history (`state` is \
-                           restored). Keel records which client added it and what it set, and shows the person. \
+                           it started. That map is a run of this client's, `mapRunId`, and counts toward the \
+                           runs it may keep open. One the person had removed comes back with its history \
+                           (`state` is restored), and its cards waiting in Todo start at once. Keel records which client added it and what it set, and shows the person. \
                            Its network, folders, services, variables and other settings stay the person's. \
                            Refused if it isn't a git repository with commits, the account isn't in \
                            `githubAccounts` of list_projects, or it's already in Keel.";
@@ -170,8 +171,10 @@ const CONFIGURE_PROJECT: &str = "Change a project's GitHub account, setup comman
                                  the person lets add and configure projects, in Keel's settings: otherwise it's \
                                  refused, and the change is theirs to make in the app. What you leave out stays, and \
                                  an empty command removes it. The commands run on the person's Mac, so change only \
-                                 what they asked for. It applies to new runs; runs already open keep the commands \
-                                 they started with, which get_run lists in `commandsChanged`. Keel records which \
+                                 what they asked for. Commands apply to new runs; runs already open keep the ones \
+                                 they started with, which get_run lists in `commandsChanged`. The account applies \
+                                 at once, also to runs already open: the ones the person approves after this push \
+                                 and open their pull request with it. Keel records which \
                                  client changed it and each value before and after, and shows the person. Nothing \
                                  else about a project can be changed here.";
 const STOP_RUN: &str = "Ask whatever a run has working to stop. It doesn't close the run: close_run does that \

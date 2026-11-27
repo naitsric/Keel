@@ -501,7 +501,15 @@ impl Inner {
     }
 
     /// Makes sure the run has its private clone, and returns the commit the step starts from.
-    fn prepare_workspace(&self, attempt: &Attempt, project_id: &str) -> Result<(Git, String)> {
+    /// A project's first map, from before it has a copy of its own, comes from its folder, even
+    /// with an account set by then: the code that was added, and not whatever that account can or
+    /// can't read on GitHub. `compare_map_with_github` and later runs bring GitHub in.
+    fn prepare_workspace(
+        &self,
+        attempt: &Attempt,
+        project_id: &str,
+        maps: bool,
+    ) -> Result<(Git, String)> {
         let tools = locked(&self.tools).clone();
         let git = Git::new(
             tools
@@ -516,12 +524,13 @@ impl Inner {
             let project = self.store.project(project_id)?;
             let mirror = self.mirror(project_id);
             let source = PathBuf::from(&project.path);
+            let first_map = maps && !mirror.exists();
             let base = match (
                 &project.github_account,
                 &project.github_repo,
                 tools.gh.as_ref(),
             ) {
-                (Some(account), Some(repo), Some(_)) => {
+                (Some(account), Some(repo), Some(_)) if !first_map => {
                     self.update_mirror_from_github(&git, &mirror, account, repo)?
                 }
                 _ => git.update_mirror_from_local(&source, &mirror)?,
@@ -592,7 +601,8 @@ impl Inner {
             .claude
             .clone()
             .ok_or(Error::Blocked(Reason::ClaudeMissing))?;
-        let (git, sha_before) = self.prepare_workspace(attempt, project_id)?;
+        let maps = spec.role == keel_core::StepRole::Mapper;
+        let (git, sha_before) = self.prepare_workspace(attempt, project_id, maps)?;
         let workspace = PathBuf::from(&attempt.workspace);
         let dir = self.run_dir(&attempt.run_id);
         // The commit the run started from, which is where this step is if it's the first.
@@ -743,7 +753,7 @@ impl Inner {
         let store = &self.store;
         store.set_state(&attempt.id, AttemptState::Preparing, None)?;
         self.changed(&attempt.run_id);
-        let (_git, sha_before) = self.prepare_workspace(attempt, project_id)?;
+        let (_git, sha_before) = self.prepare_workspace(attempt, project_id, false)?;
         let project = store.project(project_id)?;
         let read = readable(&project, &store.run(&attempt.run_id)?);
         let tools = locked(&self.tools).clone();

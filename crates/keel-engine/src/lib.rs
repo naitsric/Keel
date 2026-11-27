@@ -600,7 +600,7 @@ impl Engine {
         let map = if outcome != AddOutcome::New {
             None
         } else {
-            self.map_new_project(&project.id, language)
+            self.map_new_project(&project.id, language).0
         };
         Ok(AddedProject {
             project,
@@ -609,15 +609,23 @@ impl Engine {
         })
     }
 
-    fn map_new_project(&self, project_id: &str, language: &str) -> Option<MapStart> {
+    /// What came of starting a new project's map, and the run, if it started.
+    fn map_new_project(
+        &self,
+        project_id: &str,
+        language: &str,
+    ) -> (Option<MapStart>, Option<String>) {
         match self.first_map(project_id, DEFAULT_BRAIN_MODEL, language) {
-            Ok(run) => run.map(|_| MapStart::Started),
-            Err(Error::Blocked(reason)) => Some(MapStart::NotStarted { reason }),
-            Err(other) => Some(MapStart::NotStarted {
-                reason: Reason::PrepareFailed {
-                    detail: other.to_string(),
-                },
-            }),
+            Ok(run) => (run.as_ref().map(|_| MapStart::Started), run),
+            Err(Error::Blocked(reason)) => (Some(MapStart::NotStarted { reason }), None),
+            Err(other) => (
+                Some(MapStart::NotStarted {
+                    reason: Reason::PrepareFailed {
+                        detail: other.to_string(),
+                    },
+                }),
+                None,
+            ),
         }
     }
 

@@ -17,6 +17,8 @@ const change = (fields: Partial<McpProjectChange> = {}): McpProjectChange => ({
   clientName: "Bot",
   projectId: "p",
   projectName: "storefront",
+  projectPath: "/Users/you/work/storefront",
+  githubRepo: "acme/storefront",
   action: "configured",
   changes: [{ field: "checkCommand", before: "pnpm test", after: "pnpm test && pnpm lint" }],
   at: "2026-11-20T00:00:00Z",
@@ -178,6 +180,22 @@ describe("the MCP card", () => {
       expect(page()).toContain("Bot added api back");
       expect(page()).toContain("Setup command");
       expect(page()).toContain("After: none");
+    });
+
+    it("names the folder and repo, which two projects with one name don't share", async () => {
+      projectChanges = [change({ action: "added" }), change({ seq: 2, projectPath: "/Users/you/other/storefront", githubRepo: null })];
+      await open();
+      expect(page()).toContain("/Users/you/work/storefront · acme/storefront");
+      expect(page()).toContain("/Users/you/other/storefront");
+    });
+
+    it("can be scrolled from the keyboard, and the calls below it have their own heading", async () => {
+      projectChanges = [change()];
+      await open();
+      const list = document.querySelector<HTMLElement>("ul[aria-labelledby='mcp-project-changes']");
+      expect(list?.tabIndex).toBe(0);
+      expect(page()).toContain("Changes to projects");
+      expect(page()).toContain("Calls");
     });
 
     it("is still there with the server off", async () => {

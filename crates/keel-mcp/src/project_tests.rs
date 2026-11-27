@@ -197,6 +197,8 @@ async fn a_client_the_person_lets_adds_a_project_which_is_mapped_and_on_record()
     assert_eq!(changes[0].client_name, "Bot");
     assert_eq!(changes[0].project_id, project.id);
     assert_eq!(changes[0].project_name, "app");
+    assert_eq!(changes[0].project_path, path);
+    assert_eq!(changes[0].github_repo, None);
     assert_eq!(changes[0].action, "added");
     assert_eq!(
         values(&changes[0]),
@@ -209,6 +211,82 @@ async fn a_client_the_person_lets_adds_a_project_which_is_mapped_and_on_record()
     let calls = w.store.mcp_calls(10).unwrap();
     assert_eq!(calls[0].tool, "add_project");
     assert!(calls[0].ok);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_map_reads_the_folder_even_when_the_account_cannot_read_github() {
+    let w = world();
+    let bot = w.manager();
+    let path = w.repo("app");
+    // On GitHub as far as the folder says, where the fake `gh` gives no account a token.
+    git(
+        Path::new(&path),
+        &["remote", "add", "origin", "https://github.com/acme/app.git"],
+    );
+
+    let answer = w
+        .add(&bot, json!({ "path": path, "githubAccount": "alice" }))
+        .await
+        .unwrap();
+
+    let project = w.store.projects().unwrap().remove(0);
+    assert_eq!(project.github_repo.as_deref(), Some("acme/app"));
+    assert_eq!(answer["map"]["status"], "started", "{answer}");
+    let run = answer["mapRunId"].as_str().unwrap().to_owned();
+    // Until it has its copy, or failed before it. Inside a sandbox, git can't start the one of its
+    // own it runs in, so there it fails for that, and still never asks GitHub.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let failed = loop {
+        if w.store.run(&run).unwrap().branch.is_some() {
+            break None;
+        }
+        let attempts = w.store.attempts_of_run(&run).unwrap();
+        if let Some(reason) = attempts.iter().find_map(|a| a.reason.clone()) {
+            break Some(reason);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the map never got its copy of the code"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    if let Some(reason) = failed {
+        assert_eq!(reason["code"], "prepareFailed", "{reason}");
+        let detail = reason["detail"].as_str().unwrap_or_default();
+        assert!(detail.contains("sandbox"), "{reason}");
+    }
+    let changes = w.store.mcp_project_changes(10).unwrap();
+    assert_eq!(changes[0].project_path, path);
+    assert_eq!(changes[0].github_repo.as_deref(), Some("acme/app"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_map_of_a_project_it_adds_is_a_run_of_the_client_within_its_limit() {
+    let w = world();
+    let bot = w.manager();
+    let bot = w.store.set_mcp_client_max_open_runs(&bot.id, 1).unwrap();
+    let first = w.repo("app");
+    let second = w.repo("other");
+
+    let answer = w
+        .add(&bot, json!({ "path": first, "githubAccount": "alice" }))
+        .await
+        .unwrap();
+    let run = answer["mapRunId"].as_str().unwrap();
+    assert!(w.store.run_started_by_mcp_client(run, &bot.id).unwrap());
+    assert_eq!(
+        w.store.mcp_calls(10).unwrap()[0].run_id.as_deref(),
+        Some(run)
+    );
+    assert_eq!(w.store.open_runs_of_mcp_client(&bot.id).unwrap(), 1);
+
+    let refusal = w
+        .add(&bot, json!({ "path": second, "githubAccount": "alice" }))
+        .await
+        .unwrap_err()
+        .0;
+    assert!(refusal.contains("as many runs open"), "{refusal}");
+    assert_eq!(w.store.projects().unwrap().len(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -337,7 +415,7 @@ async fn what_cannot_be_added_is_refused_by_name_and_adds_nothing() {
         ),
         (
             json!({ "path": good, "githubAccount": "" }),
-            "no GitHub account",
+            "`githubAccount` can't be empty",
         ),
         (
             json!({ "proposal": "nothing", "githubAccount": "alice" }),

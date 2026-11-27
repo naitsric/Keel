@@ -479,6 +479,8 @@ const MIGRATIONS: &[&str] = &[
         client_name text not null,
         project_id text not null references project (id),
         project_name text not null,
+        project_path text not null,
+        github_repo text,
         action text not null,
         changes text not null,
         at text not null
@@ -641,6 +643,10 @@ pub struct McpProjectChange {
     pub client_name: String,
     pub project_id: String,
     pub project_name: String,
+    /// The folder, as two can have the same name, and the GitHub repo its runs read and push to,
+    /// as they were then.
+    pub project_path: String,
+    pub github_repo: Option<String>,
     /// `added`, `restored` or `configured`.
     pub action: String,
     pub changes: Vec<FieldChange>,
@@ -685,8 +691,8 @@ fn add_project_change(
     changes: &[FieldChange],
 ) -> Result<()> {
     conn.execute(
-        "insert into mcp_project_change (client_id, client_name, project_id, project_name, action, changes, at)
-         select m.id, m.name, p.id, p.name, ?3, ?4, ?5 from mcp_client m, project p
+        "insert into mcp_project_change (client_id, client_name, project_id, project_name, project_path, github_repo, action, changes, at)
+         select m.id, m.name, p.id, p.name, p.path, p.github_repo, ?3, ?4, ?5 from mcp_client m, project p
          where m.id = ?1 and p.id = ?2",
         params![
             client_id,
@@ -743,7 +749,8 @@ fn mcp_client_from(r: &Row) -> rusqlite::Result<McpClient> {
 }
 
 /// The tools that start a run, which is how a client's runs are told from everyone else's.
-const MCP_STARTS_A_RUN: &str = "('start_run', 'start_task', 'propose_change')";
+/// add_project starts the map of a project it adds.
+const MCP_STARTS_A_RUN: &str = "('start_run', 'start_task', 'propose_change', 'add_project')";
 
 /// Whether the run `{run}` is the client `{client}`'s: it started it, or Keel started it for the
 /// client from a card, as the run itself keeps: see `add_run_for_card`. Never by what a card
@@ -2097,7 +2104,7 @@ impl Store {
     pub fn mcp_project_changes(&self, limit: i64) -> Result<Vec<McpProjectChange>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "select seq, client_id, client_name, project_id, project_name, action, changes, at
+            "select seq, client_id, client_name, project_id, project_name, action, changes, at, project_path, github_repo
              from mcp_project_change order by seq desc limit ?1",
         )?;
         let rows = stmt.query_map([limit], |r| {
@@ -2108,6 +2115,8 @@ impl Store {
                 client_name: r.get(2)?,
                 project_id: r.get(3)?,
                 project_name: r.get(4)?,
+                project_path: r.get(8)?,
+                github_repo: r.get(9)?,
                 action: r.get(5)?,
                 changes: serde_json::from_str(&changes).unwrap_or_default(),
                 at: r.get(7)?,

@@ -66,11 +66,19 @@ pub fn delete(dir: &Path, id: &str) -> io::Result<()> {
     }
 }
 
-/// A line break, or a character that shows the text after it in another order: what would keep a
-/// person from reading a value for what it is.
+/// A line break, a character that shows the text after it in another order, or one that shows as
+/// nothing at all: what would keep a person from reading a value for what it is.
 pub fn hides_text(c: char) -> bool {
     c.is_control()
-        || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        || matches!(
+            c,
+            '\u{061C}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{2028}'..='\u{202E}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{FEFF}'
+                | '\u{E0000}'..='\u{E007F}'
+        )
 }
 
 /// Whether the person can read this path for what it is. The folder is what they're deciding on.
@@ -129,6 +137,22 @@ mod tests {
         assert!(!readable_path("/Users/you/a\nb"));
         assert!(!readable_path("/Users/you/\u{202E}gpj.exe"));
         assert!(!readable_path("/Users/you/\u{2066}x"));
+        // Ones that show as nothing, or as a plain break: the same path to the eye as another.
+        for hidden in [
+            '\u{061C}',
+            '\u{200B}',
+            '\u{200D}',
+            '\u{2028}',
+            '\u{2029}',
+            '\u{2060}',
+            '\u{FEFF}',
+            '\u{E0041}',
+        ] {
+            assert!(
+                !readable_path(&format!("/Users/you/a{hidden}b")),
+                "{hidden:?}"
+            );
+        }
         assert!(!readable_path(&format!("/{}", "a".repeat(MAX_PATH_CHARS))));
     }
 }

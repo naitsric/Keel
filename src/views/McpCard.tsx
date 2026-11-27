@@ -93,14 +93,21 @@ function ProjectChanges({ changes }: { changes: McpProjectChange[] }) {
   const { t } = useTranslation();
   return (
     <>
-      <p className="mt-1.5 text-[12px] text-muted">{t("mcp.projectChanges")}</p>
-      <ul className="mt-1 max-h-72 overflow-y-auto rounded-md border border-border">
+      <p id="mcp-project-changes" className="mt-1.5 text-[12px] text-muted">
+        {t("mcp.projectChanges")}
+      </p>
+      {/* Focusable, so its whole commands can be scrolled through from the keyboard. */}
+      <ul tabIndex={0} aria-labelledby="mcp-project-changes" className="mt-1 max-h-72 overflow-y-auto rounded-md border border-border">
         {changes.map((change) => (
           <li key={change.seq} className="border-t border-border px-3 py-1.5 text-[12px] first:border-t-0">
             <div className="flex items-baseline gap-2">
               <span className="min-w-0 flex-1 font-medium">{t(`mcp.change.${change.action}`, { client: change.clientName, project: change.projectName })}</span>
               <span className="shrink-0 text-[11px] text-subtle">{formatRelative(change.at)}</span>
             </div>
+            <p className="selectable break-all font-mono text-[11px] text-subtle">
+              {change.projectPath}
+              {change.githubRepo && ` · ${change.githubRepo}`}
+            </p>
             {change.changes.map(({ field, before, after }) => (
               <div key={field} className="mt-1">
                 <p className="text-muted">{t(`mcp.field.${field}`)}</p>
@@ -293,6 +300,7 @@ export function McpCard() {
       {/* What changed in a project stays in sight with the server off. */}
       {(status.running || projectChanges.length > 0) && <p className="mt-4 text-[12.5px] font-semibold">{t("mcp.activity")}</p>}
       {projectChanges.length > 0 && <ProjectChanges changes={projectChanges} />}
+      {status.running && projectChanges.length > 0 && <p className="mt-3 text-[12px] text-muted">{t("mcp.calls")}</p>}
       {status.running &&
         (calls.length === 0 ? (
           <p className="mt-1 text-[12px] text-subtle">{t("mcp.noActivity")}</p>

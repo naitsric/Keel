@@ -1117,6 +1117,8 @@ impl McpServer {
     ) -> Result<Json, ToolError> {
         self.call(client, "add_project", args, |server, client, args| {
             may_manage_projects(client)?;
+            // The map a new project starts is a run of this client's, within what it may keep open.
+            server.room_for_another_run(client)?;
             let source = match (args.path, args.proposal) {
                 (Some(path), None) => ProjectSource::Folder(full_path(&path)?.to_owned()),
                 (None, Some(proposal)) => ProjectSource::Proposal(proposal),
@@ -1132,7 +1134,7 @@ impl McpServer {
                 check_command: args.check_command,
             };
             let language = server.language(None)?;
-            let added = server
+            let (added, map_run) = server
                 .0
                 .engine
                 .add_project_for_client(&client.id, &source, &values, &language)
@@ -1147,8 +1149,9 @@ impl McpServer {
                     "state": state,
                     "project": configured_view(&added.project),
                     "map": added.map,
+                    "mapRunId": map_run,
                 }),
-                None,
+                map_run,
             ))
         })
         .await
@@ -3001,6 +3004,11 @@ fn client_refusal(refusal: ClientRefusal) -> ToolError {
             } else {
                 known.join(", ")
             };
+            if login.is_empty() {
+                return ToolError::new(format!(
+                    "`githubAccount` can't be empty: Keel has no GitHub account without a name, and only the person leaves a project without one, in Keel. The accounts it has are: {known}."
+                ));
+            }
             ToolError::new(format!(
                 "Keel has no GitHub account {login:?}. The accounts it has are: {known}. list_projects lists them under `githubAccounts`, and only the person adds one."
             ))
