@@ -112,7 +112,11 @@ describe("the setup dialog", () => {
     await settle();
   };
   const select = () => document.querySelector("select") as HTMLSelectElement;
-  const inputs = () => [...document.querySelectorAll("input")] as HTMLInputElement[];
+  const field = (label: string) => [...document.querySelectorAll("label")].find((l) => l.textContent?.startsWith(i18next.t(label)))?.querySelector("input") as HTMLInputElement;
+  const checkInput = () => field("settings.checkCommand");
+  const setupInput = () => field("settings.setupCommand");
+  /** Both commands by name, whatever order the dialog shows them in. */
+  const commands = () => ({ check: checkInput().value, setup: setupInput().value });
   const type = async (input: HTMLInputElement, value: string) => {
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(input, value);
@@ -218,45 +222,55 @@ describe("the setup dialog", () => {
   describe("the guess", () => {
     it("is labelled as one, fills the fields and saves nothing until Save", async () => {
       await show({ guess: PNPM, accounts: { "you-work": "WRITE" } });
-      expect(inputs().map((input) => input.value)).toEqual(["pnpm test", "pnpm install --frozen-lockfile"]);
+      expect(commands()).toEqual({ check: "pnpm test", setup: "pnpm install --frozen-lockfile" });
       expect(page()).toContain("Guessed from package.json, pnpm-lock.yaml.");
       expect(called("project_update")).toEqual([]);
     });
 
+    it("shows the setup before the check, the order they run in, each under the Commands heading", async () => {
+      await show({ guess: PNPM, accounts: { "you-work": "WRITE" } });
+      expect(setupInput().compareDocumentPosition(checkInput()) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      const headings = [...document.querySelectorAll("h3")].map((h) => h.textContent);
+      expect(headings).toEqual([i18next.t("projects.sectionGithub"), i18next.t("projects.sectionCommands")]);
+      // Where the commands came from is said beside them, before anything the dialog offers to open.
+      const section = setupInput().closest("section") as HTMLElement;
+      expect(section.textContent).toContain("Guessed from package.json, pnpm-lock.yaml.");
+    });
+
     it("leaves the fields empty for an unknown stack, and says so", async () => {
       await show({ accounts: { "you-work": "WRITE" } });
-      expect(inputs().map((input) => input.value)).toEqual(["", ""]);
+      expect(commands()).toEqual({ check: "", setup: "" });
       expect(page()).toContain(i18next.t("setup.noGuess"));
       expect(page()).not.toContain("Guessed from");
     });
 
     it("never replaces what's saved", async () => {
       await show({ project: { ...PROJECT, checkCommand: "make test", setupCommand: "make deps" }, guess: PNPM });
-      expect(inputs().map((input) => input.value)).toEqual(["make test", "make deps"]);
+      expect(commands()).toEqual({ check: "make test", setup: "make deps" });
       expect(page()).not.toContain("Guessed from");
     });
 
     it("says when it comes from what the project's CI runs", async () => {
       await show({ guess: CI, accounts: { "you-work": "WRITE" } });
-      expect(inputs().map((input) => input.value)).toEqual(["zig build test", "zig fetch && zig build"]);
+      expect(commands()).toEqual({ check: "zig build test", setup: "zig fetch && zig build" });
       expect(page()).toContain("Taken from your CI: .github/workflows/ci.yml.");
       expect(page()).not.toContain("Guessed from");
       expect(called("project_update")).toEqual([]);
-      await type(inputs()[0], "zig build test --summary all");
-      await type(inputs()[1], "zig build");
+      await type(checkInput(), "zig build test --summary all");
+      await type(setupInput(), "zig build");
       expect(page()).not.toContain("Taken from your CI");
     });
 
     it("says which commands of the check come from the project's CI", async () => {
       await show({ guess: UV_AND_CI, accounts: { "you-work": "WRITE" } });
-      expect(inputs()[0].value).toBe("uv run --frozen pytest && uv run --frozen ruff check . && uv run --frozen pyright");
+      expect(checkInput().value).toBe("uv run --frozen pytest && uv run --frozen ruff check . && uv run --frozen pyright");
       expect(page()).toContain("Guessed from uv.lock, .github/workflows/ci.yml.");
       expect(page()).toContain("From your CI: uv run --frozen ruff check ., uv run --frozen pyright.");
       // Each with why, in a few words.
       expect(page()).toContain("Left out of the check, though your CI runs them: semgrep ci (Keel can't run it offline as CI does), uv run mypy . (CI lets it fail).");
       expect(page()).toContain(i18next.t("projects.pyrightNode"));
       expect(called("project_update")).toEqual([]);
-      await type(inputs()[0], "uv run --frozen pytest");
+      await type(checkInput(), "uv run --frozen pytest");
       expect(page()).not.toContain("From your CI");
     });
 
@@ -266,7 +280,7 @@ describe("the setup dialog", () => {
       expect(page()).not.toContain("From your CI");
       expect(page()).not.toContain("Left out of the check");
       expect(page()).not.toContain(i18next.t("projects.pyrightNode"));
-      await type(inputs()[0], "pnpm test:unit");
+      await type(checkInput(), "pnpm test:unit");
       expect(page()).not.toContain("Guessed from");
     });
   });
@@ -278,15 +292,15 @@ describe("the setup dialog", () => {
       await show({ guess: UV });
       expect(option("--group test")).toBeUndefined();
       await act(async () => option("--group stubs")!.click());
-      expect(inputs()[1].value).toBe("uv sync --frozen --group test --group stubs");
+      expect(setupInput().value).toBe("uv sync --frozen --group test --group stubs");
       expect(option("--group stubs")).toBeUndefined();
     });
 
     it("offers a saved project the group it's missing and changes nothing until it's chosen", async () => {
       await show({ project: { ...PROJECT, checkCommand: "uv run --frozen pytest", setupCommand: "uv sync --frozen" }, guess: UV });
-      expect(inputs()[1].value).toBe("uv sync --frozen");
+      expect(setupInput().value).toBe("uv sync --frozen");
       await act(async () => option("--group test")!.click());
-      expect(inputs()[1].value).toBe("uv sync --frozen --group test");
+      expect(setupInput().value).toBe("uv sync --frozen --group test");
     });
 
     it("offers no flags for a setup command that isn't uv's", async () => {
@@ -298,7 +312,7 @@ describe("the setup dialog", () => {
       await show({ guess: PNPM });
       expect(option("pnpm test")).toBeUndefined();
       await act(async () => option("pnpm run lint")!.click());
-      expect(inputs()[0].value).toBe("pnpm test && pnpm run lint");
+      expect(checkInput().value).toBe("pnpm test && pnpm run lint");
     });
 
     it("adds nothing to a project with nothing to offer", async () => {
@@ -351,11 +365,11 @@ describe("the setup dialog", () => {
     const BOTH = { "you-work": "WRITE", "you-bot": "WRITE" } as const;
     const notice = () => document.querySelector('[role="status"]')?.textContent ?? "";
     const sent = () => called("project_update")[0].args.settings as Project;
-    const values = () => inputs().filter((input) => input.type !== "checkbox").map((input) => input.value);
+    const values = () => [checkInput().value, setupInput().value];
 
     it("refreshes what the person hadn't touched, keeps what they had, and says so", async () => {
       await show({ project: SAVED, accounts: BOTH });
-      await type(inputs()[1], "make mine");
+      await type(setupInput(), "make mine");
       expect(notice()).toBe("");
 
       await savedMeanwhile({ githubAccount: "you-bot", setupCommand: "make theirs", checkCommand: "make check" });
@@ -406,7 +420,7 @@ describe("the setup dialog", () => {
 
     it("warns before saving over a change to a field the person had edited", async () => {
       await show({ project: SAVED, accounts: BOTH });
-      await type(inputs()[0], "make mine");
+      await type(checkInput(), "make mine");
       await savedMeanwhile({ checkCommand: "make check" }, { heard: false });
       await click("Save");
       expect(called("project_update")).toEqual([]);
@@ -469,7 +483,7 @@ describe("the setup dialog", () => {
     it("looks again when a command changes", async () => {
       await show({ guess: PNPM, folders: [PNPM_HOME] });
       await lookedUp();
-      await type(inputs()[0], "make test");
+      await type(checkInput(), "make test");
       await lookedUp();
       expect(called("project_tool_folders").at(-1)?.args).toEqual({ projectId: "p1", setup: "pnpm install --frozen-lockfile", check: "make test" });
     });
@@ -540,7 +554,7 @@ describe("the setup dialog", () => {
 
     it("runs what's on screen, saves nothing, and shows the answer with its output", async () => {
       await show({ guess: PNPM, attempts: [check({})], events: [{ seq: 1, attemptId: "a", at: "", kind: "checkResult", data: { stdout: "all good", stderr: "" } }] });
-      await type(inputs()[0], "pnpm test:unit");
+      await type(checkInput(), "pnpm test:unit");
       await click("Try it");
       expect(called("project_try_check")[0].args).toEqual({ projectId: "p1", setup: "pnpm install --frozen-lockfile", check: "pnpm test:unit", read: [], localhost: false, language: "en" });
       expect(called("project_update")).toEqual([]);
@@ -595,7 +609,7 @@ describe("the setup dialog", () => {
       await show({ guess: PNPM, attempts: [check({})] });
       await click("Try it");
       expect(page()).toContain(i18next.t("setup.passed"));
-      await type(inputs()[0], "pnpm other");
+      await type(checkInput(), "pnpm other");
       expect(page()).not.toContain(i18next.t("setup.passed"));
     });
 

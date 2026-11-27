@@ -178,7 +178,7 @@ export function NewRunDialog() {
         </div>
 
         <div>
-          <span className="mb-1 block text-[12px] font-medium text-muted">{t("newRun.source")}</span>
+          <span className="mb-1 block text-[12.5px] font-medium text-fg">{t("newRun.source")}</span>
           <Segmented<Source>
             label={t("newRun.source")}
             value={source}
@@ -212,7 +212,7 @@ export function NewRunDialog() {
                 ))}
               </ul>
             )}
-            <p className="mt-1.5 text-[11.5px] leading-snug text-subtle">{t("newRun.issueNote")}</p>
+            <p className="mt-1.5 text-[12px] leading-snug text-muted">{t("newRun.issueNote")}</p>
           </div>
         )}
 
@@ -257,7 +257,7 @@ export function NewRunDialog() {
               </Field>
             </div>
             <div>
-              <span className="mb-1 block text-[12px] font-medium text-muted">{t("newRun.tools")}</span>
+              <span className="mb-1 block text-[12.5px] font-medium text-fg">{t("newRun.tools")}</span>
               <Segmented<ToolProfile>
                 label={t("newRun.tools")}
                 value={tools}
@@ -272,12 +272,12 @@ export function NewRunDialog() {
         )}
 
         {accounts && (
-          <p className="flex gap-2 text-[11.5px] leading-snug text-subtle">
+          <p className="flex gap-2 text-[12px] leading-snug text-muted">
             <UserRound size={14} className="mt-px shrink-0" />
             <span className="selectable min-w-0 break-words">{accounts}</span>
           </p>
         )}
-        <p className="flex gap-2 text-[11.5px] leading-snug text-subtle">
+        <p className="flex gap-2 text-[12px] leading-snug text-muted">
           <ShieldCheck size={14} className="mt-px shrink-0" />
           {t("newRun.isolation")}
         </p>

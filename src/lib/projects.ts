@@ -5,7 +5,10 @@ import { type Attempt, type CiGap, type CiLeftOut, type Guess, isActive, type Pr
  * whichever screen fixes it. A project that isn't on GitHub has no account to choose, so that alone
  * doesn't count. One with no check always does, and it never stops a run.
  */
-export const needsSetup = (project: Project) => !project.checkCommand || (Boolean(project.githubRepo) && !project.githubAccount);
+export const needsSetup = (project: Project) => setupMissing(project).length > 0;
+
+/** What a project's setup still lacks, for the screens that say it: its check, or the account for its repo. */
+export const setupMissing = (project: Project): ("check" | "account")[] => [...(project.checkCommand ? [] : ["check" as const]), ...(project.githubRepo && !project.githubAccount ? ["account" as const] : [])];
 
 /**
  * What to send when only these fields change. `project_update` replaces every field, so everything

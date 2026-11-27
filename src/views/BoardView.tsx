@@ -219,7 +219,7 @@ function AlsoTouches({ projectId, chosen, disabled, onChange }: { projectId: str
   const toggle = (id: string, on: boolean) => onChange(on ? [...chosen, id] : chosen.filter((other) => other !== id));
   return (
     <fieldset>
-      <legend className="text-[12px] font-medium text-muted">{t("board.task.alsoTouches")}</legend>
+      <legend className="text-[12.5px] font-medium text-fg">{t("board.task.alsoTouches")}</legend>
       <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
         {others.map((project) => (
           <label key={project.id} className="flex items-center gap-1.5 text-[12.5px]">
@@ -228,7 +228,7 @@ function AlsoTouches({ projectId, chosen, disabled, onChange }: { projectId: str
           </label>
         ))}
       </div>
-      <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t("board.task.alsoTouchesHint")}</p>
+      <p className="mt-1 text-[12px] leading-snug text-muted">{t("board.task.alsoTouchesHint")}</p>
     </fieldset>
   );
 }
@@ -431,7 +431,7 @@ function ImportDialog({ projectId: fixed, cards, onClose, onImported }: { projec
             })}
           </ul>
         )}
-        {issues && issues.length > 0 && <p className="text-[11.5px] leading-snug text-subtle">{t("newRun.issueNote")}</p>}
+        {issues && issues.length > 0 && <p className="text-[12px] leading-snug text-muted">{t("newRun.issueNote")}</p>}
         <div className="flex justify-end">
           <Button onClick={onClose}>{t("board.import.close")}</Button>
         </div>
