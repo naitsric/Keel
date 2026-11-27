@@ -1,4 +1,4 @@
-import { AlertTriangle, Check, X } from "lucide-react";
+import { AlertTriangle, Check, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type Attempt, type AuditEvent, type GithubStatus, type MapStart, type Project, type ProjectSetup } from "../lib/api";
@@ -120,9 +120,10 @@ function OptionButtons({ options, onAdd }: { options: string[]; onAdd: (option: 
           key={option}
           type="button"
           aria-label={t("setup.addOption", { option })}
-          className="rounded border border-border px-1.5 py-0.5 font-mono text-[11.5px] text-accent hover:bg-inset"
+          className="inline-flex items-center gap-1 rounded border border-border-strong px-1.5 py-0.5 font-mono text-[11.5px] text-accent hover:bg-hover"
           onClick={() => onAdd(option)}
         >
+          <Plus size={11} className="shrink-0" />
           {option}
         </button>
       ))}
@@ -135,10 +136,10 @@ function LocalhostChoice({ chosen, onToggle }: { chosen: boolean; onToggle: (cho
   const { t } = useTranslation();
   return (
     <label className="flex items-start gap-2 text-[12px]">
-      <input type="checkbox" className="mt-0.5" checked={chosen} onChange={(e) => onToggle(e.target.checked)} />
+      <input type="checkbox" className="mt-0.5 size-3.5 shrink-0 accent-accent" checked={chosen} onChange={(e) => onToggle(e.target.checked)} />
       <span className="min-w-0">
         <span>{t("setup.localhost")}</span>
-        <span className="mt-0.5 block text-subtle">{t("setup.localhostWhy")}</span>
+        <span className="mt-0.5 block leading-snug text-muted">{t("setup.localhostWhy")}</span>
       </span>
     </label>
   );
@@ -370,32 +371,34 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
 
   const path = info?.project.path ?? request.added?.project.path ?? "";
   return (
-    <div className="space-y-3">
-      <p className="selectable -mt-2 font-mono text-[11.5px] break-all text-subtle">
+    <div className="space-y-4">
+      <p className="selectable -mt-2 font-mono text-[11.5px] break-all text-muted">
         {shortPath(path)}
         {repo && ` · ${repo}`}
       </p>
-      {request.added?.outcome === "restored" && <p className="text-[12px] text-muted">{t("setup.restored")}</p>}
+      {request.added?.outcome === "restored" && <p className="text-[12px] leading-snug text-muted">{t("setup.restored")}</p>}
 
-      <div>
-        {github === null && checking && <p className="text-[12px] text-subtle">{t("settings.githubChecking")}</p>}
-        {github && !repo && <p className="text-[12px] text-muted">{t("setup.noRemote")}</p>}
+      <section className="space-y-2">
+        <h3 className="text-[12.5px] font-semibold">{t("projects.sectionGithub")}</h3>
+        {github === null && checking && <p className="text-[12px] text-muted">{t("settings.githubChecking")}</p>}
+        {github && !repo && <p className="text-[12px] leading-snug text-muted">{t("setup.noRemote")}</p>}
         {repo && github?.base.error?.code === "ghMissing" && (
           <div className="flex flex-wrap items-center gap-2">
-            <p className="min-w-0 flex-1 text-[12px] text-warning">{t("setup.noGh")}</p>
+            <p className="min-w-0 flex-1 text-[12px] leading-snug text-warning">{t("setup.noGh")}</p>
             <Button onClick={() => void api.openHelp("gh")}>{t("onboarding.install")}</Button>
           </div>
         )}
         {repo && github && github.base.error === null && accounts.length === 0 && (
           <div className="flex flex-wrap items-center gap-2">
-            <p className="min-w-0 flex-1 text-[12px] text-warning">{t("setup.noAccount")}</p>
+            <p className="min-w-0 flex-1 text-[12px] leading-snug text-warning">{t("setup.noAccount")}</p>
             <Button onClick={connectAccount}>{t("settings.githubConnect")}</Button>
           </div>
         )}
         {showAccounts && (
           <>
-            <div className="flex items-end gap-3">
-              <div className="w-64">
+            {/* The account, what it can do here, and the way to another one, on one row. */}
+            <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
+              <div className="max-w-72 min-w-40 flex-1">
                 <Field label={t("setup.account")}>
                   <select
                     value={account}
@@ -415,60 +418,73 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
                   </select>
                 </Field>
               </div>
-              <div className="pb-1.5">{checking ? <span className="text-[12px] text-subtle">{t("settings.githubChecking")}</span> : <AccessLabel status={status} />}</div>
+              <div className="pb-1.5">{checking ? <span className="text-[12px] text-muted">{t("settings.githubChecking")}</span> : <AccessLabel status={status} />}</div>
+              <Button variant="ghost" className="ml-auto shrink-0" onClick={connectAccount}>
+                {t("settings.githubConnect")}
+              </Button>
             </div>
-            {!checking && selected === null && canPush.length > 1 && <p className="mt-1 text-[12px] text-muted">{t("setup.several", { repo })}</p>}
-            {!checking && canPush.length === 0 && selected === null && <p className="mt-1 text-[12px] text-warning">{t("setup.noPusher", { repo })}</p>}
-            {status?.error && !needsAccess && <p className="mt-1 text-[12px] text-danger">{reasonText(t, status.error)}</p>}
+            {!checking && selected === null && canPush.length > 1 && <p className="text-[12px] leading-snug text-muted">{t("setup.several", { repo })}</p>}
+            {!checking && canPush.length === 0 && selected === null && <p className="text-[12px] leading-snug text-warning">{t("setup.noPusher", { repo })}</p>}
+            {status?.error && !needsAccess && <p className="text-[12px] leading-snug text-danger">{reasonText(t, status.error)}</p>}
             {needsAccess && (
-              <p className="mt-1 flex gap-1.5 text-[12px] text-warning">
+              <p className="flex gap-1.5 text-[12px] leading-snug text-warning">
                 <AlertTriangle size={13} className="mt-0.5 shrink-0" />
                 {t(access === "none" ? "settings.githubNoAccess" : "settings.githubReadOnly", { account: selected })}
               </p>
             )}
-            <div className="mt-1.5 flex flex-wrap gap-2">
-              {repo && (needsAccess || canPush.length === 0) && <Button onClick={() => openOnGithub(repoAccessUrl(repo))}>{t("settings.githubGiveAccess")}</Button>}
-              {repo && needsAccess && <Button onClick={() => openOnGithub(repoInvitationUrl(repo))}>{t("settings.githubAcceptInvite")}</Button>}
-              <Button variant="ghost" onClick={connectAccount}>
-                {t("settings.githubConnect")}
-              </Button>
-            </div>
+            {repo && (needsAccess || canPush.length === 0) && (
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={() => openOnGithub(repoAccessUrl(repo))}>{t("settings.githubGiveAccess")}</Button>
+                {needsAccess && <Button onClick={() => openOnGithub(repoInvitationUrl(repo))}>{t("settings.githubAcceptInvite")}</Button>}
+              </div>
+            )}
           </>
         )}
-      </div>
+      </section>
 
-      <div>
-        <Field label={t("settings.checkCommand")}>
-          <div className="flex gap-2">
-            <input value={check} onChange={(e) => changeCheck(e.target.value)} placeholder={t("settings.checkCommandPlaceholder")} className={`${inputClass} font-mono`} />
-            <Button className="h-auto shrink-0" disabled={check.trim() === "" || trying} onClick={() => void tryIt()}>
-              {t("setup.tryIt")}
-            </Button>
-          </div>
-        </Field>
-        {guess && <OptionButtons options={checkOptionsLeft(check, guess)} onAdd={(option) => changeCheck(withCheckOption(check, option))} />}
-        {runId && <TrialResult key={runId} runId={runId} onRunning={setTrying} onOpenRun={() => leaveFor(() => navigate({ name: "run", runId }))} />}
-      </div>
-      <div>
-        <Field label={t("settings.setupCommand")}>
-          <input value={setup} onChange={(e) => changeSetup(e.target.value)} placeholder={t("settings.setupCommandPlaceholder")} className={`${inputClass} font-mono`} />
-        </Field>
-        {guess && <OptionButtons options={setupOptionsLeft(setup, guess)} onAdd={(option) => changeSetup(withSetupOption(setup, guess, option))} />}
-      </div>
-      <FolderChoices folders={offered} skipped={skipped} onToggle={toggleFolder} />
-      {offerLocalhost && <LocalhostChoice chosen={openLocalhost} onToggle={toggleLocalhost} />}
+      {/* Setup first, then the check: the order they run in, and the one the project's page has. */}
+      <section className="space-y-3 border-t border-border pt-4">
+        <h3 className="text-[12.5px] font-semibold">{t("projects.sectionCommands")}</h3>
+        <div>
+          <Field label={t("settings.setupCommand")}>
+            <input value={setup} onChange={(e) => changeSetup(e.target.value)} placeholder={t("settings.setupCommandPlaceholder")} className={`${inputClass} font-mono`} />
+          </Field>
+          {guess && <OptionButtons options={setupOptionsLeft(setup, guess)} onAdd={(option) => changeSetup(withSetupOption(setup, guess, option))} />}
+        </div>
+        <div>
+          <Field label={t("settings.checkCommand")}>
+            <div className="flex gap-2">
+              <input value={check} onChange={(e) => changeCheck(e.target.value)} placeholder={t("settings.checkCommandPlaceholder")} className={`${inputClass} font-mono`} />
+              <Button className="h-auto shrink-0" disabled={check.trim() === "" || trying} onClick={() => void tryIt()}>
+                {t("setup.tryIt")}
+              </Button>
+            </div>
+          </Field>
+          {guess && <OptionButtons options={checkOptionsLeft(check, guess)} onAdd={(option) => changeCheck(withCheckOption(check, option))} />}
+          {runId && <TrialResult key={runId} runId={runId} onRunning={setTrying} onOpenRun={() => leaveFor(() => navigate({ name: "run", runId }))} />}
+        </div>
+        {/* Where the commands came from, beside them. */}
+        <div className="space-y-0.5 text-[12px] leading-snug text-muted">
+          <p>
+            {fromGuess && `${t(guess?.fromCi ? "setup.fromCi" : "setup.guessed", { files: guess?.from.join(", ") })} `}
+            {fromCiChecks.length > 0 && `${t("setup.fromCiChecks", { commands: fromCiChecks.join(", ") })} `}
+            {needsNode(fromCiChecks) && `${t("projects.pyrightNode")} `}
+            {guess && guess.ciLeftOut.length > 0 && `${t("setup.ciLeftOut", { commands: guess.ciLeftOut.map((left) => `${left.command} (${t(`projects.ciWhy.${left.why}`)})`).join(", ") })} `}
+            {nothingToGo && `${t("setup.noGuess")} `}
+            {t("setup.tryNote")}
+          </p>
+          <p>{t("setup.noCheckNote")}</p>
+        </div>
+      </section>
 
-      <div className="space-y-0.5 text-[11.5px] leading-snug text-subtle">
-        <p>
-          {fromGuess && `${t(guess?.fromCi ? "setup.fromCi" : "setup.guessed", { files: guess?.from.join(", ") })} `}
-          {fromCiChecks.length > 0 && `${t("setup.fromCiChecks", { commands: fromCiChecks.join(", ") })} `}
-          {needsNode(fromCiChecks) && `${t("projects.pyrightNode")} `}
-          {guess && guess.ciLeftOut.length > 0 && `${t("setup.ciLeftOut", { commands: guess.ciLeftOut.map((left) => `${left.command} (${t(`projects.ciWhy.${left.why}`)})`).join(", ") })} `}
-          {nothingToGo && `${t("setup.noGuess")} `}
-          {t("setup.tryNote")}
-        </p>
-        <p>{t("setup.noCheckNote")}</p>
-      </div>
+      {/* What saving opens to the commands, apart from the rest: it's the one thing here that lets them reach more. */}
+      {(offered.length > 0 || offerLocalhost) && (
+        <div className="space-y-2.5 rounded-md border border-border-strong bg-inset px-3 py-2.5">
+          <FolderChoices folders={offered} skipped={skipped} onToggle={toggleFolder} />
+          {offerLocalhost && <LocalhostChoice chosen={openLocalhost} onToggle={toggleLocalhost} />}
+        </div>
+      )}
+
       {request.added?.map && (
         <MapLine
           map={request.added.map}
@@ -482,12 +498,13 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
       )}
       {info && changed.length > 0 && <ProjectChangedNotice title={t("setup.changed")} saved={info.project} fields={changed} kept={configuredChanges(info.project, { githubAccount: selected, setupCommand: setup || null, checkCommand: check || null })} />}
       {error && (
-        <p role="alert" className="text-[12px] text-danger">
+        <p role="alert" className="text-[12px] leading-snug text-danger">
           {error}
         </p>
       )}
-      <div className="flex flex-wrap items-center gap-2 pt-1">
-        <p className="min-w-0 flex-1 text-[11.5px] text-subtle">{t("setup.moreOptions")}</p>
+      {/* Stays in view when the dialog is taller than the window, so Save is never below the fold. */}
+      <div className="sticky -bottom-5 -mx-5 -mb-5 flex flex-wrap items-center gap-2 rounded-b-lg border-t border-border bg-elevated px-5 py-3">
+        <p className="min-w-0 flex-1 text-[12px] text-muted">{t("setup.moreOptions")}</p>
         <Button onClick={closeSetup}>{t("setup.later")}</Button>
         <Button variant="primary" disabled={!known || checking || busy} onClick={() => void save()}>
           {t("setup.save")}

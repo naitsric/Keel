@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Attempt, AttemptState, Guess, Project } from "./api";
-import { accountToSelect, checkOptionsLeft, commandNotFound, foldersToOffer, isListed, needsSetup, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withFolders, withSetup, withSetupOption } from "./projects";
+import { accountToSelect, checkOptionsLeft, commandNotFound, foldersToOffer, isListed, needsSetup, setupMissing, setupOptionsLeft, shortPath, trialOutcome, withCheckOption, withFolders, withSetup, withSetupOption } from "./projects";
 
 const project = (fields: Partial<Project>) => ({ id: "p", name: "demo", path: "/w", githubAccount: null, githubRepo: null, setupCommand: null, checkCommand: null, allowedDomains: [], allowedRead: [], services: [], env: [], defaultWorkflow: null, sensitivePaths: [], allowLocalhost: false, ...fields }) as Project;
 
@@ -16,6 +16,13 @@ describe("whether a project still has setup to finish", () => {
   it("keeps asking for a check, whatever else it has", () => {
     expect(needsSetup(project({}))).toBe(true);
     expect(needsSetup(project({ githubRepo: "acme/app", githubAccount: "you" }))).toBe(true);
+  });
+
+  it("says what it lacks, the check before the account, and nothing once it's done", () => {
+    expect(setupMissing(project({}))).toEqual(["check"]);
+    expect(setupMissing(project({ githubRepo: "acme/app" }))).toEqual(["check", "account"]);
+    expect(setupMissing(project({ checkCommand: "make test", githubRepo: "acme/app" }))).toEqual(["account"]);
+    expect(setupMissing(project({ checkCommand: "make test", githubRepo: "acme/app", githubAccount: "you" }))).toEqual([]);
   });
 
   it("keeps asking for an account when the repo is on GitHub", () => {

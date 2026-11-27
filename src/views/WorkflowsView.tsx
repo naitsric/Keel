@@ -153,7 +153,7 @@ function RiskFields({ spec, onChange }: { spec: StepSpec; onChange: (spec: StepS
   return (
     <>
       <fieldset>
-        <legend className="text-[12px] font-medium text-muted">{t("workflows.risks")}</legend>
+        <legend className="text-[12.5px] font-medium text-fg">{t("workflows.risks")}</legend>
         <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
           {shown.map((risk) => (
             <label key={risk} className="flex items-center gap-1.5 text-[12.5px]">
@@ -162,7 +162,7 @@ function RiskFields({ spec, onChange }: { spec: StepSpec; onChange: (spec: StepS
             </label>
           ))}
         </div>
-        <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t("workflows.risksHint")}</p>
+        <p className="mt-1 text-[12px] leading-snug text-muted">{t("workflows.risksHint")}</p>
       </fieldset>
       <div className="max-w-md">
         <ModelField label={t("workflows.modelWhenRisky")} hint={t("workflows.modelWhenRiskyHint")} none={t("workflows.modelWhenRiskySame")} value={spec.modelWhenRisky ?? ""} onChange={(model) => onChange(withModelWhenRisky(spec, model))} />
@@ -205,7 +205,7 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
       </div>
       <div className="flex flex-wrap items-end gap-x-4 gap-y-2.5">
         <div>
-          <span className="mb-1 block text-[12px] font-medium text-muted">{t("workflows.role")}</span>
+          <span className="mb-1 block text-[12.5px] font-medium text-fg">{t("workflows.role")}</span>
           <Segmented<StepRole["kind"]>
             label={t("workflows.role")}
             value={role.kind}
@@ -222,7 +222,7 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
         </div>
         {!judges && !inGroup && (
           <div>
-            <span className="mb-1 block text-[12px] font-medium text-muted">{t("newRun.tools")}</span>
+            <span className="mb-1 block text-[12.5px] font-medium text-fg">{t("newRun.tools")}</span>
             <Segmented<ToolProfile>
               label={t("newRun.tools")}
               value={spec.tools}
@@ -256,7 +256,7 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
         )}
       </div>
       <div>
-        <span className="mb-1 block text-[12px] font-medium text-muted">{t("workflows.when")}</span>
+        <span className="mb-1 block text-[12.5px] font-medium text-fg">{t("workflows.when")}</span>
         <Segmented<StepCondition | typeof ALWAYS>
           label={t("workflows.when")}
           value={spec.when ?? ALWAYS}
@@ -267,7 +267,7 @@ function AgentFields({ spec, earlier, inGroup, onChange }: { spec: StepSpec; ear
             { value: "somethingToFix", label: t("workflows.whenSomethingToFix") },
           ]}
         />
-        <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t(spec.when === "somethingToFix" ? "workflows.whenSomethingToFixHint" : "workflows.whenHint")}</p>
+        <p className="mt-1 text-[12px] leading-snug text-muted">{t(spec.when === "somethingToFix" ? "workflows.whenSomethingToFixHint" : "workflows.whenHint")}</p>
       </div>
       {role.kind !== "specifier" && <RiskFields spec={spec} onChange={onChange} />}
       {role.kind === "reviewer" && <SkillField spec={spec} onChange={onChange} />}
@@ -353,7 +353,7 @@ function StepEditor({ step, formKey, earlier, onChange, onEarlier, onLater, onRe
           </div>
           {step.type === "check" && (
             <div className="mt-2.5">
-              <span className="mb-1 block text-[12px] font-medium text-muted">{t("workflows.when")}</span>
+              <span className="mb-1 block text-[12.5px] font-medium text-fg">{t("workflows.when")}</span>
               <Segmented<"always" | "changed">
                 label={t("workflows.when")}
                 value={step.onlyIfChanged ? "changed" : "always"}
@@ -363,7 +363,7 @@ function StepEditor({ step, formKey, earlier, onChange, onEarlier, onLater, onRe
                   { value: "changed", label: t("workflows.checkOnlyIfChanged") },
                 ]}
               />
-              <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t("workflows.checkOnlyIfChangedHint")}</p>
+              <p className="mt-1 text-[12px] leading-snug text-muted">{t("workflows.checkOnlyIfChangedHint")}</p>
             </div>
           )}
         </StepCard>
@@ -379,7 +379,7 @@ function StepEditor({ step, formKey, earlier, onChange, onEarlier, onLater, onRe
             </div>
             {step.steps.length > 0 && (
               <div>
-                <span className="mb-1 block text-[12px] font-medium text-muted">{t("workflows.members")}</span>
+                <span className="mb-1 block text-[12.5px] font-medium text-fg">{t("workflows.members")}</span>
                 <ul className="space-y-1">
                   {step.steps.map((spec, index) => (
                     <li key={index} className="flex items-center gap-1 rounded-md border border-border bg-inset pr-1">
@@ -423,7 +423,7 @@ function StepEditor({ step, formKey, earlier, onChange, onEarlier, onLater, onRe
               <input inputMode="numeric" value={step.maxRounds} onChange={(e) => onChange({ ...step, maxRounds: Number(e.target.value.replace(/\D/g, "")) || 0 })} className={inputClass} />
             </Field>
           </div>
-          <p className="mt-1 text-[11.5px] leading-snug text-subtle">{t("workflows.watchRoundsHint")}</p>
+          <p className="mt-1 text-[12px] leading-snug text-muted">{t("workflows.watchRoundsHint")}</p>
         </StepCard>
       );
   }

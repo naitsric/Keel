@@ -1,3 +1,4 @@
+import { Plus } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type ToolFolder } from "../lib/api";
@@ -37,15 +38,15 @@ export function FolderChoices({ folders, skipped, onToggle }: { folders: ToolFol
   if (folders.length === 0) return null;
   return (
     <div className="text-[12px]">
-      <p className="text-muted">{t("setup.folders")}</p>
+      <p className="leading-snug">{t("setup.folders")}</p>
       <ul className="mt-1 space-y-0.5">
         {folders.map((found) => (
           <li key={found.folder}>
             <label className="flex items-start gap-2">
-              <input type="checkbox" className="mt-0.5" checked={!skipped.includes(found.folder)} onChange={(e) => onToggle(found.folder, e.target.checked)} />
+              <input type="checkbox" className="mt-0.5 size-3.5 shrink-0 accent-accent" checked={!skipped.includes(found.folder)} onChange={(e) => onToggle(found.folder, e.target.checked)} />
               <span className="min-w-0 break-all">
                 <span className="selectable font-mono text-[11.5px]">{found.folder}</span>
-                <span className="ml-1.5 text-subtle">{t("setup.folderFor", { programs: found.programs.join(", ") })}</span>
+                <span className="ml-1.5 text-muted">{t("setup.folderFor", { programs: found.programs.join(", ") })}</span>
               </span>
             </label>
           </li>
@@ -70,9 +71,10 @@ export function FolderOffers({ folders, onAdd }: { folders: ToolFolder[]; onAdd:
             type="button"
             title={t("setup.folderFor", { programs })}
             aria-label={t("settings.addFolder", { folder: found.folder, programs })}
-            className="rounded border border-border px-1.5 py-0.5 font-mono text-[11.5px] text-accent hover:bg-inset"
+            className="inline-flex items-center gap-1 rounded border border-border-strong px-1.5 py-0.5 font-mono text-[11.5px] text-accent hover:bg-hover"
             onClick={() => onAdd(found.folder)}
           >
+            <Plus size={11} className="shrink-0" />
             {found.folder}
           </button>
         );

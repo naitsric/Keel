@@ -1,13 +1,13 @@
-import { AlertTriangle, Check, Search } from "lucide-react";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { AlertTriangle, Check, Plus, Search, X } from "lucide-react";
+import { type ReactNode, type RefObject, useCallback, useEffect, useId, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { api, type CiGap, type EnvVar, type GithubStatus, type IssueWatch, type Project, type Service, type Workflow } from "../lib/api";
 import { formatRelative } from "../lib/format";
 import { githubAccess, repoAccessUrl, repoInvitationUrl } from "../lib/github";
-import { ciCommandsLeft, ciLeftOutLeft, type Configured, configuredChanges, foldersToOffer, needsNode, needsSetup, withCheckOption, withFolders } from "../lib/projects";
+import { ciCommandsLeft, ciLeftOutLeft, type Configured, configuredChanges, foldersToOffer, needsNode, needsSetup, setupMissing, withCheckOption, withFolders } from "../lib/projects";
 import { errorText, reasonText } from "../lib/reason";
 import { useApp } from "../lib/store";
-import { Button, Card, cx, Field, inputClass } from "../ui/primitives";
+import { Button, Card, cx, Field, fieldHintClass, fieldLabelClass, inputClass, SettingRow } from "../ui/primitives";
 import { AddProjectButton, useAddProject } from "./AddProject";
 import { ProjectChangedNotice } from "./ProjectChangedNotice";
 import { RemoveProjectDialog } from "./RemoveProjectDialog";
@@ -28,6 +28,18 @@ const FULL_WORKFLOW = "builtin:full";
 const POSTGRES_PORT = 5432;
 const ENV_EXAMPLE = "DB_HOST={{socketDir:db}}";
 
+/** The parts of a project's settings, in the order the page and its index show them. */
+const SECTIONS = ["commands", "github", "workflow", "access", "services"] as const;
+type SectionId = (typeof SECTIONS)[number];
+/** Their names. The index says "Services", shorter than that card's own title. */
+const SECTION_TITLES: Record<SectionId, string> = {
+  commands: "projects.sectionCommands",
+  github: "projects.sectionGithub",
+  workflow: "projects.sectionWorkflow",
+  access: "projects.sectionAccess",
+  services: "settings.services",
+};
+
 /** Turns `NAME=value` lines into variables, or says which line isn't one. */
 export function parseEnv(text: string): { env: EnvVar[]; invalid: string | null } {
   const env: EnvVar[] = [];
@@ -42,9 +54,15 @@ export function parseEnv(text: string): { env: EnvVar[]; invalid: string | null 
 function ServiceRow({ service, onChange, onRemove }: { service: Service; onChange: (service: Service) => void; onRemove: () => void }) {
   const { t } = useTranslation();
   return (
-    <li className="rounded-md border border-border p-3">
-      <p className="mb-2 text-[11.5px] text-subtle">{service.type === "bridge" ? t("settings.serviceTypeBridge") : t("settings.serviceTypeCommand")}</p>
-      <div className="grid gap-2 md:grid-cols-[1fr_1fr_1.4fr]">
+    <li className="rounded-md border border-border px-3 pt-2 pb-3">
+      <div className="mb-2 flex items-center gap-2">
+        <p className="min-w-0 flex-1 text-[12px] leading-snug text-muted">{service.type === "bridge" ? t("settings.serviceTypeBridge") : t("settings.serviceTypeCommand")}</p>
+        <Button variant="ghost" className="-mr-1.5 h-6 shrink-0 px-1.5" onClick={onRemove}>
+          <X size={12} />
+          {t("settings.serviceRemove")}
+        </Button>
+      </div>
+      <div className="grid gap-2 @xl:grid-cols-[1fr_1fr_1.4fr]">
         <Field label={t("settings.serviceName")}>
           <input value={service.name} onChange={(e) => onChange({ ...service, name: e.target.value })} className={`${inputClass} font-mono`} />
         </Field>
@@ -61,9 +79,6 @@ function ServiceRow({ service, onChange, onRemove }: { service: Service; onChang
           <input value={service.socket ?? ""} onChange={(e) => onChange({ ...service, socket: e.target.value.trim() || null })} className={`${inputClass} font-mono`} />
         </Field>
       </div>
-      <Button variant="ghost" className="mt-1 -ml-2" onClick={onRemove}>
-        {t("settings.serviceRemove")}
-      </Button>
     </li>
   );
 }
@@ -156,12 +171,12 @@ function useSavedConfiguration(project: Project) {
 /** What the last look at the project's issues found, or why it couldn't look. */
 function IssueWatchLine({ watch, looking }: { watch: IssueWatch | null; looking: boolean }) {
   const { t } = useTranslation();
-  if (looking) return <p className="mt-1 text-[12px] text-subtle">{t("projects.issueWatch.looking")}</p>;
+  if (looking) return <p className="text-[12px] text-muted">{t("projects.issueWatch.looking")}</p>;
   if (!watch) return null;
   const problem = watch.problem;
   const failed = watch.commentFailed;
   return (
-    <div className="mt-1 space-y-0.5 text-[12px]">
+    <div className="space-y-0.5 text-[12px] leading-snug">
       {problem?.kind === "labelMissing" && (
         <p className="flex gap-1.5 text-warning">
           <AlertTriangle size={13} className="mt-0.5 shrink-0" />
@@ -181,6 +196,51 @@ function IssueWatchLine({ watch, looking }: { watch: IssueWatch | null; looking:
       {failed && <p className="text-warning">{t("projects.issueWatch.commentFailed", { number: failed.number, detail: failed.detail })}</p>}
     </div>
   );
+}
+
+/**
+ * Which section the page is on, for the index to mark, and the way to jump to one. A section is
+ * the current one once its top passes under the header, which stays at the top of the page.
+ */
+function useSections(form: RefObject<HTMLDivElement | null>, header: RefObject<HTMLDivElement | null>) {
+  const [active, setActive] = useState<SectionId>(SECTIONS[0]);
+  const section = (id: SectionId) => form.current?.querySelector<HTMLElement>(`[data-section="${id}"]`) ?? null;
+  // The section a click went to and where the page stopped for it. In a tall window the page ends
+  // before a late section gets under the header, and the index still has to mark the one chosen.
+  const landed = useRef<{ id: SectionId; top: number } | null>(null);
+
+  useEffect(() => {
+    const scroller = form.current?.closest("main");
+    if (!scroller) return;
+    const look = () => {
+      if (landed.current && Math.abs(scroller.scrollTop - landed.current.top) < 2) return setActive(landed.current.id);
+      landed.current = null;
+      const line = (header.current?.getBoundingClientRect().bottom ?? 0) + 8;
+      // At the end of the page the last sections never get as far up as the header.
+      const atEnd = scroller.scrollTop > 0 && scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
+      const passed = SECTIONS.filter((id) => (section(id)?.getBoundingClientRect().top ?? Infinity) <= line);
+      setActive(atEnd ? SECTIONS[SECTIONS.length - 1] : (passed.at(-1) ?? SECTIONS[0]));
+    };
+    // The page may already be scrolled: choosing another project starts the form over where it was.
+    if (scroller.scrollTop > 0) look();
+    scroller.addEventListener("scroll", look, { passive: true });
+    return () => scroller.removeEventListener("scroll", look);
+  }, []);
+
+  const goTo = (id: SectionId) => {
+    const target = section(id);
+    const scroller = form.current?.closest("main");
+    if (!target || !scroller) return;
+    // Under the header where it rests once the page has scrolled, which is higher than where it starts.
+    const under = scroller.getBoundingClientRect().top + (header.current?.offsetHeight ?? 0);
+    if (id === SECTIONS[0]) scroller.scrollTo({ top: 0 });
+    else scroller.scrollBy({ top: target.getBoundingClientRect().top - under });
+    landed.current = { id, top: scroller.scrollTop };
+    setActive(id);
+    target.focus({ preventScroll: true });
+  };
+
+  return { active, goTo };
 }
 
 function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boolean; onSaved: () => void }) {
@@ -205,6 +265,10 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
   const [checking, setChecking] = useState(false);
   const latestRequest = useRef(0);
   const [removing, setRemoving] = useState(false);
+  const openSetup = useApp((s) => s.openProjectSetup);
+  const form = useRef<HTMLDivElement>(null);
+  const header = useRef<HTMLDivElement>(null);
+  const { active, goTo } = useSections(form, header);
   const selected = account === NONE ? null : account;
   // Where the commands' programs are, for the person to add what isn't listed yet.
   const found = useToolFolders(project.id, setup, check);
@@ -340,145 +404,210 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
   const ciMissing = ciGap ? ciCommandsLeft(check, ciGap.commands) : [];
   const ciLeftOut = ciGap ? ciLeftOutLeft(check, ciGap.leftOut) : [];
   const removeProject = () => setRemoving(true);
+  // Of what's saved, like the list beside it: the form may hold a command nobody saved yet.
+  const missing = setupMissing(project);
+  const githubNotices = [info?.defaultBranchProtected === false && t("settings.githubUnprotected", { branch: info.defaultBranch }), status && status.excessScopes.length > 0 && t("settings.githubScopes", { scopes: status.excessScopes.join(", ") })].filter((text): text is string => Boolean(text));
+  const addService = (
+    <>
+      <Button onClick={() => setServices([...services, { type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }])}>
+        <Plus size={13} />
+        {t("settings.addBridge")}
+      </Button>
+      <Button onClick={() => setServices([...services, { type: "command", name: "db", start: "", socket: null }])}>
+        <Plus size={13} />
+        {t("settings.addCommand")}
+      </Button>
+    </>
+  );
   return (
-    <div className="space-y-4">
-      <Card className="space-y-5 p-5">
-        <header>
-          <h2 className="text-[16px] font-semibold">{project.name}</h2>
-          <p className="selectable mt-0.5 font-mono text-[11.5px] text-subtle">{project.path}</p>
-        </header>
-
-        <Section title={t("projects.sectionGeneral")}>
-          <div className="max-w-sm">
-            <Field label={t("settings.defaultWorkflow")} hint={t("settings.defaultWorkflowHint")}>
-              <select value={workflow} disabled={workflows === null} onChange={(e) => setWorkflow(e.target.value)} className={inputClass}>
-                {workflows === null && <option value={workflow}>{t("settings.githubChecking")}</option>}
-                {workflowGone && <option value={workflow}>{t("settings.defaultWorkflowGone")}</option>}
-                {workflows?.map((w) => (
-                  <option key={w.id} value={w.id}>
-                    {w.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            {workflowGone && (
-              <p className="mt-1 flex gap-1.5 text-[12px] text-warning">
-                <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-                {t("reasons.defaultWorkflowMissing")}
-              </p>
-            )}
+    <div ref={form}>
+      {/* Stays at the top while the form scrolls, so the project's name and the way to each section are never out of reach. The padding hides what scrolls past above it. */}
+      <div ref={header} className="sticky -top-5 z-10 -mt-5 bg-bg pt-5 pb-3">
+        <Card className="px-5 pt-4">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <h2 className="text-[16px] font-semibold">{project.name}</h2>
+            <span className={cx("inline-flex items-center gap-1 text-[12px] font-medium", missing.length > 0 ? "text-warning" : "text-success")}>
+              {missing.length > 0 ? <AlertTriangle size={13} className="shrink-0" /> : <Check size={13} className="shrink-0" />}
+              {t(missing.length > 0 ? "projects.needsSetup" : "projects.ready")}
+            </span>
           </div>
+          <p className="selectable mt-0.5 font-mono text-[11.5px] break-all text-muted">
+            {project.path}
+            {project.githubRepo && ` · ${project.githubRepo}`}
+          </p>
+          {missing.length > 0 && (
+            <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-border-strong bg-inset px-3 py-2">
+              <p className="min-w-0 flex-1 basis-64 text-[12px] leading-snug">{missing.map((what) => t(`projects.missing.${what}`)).join(" ")}</p>
+              <Button onClick={() => openSetup({ projectId: project.id, added: null, returnToNewRun: false })}>{t("projects.finishSetup")}</Button>
+            </div>
+          )}
+          <nav aria-label={t("projects.sections")} className="mt-3 flex flex-wrap gap-x-5 border-t border-border">
+            {SECTIONS.map((id) => (
+              <button
+                key={id}
+                type="button"
+                aria-current={active === id ? "location" : undefined}
+                onClick={() => goTo(id)}
+                className={cx("border-b-2 pt-2 pb-1.5 text-[12.5px] font-medium transition-colors", active === id ? "border-accent text-fg" : "border-transparent text-muted hover:text-fg")}
+              >
+                {t(SECTION_TITLES[id])}
+              </button>
+            ))}
+          </nav>
+        </Card>
+      </div>
+
+      <div className="space-y-3">
+        <Section id="commands" title={t(SECTION_TITLES.commands)}>
           <Field label={t("settings.setupCommand")} hint={t("settings.setupCommandHint")}>
             <input value={setup} onChange={(e) => setSetup(e.target.value)} placeholder={t("settings.setupCommandPlaceholder")} className={`${inputClass} font-mono`} />
           </Field>
-          <Field label={t("settings.checkCommand")} hint={t("settings.checkCommandHint")}>
-            <input value={check} onChange={(e) => setCheck(e.target.value)} placeholder={t("settings.checkCommandPlaceholder")} className={`${inputClass} font-mono`} />
-          </Field>
-          {(ciMissing.length > 0 || ciLeftOut.length > 0) && (
-            <div className="space-y-2 rounded-md border border-border-strong bg-inset px-3 py-2.5">
-              {ciMissing.length > 0 && (
-                <div>
-                  <p className="flex gap-1.5 text-[12.5px] text-warning">
-                    <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-                    {t("projects.ciMissing")}
-                  </p>
-                  <CommandList commands={ciMissing} />
-                  {needsNode(ciMissing) && <p className="mt-1 text-[12px] text-muted">{t("projects.pyrightNode")}</p>}
-                  <Button className="mt-2" onClick={() => setCheck(ciMissing.reduce(withCheckOption, check))}>
-                    {t("projects.ciMissingAdd")}
-                  </Button>
-                </div>
-              )}
-              {ciLeftOut.length > 0 && (
-                <div>
-                  <p className="text-[12px] text-muted">{t("projects.ciLeftOut")}</p>
-                  <ul className="mt-1 space-y-0.5 pl-5 text-[11.5px] text-muted">
-                    {ciLeftOut.map((left) => (
-                      <li key={left.command} className="break-all">
-                        <span className="selectable font-mono">{left.command}</span>
-                        <span className="text-subtle"> · {t(`projects.ciWhy.${left.why}`)}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-            </div>
-          )}
+          <div>
+            <Field label={t("settings.checkCommand")} hint={t("settings.checkCommandHint")}>
+              <input value={check} onChange={(e) => setCheck(e.target.value)} placeholder={t("settings.checkCommandPlaceholder")} className={`${inputClass} font-mono`} />
+            </Field>
+            {(ciMissing.length > 0 || ciLeftOut.length > 0) && (
+              <div className="mt-2.5 divide-y divide-border rounded-md border border-border-strong bg-inset px-3">
+                {ciMissing.length > 0 && (
+                  <div className="flex flex-wrap items-start gap-x-4 gap-y-2 py-2.5">
+                    <div className="min-w-0 flex-1 basis-72">
+                      <p className="flex gap-1.5 text-[12.5px] text-warning">
+                        <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                        {t("projects.ciMissing")}
+                      </p>
+                      <CommandList commands={ciMissing} />
+                      {needsNode(ciMissing) && <p className="mt-1 pl-5 text-[12px] text-muted">{t("projects.pyrightNode")}</p>}
+                    </div>
+                    <Button onClick={() => setCheck(ciMissing.reduce(withCheckOption, check))}>
+                      <Plus size={13} />
+                      {t("projects.ciMissingAdd")}
+                    </Button>
+                  </div>
+                )}
+                {ciLeftOut.length > 0 && (
+                  <div className="py-2.5">
+                    <p className="text-[12px] text-muted">{t("projects.ciLeftOut")}</p>
+                    <ul className="mt-1 space-y-0.5 text-[11.5px] text-muted">
+                      {ciLeftOut.map((left) => (
+                        <li key={left.command} className="break-all">
+                          <span className="selectable font-mono text-fg">{left.command}</span>
+                          <span> · {t(`projects.ciWhy.${left.why}`)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </Section>
 
-        <Section title={t("projects.sectionGithub")}>
-          {status?.repo ? <p className="text-[12px] text-muted">{t("settings.githubRepo", { repo: status.repo })}</p> : <p className="text-[12px] text-muted">{t("settings.githubNoRepo")}</p>}
-          <div className="max-w-sm">
-            <Field label={t("settings.githubAccount")} hint={t("settings.githubHint")}>
-              <select value={account} onChange={(e) => setAccount(e.target.value)} className={inputClass}>
-                <option value={NONE}>{t("settings.githubNone")}</option>
-                {status?.accounts.map((a) => (
-                  <option key={a.login} value={a.login}>
-                    {a.login}
-                    {a.active ? ` (${t("settings.githubActive")})` : ""}
-                  </option>
-                ))}
-              </select>
-            </Field>
-          </div>
-          {info && (
-            <div className="space-y-1 text-[12px] text-muted">
-              <p>
-                {t("settings.githubPermission", { permission: info.permission })} · {t("settings.githubDefault", { branch: info.defaultBranch })}
-              </p>
-              {info.defaultBranchProtected === false && (
-                <p className="flex gap-1.5 text-warning">
+        <Section
+          id="github"
+          title={t(SECTION_TITLES.github)}
+          aside={
+            status?.repo ? (
+              <>
+                <span className="selectable font-mono text-[12px]">{status.repo}</span>
+                {info && (
+                  <span className="text-[12px] text-muted">
+                    {t("settings.githubPermission", { permission: info.permission })} · {t("settings.githubDefault", { branch: info.defaultBranch })}
+                  </span>
+                )}
+              </>
+            ) : (
+              <span className="text-[12px] text-muted">{t("settings.githubNoRepo")}</span>
+            )
+          }
+        >
+          <SettingRow label={t("settings.githubAccount")} hint={t("settings.githubHint")}>
+            <select value={account} onChange={(e) => setAccount(e.target.value)} className={inputClass}>
+              <option value={NONE}>{t("settings.githubNone")}</option>
+              {status?.accounts.map((a) => (
+                <option key={a.login} value={a.login}>
+                  {a.login}
+                  {a.active ? ` (${t("settings.githubActive")})` : ""}
+                </option>
+              ))}
+            </select>
+          </SettingRow>
+          {githubNotices.length > 0 && (
+            <ul className="space-y-2 rounded-md border border-border-strong bg-inset px-3 py-2.5">
+              {githubNotices.map((text) => (
+                <li key={text} className="flex gap-1.5 text-[12px] leading-snug text-warning">
                   <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-                  {t("settings.githubUnprotected", { branch: info.defaultBranch })}
-                </p>
-              )}
-            </div>
-          )}
-          {status && status.excessScopes.length > 0 && (
-            <p className="flex gap-1.5 text-[12px] text-warning">
-              <AlertTriangle size={13} className="mt-0.5 shrink-0" />
-              {t("settings.githubScopes", { scopes: status.excessScopes.join(", ") })}
-            </p>
+                  {text}
+                </li>
+              ))}
+            </ul>
           )}
           {status?.error && !needsAccess && <p className="text-[12px] text-danger">{reasonText(t, status.error)}</p>}
           {checkError && <p className="text-[12px] text-danger">{checkError}</p>}
           {needsAccess && repo && (
             <div role="alert" className="rounded-md border border-border-strong bg-inset px-3 py-2.5">
-              <p className="flex gap-1.5 text-[12.5px] text-warning">
+              <p className="flex gap-1.5 text-[12.5px] leading-snug text-warning">
                 <AlertTriangle size={13} className="mt-0.5 shrink-0" />
                 {t(access === "none" ? "settings.githubNoAccess" : "settings.githubReadOnly", { account: selected })}
               </p>
-              <div className="mt-2 flex flex-wrap gap-2">
+              <div className="mt-2 flex flex-wrap gap-2 pl-5">
                 <Button onClick={() => openOnGithub(repoAccessUrl(repo))}>{t("settings.githubGiveAccess")}</Button>
                 <Button onClick={() => openOnGithub(repoInvitationUrl(repo))}>{t("settings.githubAcceptInvite")}</Button>
                 <Button variant="ghost" disabled={checking} onClick={load}>
                   {t(checking ? "settings.githubChecking" : "settings.githubCheckAgain")}
                 </Button>
               </div>
-              <p className="mt-2 text-[11.5px] leading-snug text-subtle">{t("settings.githubAccessHint", { account: selected })}</p>
+              <p className={cx("mt-2 pl-5", fieldHintClass)}>{t("settings.githubAccessHint", { account: selected })}</p>
             </div>
           )}
           {project.githubRepo && (
-            <div className="max-w-sm">
-              <Field label={t("projects.issueLabel")} hint={t("projects.issueLabelHint")}>
+            <div className="border-t border-border pt-4">
+              <SettingRow label={t("projects.issueLabel")} hint={t("projects.issueLabelHint")} below={<IssueWatchLine watch={watch?.label === label.trim() ? watch : null} looking={looking} />}>
                 <input value={label} onChange={(e) => setLabel(e.target.value)} maxLength={50} placeholder={t("projects.issueLabelPlaceholder")} className={inputClass} />
-              </Field>
-              <IssueWatchLine watch={watch?.label === label.trim() ? watch : null} looking={looking} />
+              </SettingRow>
             </div>
           )}
           {status && status.error?.code !== "ghMissing" && (
-            <div>
+            <div className="border-t border-border pt-4">
               <div className="flex flex-wrap gap-2">
                 {repo && !needsAccess && <Button onClick={() => openOnGithub(repoAccessUrl(repo))}>{t("settings.githubManageAccess")}</Button>}
                 <Button onClick={connectAccount}>{t("settings.githubConnect")}</Button>
               </div>
-              <p className="mt-1.5 text-[11.5px] leading-snug text-subtle">{t(repo && !needsAccess ? "settings.githubLinksHint" : "settings.githubConnectHint")}</p>
+              <p className={cx("mt-1.5", fieldHintClass)}>{t(repo && !needsAccess ? "settings.githubLinksHint" : "settings.githubConnectHint")}</p>
             </div>
           )}
         </Section>
 
-        <Section title={t("projects.sectionAccess")} hint={t("projects.sectionAccessHint")}>
-          <div className="grid gap-3 md:grid-cols-2">
+        <Section id="workflow" title={t(SECTION_TITLES.workflow)}>
+          <SettingRow
+            label={t("settings.defaultWorkflow")}
+            hint={t("settings.defaultWorkflowHint")}
+            below={
+              workflowGone && (
+                <p className="flex gap-1.5 text-[12px] leading-snug text-warning">
+                  <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+                  {t("reasons.defaultWorkflowMissing")}
+                </p>
+              )
+            }
+          >
+            <select value={workflow} disabled={workflows === null} onChange={(e) => setWorkflow(e.target.value)} className={inputClass}>
+              {workflows === null && <option value={workflow}>{t("settings.githubChecking")}</option>}
+              {workflowGone && <option value={workflow}>{t("settings.defaultWorkflowGone")}</option>}
+              {workflows?.map((w) => (
+                <option key={w.id} value={w.id}>
+                  {w.name}
+                </option>
+              ))}
+            </select>
+          </SettingRow>
+          {/* Here and not under Access: these decide how much review a change gets, not what the sandbox can reach. */}
+          <Field label={t("settings.sensitive")} hint={t("settings.sensitiveHint")}>
+            <textarea rows={3} value={sensitive} onChange={(e) => setSensitive(e.target.value)} className={`${inputClass} resize-y font-mono`} />
+          </Field>
+        </Section>
+
+        <Section id="access" title={t(SECTION_TITLES.access)} hint={t("projects.sectionAccessHint")}>
+          <div className="grid gap-4 @xl:grid-cols-2">
             <Field label={t("settings.domains")} hint={t("settings.domainsHint")}>
               <textarea rows={3} value={domains} onChange={(e) => setDomains(e.target.value)} className={`${inputClass} resize-y font-mono`} />
             </Field>
@@ -489,59 +618,69 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
               <FolderOffers folders={offered} onAdd={(folder) => setPaths(withFolders(lines(paths), [folder]).join("\n"))} />
             </div>
           </div>
-          <label className="flex items-start gap-2">
-            <input type="checkbox" className="mt-0.5" checked={localhost} onChange={(e) => setLocalhost(e.target.checked)} />
+          <label className="flex items-start gap-2.5 border-t border-border pt-4">
+            <input type="checkbox" className="mt-0.5 size-3.5 shrink-0 accent-accent" checked={localhost} onChange={(e) => setLocalhost(e.target.checked)} />
             <span className="min-w-0">
-              <span className="block text-[12px] font-medium text-muted">{t("settings.localhost")}</span>
-              <span className="mt-0.5 block text-[11.5px] text-subtle">{t("settings.localhostHint")}</span>
+              <span className={fieldLabelClass}>{t("settings.localhost")}</span>
+              <span className={cx("mt-0.5", fieldHintClass)}>{t("settings.localhostHint")}</span>
             </span>
           </label>
-          <Field label={t("settings.sensitive")} hint={t("settings.sensitiveHint")}>
-            <textarea rows={3} value={sensitive} onChange={(e) => setSensitive(e.target.value)} className={`${inputClass} resize-y font-mono`} />
-          </Field>
         </Section>
 
-        <Section title={t("projects.sectionServices")} hint={t("settings.servicesHint")}>
+        <Section id="services" title={t("projects.sectionServices")} hint={t("settings.servicesHint")}>
           {services.length === 0 ? (
-            <p className="text-[12px] text-subtle">{t("settings.servicesEmpty")}</p>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-dashed border-border-strong p-3">
+              <p className="min-w-0 flex-1 basis-40 text-[12px] text-muted">{t("settings.servicesEmpty")}</p>
+              {addService}
+            </div>
           ) : (
-            <ul className="space-y-2">
-              {services.map((service, index) => (
-                <ServiceRow
-                  // Rows have no identity until saved, and names change as they're typed.
-                  key={index}
-                  service={service}
-                  onChange={(next) => setServices(services.map((s, i) => (i === index ? next : s)))}
-                  onRemove={() => setServices(services.filter((_, i) => i !== index))}
-                />
-              ))}
-            </ul>
+            <>
+              <ul className="space-y-2">
+                {services.map((service, index) => (
+                  <ServiceRow
+                    // Rows have no identity until saved, and names change as they're typed.
+                    key={index}
+                    service={service}
+                    onChange={(next) => setServices(services.map((s, i) => (i === index ? next : s)))}
+                    onRemove={() => setServices(services.filter((_, i) => i !== index))}
+                  />
+                ))}
+              </ul>
+              <div className="flex flex-wrap gap-2">{addService}</div>
+            </>
           )}
-          <div className="flex gap-2">
-            <Button onClick={() => setServices([...services, { type: "bridge", name: "db", port: 5432, socket: ".s.PGSQL.5432" }])}>{t("settings.addBridge")}</Button>
-            <Button onClick={() => setServices([...services, { type: "command", name: "db", start: "", socket: null }])}>{t("settings.addCommand")}</Button>
+          <div className="border-t border-border pt-4">
+            <Field label={t("settings.env")} hint={t("settings.envHint")}>
+              <textarea rows={3} value={env} onChange={(e) => setEnv(e.target.value)} placeholder={ENV_EXAMPLE} className={`${inputClass} resize-y font-mono`} />
+            </Field>
           </div>
-          <Field label={t("settings.env")} hint={t("settings.envHint")}>
-            <textarea rows={3} value={env} onChange={(e) => setEnv(e.target.value)} placeholder={ENV_EXAMPLE} className={`${inputClass} resize-y font-mono`} />
-          </Field>
         </Section>
+      </div>
 
-        {/* Stays in view while the form scrolls, so saving is never a search. */}
-        <div className="sticky -bottom-5 z-10 -mx-5 -mb-5 flex flex-wrap items-center gap-2 rounded-b-lg border-t border-border bg-elevated px-5 py-3">
+      {/* Stays in view while the form scrolls, so saving is never a search. One Save for every section. */}
+      <div className="sticky -bottom-5 z-10 bg-bg pt-3 pb-5">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-border-strong bg-elevated px-5 py-2.5 shadow-[0_-6px_16px_-12px_rgb(0_0_0/0.35)]">
           {byClient.length > 0 && <ProjectChangedNotice title={t("projects.clientChanged")} saved={project} fields={byClient} kept={configuredChanges(project, { githubAccount: account === NONE ? null : account, setupCommand: setup || null, checkCommand: check || null })} />}
           <Button variant="primary" onClick={() => void save()}>
             {t("settings.save")}
           </Button>
-          {saved && <span className="text-[12px] text-success">{t("settings.saved")}</span>}
-          {error && (
-            <p role="alert" className="min-w-0 flex-1 text-[12px] text-danger">
+          {saved && (
+            <span className="inline-flex items-center gap-1 text-[12px] text-success">
+              <Check size={13} className="shrink-0" />
+              {t("settings.saved")}
+            </span>
+          )}
+          {error ? (
+            <p role="alert" className="min-w-0 flex-1 text-[12px] leading-snug text-danger">
               {error}
             </p>
+          ) : (
+            <p className="ml-auto text-[12px] text-muted">{t("projects.savesAll")}</p>
           )}
         </div>
-      </Card>
+      </div>
 
-      <Card className="flex flex-wrap items-center gap-3 border-danger/40 p-4">
+      <Card className="flex flex-wrap items-center gap-3 border-danger/40 px-5 py-4">
         <div className="min-w-0 flex-1">
           <h3 className="text-[13px] font-semibold text-danger">{t("projects.dangerTitle")}</h3>
           <p className="mt-0.5 text-[12px] text-muted">{t("projects.dangerHint")}</p>
@@ -557,7 +696,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
 
 function CommandList({ commands }: { commands: string[] }) {
   return (
-    <ul className="mt-1 space-y-0.5 pl-5 font-mono text-[11.5px] text-muted">
+    <ul className="mt-1 space-y-0.5 pl-5 font-mono text-[11.5px]">
       {commands.map((command) => (
         <li key={command} className="selectable break-all">
           {command}
@@ -567,15 +706,23 @@ function CommandList({ commands }: { commands: string[] }) {
   );
 }
 
-function Section({ title, hint, children }: { title: string; hint?: string; children: ReactNode }) {
+/** One part of a project's settings, in its own card. `aside` is what the title needs beside it, like the repo. */
+function Section({ id, title, hint, aside, children }: { id: SectionId; title: string; hint?: string; aside?: ReactNode; children: ReactNode }) {
+  const titleId = useId();
   return (
-    <section className="space-y-3 border-t border-border pt-5 first-of-type:border-t-0 first-of-type:pt-0">
+    // Takes focus when the index above jumps here, so Tab goes on from this section.
+    <Card data-section={id} aria-labelledby={titleId} tabIndex={-1} className="@container space-y-4 p-5 outline-none">
       <div>
-        <h3 className="text-[13px] font-semibold">{title}</h3>
-        {hint && <p className="mt-0.5 text-[12px] text-muted">{hint}</p>}
+        <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <h3 id={titleId} className="text-[13px] font-semibold">
+            {title}
+          </h3>
+          {aside}
+        </div>
+        {hint && <p className="mt-0.5 text-[12px] leading-snug text-muted">{hint}</p>}
       </div>
       {children}
-    </section>
+    </Card>
   );
 }
 
@@ -584,13 +731,24 @@ function ProjectItem({ project, selected, onSelect }: { project: Project; select
   const pending = needsSetup(project);
   return (
     <li>
-      <button type="button" aria-current={selected ? "true" : undefined} onClick={onSelect} className={cx("flex w-full flex-col gap-0.5 rounded-md px-2.5 py-2 text-left transition-colors hover:bg-hover", selected && "bg-active")}>
-        <span className="truncate text-[13px] font-medium">{project.name}</span>
-        <span className="truncate font-mono text-[11.5px] text-subtle">{project.githubRepo ?? t("projects.noRepo")}</span>
-        <span className={cx("flex items-center gap-1 text-[11.5px]", pending ? "text-warning" : "text-success")}>
-          {pending ? <AlertTriangle size={11} className="shrink-0" /> : <Check size={11} className="shrink-0" />}
-          {t(pending ? "projects.needsSetup" : "projects.ready")}
+      <button type="button" aria-current={selected ? "true" : undefined} onClick={onSelect} className={cx("flex w-full items-start gap-2 rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-hover", selected && "bg-active")}>
+        <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span className="truncate text-[13px] font-medium">{project.name}</span>
+          <span className="truncate font-mono text-[11.5px] text-muted">{project.githubRepo ?? t("projects.noRepo")}</span>
+          {/* Only what's missing gets a line of its own: a list where every project says "Set up" says nothing. */}
+          {pending && (
+            <span className="flex items-center gap-1 text-[11.5px] text-warning">
+              <AlertTriangle size={11} className="shrink-0" />
+              {t("projects.needsSetup")}
+            </span>
+          )}
         </span>
+        {!pending && (
+          <>
+            <Check size={13} aria-hidden className="mt-1 shrink-0 text-success" />
+            <span className="sr-only">{t("projects.ready")}</span>
+          </>
+        )}
       </button>
     </li>
   );
@@ -633,14 +791,14 @@ export function ProjectsView({ projectId }: { projectId?: string }) {
           </p>
         )}
         {projects.length === 0 ? (
-          <p className="mt-4 text-[12.5px] text-subtle">{t("projects.none")}</p>
+          <p className="mt-4 text-[12.5px] text-muted">{t("projects.none")}</p>
         ) : (
-          <div className="mt-4 grid items-start gap-4 lg:grid-cols-[240px_1fr]">
+          <div className="mt-5 grid items-start gap-x-4 gap-y-5 lg:grid-cols-[240px_minmax(0,1fr)]">
             <div className="space-y-2 lg:sticky lg:top-0">
               {projects.length >= FILTER_FROM && (
                 <label className="relative block">
-                  <Search size={13} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-subtle" />
-                  <input type="search" aria-label={t("projects.filter")} placeholder={t("projects.filterPlaceholder")} value={filter} onChange={(e) => setFilter(e.target.value)} className={`${inputClass} pl-8`} />
+                  <Search size={13} className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-muted" />
+                  <input type="search" aria-label={t("projects.filter")} placeholder={t("projects.filterPlaceholder")} value={filter} onChange={(e) => setFilter(e.target.value)} className={`${inputClass} bg-panel pl-8`} />
                 </label>
               )}
               <div aria-label={t("projects.title")} role="group">
@@ -649,7 +807,7 @@ export function ProjectsView({ projectId }: { projectId?: string }) {
                     <ProjectItem key={project.id} project={project} selected={project.id === selected?.id} onSelect={() => setChosen(project.id)} />
                   ))}
                 </ul>
-                {shown.length === 0 && <p className="px-2.5 py-2 text-[12px] text-subtle">{t("projects.noMatch")}</p>}
+                {shown.length === 0 && <p className="px-2.5 py-2 text-[12px] text-muted">{t("projects.noMatch")}</p>}
               </div>
             </div>
             {selected && <ProjectForm key={projectCardKey(selected)} project={selected} saved={savedId === selected.id} onSaved={() => showSaved(selected.id)} />}

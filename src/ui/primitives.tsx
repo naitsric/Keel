@@ -97,13 +97,42 @@ export function Card({ className, ...props }: ComponentProps<"section">) {
   return <section className={cx("rounded-lg border border-border bg-panel", className)} {...props} />;
 }
 
+/**
+ * A field's label, and the hint that explains it. The hint is for reading: it says what a setting
+ * opens or costs, so it takes the colour that reads well at its size, not the faintest one.
+ */
+export const fieldLabelClass = "block text-[12.5px] font-medium text-fg";
+export const fieldHintClass = "block text-[12px] leading-snug text-muted";
+
 export function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <label className="block">
-      <span className="mb-1 block text-[12px] font-medium text-muted">{label}</span>
+      <span className={cx("mb-1", fieldLabelClass)}>{label}</span>
       {children}
-      {hint && <span className="mt-1 block text-[11.5px] text-subtle">{hint}</span>}
+      {hint && <span className={cx("mt-1", fieldHintClass)}>{hint}</span>}
     </label>
+  );
+}
+
+/**
+ * A short setting on one row: what it is and what it does on the left, its control on the right.
+ * The label wraps both, so a click on the words reaches the control. `below` is what the control
+ * found or warns about, and stays right under it however long the words beside it are. In a narrow
+ * card the control goes under the words. The card it sits in has to be a container (`@container`).
+ */
+export function SettingRow({ label, hint, below, children }: { label: string; hint?: string; below?: ReactNode; children: ReactNode }) {
+  const hasBelow = Boolean(below);
+  return (
+    <div className={cx("grid gap-x-6 gap-y-1.5 @xl:grid-cols-[minmax(0,1fr)_300px]", hasBelow && "@xl:grid-rows-[auto_1fr]")}>
+      <label className="contents">
+        <span className={cx("min-w-0", hasBelow && "@xl:row-span-2")}>
+          <span className={fieldLabelClass}>{label}</span>
+          {hint && <span className={cx("mt-0.5", fieldHintClass)}>{hint}</span>}
+        </span>
+        <span className="block min-w-0 @xl:col-start-2">{children}</span>
+      </label>
+      {hasBelow && <div className="min-w-0 @xl:col-start-2">{below}</div>}
+    </div>
   );
 }
 

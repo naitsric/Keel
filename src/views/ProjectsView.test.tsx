@@ -67,6 +67,88 @@ describe("the Projects page", () => {
     expect(heading()).toBe("beta");
   });
 
+  describe("the page of one project", () => {
+    const section = (id: string) => main().querySelector(`[data-section="${id}"]`) as HTMLElement;
+    const index = () => main().querySelector(`nav[aria-label="${i18next.t("projects.sections")}"]`) as HTMLElement;
+
+    it("has a card for each part, in the order of the index above them", async () => {
+      await showApp(RUNS, { name: "projects" }, THREE);
+      expect([...index().querySelectorAll("button")].map((b) => b.textContent)).toEqual(["Commands", "GitHub", "Workflow", "Access", "Services"]);
+      expect([...main().querySelectorAll("[data-section]")].map((card) => card.getAttribute("data-section"))).toEqual(["commands", "github", "workflow", "access", "services"]);
+      expect(section("commands").textContent).toContain(i18next.t("settings.setupCommand"));
+      expect(section("commands").textContent).toContain(i18next.t("settings.checkCommand"));
+      expect(section("github").textContent).toContain(i18next.t("settings.githubAccount"));
+      expect(section("access").textContent).toContain(i18next.t("settings.domains"));
+      expect(section("services").textContent).toContain(i18next.t("settings.env"));
+    });
+
+    it("keeps the files too sensitive for a small change with the default workflow, not with what the sandbox reaches", async () => {
+      await showApp(RUNS, { name: "projects" }, THREE);
+      expect(section("workflow").textContent).toContain(i18next.t("settings.defaultWorkflow"));
+      expect(section("workflow").textContent).toContain(i18next.t("settings.sensitive"));
+      expect(section("access").textContent).not.toContain(i18next.t("settings.sensitive"));
+    });
+
+    it("marks the first part in the index, and a click on another goes there and puts the focus in it", async () => {
+      await showApp(RUNS, { name: "projects" }, THREE);
+      const current = () => [...index().querySelectorAll('[aria-current="location"]')].map((b) => b.textContent);
+      expect(current()).toEqual(["Commands"]);
+      await click([...index().querySelectorAll("button")].find((b) => b.textContent === "Access"));
+      expect(current()).toEqual(["Access"]);
+      expect(document.activeElement).toBe(section("access"));
+      // The list still says which project this is: the index marks a place, not a page.
+      expect(main().querySelector('[aria-current="true"]')?.textContent).toContain("alpha");
+    });
+
+    it("says a project is set up beside its name, and nothing more", async () => {
+      await showApp(RUNS, { name: "projects" }, THREE);
+      const top = main().querySelector("h2")?.parentElement as HTMLElement;
+      expect(top.textContent).toContain(i18next.t("projects.ready"));
+      expect(button(i18next.t("projects.finishSetup"))).toBeUndefined();
+      expect(main().textContent).not.toContain(i18next.t("projects.missing.check"));
+    });
+
+    it("says what a project's setup still lacks, and Finish setup opens the same dialog as on Home", async () => {
+      await showApp(RUNS, { name: "projects", projectId: "beta" }, [project("alpha"), project("beta", { checkCommand: null, githubAccount: null })]);
+      const top = main().querySelector("h2")?.parentElement as HTMLElement;
+      expect(top.textContent).toContain(i18next.t("projects.needsSetup"));
+      expect(main().textContent).toContain(i18next.t("projects.missing.check"));
+      expect(main().textContent).toContain(i18next.t("projects.missing.account"));
+      await click(button(i18next.t("projects.finishSetup")));
+      expect(view().name).toBe("projects");
+      expect(useApp.getState().projectSetup).toEqual({ projectId: "beta", added: null, returnToNewRun: false });
+      pressKey("Escape", "Escape");
+    });
+
+    it("says only what's missing: a project with a check and no account chosen for its repo", async () => {
+      await showApp(RUNS, { name: "projects" }, [project("alpha", { githubAccount: null })]);
+      expect(main().textContent).toContain(i18next.t("projects.missing.account"));
+      expect(main().textContent).not.toContain(i18next.t("projects.missing.check"));
+    });
+
+    it("offers both ways to add a service where it says there are none, and below the list once there's one", async () => {
+      await showApp(RUNS, { name: "projects" }, [project("alpha")]);
+      const empty = () => [...section("services").querySelectorAll("p")].find((p) => p.textContent === i18next.t("settings.servicesEmpty"));
+      expect(empty()?.parentElement?.textContent).toContain(i18next.t("settings.addBridge"));
+      expect(empty()?.parentElement?.textContent).toContain(i18next.t("settings.addCommand"));
+      await click(button(i18next.t("settings.addBridge")));
+      expect(empty()).toBeUndefined();
+      expect(section("services").querySelectorAll("li")).toHaveLength(1);
+      expect(button(i18next.t("settings.addCommand"))).toBeDefined();
+      await click(button(i18next.t("settings.serviceRemove")));
+      expect(empty()).toBeDefined();
+    });
+
+    it("says that Save saves every part, until there's an error to say instead", async () => {
+      await showApp(RUNS, { name: "projects" }, [project("alpha")]);
+      expect(main().textContent).toContain(i18next.t("projects.savesAll"));
+      await typeInto(envBox(), "nope");
+      await click(button(i18next.t("settings.save")));
+      expect(main().textContent).toContain(i18next.t("settings.envInvalid", { line: "nope" }));
+      expect(main().textContent).not.toContain(i18next.t("projects.savesAll"));
+    });
+  });
+
   it("opens on the project it was sent to, or the first if that one is gone or none was given", async () => {
     await showApp(RUNS, { name: "projects", projectId: "gamma" }, THREE);
     expect(heading()).toBe("gamma");

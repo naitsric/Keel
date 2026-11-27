@@ -81,8 +81,8 @@ function NoticesCard() {
             <label key={kind} className="flex items-start gap-2">
               <input type="checkbox" className="mt-0.5" checked={settings[kind]} onChange={(e) => change(kind, e.target.checked)} />
               <span>
-                <span className="block text-[12.5px]">{t(`settings.notices.${kind}`)}</span>
-                <span className="block text-[11.5px] leading-snug text-subtle">{t(`settings.notices.${kind}Hint`)}</span>
+                <span className="block text-[12.5px] font-medium">{t(`settings.notices.${kind}`)}</span>
+                <span className="block text-[12px] leading-snug text-muted">{t(`settings.notices.${kind}Hint`)}</span>
               </span>
             </label>
           ))}

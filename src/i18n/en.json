@@ -680,7 +680,6 @@
     "githubNone": "None",
     "githubActive": "active in your terminal",
     "githubHint": "Keel uses this account for this project only, and never changes the one active in your terminal.",
-    "githubRepo": "Repo: {{repo}}",
     "githubNoRepo": "This project's repo isn't on GitHub.",
     "githubPermission": "Permission: {{permission}}",
     "githubDefault": "Default branch: {{branch}}",
@@ -1212,7 +1211,14 @@
     "filterPlaceholder": "Filter by name or repo…",
     "noMatch": "No project matches.",
     "noRepo": "Not on GitHub",
-    "sectionGeneral": "General",
+    "sectionCommands": "Commands",
+    "sectionWorkflow": "Workflow",
+    "sections": "Sections",
+    "missing": {
+      "check": "It has no check command yet.",
+      "account": "It has no GitHub account chosen yet."
+    },
+    "savesAll": "Saves every section.",
     "sectionGithub": "GitHub",
     "issueLabel": "Bring issues with the label",
     "issueLabelPlaceholder": "keel",
