@@ -150,8 +150,8 @@ one of them is part of the change and reaches no agent as a rule until you merge
   stopped or interrupted, say. It reaches the domains you allowed it, while the project still
   allows them, through a proxy Keel runs for it, which refuses every other domain and never
   connects to your Mac or to an address of a private network, and its sandbox opens only the
-  proxy's port on localhost. A tool that ignores the usual proxy variables stays offline there.
-  Later checks have no network again.
+  proxy's port on localhost. A tool that ignores the usual proxy variables, as Java's do, stays
+  offline there. Later checks have no network again.
 - Keel uses your own signed-in `claude` and `gh`, and never stores a credential. Agents never
   get GitHub access: Keel pushes the branch and opens the pull request itself, as a draft. It
   doesn't merge.

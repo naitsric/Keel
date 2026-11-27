@@ -713,19 +713,32 @@ fn with_domains(held: &[String], add: &[String], remove: &[String]) -> Vec<Strin
     domains
 }
 
+/// Whether what a project allows lets a step reach this host: by its name, or by a `*.` over a
+/// domain it's under. Case doesn't tell two apart.
+fn allows(allowed: &[String], host: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    allowed.iter().any(|domain| {
+        let domain = domain.trim().to_ascii_lowercase();
+        match domain.strip_prefix("*.") {
+            Some(base) => host
+                .strip_suffix(base)
+                .is_some_and(|sub| sub.ends_with('.')),
+            None => domain == host,
+        }
+    })
+}
+
 /// Forgets the offline variables freed by domains a project no longer allows. One allowed again
 /// later, by anyone, frees nothing by itself: only a person allowing it from a step that waits
-/// for it does.
+/// for it does. One the project still lets through another way, as when its name gives way to a
+/// `*.` over it, keeps what it freed: the builder reaches it as before.
 fn forget_freed(conn: &Connection, project_id: &str, allowed: &[String]) -> rusqlite::Result<()> {
     let freed: Vec<String> = conn
         .prepare("select distinct domain from freed_by_domain where project_id = ?1")?
         .query_map([project_id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     for domain in freed {
-        let still = allowed
-            .iter()
-            .any(|held| held.trim().eq_ignore_ascii_case(&domain));
-        if !still {
+        if !allows(allowed, &domain) {
             conn.execute(
                 "delete from freed_by_domain where project_id = ?1 and domain = ?2",
                 params![project_id, domain],
@@ -2426,10 +2439,7 @@ impl Store {
         let mut variables: Vec<String> = Vec::new();
         for row in rows {
             let (domain, variable) = row?;
-            let still = allowed
-                .iter()
-                .any(|held| held.trim().eq_ignore_ascii_case(&domain));
-            if still && !variables.contains(&variable) {
+            if allows(&allowed, &domain) && !variables.contains(&variable) {
                 variables.push(variable);
             }
         }
@@ -4816,6 +4826,35 @@ mod tests {
             .update_project("p", &ProjectSettings::default())
             .unwrap();
         assert!(store.freed_variables("p").unwrap().is_empty());
+    }
+
+    /// A person allows a private registry from a step, and later widens it in the settings to
+    /// every host of their company's. The builder reaches the registry as before, so its tools
+    /// stay online.
+    #[test]
+    fn a_domain_still_let_through_by_a_wildcard_keeps_what_it_freed() {
+        let (_dir, store) = store();
+        seeded(&store);
+        let private = "npm.mycorp.example";
+        let freed = [(private, "npm_config_offline")];
+        store.allow_domains("p", &[private.into()], &freed).unwrap();
+        let save = |domains: &[&str]| {
+            let settings = ProjectSettings {
+                allowed_domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+                ..ProjectSettings::default()
+            };
+            store.update_project("p", &settings).unwrap();
+            store.freed_variables("p").unwrap()
+        };
+
+        assert_eq!(save(&["*.MyCorp.example"]), ["npm_config_offline"]);
+        // And back to its name, or to both.
+        assert_eq!(save(&[private]), ["npm_config_offline"]);
+        assert_eq!(save(&["*.mycorp.example", private]), ["npm_config_offline"]);
+        // A wildcard over something else, or over the domain itself and not what's under it,
+        // doesn't let it through, so what it freed goes for good.
+        assert!(save(&["*.npm.mycorp.example", "*.othercorp.example"]).is_empty());
+        assert!(save(&["*.mycorp.example"]).is_empty());
     }
 
     /// What a person freed by allowing a domain from a step doesn't come back when someone else

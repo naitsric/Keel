@@ -3,15 +3,17 @@
 //! per call, and ends its work with the command output in `bash`, if there is one. The check itself
 //! is a real command in the sandbox.
 
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use keel_core::{
     AttemptState, NeededDomain, Reason, StepRole, StepSpec, ToolProfile, WorkflowStep,
 };
-use keel_engine::{Config, Engine, Error, NetworkAnswer, StartRun};
+use keel_engine::{Config, Connector, Engine, Error, NetworkAnswer, StartRun};
 use keel_harness::Tools;
 use keel_store::{Attempt, NewAttempt, NewRun, ProjectSettings, Store};
 
@@ -26,6 +28,40 @@ struct World {
     store: Arc<Store>,
     engine: Engine,
     project_id: String,
+    /// The domains a check's proxy connected to, each with its port. They all lead to a server of
+    /// this test's, so none of it needs the internet.
+    reached: Arc<Mutex<Vec<(String, u16)>>>,
+}
+
+/// A server on this Mac that answers every request with `hello`, in place of whatever domain a
+/// check's proxy lets through, and how the proxy gets to it. None where the sandbox this runs in
+/// opens no sockets: only tests that say they need them go through a proxy.
+fn registry(reached: &Arc<Mutex<Vec<(String, u16)>>>) -> Option<Connector> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).ok()?;
+    let port = listener.local_addr().ok()?.port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            std::thread::spawn(move || {
+                let mut asked = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !asked.windows(4).any(|w| w == b"\r\n\r\n") {
+                    match stream.read(&mut buffer) {
+                        Ok(count) if count > 0 => asked.extend_from_slice(&buffer[..count]),
+                        _ => return,
+                    }
+                }
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+                );
+            });
+        }
+    });
+    let reached = reached.clone();
+    Some(Connector::new(move |host, port_asked| {
+        reached.lock().unwrap().push((host.to_owned(), port_asked));
+        TcpStream::connect(("127.0.0.1", port))
+    }))
 }
 
 fn git(repo: &Path, args: &[&str]) {
@@ -70,7 +106,11 @@ BUILD*)
   fi
   needed=""
   if [ -s "{dir}/declare" ]; then needed=$(head -1 "{dir}/declare"); sed -i '' 1d "{dir}/declare"; fi
-  result="{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"\",\"num_turns\":1,\"structured_output\":{{\"message\":\"Built it.\",\"neededDomains\":[$needed]}}}}";;
+  # What it wrote before it answered, and the message it put in its answer.
+  said=""; message="Built it."
+  if [ -f "{dir}/said" ]; then said=$(cat "{dir}/said"); fi
+  if [ -f "{dir}/message" ]; then message=$(cat "{dir}/message"); fi
+  result="{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"$said\",\"num_turns\":1,\"structured_output\":{{\"message\":\"$message\",\"neededDomains\":[$needed]}}}}";;
 APPROVE*)
   result='{{"type":"result","subtype":"success","is_error":false,"result":"","num_turns":1,"structured_output":{{"decision":"approve","risk":"low","reasons":"because","instructions":""}}}}';;
 *)
@@ -100,6 +140,8 @@ fn world() -> World {
     let mut config = Config::new(dir.path().join("data"));
     config.tick = Duration::from_millis(20);
     config.keep_awake = false;
+    let reached = Arc::default();
+    config.check_connects = registry(&reached);
     let engine = Engine::new(store.clone(), config, tools, |_| {});
     let project_id = engine.add_project(&repo).unwrap().id;
     World {
@@ -107,6 +149,7 @@ fn world() -> World {
         store,
         engine,
         project_id,
+        reached,
     }
 }
 
@@ -447,13 +490,17 @@ fn a_check_that_fails_offline_waits_for_the_person_instead_of_going_back() {
 }
 
 /// Fails as npm does for as long as it's kept offline. Once it isn't, says what it has and what it
-/// can reach: a domain the project allows, one it doesn't, and an address without the proxy.
+/// can reach: a domain the project allows, one it doesn't, and an address without the proxy. It
+/// also shows the proxy's password every way it has it: as it comes, in what Java is given, and
+/// in the header curl says it sent.
 fn check_that_needs_npm() -> String {
     format!(
         "if [ -n \"$npm_config_offline\" ]; then {OFFLINE_CHECK}; fi; \
          code() {{ /usr/bin/curl -s -o /dev/null -m 8 -w '%{{http_code}}' \"$@\"; true; }}; \
          echo \"offline=[$npm_config_offline$pnpm_config_offline] cargo=[$CARGO_NET_OFFLINE]\"; \
          echo \"proxy=[$HTTPS_PROXY]\"; \
+         echo \"java=[$JDK_JAVA_OPTIONS]\"; \
+         echo \"sent=[$(/usr/bin/curl -sv -o /dev/null -m 8 http://{NPM}/ 2>&1 | grep -i '^> proxy-authorization' | tr -d '\\r')]\"; \
          echo \"allowed=$(code http://{NPM}/)\"; \
          echo \"other=$(code http://other.example/)\"; \
          echo \"direct=$(code --noproxy '*' http://192.0.2.1/)\""
@@ -497,15 +544,66 @@ fn allowing_from_a_check_repeats_that_check_in_the_same_round() {
     };
     // npm's variables are gone, and those of a registry the project doesn't allow stay.
     assert_eq!(line("offline="), "[] cargo=[true]");
-    assert!(line("proxy=").contains("@127.0.0.1:"), "{printed}");
-    // The proxy tries to reach what's allowed, which answers or, with no internet here, can't be
-    // reached. Anything else it refuses, and without it nothing gets out.
-    assert!(
-        !["000", "403", "407"].contains(&line("allowed=")),
-        "{printed}"
-    );
+    // The proxy lets through what's allowed, which answers. Anything else it refuses, and
+    // without it nothing gets out.
+    assert_eq!(line("allowed="), "200", "{printed}");
     assert_eq!(line("other="), "403", "{printed}");
     assert_eq!(line("direct="), "000", "{printed}");
+    let reached = w.reached.lock().unwrap().clone();
+    assert!(!reached.is_empty(), "{printed}");
+    for to in &reached {
+        assert_eq!(*to, (NPM.to_owned(), 80), "{reached:?}");
+    }
+    // What Keel keeps of what the check printed has the proxy, and not its password, however
+    // the check came to print it. Java is given nothing of it.
+    let port = profile
+        .split("localhost:")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the proxy's port");
+    assert_eq!(
+        line("proxy="),
+        format!("[http://keel:***@127.0.0.1:{port}]"),
+        "{printed}"
+    );
+    assert_eq!(
+        line("sent="),
+        "[> Proxy-Authorization: Basic ***]",
+        "{printed}"
+    );
+    assert_eq!(
+        line("java="),
+        "[-Djava.net.preferIPv4Stack=true]",
+        "{printed}"
+    );
+}
+
+/// A builder that says what it did as it works, and leaves its answer's message empty.
+#[test]
+fn an_empty_message_in_the_builders_answer_does_not_replace_what_it_said() {
+    keel_harness::needs!(sandbox);
+    let w = world();
+    for (run, message) in [("first", ""), ("second", "  ")] {
+        std::fs::write(
+            w.dir.path().join("said"),
+            "I added the parser and its tests.",
+        )
+        .unwrap();
+        std::fs::write(w.dir.path().join("message"), message).unwrap();
+        let run_id = w.start("true");
+        let built = w.wait(&run_id, "builder", 1, AttemptState::Succeeded);
+        assert_eq!(
+            built.result_text.as_deref(),
+            Some("I added the parser and its tests."),
+            "{run}"
+        );
+        w.wait(&run_id, "human", 1, AttemptState::WaitingApproval);
+    }
+    // A message that says something is what it said when it finished.
+    std::fs::write(w.dir.path().join("message"), "Built it.").unwrap();
+    let run_id = w.start("true");
+    let built = w.wait(&run_id, "builder", 1, AttemptState::Succeeded);
+    assert_eq!(built.result_text.as_deref(), Some("Built it."));
 }
 
 #[test]

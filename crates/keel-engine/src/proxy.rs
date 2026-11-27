@@ -30,6 +30,85 @@ const USER: &str = "keel";
 
 type Connect = dyn Fn(&str, u16) -> io::Result<TcpStream> + Send + Sync;
 
+/// How a check's proxy connects to a domain it lets through, for `Config::check_connects`. The
+/// app has none, and connects as `connect_out` does. A test gives one that leads to a server of
+/// its own, so that it needs no internet.
+#[derive(Clone)]
+pub struct Connector(Arc<Connect>);
+
+impl Connector {
+    pub fn new(
+        connect: impl Fn(&str, u16) -> io::Result<TcpStream> + Send + Sync + 'static,
+    ) -> Self {
+        Self(Arc::new(connect))
+    }
+}
+
+impl std::fmt::Debug for Connector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Connector")
+    }
+}
+
+/// What stands in what Keel keeps for a proxy's password.
+const MASK: &str = "***";
+const PASSWORD_CHARS: usize = 32;
+/// How `keel:` and a password start once encoded for a `Proxy-Authorization` header, which says
+/// no more than that it's this user's, and how long the whole of it is.
+const ENCODED_START: &str = "a2VlbD";
+const ENCODED_CHARS: usize = 52;
+
+/// `text` without any proxy's password, as it is and as a header carries it. A check has it in
+/// its environment, so what it prints can have it: `echo $HTTPS_PROXY` does, and so does a tool
+/// that shows the requests it makes. What Keel keeps of that, shows and hands to the next agent
+/// doesn't. `secrets` are those of the proxy the check had (see `Proxy::secrets`), which go
+/// wherever they are. Beyond those it's told by its shape after its user, so it's found for a
+/// check the app found already running too, whose proxy is gone.
+pub(crate) fn masked(text: &str, secrets: &[String]) -> String {
+    let mut known = text.to_owned();
+    for secret in secrets {
+        known = known.replace(secret, MASK);
+    }
+    let text = known.as_str();
+    let plain = format!("{USER}:");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    loop {
+        let found = [(plain.as_str(), true), (ENCODED_START, false)]
+            .into_iter()
+            .filter_map(|(start, is_plain)| Some((rest.find(start)?, start, is_plain)))
+            .min_by_key(|(at, ..)| *at);
+        let Some((at, start, is_plain)) = found else {
+            out.push_str(rest);
+            return out;
+        };
+        let after = &rest[at + start.len()..];
+        let secret = if is_plain {
+            let hex = |b: u8| b.is_ascii_digit() || (b'a'..=b'f').contains(&b);
+            let bytes = after.as_bytes();
+            (bytes.len() >= PASSWORD_CHARS && bytes[..PASSWORD_CHARS].iter().all(|b| hex(*b)))
+                .then_some((start.len(), PASSWORD_CHARS))
+        } else {
+            let encoded = |b: u8| b.is_ascii_alphanumeric() || b"+/=".contains(&b);
+            let length = ENCODED_CHARS - start.len();
+            let bytes = after.as_bytes();
+            (bytes.len() >= length && bytes[..length].iter().all(|b| encoded(*b)))
+                .then_some((0, ENCODED_CHARS))
+        };
+        match secret {
+            Some((kept, hidden)) => {
+                out.push_str(&rest[..at + kept]);
+                out.push_str(MASK);
+                rest = &rest[at + kept + hidden..];
+            }
+            None => {
+                out.push_str(&rest[..at + start.len()]);
+                rest = after;
+            }
+        }
+    }
+}
+
 /// How many connections are open, of at most so many. One for every proxy of the app: see
 /// `MOST_AT_ONCE`.
 struct Places {
@@ -86,9 +165,17 @@ pub(crate) struct Proxy {
 }
 
 impl Proxy {
-    /// A proxy on a port of localhost the system picks, for these domains.
-    pub(crate) fn start(domains: &[String]) -> io::Result<Self> {
-        Self::start_with(domains, Box::new(connect_out))
+    /// A proxy on a port of localhost the system picks, for these domains. It connects to them
+    /// as `connect_out` does, unless it's given another way.
+    pub(crate) fn start(domains: &[String], connect: Option<&Connector>) -> io::Result<Self> {
+        let connect: Box<Connect> = match connect {
+            Some(Connector(connect)) => {
+                let connect = connect.clone();
+                Box::new(move |host, port| connect(host, port))
+            }
+            None => Box::new(connect_out),
+        };
+        Self::start_with(domains, connect)
     }
 
     fn start_with(domains: &[String], connect: Box<Connect>) -> io::Result<Self> {
@@ -126,8 +213,23 @@ impl Proxy {
         self.port
     }
 
+    /// Its password, alone and as a `Proxy-Authorization` header carries it: what `masked` takes
+    /// out of what the check printed.
+    pub(crate) fn secrets(&self) -> Vec<String> {
+        let password = &self.shared.password;
+        let pair = format!("{USER}:{password}");
+        vec![
+            password.clone(),
+            base64::engine::general_purpose::STANDARD.encode(pair),
+        ]
+    }
+
     /// The variables that send a command's downloads through it. What's on localhost, such as a
-    /// server a test starts, isn't a download.
+    /// server a test starts, isn't a download. Java reads none of these and gets nothing in their
+    /// place: it prints the options it's given, password and all, won't send a password to open a
+    /// tunnel unless told to, and no check reaches a repository of Maven's or Gradle's anyway,
+    /// since the only domains a check is ever allowed are those of the tools Keel can tell failed
+    /// offline (see `network::failed_offline`). So Java stays offline here, as the check before.
     pub(crate) fn env(&self) -> Vec<(String, String)> {
         let url = format!(
             "http://{USER}:{}@127.0.0.1:{}",
@@ -138,19 +240,6 @@ impl Proxy {
         let direct = ["NO_PROXY", "no_proxy"]
             .map(|name| (name.to_owned(), "localhost,127.0.0.1,::1".to_owned()));
         proxied.into_iter().chain(direct).collect()
-    }
-
-    /// The same for Java, which reads none of those.
-    pub(crate) fn java_options(&self) -> String {
-        let (port, password) = (self.port, &self.shared.password);
-        ["http", "https"]
-            .map(|scheme| {
-                format!(
-                    "-D{scheme}.proxyHost=127.0.0.1 -D{scheme}.proxyPort={port} \
-                     -D{scheme}.proxyUser={USER} -D{scheme}.proxyPassword={password}"
-                )
-            })
-            .join(" ")
     }
 }
 
@@ -397,8 +486,9 @@ fn is_elsewhere(address: IpAddr) -> bool {
 /// them. Anything else it says, such as having no descriptors left, tells nothing about the
 /// address, and then it counts as this Mac's.
 fn is_elsewhere_given(address: IpAddr, listen: impl Fn(IpAddr) -> io::Result<()>) -> bool {
+    // An IPv4 address inside an IPv6 one is that IPv4 address, however it's written.
     let address = match address {
-        IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(address, IpAddr::V4),
+        IpAddr::V6(v6) => v6.to_ipv4().map_or(address, IpAddr::V4),
         IpAddr::V4(_) => address,
     };
     let special = match address {
@@ -416,6 +506,8 @@ fn is_elsewhere_given(address: IpAddr, listen: impl Fn(IpAddr) -> io::Result<()>
                 || v6.is_unspecified()
                 || v6.is_multicast()
                 || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // The old site-local addresses, which some networks still use.
+                || (v6.segments()[0] & 0xffc0) == 0xfec0
                 || (v6.segments()[0] & 0xfe00) == 0xfc00
         }
     };
@@ -506,6 +598,53 @@ mod tests {
     }
 
     #[test]
+    fn what_keel_keeps_of_what_a_check_printed_has_no_proxy_password() {
+        let password = uuid::Uuid::new_v4().simple().to_string();
+        let encoded =
+            base64::engine::general_purpose::STANDARD.encode(format!("{USER}:{password}"));
+        assert_eq!(
+            (password.len(), encoded.len()),
+            (PASSWORD_CHARS, ENCODED_CHARS)
+        );
+        assert!(encoded.starts_with(ENCODED_START), "{encoded}");
+        let printed = format!(
+            "HTTPS_PROXY=http://keel:{password}@127.0.0.1:50123\n\
+             > Proxy-Authorization: Basic {encoded}\r\n\
+             twice: keel:{password} keel:{password}é"
+        );
+        // By its shape alone, as for a check whose proxy went with the app.
+        let kept = masked(&printed, &[]);
+        assert!(!kept.contains(&password), "{kept}");
+        assert!(!kept.contains(&encoded), "{kept}");
+        assert_eq!(
+            kept,
+            "HTTPS_PROXY=http://keel:***@127.0.0.1:50123\n\
+             > Proxy-Authorization: Basic ***\r\n\
+             twice: keel:*** keel:***é"
+        );
+        // Away from its user nothing tells it, so only the proxy's own secrets take it out.
+        let alone = format!("the password is {password}, {password}");
+        assert_eq!(masked(&alone, &[]), alone);
+        let secrets = [password.clone(), encoded.clone()];
+        assert_eq!(masked(&alone, &secrets), "the password is ***, ***");
+        assert_eq!(masked(&printed, &secrets), kept);
+
+        // Anything else stays as it was printed.
+        for plain in [
+            "",
+            "keel:",
+            "keel: a run",
+            "keel:0123456789abcdef",
+            "user keel:XYZ23456789abcdef0123456789abcdef",
+            "a2VlbD",
+            "a2VlbDshort==",
+            "an á and a2VlbD then *** and keel:é",
+        ] {
+            assert_eq!(masked(plain, &[]), plain);
+        }
+    }
+
+    #[test]
     fn it_tunnels_to_an_allowed_domain_and_to_no_other() {
         let (shared, heard) = serving(&["registry.example", "*.cdn.example"]);
         let auth = authorization("secret");
@@ -591,6 +730,11 @@ mod tests {
         .unwrap();
         let port = proxy.port();
         let auth = authorization(&proxy.shared.password);
+        assert_eq!(proxy.secrets()[0], proxy.shared.password);
+        assert_eq!(
+            format!("Proxy-Authorization: Basic {}\r\n", proxy.secrets()[1]),
+            auth
+        );
         assert_eq!(
             proxy.env()[0].1,
             format!("http://keel:{}@127.0.0.1:{port}", proxy.shared.password)
@@ -640,6 +784,7 @@ mod tests {
             "::1",
             "::",
             "::ffff:127.0.0.1",
+            "::127.0.0.1",
             "fe80::1",
         ] {
             assert!(!is_elsewhere(here.parse().unwrap()), "{here}");
@@ -675,6 +820,9 @@ mod tests {
             "fd12:3456:789a::1",
             "::ffff:192.168.1.1",
             "::ffff:10.0.0.1",
+            "::192.168.1.1",
+            "fec0::1",
+            "feff::1",
         ] {
             assert!(
                 !is_elsewhere_given(private.parse().unwrap(), not_mine),

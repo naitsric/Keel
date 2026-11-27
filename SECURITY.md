@@ -47,7 +47,9 @@ pushed with the branch.
 by allowing a domain it lacked, and that one tried again with the same command while it hasn't
 finished, reaches the domains you allowed it, through a proxy Keel runs outside the sandbox while it
 does: what it runs, which an agent may have edited, can send there what it can read. The proxy
-connects to no address of your Mac or of a private network, whatever a name resolves to. A project that opens localhost to its check and builder lets them reach any service on
+connects to no address of your Mac or of a private network, whatever a name resolves to. It asks
+for a password only that check has, which Keel takes out of what it keeps of the check's output;
+the check's own log file on disk has whatever it printed. A project that opens localhost to its check and builder lets them reach any service on
 your Mac. Services a project declares, like a test database, run outside the sandbox. Open only what
 a project needs.
 

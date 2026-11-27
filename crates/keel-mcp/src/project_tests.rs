@@ -960,6 +960,17 @@ async fn domains_are_refused_without_the_permission_or_when_one_is_no_domain() {
         .unwrap_err()
         .0;
     assert!(both.contains("both"), "{both}");
+    // Blanks around the one to take away don't tell them apart: the store takes it away the
+    // same, and would then add it back, which isn't what either list says.
+    let spaced = w
+        .configure(
+            &bot,
+            json!({ "project": "app", "addAllowedDomains": ["example.com"], "removeAllowedDomains": [" Example.com\n"] }),
+        )
+        .await
+        .unwrap_err()
+        .0;
+    assert!(spaced.contains("both"), "{spaced}");
     // Empty lists say nothing to change.
     let nothing = w
         .configure(

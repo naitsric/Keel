@@ -70,6 +70,8 @@ pub(crate) struct Monitor {
     proxy: Option<Proxy>,
     /// A check that ran with localhost open.
     localhost_open: bool,
+    /// A check that ran with a proxy to the network, whose password it could print.
+    had_proxy: bool,
 }
 
 impl Monitor {
@@ -101,6 +103,7 @@ impl Monitor {
             services: None,
             proxy: None,
             localhost_open: opens_localhost(attempt),
+            had_proxy: reaches(attempt).is_some(),
         }
     }
 }
@@ -145,11 +148,10 @@ const OFFLINE: [(&str, &str, &str); 7] = [
 ];
 
 /// The offline variables of each tool `network` can tell failed. pnpm before 11 reads npm's.
-const TOOL_OFFLINE: [(&str, &[&str]); 4] = [
+const TOOL_OFFLINE: [(&str, &[&str]); 3] = [
     ("npm", &["npm_config_offline"]),
     ("pnpm", &["pnpm_config_offline", "npm_config_offline"]),
     ("cargo", &["CARGO_NET_OFFLINE"]),
-    ("pip", &["PIP_NO_INDEX"]),
 ];
 
 /// Whether a domain is a registry Keel knows whose it is: allowing it takes its tool's offline
@@ -912,7 +914,10 @@ impl Inner {
         // Only the check a person repeats after allowing a domain it lacked reaches the network,
         // through a proxy that lets the allowed domains pass: see `proxy`.
         let allowed = reaches(attempt);
-        let proxy = allowed.as_deref().map(Proxy::start).transpose()?;
+        let proxy = allowed
+            .as_deref()
+            .map(|domains| Proxy::start(domains, self.config.check_connects.as_ref()))
+            .transpose()?;
         let profile = match &proxy {
             Some(proxy) => settings::with_proxy(profile, proxy.port()),
             None => profile,
@@ -968,11 +973,6 @@ impl Inner {
         if let Some(proxy) = &proxy {
             let online = self.online_for_step(attempt)?;
             home_vars.retain(|(name, _)| !online.contains(name));
-            for (name, value) in &mut home_vars {
-                if name == JAVA_ON_IPV4.0 {
-                    *value = format!("{value} {}", proxy.java_options());
-                }
-            }
             home_vars.extend(proxy.env());
         }
         // After the project's own variables, as for an agent, so the folder is always Keel's.
@@ -1070,9 +1070,10 @@ impl Inner {
         }
         // A setup or check that left its exit code is over, whatever its pid looks like now.
         let ended = context.ended_while_away();
-        // Its proxy went with the app, so how it ends isn't about the work. Not for one that left
-        // its exit code: it's over, and how it ended is all there is to go by.
-        if reaches(attempt).is_some() && ended.flatten().is_none() {
+        // Its proxy went with the app while it ran, so how it ends isn't about the work: a
+        // command that then failed, with an exit code of its own too, may have failed for the
+        // connection it lost. Only one that passed all the same is taken at its word.
+        if reaches(attempt).is_some() && ended != Some(Some(0)) {
             self.record_event(&attempt.id, "networkLost", &json!({}));
         }
         if alive && ended.is_none() {
@@ -1383,12 +1384,9 @@ impl Inner {
                 // here on as what it said when it finished.
                 if m.declares_network
                     && !result.is_error
-                    && let Some(message) = result
-                        .structured_output
-                        .as_ref()
-                        .and_then(|answer| answer["message"].as_str())
+                    && let Some(message) = final_message(result.structured_output.as_ref())
                 {
-                    result.text = Some(message.to_owned());
+                    result.text = Some(message);
                 }
                 self.record_event(
                     &m.attempt_id,
@@ -1454,6 +1452,7 @@ impl Inner {
         // First of all, so that "finished" means nothing is left running, and so the next step
         // can open the same sockets. A check's way to the network closes with them.
         drop(m.services.take());
+        let proxy_secrets = m.proxy.as_ref().map(Proxy::secrets).unwrap_or_default();
         drop(m.proxy.take());
         if let Ok(lines) = m.tail.read_new(&m.raw_path)
             && !lines.is_empty()
@@ -1542,8 +1541,18 @@ impl Inner {
                         .any(|bytes| localhost::refused(&String::from_utf8_lossy(bytes)));
             }
             let tail = |bytes: &[u8]| {
-                String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(EVENT_TEXT_LIMIT)..])
-                    .into_owned()
+                if !m.had_proxy {
+                    let end = &bytes[bytes.len().saturating_sub(EVENT_TEXT_LIMIT)..];
+                    return String::from_utf8_lossy(end).into_owned();
+                }
+                // Without the password of its proxy, which a check can print. Taken out of all
+                // of it before the end is cut, so the cut can't leave half of one.
+                let kept = crate::proxy::masked(&String::from_utf8_lossy(bytes), &proxy_secrets);
+                let mut from = kept.len().saturating_sub(EVENT_TEXT_LIMIT);
+                while !kept.is_char_boundary(from) {
+                    from += 1;
+                }
+                kept[from..].to_owned()
             };
             let dirty = git.as_ref().is_some_and(|g| g.is_dirty(&m.workspace));
             self.record_event(
@@ -1685,10 +1694,18 @@ impl Inner {
         // A step that couldn't go on for lack of a domain waits for the person, before anything
         // judges it or sends it back: see `network`.
         let answer = m.result.as_ref().and_then(|r| r.structured_output.as_ref());
-        self.waits_for_network(&m.attempt_id, &mut state, &mut reason, answer);
+        let waits = self.waits_for_network(&m.attempt_id, &mut state, &mut reason, answer);
+        #[cfg(test)]
+        if waits && let Some(hook) = locked(&self.once_it_waits).as_ref() {
+            hook(&m.attempt_id);
+        }
         // A check that ran and failed sends the work back to the builder: see `failed_checks`.
         let sent_back = self.failed_check_goes_back(&m.attempt_id, &mut state, &mut reason);
-        self.keep_state(&m.attempt_id, state, reason.as_ref());
+        // One that waits is on the record as it waits, and the person may have answered it by
+        // now: written again, it would wait once more for what they already said.
+        if !waits {
+            self.keep_state(&m.attempt_id, state, reason.as_ref());
+        }
         self.record_event(
             &m.attempt_id,
             "finished",
@@ -2050,6 +2067,13 @@ impl Inner {
         )?;
         Ok(())
     }
+}
+
+/// What a builder said when it finished, from its structured answer. None if it left it empty:
+/// then what it said is what it wrote before it answered, which Claude Code gives as its result.
+fn final_message(answer: Option<&serde_json::Value>) -> Option<String> {
+    let message = answer?["message"].as_str()?;
+    (!message.trim().is_empty()).then(|| message.to_owned())
 }
 
 /// What an attempt's ending means. `is_error` decides, not the subtype or the exit code:

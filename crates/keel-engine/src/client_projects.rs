@@ -129,7 +129,7 @@ fn edit_of(values: &ProjectValues) -> Result<ClientProjectEdit, ClientRefusal> {
         values
             .remove_domains
             .iter()
-            .any(|removed| removed.eq_ignore_ascii_case(added))
+            .any(|removed| removed.trim().eq_ignore_ascii_case(added))
     }) {
         return Err(ClientRefusal::DomainBothWays {
             domain: both.clone(),

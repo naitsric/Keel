@@ -68,6 +68,7 @@ pub use notices::{Notice, NoticeSettings, NoticeWatch};
 pub use project_commands::{CommandChange, CommandKind, retry_runs_something_new};
 pub use project_proposals::{MAX_PROJECT_PROPOSALS, ProjectProposal};
 pub use prompts::full_workflow;
+pub use proxy::Connector;
 pub use screenshots::{Screenshot, Screenshots};
 use serde_json::json;
 // What a reader outside the engine needs to tell what a run did and what it waits for, read the way
@@ -179,6 +180,10 @@ pub struct Config {
     /// which project files changed (see `keel_harness::hook`). The app installs it. Without it, or
     /// without git, no hook.
     pub bash_hook: Option<PathBuf>,
+    /// How the proxy of a check with network connects to a domain it lets through. None, as the
+    /// app has it, finds the domain's address and refuses this Mac's and a private network's.
+    /// Tests give one that leads to a server of theirs.
+    pub check_connects: Option<Connector>,
 }
 
 impl Config {
@@ -201,6 +206,7 @@ impl Config {
             continue_after_reset: limits::AFTER_RESET,
             limit_look_again: limits::LOOK_AGAIN,
             bash_hook: None,
+            check_connects: None,
         }
     }
 }
@@ -456,7 +462,14 @@ struct Inner {
     issue_watch: Mutex<HashMap<String, IssueWatch>>,
     /// The last comment on each project's issues that didn't work, until one does.
     issue_comment_failed: Mutex<HashMap<String, CommentFailed>>,
+    /// For a test to act where a person's answer can come in: once a step that closes is on the
+    /// record as waiting for a domain, and before the rest of its closing. See `runner::finish`.
+    #[cfg(test)]
+    once_it_waits: Mutex<Option<WaitHook>>,
 }
+
+#[cfg(test)]
+type WaitHook = Box<dyn Fn(&str) + Send + Sync>;
 
 #[derive(Clone)]
 pub struct Engine {
@@ -529,6 +542,8 @@ impl Engine {
                 issue_looks: Mutex::default(),
                 issue_watch: Mutex::default(),
                 issue_comment_failed: Mutex::default(),
+                #[cfg(test)]
+                once_it_waits: Mutex::default(),
             }),
         }
     }
