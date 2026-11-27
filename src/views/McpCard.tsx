@@ -2,7 +2,7 @@ import { Check, Copy } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { openRun } from "../commands/runs";
-import { api, type McpClient, type McpOverview } from "../lib/api";
+import { api, type McpClient, type McpOverview, type McpProjectChange } from "../lib/api";
 import { formatRelative } from "../lib/format";
 import { errorText } from "../lib/reason";
 import { Button, Card, cx, Field, inputClass, Segmented } from "../ui/primitives";
@@ -72,6 +72,11 @@ function ClientRow({ client, onChanged, onError }: { client: McpClient; onChange
               {t("mcp.canSteer")}
             </label>
             {!client.canRun && <p className="pl-5 text-[11px] text-subtle">{t("mcp.canSteerNeedsRun")}</p>}
+            <label className={cx("flex items-center gap-1.5 text-[12px] text-muted", !client.canRun && "opacity-60")}>
+              <input type="checkbox" checked={client.canRun && client.canManageProjects} disabled={!client.canRun} onChange={(e) => void act(api.mcpClientSetCanManageProjects(client.id, e.target.checked))} />
+              {t("mcp.canManageProjects")}
+            </label>
+            {!client.canRun && <p className="pl-5 text-[11px] text-subtle">{t("mcp.canManageProjectsNeedsRun")}</p>}
             <OpenRunsField client={client} disabled={!client.canRun} onSave={(max) => void act(api.mcpClientSetMaxOpenRuns(client.id, max))} />
           </div>
           <Button variant="ghost" onClick={() => void act(api.mcpClientRevoke(client.id))}>
@@ -80,6 +85,33 @@ function ClientRow({ client, onChanged, onError }: { client: McpClient; onChange
         </>
       )}
     </li>
+  );
+}
+
+/** What clients added or changed in projects, each value whole: those commands run on this Mac. */
+function ProjectChanges({ changes }: { changes: McpProjectChange[] }) {
+  const { t } = useTranslation();
+  return (
+    <>
+      <p className="mt-1.5 text-[12px] text-muted">{t("mcp.projectChanges")}</p>
+      <ul className="mt-1 max-h-72 overflow-y-auto rounded-md border border-border">
+        {changes.map((change) => (
+          <li key={change.seq} className="border-t border-border px-3 py-1.5 text-[12px] first:border-t-0">
+            <div className="flex items-baseline gap-2">
+              <span className="min-w-0 flex-1 font-medium">{t(`mcp.change.${change.action}`, { client: change.clientName, project: change.projectName })}</span>
+              <span className="shrink-0 text-[11px] text-subtle">{formatRelative(change.at)}</span>
+            </div>
+            {change.changes.map(({ field, before, after }) => (
+              <div key={field} className="mt-1">
+                <p className="text-muted">{t(`mcp.field.${field}`)}</p>
+                <p className="selectable whitespace-pre-wrap break-all pl-3 font-mono text-[11.5px] text-subtle">{t("mcp.before", { value: before ?? t("mcp.noValue") })}</p>
+                <p className="selectable whitespace-pre-wrap break-all pl-3 font-mono text-[11.5px]">{t("mcp.after", { value: after ?? t("mcp.noValue") })}</p>
+              </div>
+            ))}
+          </li>
+        ))}
+      </ul>
+    </>
   );
 }
 
@@ -137,7 +169,7 @@ export function McpCard() {
   }, [savedPort]);
 
   if (!overview) return null;
-  const { settings, status, clients, calls } = overview;
+  const { settings, status, clients, calls, projectChanges } = overview;
   const portNumber = Number(port);
   const validPort = Number.isInteger(portNumber) && portNumber >= 1024 && portNumber <= 65535;
 
@@ -255,28 +287,31 @@ export function McpCard() {
             </Button>
           </div>
           {token && <NewToken token={token} url={status.url} />}
-
-          <p className="mt-4 text-[12.5px] font-semibold">{t("mcp.activity")}</p>
-          {calls.length === 0 ? (
-            <p className="mt-1 text-[12px] text-subtle">{t("mcp.noActivity")}</p>
-          ) : (
-            <ul className="mt-1.5 max-h-56 overflow-y-auto rounded-md border border-border">
-              {calls.map((call) => (
-                <li key={call.seq} title={call.args} className="flex items-baseline gap-2 border-t border-border px-3 py-1.5 text-[12px] first:border-t-0">
-                  <span className={cx("font-mono text-[11.5px]", call.ok ? "text-fg" : "text-warning")}>{call.tool}</span>
-                  <span className="min-w-0 flex-1 truncate text-subtle">{call.ok ? call.clientName : call.error}</span>
-                  {call.runId && (
-                    <button type="button" className="shrink-0 text-accent hover:underline" onClick={() => openRun(call.runId as string)}>
-                      {t("mcp.openRun")}
-                    </button>
-                  )}
-                  <span className="shrink-0 text-[11px] text-subtle">{formatRelative(call.at)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
         </>
       )}
+
+      {/* What changed in a project stays in sight with the server off. */}
+      {(status.running || projectChanges.length > 0) && <p className="mt-4 text-[12.5px] font-semibold">{t("mcp.activity")}</p>}
+      {projectChanges.length > 0 && <ProjectChanges changes={projectChanges} />}
+      {status.running &&
+        (calls.length === 0 ? (
+          <p className="mt-1 text-[12px] text-subtle">{t("mcp.noActivity")}</p>
+        ) : (
+          <ul className="mt-1.5 max-h-56 overflow-y-auto rounded-md border border-border">
+            {calls.map((call) => (
+              <li key={call.seq} title={call.args} className="flex items-baseline gap-2 border-t border-border px-3 py-1.5 text-[12px] first:border-t-0">
+                <span className={cx("font-mono text-[11.5px]", call.ok ? "text-fg" : "text-warning")}>{call.tool}</span>
+                <span className="min-w-0 flex-1 truncate text-subtle">{call.ok ? call.clientName : call.error}</span>
+                {call.runId && (
+                  <button type="button" className="shrink-0 text-accent hover:underline" onClick={() => openRun(call.runId as string)}>
+                    {t("mcp.openRun")}
+                  </button>
+                )}
+                <span className="shrink-0 text-[11px] text-subtle">{formatRelative(call.at)}</span>
+              </li>
+            ))}
+          </ul>
+        ))}
 
       {error && (
         <p role="alert" className="mt-2 text-[12px] text-danger">

@@ -26,8 +26,11 @@ keeps a bug in the app from rewriting history. It doesn't protect against someon
 **Keel from programs outside.** The MCP server is off until you turn it on, and listens on
 `127.0.0.1` only. It refuses web pages (any `Origin`) and hosts that aren't this Mac, and every
 request needs the token of a client you created, of which only a hash is kept. A client can't
-approve, answer, merge, change settings or let anything into the Brain: there is no tool for it.
-Every call is recorded. Agents that Keel runs can't reach it.
+approve, answer, merge, change what a client may do or let anything into the Brain: there is no tool
+for it. Nor can it change settings, with one exception, off until you turn it on for a client: it can
+add projects and set their GitHub account and their setup and check commands. Each such change is
+recorded with the client and the values before and after, and shown in Settings. Every call is
+recorded. Agents that Keel runs can't reach it.
 
 ## What it does not
 
@@ -45,4 +48,6 @@ opens localhost to its check and builder lets them reach any service on your Mac
 project declares, like a test database, run outside the sandbox. Open only what a project needs.
 
 **Your own tools are trusted.** Keel runs your signed-in `claude` and `gh`, and the commands you set
-for each project, as they are.
+for each project, as they are. A client you let add and configure projects sets those commands too,
+without asking you each time: they run in the same sandbox, with whatever you opened to that project.
+Let only a client you trust.

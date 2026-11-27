@@ -3,6 +3,7 @@
 
 mod board;
 mod brain;
+mod client_projects;
 mod copies;
 mod deliver;
 mod detect;
@@ -40,6 +41,7 @@ use std::time::{Duration, Instant};
 
 pub use board::{Board, BoardCard, BoardIssue};
 pub use brain::{BrainView, DEFAULT_BRAIN_MODEL, DecisionView, NoteView};
+pub use client_projects::{ClientRefusal, ProjectSource, ProjectValues};
 pub use copies::{CopiesFreed, CopyNotFreed};
 pub use detect::{CiGap, CiLeftOut, CiWhy, Guess};
 pub use git::{ChangeSize, Git, GitError, Snapshot};
@@ -105,6 +107,30 @@ fn folder_name(root: &Path) -> String {
         || root.to_string_lossy().into_owned(),
         |name| name.to_string_lossy().into_owned(),
     )
+}
+
+/// A folder that was never in Keel, as it's added: nothing set yet, and nothing opened.
+fn new_project(git: &Git, root: &Path) -> Project {
+    Project {
+        id: new_id(),
+        name: folder_name(root),
+        path: root.to_string_lossy().into_owned(),
+        created_at: now(),
+        github_account: None,
+        setup_command: None,
+        github_repo: git
+            .origin_url(root)
+            .and_then(|url| github::github_repo(&url)),
+        check_command: None,
+        allowed_domains: Vec::new(),
+        allowed_read: Vec::new(),
+        services: Vec::new(),
+        env: Vec::new(),
+        default_workflow: None,
+        sensitive_paths: Vec::new(),
+        allow_localhost: false,
+        issue_label: None,
+    }
 }
 
 fn gh_blocked(error: GhError) -> Error {
@@ -574,21 +600,25 @@ impl Engine {
         let map = if outcome != AddOutcome::New {
             None
         } else {
-            match self.first_map(&project.id, DEFAULT_BRAIN_MODEL, language) {
-                Ok(run) => run.map(|_| MapStart::Started),
-                Err(Error::Blocked(reason)) => Some(MapStart::NotStarted { reason }),
-                Err(other) => Some(MapStart::NotStarted {
-                    reason: Reason::PrepareFailed {
-                        detail: other.to_string(),
-                    },
-                }),
-            }
+            self.map_new_project(&project.id, language)
         };
         Ok(AddedProject {
             project,
             outcome,
             map,
         })
+    }
+
+    fn map_new_project(&self, project_id: &str, language: &str) -> Option<MapStart> {
+        match self.first_map(project_id, DEFAULT_BRAIN_MODEL, language) {
+            Ok(run) => run.map(|_| MapStart::Started),
+            Err(Error::Blocked(reason)) => Some(MapStart::NotStarted { reason }),
+            Err(other) => Some(MapStart::NotStarted {
+                reason: Reason::PrepareFailed {
+                    detail: other.to_string(),
+                },
+            }),
+        }
     }
 
     /// However a folder got added, a proposal to add it has its answer.
@@ -619,26 +649,7 @@ impl Engine {
             }
             return Ok((project, outcome));
         }
-        let project = Project {
-            id: new_id(),
-            name: folder_name(&root),
-            path: root_text,
-            created_at: now(),
-            github_account: None,
-            setup_command: None,
-            github_repo: git
-                .origin_url(&root)
-                .and_then(|url| github::github_repo(&url)),
-            check_command: None,
-            allowed_domains: Vec::new(),
-            allowed_read: Vec::new(),
-            services: Vec::new(),
-            env: Vec::new(),
-            default_workflow: None,
-            sensitive_paths: Vec::new(),
-            allow_localhost: false,
-            issue_label: None,
-        };
+        let project = new_project(&git, &root);
         self.inner.store.add_project(&project)?;
         Ok((project, AddOutcome::New))
     }

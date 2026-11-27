@@ -206,6 +206,8 @@ export interface McpClient {
   canRun: boolean;
   /** May send work back and retry on the runs it started, and add a note to their cards while they wait. Only with `canRun`. */
   canSteer: boolean;
+  /** May add projects and change their GitHub account and setup and check commands. Only with `canRun`. */
+  canManageProjects: boolean;
   /** How many of its runs may be open at once, counting those that wait for the person. */
   maxOpenRuns: number;
   createdAt: string;
@@ -226,11 +228,25 @@ export interface McpCall {
   durationMs: number;
 }
 
+/** A project a client added, brought back or configured, with each value it set or changed. */
+export interface McpProjectChange {
+  seq: number;
+  clientId: string;
+  clientName: string;
+  projectId: string;
+  projectName: string;
+  action: "added" | "restored" | "configured";
+  changes: { field: "githubAccount" | "setupCommand" | "checkCommand"; before: string | null; after: string | null }[];
+  at: string;
+}
+
 export interface McpOverview {
   settings: McpSettings;
   status: { running: boolean; port: number | null; url: string | null; error: McpStartError | null };
   clients: McpClient[];
   calls: McpCall[];
+  /** Newest first. Kept apart from `calls`, so later calls don't push one out of sight. */
+  projectChanges: McpProjectChange[];
 }
 
 export interface GithubStatus {
@@ -902,6 +918,7 @@ export const api = {
   mcpClientCreate: (name: string, canRun: boolean) => invoke<{ client: McpClient; token: string }>("mcp_client_create", { name, canRun }),
   mcpClientSetCanRun: (id: string, canRun: boolean) => invoke<void>("mcp_client_set_can_run", { id, canRun }),
   mcpClientSetCanSteer: (id: string, canSteer: boolean) => invoke<void>("mcp_client_set_can_steer", { id, canSteer }),
+  mcpClientSetCanManageProjects: (id: string, canManageProjects: boolean) => invoke<void>("mcp_client_set_can_manage_projects", { id, canManageProjects }),
   mcpClientSetMaxOpenRuns: (id: string, max: number) => invoke<void>("mcp_client_set_max_open_runs", { id, max }),
   mcpClientRevoke: (id: string) => invoke<void>("mcp_client_revoke", { id }),
   mcpConnectClaude: (canRun: boolean) => invoke<McpOverview>("mcp_connect_claude", { canRun }),

@@ -66,13 +66,16 @@ pub fn delete(dir: &Path, id: &str) -> io::Result<()> {
     }
 }
 
-/// Whether the person can read this path for what it is. The folder is what they're deciding on, so
-/// it can't carry a line break, or a character that shows the text after it in another order.
+/// A line break, or a character that shows the text after it in another order: what would keep a
+/// person from reading a value for what it is.
+pub fn hides_text(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// Whether the person can read this path for what it is. The folder is what they're deciding on.
 pub fn readable_path(path: &str) -> bool {
-    path.chars().count() <= MAX_PATH_CHARS
-        && !path.chars().any(|c| {
-            c.is_control() || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
-        })
+    path.chars().count() <= MAX_PATH_CHARS && !path.chars().any(hides_text)
 }
 
 #[cfg(test)]

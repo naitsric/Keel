@@ -2,13 +2,15 @@
 //! Each call goes to the matching method of [`McpServer`] with the client the HTTP layer
 //! authenticated. Nothing is decided here.
 //!
-//! There is deliberately no tool to approve, reject or answer a step, to merge, to change a project's
-//! settings or saved workflows, or to let anything into the Brain. Those stay with the person, in the
+//! There is deliberately no tool to approve, reject or answer a step, to merge, to remove a project,
+//! to change saved workflows, or to let anything into the Brain. Those stay with the person, in the
 //! app. A client that may start runs can close the ones it started, which delivers nothing, and put
 //! their cards back in Todo, which starts a run. Sending work back, retrying a step and adding a
 //! note to a card that waits are only for a client the person also lets give feedback, and only on
-//! runs and cards it started. A client can propose a workflow or a project, and only the person can
-//! save the one or add the other.
+//! runs and cards it started. A client can propose a workflow or a project. Only the person saves
+//! the one. They add the other, as does a client they let add and configure projects, which may set
+//! a project's GitHub account and its setup and check commands, and none of its other settings. No
+//! tool changes what a client may do.
 //! `tests/http.rs` fails if the list of tools grows without someone deciding so.
 
 use std::sync::Arc;
@@ -25,17 +27,20 @@ use schemars::JsonSchema;
 use serde_json::Value as Json;
 
 use crate::tools::{
-    AppendToCardArgs, CloseRunArgs, DraftWorkflowArgs, GetBrainArgs, GetRunArgs, GetStepArgs,
-    ListIssuesArgs, ListProjectsArgs, ListRunsArgs, ListWorkflowsArgs, MoveCardToTodoArgs,
-    ProposeChangeArgs, ProposeProjectArgs, RetryStepArgs, SendBackArgs, StartRunArgs,
-    StartTaskArgs, StopRunArgs, WaitForRunArgs,
+    AddProjectArgs, AppendToCardArgs, CloseRunArgs, ConfigureProjectArgs, DraftWorkflowArgs,
+    GetBrainArgs, GetRunArgs, GetStepArgs, ListIssuesArgs, ListProjectsArgs, ListRunsArgs,
+    ListWorkflowsArgs, MoveCardToTodoArgs, ProposeChangeArgs, ProposeProjectArgs, RetryStepArgs,
+    SendBackArgs, StartRunArgs, StartTaskArgs, StopRunArgs, WaitForRunArgs,
 };
 use crate::{INSTRUCTIONS, McpServer, ToolError};
 
 const LIST_PROJECTS: &str = "List the projects in Keel: each one's id, name, GitHub repo and account, and the \
                              command that checks its work. Start here: the other tools take a project's id or \
                              its name as `project`. `proposals` are the folders proposed with propose_project \
-                             that the person hasn't added yet, which aren't projects.";
+                             that haven't been added yet, which aren't projects. `githubAccounts` are the GitHub \
+                             accounts Keel has, each with its `login` and whether it's signed in (`ok`), for \
+                             add_project and configure_project, which only a client the person allows may use. \
+                             It's null when Keel can't read them.";
 const LIST_WORKFLOWS: &str = "List the workflows a project can run: each one's id, name, and its steps with the \
                               model of each agent. start_run takes one of these ids. `drafts` are the ones \
                               proposed with draft_workflow that the person hasn't saved yet, which can't run.";
@@ -138,14 +143,37 @@ const DRAFT_WORKFLOW: &str = "Propose a workflow for a project, as a draft the p
                               drafts waiting.";
 const PROPOSE_PROJECT: &str = "Propose adding a git repository on this Mac to Keel, for the person to review in the \
                                app. Nothing is added and nothing runs: it isn't a project, and start_run can't reach \
-                               it, until they add it. Adding is theirs alone, so tell them it's there. They choose \
-                               its GitHub account and commands, and adding it starts an agent that maps the repo, on \
-                               their Claude usage. `path` is the only thing you give, as a full path: a subfolder \
-                               proposes its repo, and the answer says which. list_projects shows it under \
-                               `proposals` while it waits, and under `projects` once added. Proposing the same \
-                               folder again returns the same proposal, and one already in Keel returns its project. \
-                               Refused if this client may only read, if it isn't a git repository with commits, or \
-                               if 10 proposals are waiting.";
+                               it, until it's added. The person adds it, choosing its GitHub account and commands, \
+                               so tell them it's there. If they let this client add and configure projects, \
+                               add_project adds it without waiting for them, and without that permission it's \
+                               theirs alone. Adding it starts an agent that maps the repo, on their Claude usage. \
+                               `path` is the only thing you give, as a full path: a subfolder proposes its repo, \
+                               and the answer says which. list_projects shows it under `proposals` while it waits, \
+                               and under `projects` once added. Proposing the same folder again returns the same \
+                               proposal, and one already in Keel returns its project. Refused if this client may \
+                               only read, if it isn't a git repository with commits, or if 10 proposals are \
+                               waiting.";
+const ADD_PROJECT: &str = "Add a git repository on this Mac to Keel as a project, from its full `path` or from a \
+                           `proposal` waiting, with a GitHub account and the setup and check commands, as the \
+                           person would in the app. Only for a client the person lets add and configure projects, \
+                           in Keel's settings: otherwise it's refused, and you can propose_project instead. The \
+                           commands run on the person's Mac, so give only what they asked for or what the repo \
+                           itself says it uses. A command left out, or empty, means the project has none. It's \
+                           named after its folder; a subfolder adds its repo, and the answer says which. Adding a \
+                           new one starts an agent that maps the repo, on their Claude usage, and `map` says if \
+                           it started. One the person had removed comes back with its history (`state` is \
+                           restored). Keel records which client added it and what it set, and shows the person. \
+                           Its network, folders, services, variables and other settings stay the person's. \
+                           Refused if it isn't a git repository with commits, the account isn't in \
+                           `githubAccounts` of list_projects, or it's already in Keel.";
+const CONFIGURE_PROJECT: &str = "Change a project's GitHub account, setup command or check command. Only for a client \
+                                 the person lets add and configure projects, in Keel's settings: otherwise it's \
+                                 refused, and the change is theirs to make in the app. What you leave out stays, and \
+                                 an empty command removes it. The commands run on the person's Mac, so change only \
+                                 what they asked for. It applies to new runs; runs already open keep the commands \
+                                 they started with, which get_run lists in `commandsChanged`. Keel records which \
+                                 client changed it and each value before and after, and shows the person. Nothing \
+                                 else about a project can be changed here.";
 const STOP_RUN: &str = "Ask whatever a run has working to stop. It doesn't close the run: close_run does that \
                         for one this client started, and otherwise what happens next is the person's decision \
                         in Keel. Refused if this client may only read.";
@@ -406,6 +434,36 @@ impl Handler {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ErrorData> {
         reply(self.server.propose_project(client(&context)?, args).await)
+    }
+
+    #[tool(
+        name = "add_project",
+        title = "Add a project",
+        description = ADD_PROJECT,
+        input_schema = input_schema::<AddProjectArgs>(),
+        annotations(read_only_hint = false, destructive_hint = false, idempotent_hint = false, open_world_hint = true)
+    )]
+    async fn add_project(
+        &self,
+        Parameters(args): Parameters<AddProjectArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        reply(self.server.add_project(client(&context)?, args).await)
+    }
+
+    #[tool(
+        name = "configure_project",
+        title = "Change a project's account and commands",
+        description = CONFIGURE_PROJECT,
+        input_schema = input_schema::<ConfigureProjectArgs>(),
+        annotations(read_only_hint = false, destructive_hint = true, idempotent_hint = true, open_world_hint = true)
+    )]
+    async fn configure_project(
+        &self,
+        Parameters(args): Parameters<ConfigureProjectArgs>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, ErrorData> {
+        reply(self.server.configure_project(client(&context)?, args).await)
     }
 
     #[tool(

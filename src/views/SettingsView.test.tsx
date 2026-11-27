@@ -32,7 +32,7 @@ describe("notifications", () => {
         saved.push((args as { settings: NoticeSettings }).settings);
       }
       if (command === "max_agents_get") return 2;
-      if (command === "mcp_overview") return { settings: { enabled: false, port: 7413 }, status: { running: false, port: null, url: null, error: null }, clients: [], calls: [] };
+      if (command === "mcp_overview") return { settings: { enabled: false, port: 7413 }, status: { running: false, port: null, url: null, error: null }, clients: [], calls: [], projectChanges: [] };
       return null;
     });
     root = createRoot(document.body.appendChild(document.createElement("div")));

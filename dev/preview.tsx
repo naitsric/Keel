@@ -643,9 +643,9 @@ const mcpOverview = () => {
     clients:
       mcp === "on"
         ? [
-            { id: "c1", name: "Claude Code", tokenPrefix: "keel_Ab3xYz", canRun: true, canSteer: true, maxOpenRuns: 5, createdAt: at(4000), lastSeenAt: at(20), revokedAt: null },
-            { id: "c3", name: "Zed", tokenPrefix: "keel_Zd4Kpq", canRun: false, canSteer: false, maxOpenRuns: 3, createdAt: at(9000), lastSeenAt: at(300), revokedAt: null },
-            { id: "c2", name: "Cursor", tokenPrefix: "keel_Qr8Lmn", canRun: false, canSteer: false, maxOpenRuns: 3, createdAt: at(90000), lastSeenAt: null, revokedAt: at(4000) },
+            { id: "c1", name: "Claude Code", tokenPrefix: "keel_Ab3xYz", canRun: true, canSteer: true, canManageProjects: true, maxOpenRuns: 5, createdAt: at(4000), lastSeenAt: at(20), revokedAt: null },
+            { id: "c3", name: "Zed", tokenPrefix: "keel_Zd4Kpq", canRun: false, canSteer: false, canManageProjects: false, maxOpenRuns: 3, createdAt: at(9000), lastSeenAt: at(300), revokedAt: null },
+            { id: "c2", name: "Cursor", tokenPrefix: "keel_Qr8Lmn", canRun: false, canSteer: false, canManageProjects: false, maxOpenRuns: 3, createdAt: at(90000), lastSeenAt: null, revokedAt: at(4000) },
           ]
         : [],
     calls: mcp === "on"
@@ -654,6 +654,12 @@ const mcpOverview = () => {
           { seq: 3, clientId: "c1", clientName: "Claude Code", tool: "wait_for_run", args: '{"run":"r1"}', ok: true, error: null, runId: "r1", at: at(20), durationMs: 4000 },
           { seq: 2, clientId: "c1", clientName: "Claude Code", tool: "start_run", args: '{"project":"demo"}', ok: true, error: null, runId: "r1", at: at(90), durationMs: 300 },
           { seq: 1, clientId: "c2", clientName: "Cursor", tool: "start_run", args: '{"project":"demo"}', ok: false, error: "This client may only read. The person can let it start runs in Keel's settings.", runId: null, at: at(600), durationMs: 2 },
+        ]
+      : [],
+    projectChanges: mcp === "on"
+      ? [
+          { seq: 2, clientId: "c1", clientName: "Claude Code", projectId: "p1", projectName: "demo", action: "configured", changes: [{ field: "checkCommand", before: "make test", after: "make lint test" }], at: at(15) },
+          { seq: 1, clientId: "c1", clientName: "Claude Code", projectId: "p2", projectName: "payments", action: "added", changes: [{ field: "githubAccount", before: null, after: "you-work" }, { field: "setupCommand", before: null, after: "pnpm install --frozen-lockfile" }], at: at(120) },
         ]
       : [],
   };

@@ -1147,7 +1147,7 @@
   "mcp": {
     "title": "Servidor MCP",
     "hint": "Deja que un asistente como Claude Code vea tus proyectos y lance ejecuciones en este Mac, y tú las ves aquí. Solo este Mac puede llegar a él, y está apagado hasta que lo enciendas.",
-    "limits": "Si lo permites, puede devolver trabajo, reintentar un paso, cerrar las ejecuciones que lanzó, y agregar una nota a sus tarjetas o volverlas a Todo mientras esperan. No puede aprobar ni rechazar un paso, responder sus preguntas, mergear, cambiar ajustes, guardar un workflow ni aceptar nada en el Brain. Eso sigue siendo tuyo, aquí. Un workflow que proponga te espera en Workflows, y no puede correr hasta que lo guardes. Un proyecto que proponga no se agrega hasta que lo agregues tú.",
+    "limits": "Si lo permites, puede devolver trabajo, reintentar un paso, cerrar las ejecuciones que lanzó, y agregar una nota a sus tarjetas o volverlas a Todo mientras esperan. No puede aprobar ni rechazar un paso, responder sus preguntas, mergear, cambiar ajustes, guardar un workflow ni aceptar nada en el Brain. Eso sigue siendo tuyo, aquí. Un workflow que proponga te espera en Workflows, y no puede correr hasta que lo guardes. Un proyecto que proponga no se agrega hasta que lo agregues tú. La única excepción es un cliente al que dejes agregar y configurar proyectos: puede agregarlos y ponerles la cuenta de GitHub y los comandos de preparación y verificación.",
     "off": "Apagado",
     "on": "Encendido",
     "port": "Puerto",
@@ -1160,6 +1160,22 @@
     "canRun": "Puede lanzar y detener ejecuciones, cerrar las que lanzó, y proponer workflows y proyectos",
     "canSteer": "Puede dar feedback: devolver trabajo, reintentar y agregar notas a sus tarjetas",
     "canSteerNeedsRun": "Primero activa la de arriba.",
+    "canManageProjects": "Puede agregar y configurar proyectos: su cuenta de GitHub y sus comandos de preparación y verificación, que corren en este Mac",
+    "canManageProjectsNeedsRun": "Primero deja que lance y detenga ejecuciones.",
+    "projectChanges": "Cambios en proyectos",
+    "change": {
+      "added": "{{client}} agregó {{project}}",
+      "restored": "{{client}} volvió a agregar {{project}}",
+      "configured": "{{client}} configuró {{project}}"
+    },
+    "field": {
+      "githubAccount": "Cuenta de GitHub",
+      "setupCommand": "Comando de preparación",
+      "checkCommand": "Comando de verificación"
+    },
+    "before": "Antes: {{value}}",
+    "after": "Después: {{value}}",
+    "noValue": "nada",
     "maxOpenRuns": "Ejecuciones abiertas a la vez",
     "maxOpenRunsHint": "hasta {{max}}, contando las que te esperan",
     "clients": "Clientes",

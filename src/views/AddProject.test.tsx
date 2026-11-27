@@ -103,7 +103,7 @@ describe("adding a project", () => {
         case "max_agents_get":
           return 2;
         case "mcp_overview":
-          return { settings: { enabled: false, port: 7413 }, status: { running: false, port: null, url: null, error: null }, clients: [], calls: [] };
+          return { settings: { enabled: false, port: 7413 }, status: { running: false, port: null, url: null, error: null }, clients: [], calls: [], projectChanges: [] };
         default:
           return null;
       }

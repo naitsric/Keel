@@ -11,10 +11,10 @@ use keel_core::{
     WorkflowStep, mask_secrets, mask_value,
 };
 use keel_engine::{
-    Error, Finding, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal, ProposedProject, StartRun,
-    Verification, WhyNotProven, after_last_build, breakable_ids, can_send_back, changed_since,
-    files_changed, findings_of, limits_with_ids, request_from_issue, skipped_steps,
-    spec_of_attempt, verifications_in_round,
+    AddOutcome, ClientRefusal, Error, Finding, MAX_PROJECT_PROPOSALS, Outcome, ProjectProposal,
+    ProjectSource, ProjectValues, ProposedProject, StartRun, Verification, WhyNotProven,
+    after_last_build, breakable_ids, can_send_back, changed_since, files_changed, findings_of,
+    limits_with_ids, request_from_issue, skipped_steps, spec_of_attempt, verifications_in_round,
 };
 use keel_store::{Attempt, Card, MAX_OPEN_RUNS_CEILING, McpClient, NewMcpCall, Project, Run};
 use schemars::JsonSchema;
@@ -322,13 +322,56 @@ pub struct StartTaskArgs {
     pub language: Option<String>,
 }
 
-// Only the folder. The account that pushes and the commands Keel runs are the person's to choose, so
-// a client has nowhere to name them.
+// Only the folder. In a proposal the account that pushes and the commands Keel runs are the person's
+// to choose, so a client has nowhere to name them. add_project, for a client the person lets, takes
+// them.
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ProposeProjectArgs {
     /// The full path of a git repository on this Mac, starting with `/`.
     pub path: String,
+}
+
+// A project's account and commands, and nothing that opens anything up for them. Anything else is
+// refused rather than ignored, so a client doesn't go on believing it got it.
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AddProjectArgs {
+    /// The full path of a git repository on this Mac, starting with `/`. Give this or `proposal`.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// The `proposalId` of a proposal waiting, from list_projects. Give this or `path`.
+    #[serde(default)]
+    pub proposal: Option<String>,
+    /// The `login` of one of `githubAccounts` in list_projects. Keel pushes and opens pull requests
+    /// with it.
+    pub github_account: String,
+    /// The command that installs dependencies before a run's work, on one line. It runs on the
+    /// person's Mac. Leave it out, or empty, for none.
+    #[serde(default)]
+    pub setup_command: Option<String>,
+    /// The command that checks the work, on one line. It runs on the person's Mac. Leave it out, or
+    /// empty, for none.
+    #[serde(default)]
+    pub check_command: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfigureProjectArgs {
+    /// A project's id or name.
+    pub project: String,
+    /// The `login` of one of `githubAccounts` in list_projects. Left out, it stays.
+    #[serde(default)]
+    pub github_account: Option<String>,
+    /// The new setup command, on one line. It runs on the person's Mac. Left out, it stays; empty,
+    /// the project has none.
+    #[serde(default)]
+    pub setup_command: Option<String>,
+    /// The new check command, on one line. It runs on the person's Mac. Left out, it stays; empty,
+    /// the project has none.
+    #[serde(default)]
+    pub check_command: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -494,8 +537,16 @@ impl McpServer {
                 .iter()
                 .map(proposal_view)
                 .collect();
+            // Null when Keel can't ask `gh`, which mustn't hide the projects.
+            let accounts: Option<Vec<Json>> =
+                server.0.engine.github_accounts().ok().map(|accounts| {
+                    accounts
+                        .iter()
+                        .map(|account| json!({ "login": account.login, "ok": account.ok }))
+                        .collect()
+                });
             Ok((
-                json!({ "projects": projects, "proposals": proposals }),
+                json!({ "projects": projects, "proposals": proposals, "githubAccounts": accounts }),
                 None,
             ))
         })
@@ -1021,12 +1072,7 @@ impl McpServer {
             if !client.can_run {
                 return Err(may_only_read());
             }
-            let path = Path::new(&args.path);
-            if !path.is_absolute() || args.path.chars().count() > MAX_PROPOSED_PATH {
-                return Err(ToolError::new(format!(
-                    "Give the repository's full path, starting with `/`, in up to {MAX_PROPOSED_PATH} characters."
-                )));
-            }
+            let path = full_path(&args.path)?;
             let answer = match server
                 .0
                 .engine
@@ -1036,9 +1082,11 @@ impl McpServer {
                 ProposedProject::Waiting(proposal) => {
                     let mut answer = proposal_view(&proposal);
                     answer["state"] = json!("waitingForPerson");
-                    answer["who"] = json!(
-                        "The person, in Keel. There is no tool for this. It isn't a project, and no run can start on it, until they add it. They choose its GitHub account and commands, and adding it starts an agent that maps the repo. Tell them it's there."
-                    );
+                    answer["who"] = json!(if client.can_manage_projects {
+                        "The person, in Keel, or this client with add_project, which the person lets it use: give it this proposalId as `proposal`. It isn't a project, and no run can start on it, until it's added, which starts an agent that maps the repo. If you don't add it, tell them it's there."
+                    } else {
+                        "The person, in Keel. This client may not add it: add_project is refused unless the person allows it in Keel's settings. It isn't a project, and no run can start on it, until they add it. They choose its GitHub account and commands, and adding it starts an agent that maps the repo. Tell them it's there."
+                    });
                     answer
                 }
                 ProposedProject::InKeel(project) => {
@@ -1056,6 +1104,84 @@ impl McpServer {
                 }
             };
             Ok((answer, None))
+        })
+        .await
+    }
+
+    /// Adds a project as the person would in the app, for a client they let. The engine records
+    /// what it set.
+    pub(crate) async fn add_project(
+        &self,
+        client: McpClient,
+        args: AddProjectArgs,
+    ) -> Result<Json, ToolError> {
+        self.call(client, "add_project", args, |server, client, args| {
+            may_manage_projects(client)?;
+            let source = match (args.path, args.proposal) {
+                (Some(path), None) => ProjectSource::Folder(full_path(&path)?.to_owned()),
+                (None, Some(proposal)) => ProjectSource::Proposal(proposal),
+                _ => {
+                    return Err(ToolError::new(
+                        "Say which repository to add with either `path` or `proposal`.",
+                    ));
+                }
+            };
+            let values = ProjectValues {
+                github_account: Some(args.github_account),
+                setup_command: args.setup_command,
+                check_command: args.check_command,
+            };
+            let language = server.language(None)?;
+            let added = server
+                .0
+                .engine
+                .add_project_for_client(&client.id, &source, &values, &language)
+                .map_err(engine_error)?
+                .map_err(client_refusal)?;
+            let state = match added.outcome {
+                AddOutcome::Restored => "restored",
+                AddOutcome::New | AddOutcome::Existing => "added",
+            };
+            Ok((
+                json!({
+                    "state": state,
+                    "project": configured_view(&added.project),
+                    "map": added.map,
+                }),
+                None,
+            ))
+        })
+        .await
+    }
+
+    pub(crate) async fn configure_project(
+        &self,
+        client: McpClient,
+        args: ConfigureProjectArgs,
+    ) -> Result<Json, ToolError> {
+        self.call(client, "configure_project", args, |server, client, args| {
+            may_manage_projects(client)?;
+            if args.github_account.is_none()
+                && args.setup_command.is_none()
+                && args.check_command.is_none()
+            {
+                return Err(ToolError::new(
+                    "Say what to change with `githubAccount`, `setupCommand` or `checkCommand`.",
+                ));
+            }
+            let project = server.project(&args.project)?;
+            let values = ProjectValues {
+                github_account: args.github_account,
+                setup_command: args.setup_command,
+                check_command: args.check_command,
+            };
+            let project = server
+                .0
+                .engine
+                .configure_project_for_client(&client.id, &project.id, &values)
+                .map_err(engine_error)?
+                .map_err(client_refusal)?;
+            Ok((json!({ "project": configured_view(&project) }), None))
         })
         .await
     }
@@ -2819,6 +2945,73 @@ fn project_view(project: &Project) -> Json {
         "githubAccount": project.github_account,
         "checkCommand": project.check_command,
     })
+}
+
+/// A project as add_project and configure_project return it, with both commands they set.
+fn configured_view(project: &Project) -> Json {
+    let mut view = project_view(project);
+    view["setupCommand"] = json!(project.setup_command);
+    view
+}
+
+/// A repository's path as a client gives it: a full one, which says the same wherever Keel runs.
+fn full_path(path: &str) -> Result<&Path, ToolError> {
+    if !Path::new(path).is_absolute() || path.chars().count() > MAX_PROPOSED_PATH {
+        return Err(ToolError::new(format!(
+            "Give the repository's full path, starting with `/`, in up to {MAX_PROPOSED_PATH} characters."
+        )));
+    }
+    Ok(Path::new(path))
+}
+
+/// Whether the person lets this client add and configure projects.
+fn may_manage_projects(client: &McpClient) -> Result<(), ToolError> {
+    if !client.can_run {
+        return Err(may_only_read());
+    }
+    if !client.can_manage_projects {
+        return Err(may_not_manage_projects());
+    }
+    Ok(())
+}
+
+fn may_not_manage_projects() -> ToolError {
+    ToolError::new(
+        "This client may not add or configure projects. The person can allow it in Keel's settings.",
+    )
+}
+
+/// Why add_project or configure_project was refused, with nothing added or changed.
+fn client_refusal(refusal: ClientRefusal) -> ToolError {
+    match refusal {
+        ClientRefusal::NotAllowed => may_not_manage_projects(),
+        ClientRefusal::UnknownProposal => ToolError::new(
+            "Keel has no proposal with that id waiting. list_projects lists them under `proposals`.",
+        ),
+        ClientRefusal::UnreadablePath => ToolError::new(
+            "This folder's path has characters Keel won't show, because they could hide what it is. The person can add it by hand in Keel.",
+        ),
+        ClientRefusal::AlreadyInKeel(project) => ToolError::new(format!(
+            "{} is already in Keel, with the id {}. configure_project changes its GitHub account and commands.",
+            project.name, project.id
+        )),
+        ClientRefusal::UnknownAccount { login, known } => {
+            let known = if known.is_empty() {
+                "none".to_owned()
+            } else {
+                known.join(", ")
+            };
+            ToolError::new(format!(
+                "Keel has no GitHub account {login:?}. The accounts it has are: {known}. list_projects lists them under `githubAccounts`, and only the person adds one."
+            ))
+        }
+        ClientRefusal::UnreadableCommand { field } => ToolError::new(format!(
+            "`{field}` has to be one line of up to 4096 characters, with no control characters or others that hide text, so the person can read what runs."
+        )),
+        ClientRefusal::ProjectChanged => ToolError::new(
+            "The project was added or removed in the meantime, so Keel did nothing. Look again with list_projects.",
+        ),
+    }
 }
 
 fn proposal_view(proposal: &ProjectProposal) -> Json {

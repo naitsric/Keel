@@ -93,7 +93,7 @@ function backend(command: string, args: unknown) {
     case "brain_get":
       return { map: [], learnings: [], proposals: [], decisions: [], used: 0, limit: 4096, mapUsed: 0, mapLimit: 3072, prompt: "", mapRun: null };
     case "mcp_overview":
-      return { settings: { enabled: false, port: 7413 }, status: { running: false, port: null, url: null, error: null }, clients: [], calls: [] };
+      return { settings: { enabled: false, port: 7413 }, status: { running: false, port: null, url: null, error: null }, clients: [], calls: [], projectChanges: [] };
     case "github_status":
       return { repo: "acme/demo", accounts: [], info: null, excessScopes: [], error: null };
     case "project_tool_folders":
