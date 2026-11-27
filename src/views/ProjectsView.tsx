@@ -121,7 +121,17 @@ function useSavedConfiguration(project: Project) {
     setByClient([]);
   };
 
-  return { account, setAccount, setup, setSetup, check, setCheck, byClient, takeSaved };
+  /**
+   * Whether a client changed the project since the form opened, and the form hasn't taken it in
+   * yet: the app hears of a change a moment after it's saved, and saving then would write over it.
+   */
+  const clientChangeUnheard = () =>
+    api
+      .mcpOverview()
+      .then(({ projectChanges }) => projectChanges.some((c) => c.projectId === id && c.seq > announced.current && Date.parse(c.at) >= openedAt))
+      .catch(() => false);
+
+  return { account, setAccount, setup, setSetup, check, setCheck, byClient, takeSaved, clientChangeUnheard };
 }
 
 /** What the last look at the project's issues found, or why it couldn't look. */
@@ -157,7 +167,7 @@ function IssueWatchLine({ watch, looking }: { watch: IssueWatch | null; looking:
 function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boolean; onSaved: () => void }) {
   const { t, i18n } = useTranslation();
   const refreshOverview = useApp((s) => s.refreshOverview);
-  const { account, setAccount, setup, setSetup, check, setCheck, byClient, takeSaved } = useSavedConfiguration(project);
+  const { account, setAccount, setup, setSetup, check, setCheck, byClient, takeSaved, clientChangeUnheard } = useSavedConfiguration(project);
   const [domains, setDomains] = useState(project.allowedDomains.join("\n"));
   const [paths, setPaths] = useState(project.allowedRead.join("\n"));
   const [services, setServices] = useState<Service[]>(project.services);
@@ -269,6 +279,13 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
       return;
     }
     try {
+      // A client may have changed the account or commands since the form took them in. Those are
+      // shown first rather than written over unseen, and saving again is the person's call.
+      if (await clientChangeUnheard()) {
+        await refreshOverview();
+        setError(t("projects.notSaved"));
+        return;
+      }
       await api.projectUpdate(project.id, {
         githubAccount: account === NONE ? null : account,
         setupCommand: setup,
@@ -488,7 +505,7 @@ function ProjectForm({ project, saved, onSaved }: { project: Project; saved: boo
 
         {/* Stays in view while the form scrolls, so saving is never a search. */}
         <div className="sticky -bottom-5 z-10 -mx-5 -mb-5 flex flex-wrap items-center gap-2 rounded-b-lg border-t border-border bg-elevated px-5 py-3">
-          {byClient.length > 0 && <ProjectChangedNotice title={t("projects.clientChanged")} saved={project} fields={byClient} />}
+          {byClient.length > 0 && <ProjectChangedNotice title={t("projects.clientChanged")} saved={project} fields={byClient} kept={configuredChanges(project, { githubAccount: account === NONE ? null : account, setupCommand: setup || null, checkCommand: check || null })} />}
           <Button variant="primary" onClick={() => void save()}>
             {t("settings.save")}
           </Button>
@@ -573,6 +590,11 @@ export function ProjectsView({ projectId }: { projectId?: string }) {
 
   // The one asked for, or the first when none was or it's gone.
   const selected = projects.find((p) => p.id === chosen) ?? projects[0];
+  // Held from then on, so that a project a client adds ahead of it doesn't take its place and
+  // drop what the person hasn't saved.
+  useEffect(() => {
+    if (selected && selected.id !== chosen) setChosen(selected.id);
+  }, [selected?.id, chosen]);
   const text = filter.trim().toLowerCase();
   const shown = projects.length >= FILTER_FROM && text ? projects.filter((p) => p.name.toLowerCase().includes(text) || (p.githubRepo ?? "").toLowerCase().includes(text)) : projects;
   return (

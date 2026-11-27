@@ -1147,7 +1147,7 @@
   "mcp": {
     "title": "MCP server",
     "hint": "Lets an assistant like Claude Code see your projects and start runs on this Mac, and you watch them here. Only this Mac can reach it, and it's off until you turn it on.",
-    "limits": "If you allow it, it can send work back, try a step again, close the runs it started, and add a note to their cards or put them back in Todo while they wait. It can't approve or reject a step, answer the questions a step asks, merge, change settings, save a workflow or accept anything into the Brain. Those stay with you, here. A workflow it proposes waits for you on Workflows, and can't run until you save it. A project it proposes isn't added until you add it. The one exception is a client you let add and configure projects: it can add them and set their GitHub account and setup and check commands.",
+    "limits": "If you allow it, it can send work back, try a step again, close the runs it started, and add a note to their cards or put them back in Todo while they wait. It can't approve or reject a step, answer the questions a step asks, merge, change settings, save a workflow or accept anything into the Brain. Those stay with you, here. A workflow it proposes waits for you on Workflows, and can't run until you save it. A project it proposes isn't added until you add it, unless you let that client add and configure projects: then it can add them and set their GitHub account and setup and check commands.",
     "off": "Off",
     "on": "On",
     "port": "Port",
@@ -1160,7 +1160,7 @@
     "canRun": "Can start and stop runs, close the ones it started, and propose workflows and projects",
     "canSteer": "Can give feedback: send work back, try again and add notes to its cards",
     "canSteerNeedsRun": "Turn on the one above first.",
-    "canManageProjects": "Can add and configure projects: their GitHub account and their setup and check commands, which run on this Mac",
+    "canManageProjects": "Can add and configure projects: their GitHub account and their setup and check commands, which run on this Mac. Setup has internet access",
     "canManageProjectsNeedsRun": "First let it start and stop runs.",
     "projectChanges": "Changes to projects",
     "change": {
@@ -1256,7 +1256,10 @@
     "proposalDiscard": "Discard",
     "proposalAdd": "Add project",
     "clientChanged": "A client changed this project.",
-    "changedKept": "Saved now, as below. What you had edited is still in its field, and saving puts it in place of this."
+    "changedKept": "Saved now, as below. What you had edited is still in its field, and saving puts it in place of this.",
+    "changedTaken": "Saved now, as below. The fields already show it.",
+    "yoursKept": "your edit is kept",
+    "notSaved": "Nothing was saved: the account or commands changed meanwhile. Look at them and save again."
   },
   "setup": {
     "titleNew": "{{name}} is added",

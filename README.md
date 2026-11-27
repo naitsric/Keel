@@ -231,7 +231,7 @@ whether it can add and configure projects, you allow for each client, and no cli
 **A client you trust can add and configure projects.** The permission is off until you turn it on
 for that client, and needs the one to start runs. With it, a client can add a repository on your
 Mac, from its path or from a proposal, and set a project's GitHub account and its setup and check
-commands, which run on your Mac. Adding one starts the agent that maps it, on your Claude usage.
+commands, which run on your Mac, the setup one with internet access as every setup has. Adding one starts the agent that maps it, on your Claude usage.
 The network, folders, services, variables, default workflow and sensitive paths of a project stay
 yours. **Settings** shows which client added or changed what, with each value before and after.
 

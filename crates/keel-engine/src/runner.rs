@@ -501,9 +501,10 @@ impl Inner {
     }
 
     /// Makes sure the run has its private clone, and returns the commit the step starts from.
-    /// A project's first map, from before it has a copy of its own, comes from its folder, even
-    /// with an account set by then: the code that was added, and not whatever that account can or
-    /// can't read on GitHub. `compare_map_with_github` and later runs bring GitHub in.
+    /// The first map of a project an MCP client added, from before it has a copy of its own, comes
+    /// from its folder, though the client set an account with it: the code that was added, and not
+    /// whatever that account can or can't read on GitHub. Later runs bring GitHub in. A project the
+    /// person added maps as it always did.
     fn prepare_workspace(
         &self,
         attempt: &Attempt,
@@ -524,7 +525,8 @@ impl Inner {
             let project = self.store.project(project_id)?;
             let mirror = self.mirror(project_id);
             let source = PathBuf::from(&project.path);
-            let first_map = maps && !mirror.exists();
+            let first_map =
+                maps && !mirror.exists() && self.store.project_added_by_mcp_client(project_id)?;
             let base = match (
                 &project.github_account,
                 &project.github_repo,

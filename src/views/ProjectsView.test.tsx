@@ -2,7 +2,7 @@ import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { callsTo, hideApp, paletteRow, pressKey, pressMod, row, setCiGap, setIssueWatch, setProjectChanges, setToolFolders, settle, showApp, view } from "../commands/testApp";
 import i18next from "../i18n";
-import type { IssueWatch, McpProjectChange, Project } from "../lib/api";
+import { api, type IssueWatch, type McpProjectChange, type Project } from "../lib/api";
 import { useApp } from "../lib/store";
 
 const RUNS = [row("r1", "running")];
@@ -167,6 +167,39 @@ describe("the Projects page", () => {
       await click(button(i18next.t("settings.save")));
       expect(saved()).toMatchObject({ githubAccount: "bot-account", setupCommand: "make mine", checkCommand: "make check", env: [{ name: "A", value: "1" }] });
       expect(notice()).toBe("");
+    });
+
+    it("doesn't save over a change it hasn't heard of yet, and says nothing was saved", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      // Saved by a client and on record, and the app not told yet.
+      setProjectChanges([record(1)]);
+      const fresh = { ...useApp.getState().overview, projects: [{ ...START, checkCommand: "make check" }] };
+      vi.spyOn(api, "overview").mockResolvedValueOnce(fresh);
+      await click(button(i18next.t("settings.save")));
+      expect(callsTo("project_update")).toEqual([]);
+      expect(checkBox().value).toBe("make check");
+      expect(main().textContent).toContain(i18next.t("projects.notSaved"));
+
+      await click(button(i18next.t("settings.save")));
+      expect(saved().checkCommand).toBe("make check");
+    });
+
+    it("says the fields already show a change when the person had edited none of them", async () => {
+      await showApp(RUNS, { name: "projects" }, [START]);
+      setProjectChanges([record(1)]);
+      await change({ checkCommand: "make check" });
+      expect(notice()).toContain(i18next.t("projects.changedTaken"));
+      expect(notice()).not.toContain(i18next.t("projects.changedKept"));
+      expect(notice()).not.toContain(i18next.t("projects.yoursKept"));
+    });
+
+    it("stays on the project shown when a client adds one ahead of it", async () => {
+      await showApp(RUNS, { name: "projects" }, [project("beta")]);
+      await typeInto(envBox(), "A=1");
+      act(() => useApp.setState({ overview: { ...useApp.getState().overview, projects: [project("aardvark"), ...useApp.getState().overview.projects] } }));
+      await settle();
+      expect(envBox().value).toBe("A=1");
+      expect(main().querySelector('[aria-current="true"]')?.textContent).toContain("beta");
     });
 
     it("takes a command the client removed", async () => {

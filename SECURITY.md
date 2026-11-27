@@ -49,5 +49,6 @@ project declares, like a test database, run outside the sandbox. Open only what 
 
 **Your own tools are trusted.** Keel runs your signed-in `claude` and `gh`, and the commands you set
 for each project, as they are. A client you let add and configure projects sets those commands too,
-without asking you each time: they run in the same sandbox, with whatever you opened to that project.
+without asking you each time: they run in the same sandbox, with whatever you opened to that project,
+and its setup command with internet access, as any setup has, so it could send out what it can read.
 Let only a client you trust.

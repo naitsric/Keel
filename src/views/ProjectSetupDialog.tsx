@@ -349,7 +349,10 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
       const project = useApp.getState().overview.projects.find((p) => p.id === projectId) ?? info.project;
       // An account or command saved since this showed it isn't written over unseen: it's shown
       // first, and saving again is the person's call.
-      if (catchUp(project)) return;
+      if (catchUp(project)) {
+        setError(t("projects.notSaved"));
+        return;
+      }
       await api.projectUpdate(projectId, withSetup(project, { githubAccount: showAccounts ? selected : project.githubAccount, setupCommand: setup, checkCommand: check, allowedRead: withFolders(project.allowedRead, chosen), allowLocalhost: project.allowLocalhost || openLocalhost }));
       await refreshOverview();
       closeSetup();
@@ -477,7 +480,7 @@ function SetupForm({ request }: { request: ProjectSetupRequest }) {
           }
         />
       )}
-      {info && changed.length > 0 && <ProjectChangedNotice title={t("setup.changed")} saved={info.project} fields={changed} />}
+      {info && changed.length > 0 && <ProjectChangedNotice title={t("setup.changed")} saved={info.project} fields={changed} kept={configuredChanges(info.project, { githubAccount: selected, setupCommand: setup || null, checkCommand: check || null })} />}
       {error && (
         <p role="alert" className="text-[12px] text-danger">
           {error}

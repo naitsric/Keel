@@ -195,6 +195,11 @@ async fn a_client_the_person_lets_adds_a_project_which_is_mapped_and_on_record()
     assert_eq!(answer["project"]["setupCommand"], "pnpm install");
     assert_eq!(answer["map"]["status"], "started", "{answer}");
     assert!(w.mapping(&project.id));
+    // So its first map reads the folder; one the person added maps as it always did.
+    assert!(w.store.project_added_by_mcp_client(&project.id).unwrap());
+    let theirs = w.repo("theirs");
+    let theirs = w.engine.add_project(Path::new(&theirs)).unwrap();
+    assert!(!w.store.project_added_by_mcp_client(&theirs.id).unwrap());
 
     let changes = w.store.mcp_project_changes(10).unwrap();
     assert_eq!(changes.len(), 1);
@@ -434,6 +439,15 @@ async fn what_cannot_be_added_is_refused_by_name_and_adds_nothing() {
             json!({ "path": good, "githubAccount": "alice", "setupCommand": "echo \u{202E}x" }),
             "setupCommand",
         ),
+        // Shows as ./scripts/test.sh, and runs another file.
+        (
+            json!({ "path": good, "githubAccount": "alice", "setupCommand": "./scripts/te\u{00AD}st.sh" }),
+            "setupCommand",
+        ),
+        (
+            json!({ "path": good, "githubAccount": "alice", "checkCommand": "make\u{FE0F} test" }),
+            "checkCommand",
+        ),
         (
             json!({ "path": good, "githubAccount": "alice", "setupCommand": "a".repeat(5000) }),
             "setupCommand",
@@ -571,6 +585,11 @@ async fn a_removed_project_comes_back_with_its_history_and_what_the_client_gave(
         .unwrap();
     let card = w.engine.card_create(&project.id, "kept", "").unwrap();
     w.engine.remove_project(&project.id).unwrap();
+    // Moved to GitHub while it was out of Keel.
+    git(
+        Path::new(&path),
+        &["remote", "add", "origin", "https://github.com/acme/app.git"],
+    );
 
     let answer = w
         .add(
@@ -591,6 +610,8 @@ async fn a_removed_project_comes_back_with_its_history_and_what_the_client_gave(
     assert_eq!(w.store.card(&card).unwrap().lane, CardLane::Backlog);
     let changes = w.store.mcp_project_changes(10).unwrap();
     assert_eq!(changes[0].action, "restored");
+    assert_eq!(back.github_repo.as_deref(), Some("acme/app"));
+    assert_eq!(changes[0].github_repo.as_deref(), Some("acme/app"));
     // Everything it comes back with or loses, what the client set as it already was included.
     assert_eq!(
         values(&changes[0]),

@@ -67,23 +67,46 @@ pub fn delete(dir: &Path, id: &str) -> io::Result<()> {
 }
 
 /// A line break, a character that shows the text after it in another order, or one that shows as
-/// nothing at all: what would keep a person from reading a value for what it is.
+/// nothing at all: what would keep a person from reading a value for what it is. That's every
+/// control and format character Unicode says shows as nothing (Default_Ignorable_Code_Point), and
+/// the line and paragraph separators. For what a client sets to run, or adds, without asking.
 pub fn hides_text(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{061C}'
+            '\u{00AD}'
+                | '\u{034F}'
+                | '\u{061C}'
+                | '\u{115F}'..='\u{1160}'
+                | '\u{17B4}'..='\u{17B5}'
+                | '\u{180B}'..='\u{180F}'
                 | '\u{200B}'..='\u{200F}'
                 | '\u{2028}'..='\u{202E}'
-                | '\u{2060}'..='\u{2069}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{3164}'
+                | '\u{FE00}'..='\u{FE0F}'
                 | '\u{FEFF}'
-                | '\u{E0000}'..='\u{E007F}'
+                | '\u{FFA0}'
+                | '\u{FFF0}'..='\u{FFFB}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0000}'..='\u{E0FFF}'
         )
 }
 
-/// Whether the person can read this path for what it is. The folder is what they're deciding on.
+/// Whether the person can read this path for what it is. The folder is what they're deciding on,
+/// so it can't carry a line break, or a character that shows the text after it in another order.
 pub fn readable_path(path: &str) -> bool {
-    path.chars().count() <= MAX_PATH_CHARS && !path.chars().any(hides_text)
+    path.chars().count() <= MAX_PATH_CHARS
+        && !path.chars().any(|c| {
+            c.is_control() || matches!(c, '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        })
+}
+
+/// `readable_path`, and none of what `hides_text` has either: for a folder a client adds without
+/// the person deciding on it first.
+pub fn readable_path_for_client(path: &str) -> bool {
+    readable_path(path) && !path.chars().any(hides_text)
 }
 
 #[cfg(test)]
@@ -137,22 +160,42 @@ mod tests {
         assert!(!readable_path("/Users/you/a\nb"));
         assert!(!readable_path("/Users/you/\u{202E}gpj.exe"));
         assert!(!readable_path("/Users/you/\u{2066}x"));
+        assert!(!readable_path(&format!("/{}", "a".repeat(MAX_PATH_CHARS))));
+        // A proposal takes what it always took, as a folder in Persian or with a joined emoji.
+        assert!(readable_path("/Users/you/می\u{200C}خواهم"));
+        assert!(readable_path("/Users/you/👨\u{200D}💻"));
+    }
+
+    #[test]
+    fn a_folder_a_client_adds_can_show_nothing_hidden() {
+        assert!(readable_path_for_client("/Users/you/www/año nuevo"));
+        assert!(!readable_path_for_client("/Users/you/\u{202E}gpj.exe"));
         // Ones that show as nothing, or as a plain break: the same path to the eye as another.
         for hidden in [
+            '\u{00AD}',
+            '\u{034F}',
             '\u{061C}',
+            '\u{180E}',
             '\u{200B}',
             '\u{200D}',
             '\u{2028}',
             '\u{2029}',
             '\u{2060}',
+            '\u{206A}',
+            '\u{3164}',
+            '\u{FE0F}',
             '\u{FEFF}',
+            '\u{FFA0}',
+            '\u{FFF9}',
+            '\u{1D173}',
             '\u{E0041}',
+            '\u{E0100}',
         ] {
             assert!(
-                !readable_path(&format!("/Users/you/a{hidden}b")),
+                !readable_path_for_client(&format!("/Users/you/a{hidden}b")),
                 "{hidden:?}"
             );
+            assert!(hides_text(hidden), "{hidden:?}");
         }
-        assert!(!readable_path(&format!("/{}", "a".repeat(MAX_PATH_CHARS))));
     }
 }

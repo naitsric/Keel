@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use keel_core::Reason;
 use keel_store::{ClientProjectEdit, ClientWrite, Project};
 
-use crate::project_proposals::{hides_text, readable_path};
+use crate::project_proposals::{hides_text, readable_path_for_client};
 use crate::{AddOutcome, AddedProject, Engine, Error, Result};
 
 /// Longer than any command a person would read through, which they have to be able to.
@@ -78,6 +78,7 @@ fn edit_of(values: &ProjectValues) -> Result<ClientProjectEdit, ClientRefusal> {
             .map(|login| login.trim().to_owned()),
         setup_command: read("setupCommand", &values.setup_command)?,
         check_command: read("checkCommand", &values.check_command)?,
+        github_repo: None,
     })
 }
 
@@ -128,7 +129,7 @@ impl Engine {
             }
         };
         let root_text = root.to_string_lossy().into_owned();
-        if !readable_path(&root_text) {
+        if !readable_path_for_client(&root_text) {
             return Ok(Err(ClientRefusal::UnreadablePath));
         }
         let store = &self.inner.store;
@@ -145,6 +146,11 @@ impl Engine {
 
         let (id, outcome) = match &existing {
             Some(removed) => {
+                // As `origin` says now, in the same write: it may have changed while removed.
+                edit.github_repo = Some(
+                    git.origin_url(&root)
+                        .and_then(|url| keel_harness::github::github_repo(&url)),
+                );
                 let write =
                     store.edit_project_for_mcp_client(client_id, &removed.id, &edit, true)?;
                 if let Some(refusal) = refusal_of(write) {
@@ -171,8 +177,12 @@ impl Engine {
                 (store.project(&id)?, map)
             }
             _ => {
-                let project = self.refresh_repo(&id)?;
-                if existing.and_then(|before| before.github_account) != project.github_account {
+                let project = store.project(&id)?;
+                let moved = existing.is_some_and(|before| {
+                    before.github_account != project.github_account
+                        || before.github_repo != project.github_repo
+                });
+                if moved {
                     self.inner.compare_map_with_github(&project)?;
                 }
                 (project, (None, None))
